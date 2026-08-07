@@ -603,6 +603,15 @@ function initAuxPanels() {
 
 // ---------------------------------------------------------------- mpv 键位自定义（T8）
 
+/** 字号档位吸附（T12）：任意数值/旧档位 → 最近的明确档位 */
+const SIZE_TIERS = [80, 90, 100, 110, 125, 150];
+function snapSizeTier(v) {
+    const n = parseInt(v, 10) || 100;
+    let best = 100;
+    for (const t of SIZE_TIERS) if (Math.abs(t - n) < Math.abs(best - n)) best = t;
+    return String(best);
+}
+
 // 动作表与主进程 HK_DEF_KEYS 一致：[id, 说明, 默认键]
 const HK_UI_ACTIONS = [
     ['pause', '暂停 / 继续', 'SPACE'],
@@ -698,9 +707,24 @@ async function saveHotkeys() {
 }
 
 function initSettingsPanel() {
+    // 设置一级菜单（T12）：点大类只显示对应二级详情卡片；记忆上次分类
+    const showSetCat = (cat) => {
+        $('#settings-nav .settings-nav-item').removeClass('active')
+            .filter(`[data-cat="${cat}"]`).addClass('active');
+        $('#view-settings .tool-card[data-setcat]').each(function () {
+            $(this).toggle(String($(this).data('setcat')) === cat);
+        });
+    };
+    showSetCat('appearance'); // 先按默认分类收纳，回填后切到记忆分类
+    $('#settings-nav').on('click', '.settings-nav-item', function () {
+        const cat = String($(this).data('cat'));
+        showSetCat(cat);
+        window.vpc.settingsSet('settingsCat', cat);
+    });
     // 播放设置：载入持久化值，改动即存
     window.vpc.settingsGet().then((s) => {
         s = s || {};
+        if (s.settingsCat) showSetCat(s.settingsCat);
         if (s.playerVolume) $('#set_volume').val(s.playerVolume);
         // 上次配置回填 + 历史源列表
         if (s.lastConfigUrl) $('#setting_text').val(s.lastConfigUrl);
@@ -713,10 +737,10 @@ function initSettingsPanel() {
         if (s.theme) $('#set_theme').val(s.theme);
         if (s.customTheme) $('#set_theme_pick').val(s.customTheme);
         if (s.colorMode) $('#set_colormode').val(s.colorMode);
-        // 界面缩放/字体大小数值回填（空=标准 100；兼容旧 xs/sm/lg/xl 档位）
+        // 界面缩放/字体大小档位回填（空=标准 100；兼容旧数值/ xs/sm/lg/xl 档位，吸附到最近档位）
         const _legacyPct = { xs: 80, sm: 90, lg: 110, xl: 125 };
-        $('#set_fontsize').val(s.fontSize ? (parseInt(s.fontSize, 10) || _legacyPct[s.fontSize] || 100) : '');
-        $('#set_textsize').val(s.textSize ? (parseInt(s.textSize, 10) || _legacyPct[s.textSize] || 100) : '');
+        $('#set_fontsize').val(snapSizeTier(s.fontSize ? (parseInt(s.fontSize, 10) || _legacyPct[s.fontSize] || 100) : 100));
+        $('#set_textsize').val(snapSizeTier(s.textSize ? (parseInt(s.textSize, 10) || _legacyPct[s.textSize] || 100) : 100));
         if (s.textColor) {
             // 预设项回填下拉，自定义色回填取色器
             if ($('#set_textcolor option[value="' + s.textColor + '"]').length) $('#set_textcolor').val(s.textColor);
@@ -733,6 +757,7 @@ function initSettingsPanel() {
         $('#set_autonext').prop('checked', s.autoNext !== false);
         $('#set_resumepos').prop('checked', s.resumePos !== false);
         $('#set_bgplay').prop('checked', s.bgPlay !== false);
+        $('#set_simuldl').prop('checked', !!s.simulDownload); // 边下边播（默认关）
         $('#set_anime4k').prop('checked', !!s.anime4k);
         // 系统：关闭行为 / 隐身模式 / 缓存位置
         $('#set_closeaction').val(s.closeAction || 'tray');
@@ -795,16 +820,14 @@ function initSettingsPanel() {
         applySkin({ colorMode: this.value });
     });
     $('#set_fontsize').on('change', function () {
-        // 数值自定义：钳制 60~200 防布局崩坏，100 恢复标准
-        const v = Math.min(200, Math.max(60, parseInt(this.value, 10) || 100));
-        this.value = v;
+        // 明确档位下拉（T12）：选中即生效，100 为标准
+        const v = parseInt(this.value, 10) || 100;
         window.vpc.settingsSet('fontSize', v === 100 ? '' : v);
         applySkin({ fontSize: v });
     });
     // 字体大小（仅文字）与字体颜色
     $('#set_textsize').on('change', function () {
-        const v = Math.min(200, Math.max(80, parseInt(this.value, 10) || 100));
-        this.value = v;
+        const v = parseInt(this.value, 10) || 100;
         window.vpc.settingsSet('textSize', v === 100 ? '' : v);
         applySkin({ textSize: v });
     });
@@ -889,6 +912,11 @@ function initSettingsPanel() {
     });
     $('#set_bgplay').on('change', function () {
         window.vpc.settingsSet('bgPlay', this.checked);
+    });
+    // 边下边播：仅持久化，主进程起播时读取（无需通知，下次起播即生效）
+    $('#set_simuldl').on('change', function () {
+        window.vpc.settingsSet('simulDownload', this.checked);
+        warnToast(this.checked ? '已开启边下边播（下次起播生效）' : '已关闭边下边播');
     });
     // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）

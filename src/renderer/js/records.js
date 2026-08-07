@@ -107,7 +107,7 @@ function recCard(v, editable, withTags) {
         ${withTags && tag ? `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→已看→取消">${tag === 'seen' ? '已看' : '想看'}</span>` : ''}
         <button class="rec-del" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>
         ${editable ? `<button class="rec-edit" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : ''}
-        <div class="vod-cover"><img src="${escHtml(pic)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">${v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : ''}</div>
+        <div class="vod-cover"><img src="${escHtml(pic)}" alt="" loading="lazy" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">${v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : ''}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(v.name)}</div>
         <div class="vod-remarks">${escHtml(v.remarks || '')}</div>
     </div>`;

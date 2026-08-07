@@ -198,9 +198,12 @@ const Player = {
         return { ok: false, reason: 'mpv-missing' };
     },
 
-    /** mpv 起播成功提示；开启 Anime4K 时额外标注超分已生效（便于确认开关状态）。 */
+    /** mpv 起播成功提示；开启 Anime4K/边下边播时额外标注状态（便于确认开关生效）。 */
     _mpvToast(r, msg) {
-        warnToast(r && r.anime4k ? `${msg}（Anime4K 超分已生效）` : msg);
+        const extra = [];
+        if (r && r.anime4k) extra.push('Anime4K 超分已生效');
+        if (r && r.simulDl) extra.push('已同步加入后台下载');
+        warnToast(extra.length ? `${msg}（${extra.join('，')}）` : msg);
     },
 
     /** 直链直接交 mpv（parse=1 但地址已是媒体直链时的快路径）。 */

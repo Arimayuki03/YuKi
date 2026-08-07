@@ -185,7 +185,7 @@ const Detail = {
         }
         let html = `
         <div class="detail-head">
-            <div class="detail-cover">${pic ? `<img src="${escHtml(pic)}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='assets/cover-fallback.svg'">` : ''}</div>
+            <div class="detail-cover">${pic ? `<img src="${escHtml(pic)}" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='assets/cover-fallback.svg'">` : ''}</div>
             <div class="detail-info">
                 <div class="detail-title">${escHtml(vod.vod_name || this.vodName)}</div>
                 <div class="detail-meta">${this.metaLine(vod)}</div>

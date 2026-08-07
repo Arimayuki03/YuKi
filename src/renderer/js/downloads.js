@@ -125,7 +125,7 @@ const Downloads = {
         this._tasks = items || [];
         const list = $('#dl-list');
         if (!this._tasks.length) {
-            list.html('<div class="tip-line">暂无下载任务，粘贴链接或选择种子文件开始下载</div>');
+            list.empty(); // 空列表留白，不显示引导文案（T11）
             return;
         }
         this._tip('');
@@ -149,13 +149,13 @@ const Downloads = {
         let btns = '';
         if (t.status === 'active' || t.status === 'waiting') {
             // ffmpeg 合成任务不支持暂停
-            btns = isHls ? '' : `<button class="md-btn" data-act="pause" data-gid="${t.gid}">暂停</button>`;
+            btns = isHls ? '' : `<button class="md-btn md-btn-tonal" data-act="pause" data-gid="${t.gid}">暂停</button>`;
         } else if (t.status === 'paused') {
             btns = `<button class="md-btn md-btn-tonal" data-act="unpause" data-gid="${t.gid}">继续</button>`;
         } else if (t.status === 'complete') {
             btns = `<button class="md-btn md-btn-tonal" data-act="play" data-gid="${t.gid}">▶ 播放</button>`;
         }
-        btns += `${btns ? ' ' : ''}<button class="md-btn md-btn-danger-text" data-act="remove" data-gid="${t.gid}">删除</button>`;
+        btns += `${btns ? ' ' : ''}<button class="md-btn md-btn-tonal" data-act="remove" data-gid="${t.gid}">删除</button>`;
         return `<div class="dl-item">
             <div class="dl-item-top"><span class="dl-name" title="${this._esc(t.name)}">${this._esc(t.name || t.gid)}</span><span class="dl-status dl-st-${t.status}">${status}</span></div>
             <div class="dl-bar"><div class="dl-bar-fill" style="width:${bar}%;"></div></div>

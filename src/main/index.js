@@ -524,7 +524,7 @@ app.whenReady().then(() => {
     });
 
     // 播放入口：mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
-    ipcMain.handle('vpc:play', (_e, payload) => {
+    ipcMain.handle('vpc:play', async (_e, payload) => {
         if (!mpv.isAvailable()) {
             return { ok: false, reason: 'mpv-missing', hint: 'node scripts/download-binaries.js' };
         }
@@ -553,6 +553,35 @@ app.whenReady().then(() => {
             afterPlay();
             if (alts.length) watchLiveFallbacks(title, alts, meta.header).catch(() => { });
             r.anime4k = !!mpv.anime4kShaders; // 渲染层 toast 提示 Anime4K 是否生效
+            // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
+            // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放
+            if (settings.get('simulDownload')) {
+                try {
+                    const ep = episodes[0];
+                    const urlPath = String(ep.url).split('?')[0];
+                    const isM3u8 = /\.m3u8$/i.test(urlPath);
+                    const ext = (urlPath.match(/\.(mp4|mkv|flv|mov|avi|webm|ts)$/i) || ['', ''])[1];
+                    const out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + ext;
+                    if (isM3u8) {
+                        syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                        hls.add({ url: ep.url, out, header: meta.header });
+                        startDlPoll();
+                        r.simulDl = true;
+                    } else if (dl.isAvailable()) {
+                        await dl.start(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                        const opts = { out };
+                        if (meta.header && typeof meta.header === 'object') {
+                            const pairs = Object.entries(meta.header)
+                                .filter(([, v]) => v != null && v !== '')
+                                .map(([k, v]) => `${k}: ${v}`);
+                            if (pairs.length) opts.header = pairs;
+                        }
+                        await dl.addUri(ep.url, opts);
+                        startDlPoll();
+                        r.simulDl = true;
+                    }
+                } catch (e) { /* 静默跳过：播放优先 */ }
+            }
         }
         return r;
     });
@@ -849,12 +878,25 @@ app.whenReady().then(() => {
     });
     function startDlPoll() {
         if (dlTimer) return;
+        // 启动即推一次：空闲自停机制下，进入下载页仍能立刻看到历史任务列表
+        (async () => {
+            try {
+                let items = [];
+                try { items = await dl.listAll(); } catch (e) { /* aria2 未就绪 */ }
+                send('vpc:dl-list', [...items, ...hls.list()]);
+            } catch (e) { /* ignore */ }
+        })();
         dlTimer = setInterval(async () => {
             try {
                 // aria2 任务 + m3u8 合成任务合并推送（aria2 未就绪不阻断 HLS 展示）
                 let items = [];
                 try { items = await dl.listAll(); } catch (e) { /* 下一轮会重新拉起 aria2c */ }
-                send('vpc:dl-list', [...items, ...hls.list()]);
+                const hlsItems = hls.list();
+                send('vpc:dl-list', [...items, ...hlsItems]);
+                // 空闲自停（T10 泄漏/功耗审计）：无进行中任务时停掉 1s 轮询，下次 add 时重新拉起
+                const busy = items.some((t) => ['active', 'waiting', 'paused'].includes(t.status))
+                    || hlsItems.some((t) => t.status === 'active');
+                if (!busy) { clearInterval(dlTimer); dlTimer = null; }
             } catch (e) { /* ignore */ }
         }, 1000);
     }

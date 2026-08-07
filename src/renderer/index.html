@@ -105,14 +105,13 @@
             <!-- 收藏（多选删除：进入选择模式后勾选卡片批量移除） -->
             <section id="view-favorites" class="view">
                 <div class="view-toolbar">
-                    <span class="dl-spacer"></span>
+                    <input id="view-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
                     <label class="rec-checkall" id="view-favorites-checkall-wrap" style="display:none"><input type="checkbox" id="view-favorites-checkall">全选</label>
                     <button id="view-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-text" style="display:none">删除勾选</button>
                     <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选删除</button>
                     <button id="view-favorites-clear" class="md-btn md-btn-sm md-btn-danger-text">清空收藏</button>
                 </div>
                 <div class="rec-bar">
-                    <input id="view-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
                     <div id="view-favorites-tags" class="rec-tags">
                         <span class="class-tab active" data-tag="">全部</span>
                         <span class="class-tab" data-tag="want">想看</span>
@@ -126,14 +125,11 @@
             <!-- 历史（多选删除：进入选择模式后勾选卡片批量移除） -->
             <section id="view-history" class="view">
                 <div class="view-toolbar">
-                    <span class="dl-spacer"></span>
+                    <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
                     <label class="rec-checkall" id="view-history-checkall-wrap" style="display:none"><input type="checkbox" id="view-history-checkall">全选</label>
                     <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-text" style="display:none">删除勾选</button>
                     <button id="view-history-multidel" class="md-btn md-btn-sm">多选删除</button>
                     <button id="view-history-clear" class="md-btn md-btn-sm md-btn-danger-text">清空历史</button>
-                </div>
-                <div class="rec-bar">
-                    <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
                 </div>
                 <div id="view-history-grid" class="vod-grid"></div>
                 <div id="view-history-pager" class="pager"></div>
@@ -168,8 +164,8 @@
                         </div>
                         <div class="dl-settings">
                             <span class="dl-spacer"></span>
-                            <button id="dl-clear-failed" class="md-btn md-btn-sm md-btn-danger-text">删除失败下载</button>
-                            <button id="dl-clear" class="md-btn md-btn-sm md-btn-danger-text">清除已完成</button>
+                            <button id="dl-clear-failed" class="md-btn md-btn-sm md-btn-tonal">删除失败下载</button>
+                            <button id="dl-clear" class="md-btn md-btn-sm md-btn-tonal">清除已完成</button>
                         </div>
                         <div id="dl-tip" class="tip-line" style="display:none;"></div>
                         <div id="dl-list" class="dl-list"></div>
@@ -273,12 +269,21 @@
                 </div>
             </section>
 
-            <!-- 设置（独立视图；分类卡片双列网格，见 ui.css .settings-grid） -->
+            <!-- 设置（独立视图；一级分类导航 + 二级详情卡片，见 panels.js settingsNav） -->
             <section id="view-settings" class="view">
-                <div class="settings-wrap settings-grid">
-                    <div class="tool-card">
+                <div class="settings-wrap">
+                    <div class="settings-nav" id="settings-nav">
+                        <span class="settings-nav-item active" data-cat="appearance">外观</span>
+                        <span class="settings-nav-item" data-cat="play">播放与快捷键</span>
+                        <span class="settings-nav-item" data-cat="download">下载</span>
+                        <span class="settings-nav-item" data-cat="cache">缓存</span>
+                        <span class="settings-nav-item" data-cat="system">系统</span>
+                        <span class="settings-nav-item" data-cat="asset">资产</span>
+                    </div>
+                    <div class="settings-grid">
+                    <div class="tool-card" data-setcat="appearance">
                         <div class="tool-card-title">外观</div>
-                        <div class="tip-line pad0">主题色（内置配色 + 取色器自定义）</div>
+                        <div class="tip-line pad0">主题色</div>
                         <div class="color-row">
                             <select id="set_theme" class="md-select">
                                 <option value="">默认绿</option>
@@ -297,14 +302,24 @@
                             <option value="light">强制浅色</option>
                             <option value="dark">强制深色</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">界面缩放（整体，60%~200%，填 100 恢复标准）</div>
-                        <div class="md-field short-num">
-                            <input id="set_fontsize" class="md-input" type="number" min="60" max="200" step="5" placeholder="100" />
-                        </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">字体大小（仅文字，80%~200%，填 100 恢复标准）</div>
-                        <div class="md-field short-num">
-                            <input id="set_textsize" class="md-input" type="number" min="80" max="200" step="5" placeholder="100" />
-                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="调整整体大小">界面缩放</div>
+                        <select id="set_fontsize" class="md-select">
+                            <option value="80">较小（80%）</option>
+                            <option value="90">小（90%）</option>
+                            <option value="100" selected>标准（100%）</option>
+                            <option value="110">大（110%）</option>
+                            <option value="125">较大（125%）</option>
+                            <option value="150">特大（150%）</option>
+                        </select>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="仅调整文字大小">字体大小</div>
+                        <select id="set_textsize" class="md-select">
+                            <option value="80">较小（80%）</option>
+                            <option value="90">小（90%）</option>
+                            <option value="100" selected>标准（100%）</option>
+                            <option value="110">大（110%）</option>
+                            <option value="125">较大（125%）</option>
+                            <option value="150">特大（150%）</option>
+                        </select>
                         <div class="tip-line pad0" style="margin-top:12px;">字体颜色</div>
                         <div class="color-row">
                             <select id="set_textcolor" class="md-select">
@@ -315,7 +330,7 @@
                             <input id="set_textcolor_pick" class="color-pick" type="color" value="#304c3a" title="自定义字体颜色">
                             <button id="set_textcolor_clear" class="md-btn md-btn-tonal">恢复</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">壁纸：可使用本地图片作为背景</div>
+                        <div class="tip-line pad0" style="margin-top:12px;">壁纸</div>
                         <div class="wall-row">
                             <select id="set_walldim" class="md-select">
                                 <option value="">遮罩强度 · 标准</option>
@@ -325,8 +340,8 @@
                             <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
                             <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除壁纸</button>
                         </div>
-                        <label class="md-switch"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画（关闭后取消全部过渡动画）</span></label>
-                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量（分类/搜索/收藏/历史列表）</div>
+                        <label class="md-switch"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画</span></label>
+                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量</div>
                         <select id="set_pagesize" class="md-select">
                             <option value="" selected>自动（铺满窗口）</option>
                             <option value="24">24 条</option>
@@ -335,13 +350,13 @@
                             <option value="120">120 条</option>
                         </select>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="play">
                         <div class="tool-card-title">播放与快捷键</div>
-                        <div class="tip-line pad0">预设音量（0 = 不设定，100 = 最大）</div>
+                        <div class="tip-line pad0" title="0 = 不设定，100 = 最大">预设音量</div>
                         <div class="md-field short-num">
                             <input id="set_volume" class="md-input" type="number" min="0" max="100" placeholder="0" />
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">默认倍速（起播时生效，播放中可用 [ ] 调整）</div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="起播时生效，播放中可用 [ ] 调整">默认倍速</div>
                         <select id="set_speed" class="md-select">
                             <option value="0.5">0.5 倍</option>
                             <option value="0.75">0.75 倍</option>
@@ -351,18 +366,19 @@
                             <option value="2">2.0 倍</option>
                             <option value="3">3.0 倍</option>
                         </select>
-                        <label class="md-switch"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播（一集播完自动播下一集，需解析的源自动逐集解析）</span></label>
-                        <label class="md-switch"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置（下次播放同一影片自动跳转上次位置）</span></label>
-                        <label class="md-switch"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放（关闭窗口时不停止正在播放的影片）</span></label>
-                        <label class="md-switch"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式（不记录播放历史）</span></label>
-                        <label class="md-switch"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分（实时升频锐化，适合动漫；着色器启动时自动下载，首次启动稍候）</span></label>
-                        <div class="tip-line pad0" style="margin-top:6px;">Anime4K 档位（开启超分后选择，下次起播生效）</div>
+                        <label class="md-switch" title="一集播完自动播下一集"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播</span></label>
+                        <label class="md-switch" title="下次播放同一影片自动跳转上次位置"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置</span></label>
+                        <label class="md-switch" title="关闭窗口时不停止正在播放的影片"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放</span></label>
+                        <label class="md-switch" title="播放时自动把当前集下载到下载目录"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
+                        <label class="md-switch" title="不记录播放历史"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式</span></label>
+                        <label class="md-switch" title="实时升频锐化，适合动漫；着色器首次启动时自动下载"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分</span></label>
+                        <div class="tip-line pad0" style="margin-top:6px;" title="开启超分后选择，下次起播生效">Anime4K 档位</div>
                         <select id="set_anime4k_mode" class="md-select">
                             <option value="a" selected>均衡（Mode A · 默认）</option>
                             <option value="aa">细节增强（Mode A+A · 低清片源）</option>
                             <option value="restore">仅修复（不升频 · 高清片源）</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">mpv 语言偏好（多音轨/多字幕时优先选择，下次起播生效）</div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="多音轨/多字幕时优先选择，下次起播生效">音轨 / 字幕语言</div>
                         <div class="hotkey-grid">
                             <div>
                                 <div class="tip-line pad0">音轨语言</div>
@@ -386,10 +402,10 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">mpv 播放器快捷键步长（保存后下次起播生效）</div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="保存后下次起播生效">快捷键步长</div>
                         <div class="hotkey-grid">
                             <div>
-                                <div class="tip-line pad0">快进/快退（秒）</div>
+                                <div class="tip-line pad0">快退 / 快进（秒）</div>
                                 <div class="md-field short-num">
                                     <input id="set_hotkey_seek" class="md-input" type="number" min="1" max="120" placeholder="5" />
                                 </div>
@@ -407,13 +423,13 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">mpv 播放器快捷键（点击键位后按下新键即可修改，保存后下次起播生效）</div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="点击键位后按下新键即可修改，保存后下次起播生效">快捷键键位</div>
                         <div id="hotkey_rows"></div>
                         <div class="wall-row">
                             <button id="hotkey_reset" class="md-btn md-btn-tonal">恢复默认键位</button>
                         </div>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="download">
                         <div class="tool-card-title">下载</div>
                         <div class="tip-line pad0" id="set_dl_dir_line">下载目录：默认（系统下载目录）</div>
                         <div class="wall-row">
@@ -435,7 +451,7 @@
                             <option value="8">8 个</option>
                         </select>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="cache">
                         <div class="tool-card-title">缓存</div>
                         <div class="tip-line pad0" id="cache_size_line">当前缓存占用：统计中…</div>
                         <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
@@ -454,7 +470,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="cache">
                         <div class="tool-card-title">播放缓存（mpv）</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
@@ -478,7 +494,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="system">
                         <div class="tool-card-title">系统</div>
                         <div class="tip-line pad0">关闭主窗口时</div>
                         <select id="set_closeaction" class="md-select">
@@ -495,7 +511,7 @@
                         <button id="set_reset" class="md-btn md-btn-tonal md-btn-danger-text">恢复默认设置</button>
                         <div class="tip-line pad0" id="app_version" style="margin-top:14px;"></div>
                     </div>
-                    <div class="tool-card">
+                    <div class="tool-card" data-setcat="asset">
                         <div class="tool-card-title">资产状态</div>
                         <div class="tip-line pad0">以下为应用运行所需的本地二进制资产就绪情况。</div>
                         <div id="asset-status-list" class="asset-status-list" style="margin-top:10px;">
@@ -513,6 +529,7 @@
                                 <div class="info-detail">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
                             </div>
                         </div>
+                    </div>
                     </div>
                 </div>
             </section>

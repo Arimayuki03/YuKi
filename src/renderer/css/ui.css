@@ -470,10 +470,25 @@ html, body {
 body, .view { scrollbar-width:none; }
 body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:none; }
 
-/* 设置独立视图容器（居中限宽；带左右内边距，窄窗/非全屏时内容不贴边） */
-.settings-wrap { width:100%; max-width:1060px; margin:0 auto; padding:0 16px; box-sizing:border-box; }
+/* 设置独立视图容器（T12 二级菜单：一级分类导航 + 二级详情卡片区；居中限宽，窄窗不贴边） */
+.settings-wrap {
+    width:100%; max-width:1060px; margin:0 auto; padding:0 16px; box-sizing:border-box;
+    display:grid; grid-template-columns:170px 1fr; gap:0 20px; align-items:start;
+}
 @media (min-width:1500px) { .settings-wrap { max-width:1320px; } }
 @media (min-width:2200px) { .settings-wrap { max-width:1680px; } }
+@media (max-width:900px) { .settings-wrap { grid-template-columns:1fr; } }
+/* 一级分类导航：宽屏竖排吸顶，窄屏横排换行 */
+.settings-nav { display:flex; flex-direction:column; gap:6px; position:sticky; top:0; }
+@media (max-width:900px) { .settings-nav { flex-direction:row; flex-wrap:wrap; margin-bottom:14px; position:static; } }
+.settings-nav-item {
+    padding:8px 16px; border-radius:18px; font-size:14px; cursor:pointer; text-align:center;
+    border:1px solid var(--md-outline-variant);
+    background:var(--md-surface-container-high); color:var(--md-on-surface-variant);
+    user-select:none; transition:background .15s, color .15s, border-color .15s;
+}
+.settings-nav-item:hover { background:var(--md-secondary-container); }
+.settings-nav-item.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
 
 /* 工具面板：桌面布局（顶部页签 + 卡片式内容，取消原 600px 移动壳） */
 .tools-wrap { max-width: 1060px; margin: 0 auto; }
@@ -484,6 +499,8 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .tools-tab {
     display:inline-flex; align-items:center; gap:8px;
     padding:8px 20px; border-radius:18px; font-size:14px; cursor:pointer;
+    border:1px solid var(--md-outline-variant);
+    background:var(--md-surface-container-high); /* 不透明底（T11：与分类 tabs 一致的胶囊样式） */
     color:var(--md-on-surface-variant); user-select:none;
     transition:background .15s,color .15s;
 }
@@ -503,9 +520,9 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .settings-grid .md-select { min-width:0; flex:1 1 auto; }
 /* 设置页按钮统一样式与大小（避免 md-btn / md-btn-sm 混用显得参差） */
 .settings-grid .md-btn { height:38px; padding:0 18px; font-size:13.5px; border-radius:19px; white-space:nowrap; }
-/* 收藏/历史页工具条：搜索框 + （收藏）已看/想看筛选标签 */
+/* 收藏/历史页工具条：标签筛选行；搜索框已并入顶部 view-toolbar（T13，与首页同规格） */
 .rec-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 12px; }
-.rec-search { height:36px; width:240px; max-width:60vw; font-size:13px; border-radius:18px; }
+.rec-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:20px; }
 .rec-tags { display:flex; gap:6px; flex-wrap:wrap; }
 /* 横排小行：遮罩选择 / 壁纸按钮 / 下载目录按钮等 */
 .wall-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
@@ -601,7 +618,9 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     transition:transform .12s, box-shadow .12s; }
 .vod-card:hover, .vod-card:focus { transform:translateY(-3px); box-shadow:0 6px 16px var(--md-shadow); }
 .vod-cover { width:100%; aspect-ratio:160/220; background:var(--md-surface-container-high); overflow:hidden; }
-.vod-cover img { width:100%; height:100%; object-fit:cover; display:block; }
+.vod-cover img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .25s ease; }
+/* 封面淡入（T14）：加载完成前由占位底色托底，完成后渐显，避免刷新闪烁 */
+.vod-cover img.loaded, .detail-cover img.loaded { opacity:1; }
 .vod-name { font-size:13px; line-height:18px; padding:8px 10px 2px; color:var(--md-on-surface);
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
     word-break:break-all; min-height:38px; }
@@ -631,7 +650,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .back-btn { margin-bottom:16px; }
 .detail-head { display:flex; gap:20px; margin-bottom:16px; }
 .detail-cover { flex:0 0 180px; }
-.detail-cover img { width:180px; border-radius:12px; display:block; }
+.detail-cover img { width:180px; border-radius:12px; display:block; opacity:0; transition:opacity .25s ease; }
 .detail-info { flex:1; min-width:0; }
 /* 信息栏遮罩：半透明底 + 模糊，壁纸/深色背景下保证文字可读性 */
 .detail-info {
