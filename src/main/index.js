@@ -134,6 +134,38 @@ function send(channel, payload) {
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+/** mpv 硬盘缓存文件名模式：--demuxer-cache-dir 平铺写入 mpv-cache-<hex>.dat。 */
+const MPV_CACHE_FILE_RE = /^mpv-cache-.+\.dat$/i;
+
+/**
+ * 清空 mpv 硬盘缓存目录：递归遍历（兼容未来子目录结构），只删 mpv 缓存模式文件
+ * （避免在用户自选目录里误删无关文件），随之变空的子目录一并移除。
+ * 逐文件 try/catch：正被 mpv 写盘的文件跳过（Windows 下 mpv 以共享删除打开一般可删，
+ * 但仍有竞态窗口）。返回成功释放的字节数（不含跳过文件）。
+ */
+function clearDiskCache(dir) {
+    if (!dir || !fs.existsSync(dir)) return 0;
+    let cleaned = 0;
+    const walk = (d) => {
+        let entries;
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        for (const ent of entries) {
+            const p = path.join(d, ent.name);
+            try {
+                if (ent.isDirectory()) {
+                    walk(p);
+                    try { fs.rmdirSync(p); } catch (e) { /* 仍有文件/占用：保留 */ }
+                } else if (ent.isFile() && MPV_CACHE_FILE_RE.test(ent.name)) {
+                    const st = fs.statSync(p);
+                    try { fs.rmSync(p, { force: true }); cleaned += st.size; } catch (e) { /* 占用跳过 */ }
+                }
+            } catch (e) { /* 单项失败不影响整体 */ }
+        }
+    };
+    walk(dir);
+    return cleaned;
+}
+
 /** 播放成功后的公共后处理：应用预设音量。 */
 function afterPlay() {
     const vol = settings ? parseInt(settings.get('playerVolume'), 10) : 0;
@@ -694,9 +726,62 @@ app.whenReady().then(() => {
         return { ok: true, path: target };
     });
 
+    // ---- mpv 视频缓冲缓存（内存默认 / 硬盘 + 自定义目录） ----
+
+    // 通用目录选择：mpv 硬盘缓存目录用（openDirectory + createDirectory，取消返回 cancelled）
+    ipcMain.handle('vpc:pick-folder', async () => {
+        const r = await dialog.showOpenDialog(win, {
+            title: '选择文件夹',
+            properties: ['openDirectory', 'createDirectory'],
+        });
+        if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
+        return { ok: true, path: r.filePaths[0] };
+    });
+
+    /** 读设置注入 mpv 视频缓冲缓存偏好（启动时与设置变更时调用）。 */
+    function applyPlayerCache() {
+        const m = settings.get('playerCacheMode') === 'disk' ? 'disk' : 'memory';
+        mpv.cacheMode = m;
+        mpv.cacheDir = m === 'disk' ? (settings.get('playerCacheDir') || settings.defaultCacheDir()) : '';
+    }
+
+    /**
+     * 设置 mpv 视频缓冲缓存模式/目录：
+     * - mode='disk' 且 dir 非空：mkdir + 持久化 playerCacheDir；与旧目录不同则清理旧目录残留（换路径清缓存）。
+     * - mode='disk' 且 dir 为空：沿用已记忆目录（还原上次的硬盘缓存目录）。
+     * - mode='memory'：切回内存缓冲，清空原硬盘缓存目录残留。
+     * 只清旧目录、不清新选择目录（防误删刚指定的目录内容）；返回 {ok, mode, dir, cleanedBytes}。
+     */
+    ipcMain.handle('vpc:set-player-cache', (_e, mode, dir) => {
+        const m = mode === 'disk' ? 'disk' : 'memory';
+        const prevDir = settings.get('playerCacheDir') || settings.defaultCacheDir();
+        let cleanedBytes = 0;
+        let newDir = '';
+        if (m === 'disk') {
+            newDir = String(dir || '').trim() || prevDir;
+            try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
+            if (newDir !== prevDir) cleanedBytes = clearDiskCache(prevDir);
+        } else {
+            cleanedBytes = clearDiskCache(prevDir);
+            newDir = '';
+        }
+        settings.set('playerCacheMode', m);
+        if (m === 'disk') settings.set('playerCacheDir', newDir);
+        mpv.cacheMode = m;
+        mpv.cacheDir = m === 'disk' ? newDir : '';
+        return { ok: true, mode: m, dir: mpv.cacheDir, cleanedBytes };
+    });
+
+    // 清空 mpv 硬盘缓存（不改变模式/目录；正被占用文件跳过）
+    ipcMain.handle('vpc:clear-player-cache', () => {
+        const dir = settings.get('playerCacheDir') || settings.defaultCacheDir();
+        const cleanedBytes = clearDiskCache(dir);
+        return { ok: true, cleanedBytes };
+    });
+
     // 恢复默认设置：清偏好类键（保留收藏/历史/源等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir']);
         app.relaunch();
         isQuitting = true;
         app.exit(0);
@@ -1019,6 +1104,8 @@ app.whenReady().then(() => {
     // 语言偏好（音轨/字幕）：读设置注入播放器
     mpv.audioLang = String(settings.get('playerAlang') || '');
     mpv.subLang = String(settings.get('playerSlang') || '');
+    // 视频缓冲缓存（内存/硬盘）：读设置注入播放器（起播时按模式追加 --cache-on-disk 参数）
+    applyPlayerCache();
     // ffmpeg 内置：启动后台自动补齐（m3u8 下载合成与本地预览图依赖；缺失时静默降级）
     ensureFfmpeg().catch(() => { });
     // Anime4K 超分：启动自动补齐着色器（内置免手动下载）；用户从未设置过开关则默认开启，

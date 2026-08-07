@@ -641,6 +641,9 @@ function initSettingsPanel() {
         $('#set_closeaction').val(s.closeAction || 'tray');
         $('#set_incognito').prop('checked', !!s.incognito);
         refreshCacheDirLine(s.cacheDir);
+        // mpv 视频缓冲缓存：模式 + 目录展示（目录未设置时显示默认路径）
+        $('#set_cache_mode').val(s.playerCacheMode === 'disk' ? 'disk' : 'memory');
+        refreshMpvCacheDirLine(s.playerCacheDir);
         // 下载：目录展示（读持久化值，不拉起 aria2）+ 并发数回填
         refreshDlDirLine(s.dlDir);
         $('#set_dl_concurrency').val(String(s.dlConcurrency || '3'));
@@ -797,6 +800,49 @@ function initSettingsPanel() {
     });
     // 缓存位置：选目录 → 确认后重启后端生效
     $('#cache_dir_pick').on('click', pickCacheDir);
+    // mpv 视频缓冲缓存模式：切内存自动清硬盘缓存；切磁盘沿用已记忆目录（下次起播生效）
+    $('#set_cache_mode').on('change', async function () {
+        const mode = this.value === 'disk' ? 'disk' : 'memory';
+        let r;
+        try { r = await window.vpc.setPlayerCache(mode, ''); } catch (e) { r = null; }
+        if (r && r.ok) {
+            refreshMpvCacheDirLine(r.dir);
+            warnToast(r.cleanedBytes > 0
+                ? (mode === 'memory' ? `已切换为内存缓冲，清理硬盘缓存 ${fmtSize(r.cleanedBytes)}` : `已切换为硬盘缓冲，清理旧缓存 ${fmtSize(r.cleanedBytes)}`)
+                : (mode === 'memory' ? '已切换为内存缓冲（下次起播生效）' : '已切换为硬盘缓冲（下次起播生效）'));
+        } else {
+            warnToast('切换失败：' + ((r && r.reason) || '未知错误'));
+        }
+    });
+    // 更换 mpv 硬盘缓存目录：选目录 → 确认 → 提交（旧目录残留自动清理）
+    $('#set_cache_dir_pick').on('click', async () => {
+        let r;
+        try { r = await window.vpc.pickFolder(); } catch (e) { return; }
+        if (!r || !r.ok) return; // 取消静默
+        const dir = r.path;
+        if (!await confirmDialog(`将 mpv 硬盘缓存目录改为：\n${dir}\n\n原目录残留的 mpv 缓存会被清理（新目录内容不受影响）。继续？`)) return;
+        const r2 = await window.vpc.setPlayerCache('disk', dir);
+        if (r2 && r2.ok) {
+            $('#set_cache_mode').val('disk');
+            refreshMpvCacheDirLine(r2.dir);
+            warnToast(r2.cleanedBytes > 0
+                ? `已更换缓存目录，清理旧缓存 ${fmtSize(r2.cleanedBytes)}（下次起播生效）`
+                : '已更换缓存目录（下次起播生效）');
+        } else {
+            warnToast('更换失败：' + ((r2 && r2.reason) || '未知错误'));
+        }
+    });
+    // 清空 mpv 硬盘缓存（不改变模式/目录；占用中的文件跳过）
+    $('#set_cache_clear').on('click', async () => {
+        if (!await confirmDialog('将清空 mpv 硬盘缓存目录中的缓存文件。\n正在播放中的缓存文件可能被跳过。继续？')) return;
+        let r;
+        try { r = await window.vpc.clearPlayerCache(); } catch (e) { r = null; }
+        if (r && r.ok) {
+            warnToast(r.cleanedBytes > 0 ? `硬盘缓存已清空，释放 ${fmtSize(r.cleanedBytes)}` : '硬盘缓存目录已是空的');
+        } else {
+            warnToast('清理失败：' + ((r && r.reason) || '未知错误'));
+        }
+    });
     // 下载目录：主进程弹目录选择框，持久化并重启下载引擎
     $('#set_dl_dir_pick').on('click', async () => {
         let r;
@@ -954,6 +1000,13 @@ function refreshCacheDirLine(dir) {
     const el = $('#cache_dir_line');
     if (dir) el.text(`缓存位置：${dir}`).attr('title', dir);
     else el.text('缓存位置：默认（用户目录下 .video-pc）').attr('title', '');
+}
+
+/** mpv 硬盘缓存目录展示行（未设置时显示默认路径）。 */
+function refreshMpvCacheDirLine(dir) {
+    const el = $('#mpv_cache_dir_line');
+    if (dir) el.text(`mpv 缓存目录：${dir}`).attr('title', dir);
+    else el.text('mpv 缓存目录：默认（用户目录下 mpv-cache）').attr('title', '');
 }
 
 /** 下载目录展示行（设置页「下载」卡片）。 */

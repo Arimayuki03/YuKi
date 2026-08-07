@@ -93,6 +93,13 @@ contextBridge.exposeInMainWorld('vpc', {
     settingsReset: () => ipcRenderer.invoke('vpc:settings-reset'),
     /** 缓存位置：不传 dir 弹目录选择框（返回 need-restart+path）；传 dir 提交并重启后端 */
     pickCacheDir: (dir) => ipcRenderer.invoke('vpc:pick-cache-dir', dir || ''),
+    /** 通用目录选择（mpv 硬盘缓存目录用）：{ok, path} | {ok:false, reason:'cancelled'} */
+    pickFolder: () => ipcRenderer.invoke('vpc:pick-folder'),
+    /** 设置 mpv 视频缓冲缓存（mode='memory'|'disk'，dir 为硬盘缓存目录，空串沿用已记忆目录）：
+     *  返回 {ok, mode, dir, cleanedBytes}（切内存/换路径时自动清理旧目录缓存） */
+    setPlayerCache: (mode, dir) => ipcRenderer.invoke('vpc:set-player-cache', mode, dir || ''),
+    /** 清空 mpv 硬盘缓存（不改变模式/目录）：{ok, cleanedBytes} */
+    clearPlayerCache: () => ipcRenderer.invoke('vpc:clear-player-cache'),
     /** 快捷键步长变更后通知主进程重写 mpv input.conf */
     updateHotkeys: () => ipcRenderer.invoke('vpc:update-hotkeys'),
     /** 播放偏好（默认倍速 / 记忆位置）变更后通知主进程，下次起播生效 */

@@ -86,6 +86,8 @@ class MpvPlayer extends EventEmitter {
         this.audioLang = '';       // 音轨语言偏好（非空时注入 --alang）
         this.subLang = '';         // 字幕语言偏好（非空时注入 --slang）
         this.anime4kShaders = '';  // Anime4K 着色器链（分号分隔路径；非空时注入 --glsl-shaders）
+        this.cacheMode = 'memory'; // 视频缓冲位置：'memory' 内存（mpv 默认）| 'disk' 硬盘（--cache-on-disk）
+        this.cacheDir = '';        // 硬盘缓存目录（cacheMode==='disk' 且非空时注入 --demuxer-cache-dir）
         this._queueLen = 0;        // 当前播放队列长度（ended 事件附带，供渲染层判定队列末尾）
         this._sessionId = 0;       // 起播会话号（每次 play 自增；exit 事件附带，供渲染层匹配新旧进程）
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
@@ -152,6 +154,13 @@ class MpvPlayer extends EventEmitter {
         if (this.subLang) args.push(`--slang=${this.subLang}`);
         // Anime4K 实时超分（动漫向）：着色器链完整存在才注入，缺文件静默跳过
         if (this.anime4kShaders) args.push(`--glsl-shaders=${this.anime4kShaders}`);
+        // 视频缓冲落盘（设置页可切内存/硬盘）：缓存模式写进磁盘而非内存，
+        // 目录不存在则创建（mpv 也会自建，提前建好便于「清空硬盘缓存」定位）。
+        // 注意 mpv v0.41 的目录选项是 --demuxer-cache-dir（--cache-dir 不是合法选项）。
+        if (this.cacheMode === 'disk' && this.cacheDir) {
+            try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
+            args.push('--cache=yes', '--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
+        }
         args.push('--', episodes[0].url);
         for (let i = 1; i < episodes.length; i++) args.push(episodes[i].url);
         this._queueLen = episodes.length;

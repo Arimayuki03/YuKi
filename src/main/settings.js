@@ -13,12 +13,18 @@ const path = require('path');
 class Settings {
     constructor(dir) {
         this.file = path.join(dir, 'settings.json');
+        this.userDataDir = dir;
         this._data = this._load();
     }
 
     _load() {
         try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); }
         catch (e) { return {}; }
+    }
+
+    /** mpv 硬盘缓存默认目录（<userData>/mpv-cache）；切到磁盘模式且未手动选过时使用。 */
+    defaultCacheDir() {
+        return path.join(this.userDataDir, 'mpv-cache');
     }
 
     all() { return { ...this._data }; }

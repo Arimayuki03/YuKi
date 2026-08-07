@@ -2,7 +2,7 @@
 
 > 续作开发只需读本文件。本文档已整合原 `重构方案.md`、`PHASE0_依赖矩阵.md`、`BUILD.md`、`FEATURES.md`、`PROGRESS.md` 五份文档，其余 md 已删除。
 > 约定：改动架构/链路前先更新「§4 架构决策」；新增功能后在「§7 功能清单」补一行；收尾跑 `npm run test:all` 全绿。
-> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L130 · §6 构建打包 L145 · §7 前端注意与功能 L165（注意事项 L167 / 功能概览 L177）· §8 已知坑位 L188 · §8.7 待完成 L209 · §8.8 进行中任务 L216
+> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L131 · §6 构建打包 L146 · §7 前端注意与功能 L166（注意事项 L168 / 功能概览 L178）· §8 已知坑位 L189 · §8.7 待完成 L211 · §8.8 进行中任务 L218
 
 ---
 
@@ -98,7 +98,7 @@ npm run build:py
 
 ### 推送/设置/解析
 31. **推送链路**：面板手动推送与局域网推送共用主进程 playPushedUrl（mpv + 通知 + `vpc:push-received`）；push-server 绑 0.0.0.0 随机端口 + token，仅收 http(s)，GET `/` 有说明页；非直链页面用 parse-window `captureDirect` 抓媒体请求；后端不处理 do=push。
-32. **设置持久化**：`settings.js` 存 `<userData>/settings.json`，键 camelCase。约定键：lastConfigUrl / playerVolume / customLives / dlDir / configHistory / favorites / history / theme / wallpaper / colorMode / fontSize / textSize / textColor / wallpaperDim / blockedSites / probedSites / playerHotkeys / navCollapsed / playerSpeed / autoNext / resumePos / bgPlay / animEnabled / closeAction / incognito / cacheDir / dlConcurrency 等。自定义数据键（customLives、lastConfigUrl、favorites、history、dlDir、cacheDir、configHistory）在 `settings.reset()` 中显式保留。
+32. **设置持久化**：`settings.js` 存 `<userData>/settings.json`，键 camelCase。约定键：lastConfigUrl / playerVolume / customLives / dlDir / configHistory / favorites / history / theme / wallpaper / colorMode / fontSize / textSize / textColor / wallpaperDim / blockedSites / probedSites / playerHotkeys / navCollapsed / playerSpeed / autoNext / resumePos / bgPlay / animEnabled / closeAction / incognito / cacheDir / dlConcurrency / playerCacheMode / playerCacheDir 等。自定义数据键（customLives、lastConfigUrl、favorites、history、dlDir、cacheDir、playerCacheMode、playerCacheDir、configHistory）在 `settings.reset()` 中显式保留。
 33. **配置自动重载**：setting(name=config) 成功后渲染层存 URL 与历史；启动时主进程在 backend ready 后 POST do=setting 自动重载，成功发 `vpc:config-reloaded`，前端 Home/Live 刷新。
 34. **配置重载状态机**（修首屏）：主进程 `configReload = {reloading, url}`，backend ready 进入重载时同步置位，所有收尾路径经 `finishReload(ok, sites)` 复位并发 `vpc:config-reloaded`；渲染层经 `vpc:config-state` IPC 取权威状态，app.js waitConfigDone 双状态轮询。改动启动链路时保持该状态机。
 35. **VIP 解析**（决策 38/33）：parses 来自 config（/sites）。parse=1 全自动起播流程：地址已是媒体直链 → 直接 mpv；否则 type=1 JSON 接口优先直接 fetch（兼容 url/data.url/vurl/play_url 多字段，抓返回里的 Referer/UA 交 mpv，解出 .html 视为失败）→ 失败再 iframe 型隐藏 BrowserWindow（partition 'parse' 独立 session，webRequest.onBeforeRequest 捕获 resourceType=media 或媒体扩展名）→ 再失败 `vpc:capture-direct`（隐藏窗口直开链接抓页面自身播放器请求）。每接口 20s 超时按序尝试。解析窗口 sandbox=true + nodeIntegration=false + contextIsolation=true，用后即 destroy。mpv 经 `--http-header-fields` 注入 Referer。
@@ -126,6 +126,7 @@ npm run build:py
 57. **确认对话框**（决策 54）：全部 confirm 用 common.js confirmDialog（md-dialog 风格，Promise<boolean>，Esc/遮罩=取消）；_confirmResolve 持有待决回调，closeDialog 未决按取消 resolve(false) 防挂死；done 先置空再 closeDialog 防双重 resolve；okText/cancelText 可定制。
 58. **二进制存放与路径适配**（决策 84）：vendor/{mpv,aria2,ffmpeg,anime4k}（.gitignore 忽略）；开发模式 ROOT=`path.join(__dirname,'..','..')`，打包模式 `process.resourcesPath`；`index.js` 统一 `RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT`；python-bridge 打包后启动 PyInstaller exe。
 59. **mpv 二进制来源**：shinchiro/mpv-winbuild-cmake latest release 动态取 tag（官方 mpv 无 Windows 发行）；.7z 用 Windows 内置 tar 解（勿用 unzip）。
+60. **mpv 视频缓冲缓存**（决策 85）：设置 `playerCacheMode`（memory/disk，默认 memory）+ `playerCacheDir`（默认 `<userData>/mpv-cache`）；disk 模式起播注入 `--cache=yes --cache-on-disk=yes --demuxer-cache-dir=<dir>`（**mpv v0.41 目录选项是 `--demuxer-cache-dir`，`--cache-dir` 非法**）。mpv 平铺写 `mpv-cache-<hex>.dat`，默认 `--demuxer-cache-unlink-files=immediate` 播完即删，仅被杀/崩溃时残留；清理只删该文件名模式（防误删自选目录里的无关文件）、逐文件 try/catch 跳过正被占用者。IPC：`vpc:pick-folder`（通用选目录）→ `vpc:set-player-cache(mode, dir)`（切内存/换路径自动清旧目录残留，返回 `cleanedBytes`；未传目录沿用已记忆目录=还原）+ `vpc:clear-player-cache`（只清不换）。两键均入 settings.reset 保留清单。
 
 ## 5. Spider 引擎契约（Phase 0 固化结论，勿重做）
 
@@ -178,7 +179,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **启动与配置**：首屏配置重载状态机（U1/37）、历史源/直播历史源卡片（U22/75/81）、自动屏蔽空源（U20/41）、缓存大小清理（U7/35）、版本号（U21→U72 移至系统卡）。
 - **首页/分类/搜索**：渐进加载铺满（U4/12/34/64/51）、搜索封面修复（U5/33）、搜索来源筛选（U80/58）、分组分页折叠（决策 80）、首页当前源搜索（U94/65）、历史按片名去重（决策 81）。
 - **详情页**：简介段落化（U3/11/107）、封面放大单例浮层滚轮缩放（U15/58/60）、收藏/想看已看（U16/89/95/106/74/66）、线路记忆+自动换线（决策 83）、选集倒序（U107/77）、多选集播放/下载（U59/91/50/62）。
-- **播放**：mpv 基础控制 lua OSD（U27）、快捷键自定义（U32/45）、全屏倍速延续（FEATURES#3，observe_property）、记忆播放（U44/47）、自动连播开关（U45）、默认倍速/语言偏好（U48/104）、断流自动重连（U86/59）、连播重写渲染层驱动（U106/70）、会话制防竞态（U109⑦/78）、Anime4K 超分（U85/93/99/60/69/64）、mpv 本地配置兼容（scripts-append + input.conf 合并用户键位，T2）、Anime4K 多镜像下载加固（T2）。
+- **播放**：mpv 基础控制 lua OSD（U27）、快捷键自定义（U32/45）、全屏倍速延续（FEATURES#3，observe_property）、记忆播放（U44/47）、自动连播开关（U45）、默认倍速/语言偏好（U48/104）、断流自动重连（U86/59）、连播重写渲染层驱动（U106/70）、会话制防竞态（U109⑦/78）、Anime4K 超分（U85/93/99/60/69/64）、mpv 本地配置兼容（scripts-append + input.conf 合并用户键位，T2）、Anime4K 多镜像下载加固（T2）、视频缓冲缓存内存/硬盘切换（T3/决策85）。
 - **直播**：mpv 健康检测备用线路（U2/36）、TVBox 式导入（U65/52）、频道可用性探测（2026-08 起改静默后台探测，见 §8.8 T1）、IDN punycode（U36）。
 - **下载**：并发数设置（U42）、系统代理感知（U110/79）、m3u8 ffmpeg 合成（U102/103/71/72）、合成与删除修复（U111）、删除失败下载清理产物（U112）、打开下载目录（U74）、设置归位（U66/53）。
 - **收藏/历史**：视图工厂共用（U16/17/39）、搜索+标签（U89/61）、多选删除（U63）、编辑标题（U41/57）、源标识徽章化（U29/69/78/57）、跨源去重（决策 81）。
@@ -197,6 +198,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - 启动自动重载两个竞态：① READY 行早于 uvicorn 监听，收到 READY 立即 POST 会 connection refused → 先轮询 /health；② `vpc:config-reloaded` 可能早于渲染层监听注册丢失 → app.js bootstrap 另加 configTask 轮询兜底。
 - mpv 未开始播放（core-idle=true）时 get_property 报 "property available"，判播放状态用 core-idle 轮询而非 time-pos。
 - mpv `--input-conf` 是取代而非追加默认 input.conf → 应用自定义 input.conf 必须合并用户全局键位（writeMpvAssets），否则用户自定义快捷键在起播时静默失效。
+- mpv v0.41 硬盘缓存目录选项是 `--demuxer-cache-dir`（传 `--cache-dir` 会报 "option not found" 直接退出）；缓存文件平铺为 `mpv-cache-<hex>.dat`，Windows 下 mpv 以共享删除方式打开（播放中可删，但空间延迟到句柄关闭才释放），默认 `--demuxer-cache-unlink-files=immediate` 播完即删——清理目录按该文件名模式匹配（防误删用户自选目录里的无关文件），逐文件 try/catch 跳过占用。
 - Google Storage 样片本机不可达，demo 样片用 media.w3.org 与 vjs.zencdn.net。
 - Grep 输出的缩进不可信（可能去掉行首空格），SearchReplace 前先 Read 目标行段。
 - Node EventEmitter：`emit('error')` 无监听器抛 ERR_UNHANDLED_ERROR，自定义类须在构造器兜底 noop 监听（downloader.js 已做）。
@@ -219,6 +221,6 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 |---|---|---|
 | T1 | 直播静默探测与自动刷新（HEAD→GET 回退防误杀）：已实现静默分批探测 + HEAD→GET 回退 | 已完成 |
 | T2 | mpv 本地配置兼容（scripts-append + input.conf 合并）+ Anime4K 多镜像下载加固 | 已完成 |
-| T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 待派发 |
+| T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 已完成 |
 | T4 | UI 按钮/组件/字体布局检查清单式优化 | 待派发 |
 | T5 | Kazumi XPath 规则引擎适配（独立排期，待用户确认） | 待确认 |
