@@ -492,8 +492,13 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .tools-tab-icon { width:18px; height:18px; fill:currentColor; flex-shrink:0; }
 .tool-panel { display:none; }
 .tool-panel.active { display:block; }
-/* 设置页分类卡片：auto-fill 按可用宽度自动折列（窄窗/非全屏单列，宽屏多列） */
-.settings-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:0 16px; align-items:start; }
+/* 设置页分类卡片（T7）：显式列数控制——窄窗单列、常规 2 列、全屏宽屏 3 列，
+   避免 auto-fill 在超宽屏折出过多窄列 */
+.settings-grid { display:grid; grid-template-columns:repeat(2, 1fr); gap:0 16px; align-items:start; }
+@media (max-width:760px) { .settings-grid { grid-template-columns:1fr; } }
+@media (min-width:1500px) { .settings-grid { grid-template-columns:repeat(3, 1fr); } }
+/* 设置页标签字号层级：标题 15px 加粗（.tool-card-title），标签 13px，正文随视图 14px */
+.settings-grid .tip-line { font-size:13px; line-height:1.5; }
 /* 卡片内下拉框可收缩：避免 min-width:200px 在窄列里撑破卡片 */
 .settings-grid .md-select { min-width:0; flex:1 1 auto; }
 /* 设置页按钮统一样式与大小（避免 md-btn / md-btn-sm 混用显得参差） */
@@ -512,6 +517,27 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     box-shadow:0 1px 3px var(--md-shadow);
 }
 .tool-card-title { font-size:15px; font-weight:700; margin-bottom:10px; color:var(--md-on-surface); }
+
+/* ⓘ 信息点（T7）：长说明收起为小圆点，点开看详情；短说明保持内联不用小点 */
+.info-tip { display:flex; align-items:flex-start; gap:6px; }
+.info-dot {
+    flex:none; width:18px; height:18px; margin-top:1px; padding:0;
+    border:1px solid var(--md-outline); border-radius:50%;
+    background:transparent; color:var(--md-on-surface-variant);
+    font-size:11px; line-height:1; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center;
+    transition:background .15s, color .15s, border-color .15s;
+}
+.info-dot:hover { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
+.info-tip.open .info-dot { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
+.info-body { flex:1 1 auto; min-width:0; }
+.info-label { font-weight:600; }
+.info-detail {
+    display:none; margin-top:6px; padding:6px 12px;
+    border-left:2px solid var(--md-outline-variant);
+    color:var(--md-on-surface-variant); line-height:1.7;
+}
+.info-tip.open .info-detail { display:block; }
 /* 本地文件卡：半透明遮罩底 + 模糊（壁纸下与其他卡片区分）；说明段落弱化色 */
 #tool-local .tool-card {
     background:color-mix(in srgb, var(--md-surface-container) 82%, transparent);

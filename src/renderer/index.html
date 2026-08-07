@@ -194,7 +194,12 @@
                         <div id="tool-source" class="tool-panel active">
                             <div class="tool-card">
                                 <div class="tool-card-title">载入视频源</div>
-                                <div class="tip-line pad0">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；需解析的影片链接会在播放时自动解析载入。</div>
+                                <div class="tip-line pad0 info-tip">
+                                    <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                                    <div class="info-body"><span class="info-label">支持配置地址或 JSON</span>
+                                        <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；需解析的影片链接会在播放时自动解析载入。</div>
+                                    </div>
+                                </div>
                                 <div class="md-field">
                                     <input id="setting_text" class="md-input" type="text" placeholder="配置地址（http/https）或 JSON…" />
                                 </div>
@@ -207,7 +212,12 @@
                             </div>
                             <div class="tool-card">
                                 <div class="tool-card-title">直播源</div>
-                                <div class="tip-line pad0">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取 lives）；配置里自带的直播源会自动载入。添加成功的直播源记录在下方「直播历史源」板块。</div>
+                                <div class="tip-line pad0 info-tip">
+                                    <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                                    <div class="info-body"><span class="info-label">支持 txt / m3u 与 TVBox 式配置</span>
+                                        <div class="info-detail">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取 lives）；配置里自带的直播源会自动载入。添加成功的直播源记录在下方「直播历史源」板块。</div>
+                                    </div>
+                                </div>
                                 <div class="md-field">
                                     <input id="live_src_url" class="md-input" type="text" placeholder="直播源地址（txt/m3u）或 TVBox 配置（JSON / .json 地址）…" />
                                 </div>
@@ -232,12 +242,17 @@
                             <div class="tool-card">
                                 <div class="tool-card-title">本地文件</div>
                                 <div class="tip-line pad0">管理并播放本机视频：出于安全仅能访问你指定的根目录（白名单机制），首次使用请先点「更换根目录」选择一个本地文件夹。</div>
-                                <div class="local-desc">
-                                    <p>· 仅展示文件夹与视频/音频文件；单击视频/音频直接交 mpv 播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
-                                    <p>· 「上传文件」：把本机其他位置的视频复制到当前目录（会弹窗选文件）。</p>
-                                    <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
-                                    <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
-                                    <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
+                                <div class="tip-line pad0 info-tip">
+                                    <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                                    <div class="info-body"><span class="info-label">使用说明（点开查看）</span>
+                                        <div class="info-detail local-desc">
+                                            <p>· 仅展示文件夹与视频/音频文件；单击视频/音频直接交 mpv 播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
+                                            <p>· 「上传文件」：把本机其他位置的视频复制到当前目录（会弹窗选文件）。</p>
+                                            <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
+                                            <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
+                                            <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div class="md-toolbar">
                                     <button class="md-btn md-btn-tonal" onclick="uploadFile()">上传文件</button>
@@ -395,7 +410,12 @@
                             <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
                             <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:6px;">更换后下载引擎会重启，进行中任务中断但可断点续传。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">更换目录会重启下载引擎</span>
+                                <div class="info-detail">进行中任务会中断，但支持断点续传。</div>
+                            </div>
+                        </div>
                         <div class="tip-line pad0" style="margin-top:12px;">并发任务数</div>
                         <select id="set_dl_concurrency" class="md-select">
                             <option value="1">1 个</option>
@@ -409,14 +429,29 @@
                         <div class="tool-card-title">缓存</div>
                         <div class="tip-line pad0" id="cache_size_line">当前缓存占用：统计中…</div>
                         <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
-                        <div class="tip-line pad0" style="margin-top:10px;">清理范围：爬虫缓存、JS 本地存储与下载临时文件，不影响已载入的源与下载好的文件。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:10px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">清理范围</span>
+                                <div class="info-detail">爬虫缓存、JS 本地存储与下载临时文件；不影响已载入的源与下载好的文件。</div>
+                            </div>
+                        </div>
                         <div class="tip-line pad0" id="cache_dir_line" style="margin-top:12px;">缓存位置：默认</div>
                         <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
-                        <div class="tip-line pad0" style="margin-top:6px;">更换后后端会重启，旧目录里的缓存不会自动迁移。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">更换位置会重启后端</span>
+                                <div class="info-detail">旧目录里的缓存不会自动迁移。</div>
+                            </div>
+                        </div>
                     </div>
                     <div class="tool-card">
                         <div class="tool-card-title">播放缓存（mpv）</div>
-                        <div class="tip-line pad0">视频缓冲位置：内存不落盘（默认，内存占用高）；硬盘适合大文件/低内存机器，缓冲写入指定目录。</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">视频缓冲位置</span>
+                                <div class="info-detail">内存不落盘（默认，内存占用高）；硬盘适合大文件/低内存机器，缓冲写入指定目录。</div>
+                            </div>
+                        </div>
                         <select id="set_cache_mode" class="md-select">
                             <option value="memory" selected>内存（默认，缓冲不写盘）</option>
                             <option value="disk">硬盘（写入缓存目录）</option>
@@ -426,7 +461,12 @@
                             <button id="set_cache_dir_pick" class="md-btn md-btn-tonal">更换缓存目录</button>
                             <button id="set_cache_clear" class="md-btn md-btn-tonal">清空硬盘缓存</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:6px;">更换目录会清理旧目录残留的 mpv 缓存；切换回内存也会清空硬盘缓存（正在播放中的缓存文件可能被跳过）。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">切换目录自动清理旧缓存</span>
+                                <div class="info-detail">更换目录会清理旧目录残留的 mpv 缓存；切换回内存也会清空硬盘缓存（正在播放中的缓存文件可能被跳过）。</div>
+                            </div>
+                        </div>
                     </div>
                     <div class="tool-card">
                         <div class="tool-card-title">系统</div>
@@ -436,7 +476,12 @@
                             <option value="exit">直接退出</option>
                             <option value="ask">每次询问</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">恢复默认设置：还原外观/播放等偏好，不删除收藏、历史与已载入的源。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:12px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">恢复默认设置</span>
+                                <div class="info-detail">还原外观/播放等偏好，不删除收藏、历史与已载入的源。</div>
+                            </div>
+                        </div>
                         <button id="set_reset" class="md-btn md-btn-tonal md-btn-danger-text">恢复默认设置</button>
                         <div class="tip-line pad0" id="app_version" style="margin-top:14px;"></div>
                     </div>
@@ -452,7 +497,12 @@
                             <button id="pick_mpv_path" class="md-btn md-btn-tonal">指定 mpv.exe 路径</button>
                             <button id="clear_mpv_path" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:6px;">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
+                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">资产安装方式</span>
+                                <div class="info-detail">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>

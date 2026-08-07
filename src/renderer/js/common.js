@@ -418,3 +418,8 @@ function _applyColorMode() {
 try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => _applyColorMode());
 } catch (e) { /* 旧内核无 addEventListener */ }
+
+// ⓘ 信息点（T7）：长说明收起为小圆点，点击展开/收起详情；短说明保持内联
+$(document).on('click', '.info-dot', function () {
+    $(this).closest('.info-tip').toggleClass('open');
+});
