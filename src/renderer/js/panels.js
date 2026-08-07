@@ -18,6 +18,7 @@ let currentFile = '';
 let currentParent = '';
 let dirNavStack = [];
 let pendingDelFolder = null;
+let _assetStatus = null; // 最近一次资产就绪状态缓存（Anime4K 开关提示用）
 
 // ---------------------------------------------------------------- 面板切换
 
@@ -763,11 +764,21 @@ function initSettingsPanel() {
     $('#set_bgplay').on('change', function () {
         window.vpc.settingsSet('bgPlay', this.checked);
     });
-    // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）
+    // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
+    // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）
     $('#set_anime4k').on('change', function () {
         window.vpc.settingsSet('anime4k', this.checked);
         if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
-        warnToast(this.checked ? '已开启 Anime4K 超分（下次起播生效）' : '已关闭 Anime4K 超分');
+        if (this.checked) {
+            const a4k = _assetStatus && _assetStatus.anime4k;
+            if (a4k && !a4k.ready) {
+                warnToast('Anime4K 着色器尚未就绪（自动下载中或下载失败），开关暂不生效');
+            } else {
+                warnToast('已开启 Anime4K 超分（下次起播生效）');
+            }
+        } else {
+            warnToast('已关闭 Anime4K 超分');
+        }
     });
     // 界面动画开关
     $('#set_anim').on('change', function () {
@@ -989,6 +1000,7 @@ async function refreshAssetStatus() {
         return;
     }
     if (!status) { box.html('<div class="tip-line">暂无资产信息</div>'); return; }
+    _assetStatus = status; // 缓存供 Anime4K 开关启用时提示真实着色器状态
     const items = [
         { key: 'ffmpeg', label: 'ffmpeg（视频缩略图 / m3u8 下载合成）', s: status.ffmpeg },
         { key: 'mpv', label: 'mpv 播放器（视频播放引擎）', s: status.mpv },

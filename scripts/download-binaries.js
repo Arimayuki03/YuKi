@@ -23,8 +23,13 @@ const ARIA2_API = 'https://api.github.com/repos/aria2/aria2/releases/latest';
 // ffmpeg 官方 essentials 构建（m3u8 合成 + 抓帧，约 90MB；与主进程 ffmpeg.js 同源）
 const FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 // Anime4K v4.1 着色器（Mode A 链：高光钳制→恢复→2x 升频→再恢复→暗部增强）
-// 仓库按功能分子目录，下载后扁平存入 vendor/anime4k（主进程按文件名拼链）
-const ANIME4K_BASE = 'https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/';
+// 仓库按功能分子目录，下载后扁平存入 vendor/anime4k（主进程按文件名拼链）。
+// 多镜像（与主进程 index.js ensureAnime4k 同源）：raw 直连 → jsdelivr CDN → ghfast.top 加速代理
+const ANIME4K_BASES = [
+    'https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/',
+    'https://cdn.jsdelivr.net/gh/bloc97/Anime4K@master/glsl/',
+    'https://ghfast.top/https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/',
+];
 const ANIME4K_FILES = [
     'Restore/Anime4K_Clamp_Highlights.glsl',
     'Restore/Anime4K_Restore_CNN_M.glsl',
@@ -162,13 +167,19 @@ async function downloadAnime4k() {
     let okCount = 0;
     for (const rel of ANIME4K_FILES) {
         const dest = path.join(dir, path.basename(rel)); // 扁平化：只留文件名
-        if (fs.existsSync(dest)) { okCount += 1; continue; }
-        try {
-            await download(ANIME4K_BASE + rel, dest);
-            okCount += 1;
-        } catch (e) {
-            log(`${rel} 下载失败：${e.message}（可稍后重跑 node scripts/download-binaries.js anime4k）`);
+        if (fs.existsSync(dest) && fs.statSync(dest).size >= 128) { okCount += 1; continue; }
+        let got = false;
+        for (const base of ANIME4K_BASES) {
+            try {
+                await download(base + rel, dest);
+                okCount += 1;
+                got = true;
+                break;
+            } catch (e) {
+                log(`${rel} 镜像 ${base} 失败：${e.message}`);
+            }
         }
+        if (!got) log(`${rel} 全部镜像下载失败（可稍后重跑 node scripts/download-binaries.js anime4k，应用启动也会自动补齐）`);
     }
     if (okCount === ANIME4K_FILES.length) log(`Anime4K 着色器就绪（${okCount}/${ANIME4K_FILES.length}）：${dir}`);
     else log(`Anime4K 不完整（${okCount}/${ANIME4K_FILES.length}），开关暂不会生效`);

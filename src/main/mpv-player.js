@@ -14,7 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 
 // 打包后 extraResources 放在 resources/，vendor 从该处读取
@@ -26,20 +26,40 @@ const ROOT = (() => {
 })();
 const WIN = process.platform === 'win32';
 
+/** 校验 mpv 二进制真实可用：spawnSync --version（规避损坏/占位 exe），返回版本首行或 null。 */
+function mpvVersion(p) {
+    try {
+        const r = spawnSync(p, ['--version'], { timeout: 8000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        if (r.error || r.status !== 0) return null;
+        const line = String(r.stdout || '').split(/\r?\n/)[0].trim();
+        return line || null;
+    } catch (e) { return null; }
+}
+
 function findMpv() {
     const exe = WIN ? 'mpv.exe' : 'mpv';
+    const candidates = [];
     const vendor = path.join(ROOT, 'vendor', 'mpv', exe);
-    if (fs.existsSync(vendor)) return vendor;
+    if (fs.existsSync(vendor)) candidates.push(vendor);
     try {
         if (WIN) {
             const out = execSync('where mpv', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-            const first = out.split(/\r?\n/)[0];
-            if (first) return first;
+            for (const p of out.split(/\r?\n/)) if (p) candidates.push(p);
         } else {
             const out = execSync(`command -v ${exe}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-            if (out) return out;
+            if (out) candidates.push(out);
         }
     } catch (e) { /* 不在 PATH */ }
+    const seen = new Set();
+    for (const p of candidates) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        const v = mpvVersion(p);
+        if (v) { // 能打印版本才算可用；损坏二进制回退下一候选
+            console.log(`[mpv] 使用 ${v}（${p}）`);
+            return p;
+        }
+    }
     return null;
 }
 
@@ -74,9 +94,14 @@ class MpvPlayer extends EventEmitter {
 
     isAvailable() { return !!this.binary; }
 
-    /** 指定自定义 mpv 二进制路径（设置页手动选择）；文件存在则更新，下次起播生效。 */
+    /** 指定自定义 mpv 二进制路径（设置页手动选择）；文件存在且能打印版本则更新，下次起播生效。 */
     setCustomPath(p) {
-        if (p && fs.existsSync(p)) { this.binary = p; return true; }
+        const v = (p && fs.existsSync(p)) ? mpvVersion(p) : null;
+        if (v) {
+            console.log(`[mpv] 自定义路径生效：${v}（${p}）`);
+            this.binary = p;
+            return true;
+        }
         return false;
     }
 
@@ -107,7 +132,9 @@ class MpvPlayer extends EventEmitter {
                 .map(([k, v]) => `${k}: ${v}`).join(', ');
             if (pairs) args.push(`--http-header-fields=${pairs}`);
         }
-        if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts=${this.scriptPath}`);
+        // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
+        // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
+        if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
         if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
         // 续播：退出时记录位置，同一地址再次起播自动跳转（mpv 按 URL 哈希匹配）；
         // 直播地址（opts.resume===false）不记录，避免下次误跳旧位置

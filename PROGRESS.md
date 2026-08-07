@@ -2,7 +2,7 @@
 
 > 续作开发只需读本文件。本文档已整合原 `重构方案.md`、`PHASE0_依赖矩阵.md`、`BUILD.md`、`FEATURES.md`、`PROGRESS.md` 五份文档，其余 md 已删除。
 > 约定：改动架构/链路前先更新「§4 架构决策」；新增功能后在「§7 功能清单」补一行；收尾跑 `npm run test:all` 全绿。
-> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L130 · §6 构建打包 L145 · §7 前端注意与功能 L165（注意事项 L167 / 功能概览 L177）· §8 已知坑位 L188 · §8.7 待完成 L208 · §8.8 进行中任务 L215
+> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L130 · §6 构建打包 L145 · §7 前端注意与功能 L165（注意事项 L167 / 功能概览 L177）· §8 已知坑位 L188 · §8.7 待完成 L209 · §8.8 进行中任务 L216
 
 ---
 
@@ -108,7 +108,7 @@ npm run build:py
 39. **播放会话制**（决策 78）：mpv 每次起播分配自增会话号，随 playUrl 返回并附在 exit 事件；渲染层仅处理与当前会话匹配的退出，防切集时旧进程延迟退出误推进、本地/推送播放（noSeq 负号）干扰连播、exit 处理期间又起新播（_playToken 双保险）。断流重连由主进程直接 mpv.play 起新会话，经 `vpc:player-session` 同步，重连集播完仍可续连播；「开播≥15s 且剩余≥8s 的媒体直链」退出不置空 _seq 等待重连。
 40. **断流自动重连**（决策 59）：proc exit 回调趁 IPC 未拆除抢读 time-pos/duration（Promise.race 400ms），剩余 ≥8s 视为断流 → 重播当前集一次（watch-later 自动续位）+ 系统通知；剩余 <8s 是正常播完，开播 <15s 退出是起播失败（另有直播备用线路），均不重试；_stallRetried 每会话一次。
 41. **mpv 播放偏好注入**（决策 47）：续播用 mpv 原生 watch-later（--save-position-on-quit + --watch-later-directory，userData/mpv-watch-later），直播地址 meta.fallbackUrls 存在则 resume=false 不记录；默认倍速 --speed；音轨/字幕语言 --alang/--slang（playerAlang/playerSlang）；偏好变更经 `vpc:update-player-prefs` 下次起播生效。
-42. **mpv 快捷键自定义**（决策 45）：settings.playerHotkeys 步长 → 主进程 writeMpvAssets 生成 userData/mpv-scripts/input.conf + lua 提示脚本；起播经 --input-conf / --scripts 加载；`vpc:update-hotkeys` 修改后重写（下次起播生效）。
+42. **mpv 快捷键自定义**（决策 45）：settings.playerHotkeys 步长 → 主进程 writeMpvAssets 生成 userData/mpv-scripts/input.conf + lua 提示脚本；起播经 --input-conf / --scripts-append 加载（scripts-append 不覆盖 mpv 默认 scripts 目录）；生成 input.conf 合并用户全局 input.conf（WIN `%APPDATA%\mpv\input.conf` / POSIX `~/.config/mpv/input.conf`）——`--input-conf` 会取代而非追加默认 input.conf，故必须把用户键位带进生成文件，用户已绑定的键不写入应用段、同键冲突以用户为准；`vpc:update-hotkeys` 修改后重写（下次起播生效）。
 43. **详情页下载**（决策 50）：选集勾选（.ep-check 阻止冒泡）或悬停单集图标；下载前逐集 playerContent 判断 parse，parse=1 走 vpc:parse 解直链（带 Referer）。vpc:dl add 扩展 out/header：out=「片名 - 集名 + URL 扩展名」（非法字符替换 _）；m3u8 切片流 aria2 无法下载单独计数提示；批量串行解析避免隐藏窗口并发冲突。多选集播放复用连播机制（勾选集按序作为 episodes 交 Player.play）。
 44. **选集倒序只翻展示不动下标**（决策 77）：Detail._epDesc 仅翻转渲染顺序，data-idx 始终为原下标，连播/勾选下载不受影响。
 45. **线路记忆 + 失败自动换线**（决策 83）：切线路持久化 `settings.lastSourceMap`（键 `site|vodId`）；`Player.play()` 返回 `{ok, reason}`；失败自动循环尝试下一线路（mpv 缺失不换线），全失败恢复最初线路。
@@ -120,7 +120,7 @@ npm run build:py
 51. **换肤**（决策 40/73）：主题色 6 套内置（html[data-color] 覆写 MD3 变量）+ 自定义单基色 HSL 推导浅深两套（html.theme-custom，customColor 与 theme 互斥）；明暗 auto/light/dark 由 common.js applySkin 挂 html.dark 类（废弃 @media）；壁纸 vpc:pick-wallpaper 写 settings.wallpaper，渲染层 toFileUrl 铺 body + --wall-veil 遮罩三档；界面缩放 60~200 写 html.style.zoom，字体大小 80~200 注入临时样式表按基准字号等比（决策 55），change 钳制回写。
 52. **托盘驻留与关闭行为**（决策 46）：closeAction 三态 tray(默认)/exit/ask；托盘图标代码生成 16x16 PNG 免资源；bgPlay 开启时选退出但 mpv 在播也转托盘保播；isQuitting 区分真退出与托盘驻留；恢复默认设置只清偏好保留数据类键后 relaunch。
 53. **缓存位置自定义**（决策 48）：hoststate 统一管理 cache_dir（kv/dl/py），主进程经 python-bridge.extraEnv 注入 VPC_CACHE_DIR，server.py main() 读取后 configure 再 ensure_dirs；换目录需重启后端（端口/令牌变），渲染层 onBackendReady → setBackendInfo 刷新连接信息；旧目录缓存不迁移。
-54. **Anime4K 超分**（决策 60/69/64）：不内置 glsl；download-binaries.js anime4k 从 bloc97/Anime4K 拉 v4.1 Mode A 链 6 个 glsl（仓库按 Restore/Upscale/Experimental-Effects 分子目录，扁平存 vendor/anime4k）；启动 ensureAnime4k fetch 补齐缺失；文件齐全才 buildAnime4kChain 拼链（win 分隔符 ';'）注入 --glsl-shaders，缺文件静默降级；从未设置过开关默认开启（手动关过保持关）；**状态以起播反馈为准**：vpc:play 返回 anime4k 标志，toast 明示「超分已生效」。
+54. **Anime4K 超分**（决策 60/69/64）：不内置 glsl；download-binaries.js anime4k 从 bloc97/Anime4K 拉 v4.1 Mode A 链 6 个 glsl（仓库按 Restore/Upscale/Experimental-Effects 分子目录，扁平存 vendor/anime4k）；启动 ensureAnime4k 多镜像补齐缺失（raw.githubusercontent → jsdelivr CDN → ghfast.top 代理，镜像返回内容须过大小+头部版权行校验拦错误页）；文件齐全才 buildAnime4kChain 拼链（win 分隔符 ';'）注入 --glsl-shaders，缺文件静默降级；从未设置过开关默认开启（手动关过保持关）；**状态以起播反馈为准**：vpc:play 返回 anime4k 标志，toast 明示「超分已生效」。
 55. **ffmpeg 内置化**（决策 72）：m3u8 合成与本地预览图共用；启动 ensureFfmpeg 幂等下载 gyan.dev essentials（约 90MB）→ vendor/ffmpeg，失败静默降级、其次探测 PATH；缩略图 5s 处抓帧缩 480 宽 jpg，md5(路径|mtime|大小) 缓存 userData/local-thumbs，并发 4。
 56. **鼠标侧键导航**（决策 63/67）：视图级两栈 _navStack/_navForward（showView 入栈同顶去重，新跳转清前进链，栈底不弹）；app-command 与 mousedown button 3/4 双通道，400ms 时间戳去重防双跳。
 57. **确认对话框**（决策 54）：全部 confirm 用 common.js confirmDialog（md-dialog 风格，Promise<boolean>，Esc/遮罩=取消）；_confirmResolve 持有待决回调，closeDialog 未决按取消 resolve(false) 防挂死；done 先置空再 closeDialog 防双重 resolve；okText/cancelText 可定制。
@@ -178,7 +178,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **启动与配置**：首屏配置重载状态机（U1/37）、历史源/直播历史源卡片（U22/75/81）、自动屏蔽空源（U20/41）、缓存大小清理（U7/35）、版本号（U21→U72 移至系统卡）。
 - **首页/分类/搜索**：渐进加载铺满（U4/12/34/64/51）、搜索封面修复（U5/33）、搜索来源筛选（U80/58）、分组分页折叠（决策 80）、首页当前源搜索（U94/65）、历史按片名去重（决策 81）。
 - **详情页**：简介段落化（U3/11/107）、封面放大单例浮层滚轮缩放（U15/58/60）、收藏/想看已看（U16/89/95/106/74/66）、线路记忆+自动换线（决策 83）、选集倒序（U107/77）、多选集播放/下载（U59/91/50/62）。
-- **播放**：mpv 基础控制 lua OSD（U27）、快捷键自定义（U32/45）、全屏倍速延续（FEATURES#3，observe_property）、记忆播放（U44/47）、自动连播开关（U45）、默认倍速/语言偏好（U48/104）、断流自动重连（U86/59）、连播重写渲染层驱动（U106/70）、会话制防竞态（U109⑦/78）、Anime4K 超分（U85/93/99/60/69/64）。
+- **播放**：mpv 基础控制 lua OSD（U27）、快捷键自定义（U32/45）、全屏倍速延续（FEATURES#3，observe_property）、记忆播放（U44/47）、自动连播开关（U45）、默认倍速/语言偏好（U48/104）、断流自动重连（U86/59）、连播重写渲染层驱动（U106/70）、会话制防竞态（U109⑦/78）、Anime4K 超分（U85/93/99/60/69/64）、mpv 本地配置兼容（scripts-append + input.conf 合并用户键位，T2）、Anime4K 多镜像下载加固（T2）。
 - **直播**：mpv 健康检测备用线路（U2/36）、TVBox 式导入（U65/52）、频道可用性探测（2026-08 起改静默后台探测，见 §8.8 T1）、IDN punycode（U36）。
 - **下载**：并发数设置（U42）、系统代理感知（U110/79）、m3u8 ffmpeg 合成（U102/103/71/72）、合成与删除修复（U111）、删除失败下载清理产物（U112）、打开下载目录（U74）、设置归位（U66/53）。
 - **收藏/历史**：视图工厂共用（U16/17/39）、搜索+标签（U89/61）、多选删除（U63）、编辑标题（U41/57）、源标识徽章化（U29/69/78/57）、跨源去重（决策 81）。
@@ -196,6 +196,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - config 异步任务：同步阻塞会卡住 /action 分钟级（多仓扫描），前端 fetch 加 30s 超时兜底。
 - 启动自动重载两个竞态：① READY 行早于 uvicorn 监听，收到 READY 立即 POST 会 connection refused → 先轮询 /health；② `vpc:config-reloaded` 可能早于渲染层监听注册丢失 → app.js bootstrap 另加 configTask 轮询兜底。
 - mpv 未开始播放（core-idle=true）时 get_property 报 "property available"，判播放状态用 core-idle 轮询而非 time-pos。
+- mpv `--input-conf` 是取代而非追加默认 input.conf → 应用自定义 input.conf 必须合并用户全局键位（writeMpvAssets），否则用户自定义快捷键在起播时静默失效。
 - Google Storage 样片本机不可达，demo 样片用 media.w3.org 与 vjs.zencdn.net。
 - Grep 输出的缩进不可信（可能去掉行首空格），SearchReplace 前先 Read 目标行段。
 - Node EventEmitter：`emit('error')` 无监听器抛 ERR_UNHANDLED_ERROR，自定义类须在构造器兜底 noop 监听（downloader.js 已做）。
@@ -217,7 +218,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | 批次 | 任务 | 状态 |
 |---|---|---|
 | T1 | 直播静默探测与自动刷新（HEAD→GET 回退防误杀）：已实现静默分批探测 + HEAD→GET 回退 | 已完成 |
-| T2 | mpv 本地配置兼容（scripts-append + input.conf 合并）+ Anime4K 多镜像下载加固 | 待派发 |
+| T2 | mpv 本地配置兼容（scripts-append + input.conf 合并）+ Anime4K 多镜像下载加固 | 已完成 |
 | T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 待派发 |
 | T4 | UI 按钮/组件/字体布局检查清单式优化 | 待派发 |
 | T5 | Kazumi XPath 规则引擎适配（独立排期，待用户确认） | 待确认 |

@@ -16,6 +16,7 @@
  */
 const { app, BrowserWindow, ipcMain, dialog, Notification, Tray, nativeImage, shell } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -42,17 +43,27 @@ const ANIME4K_FILES = [
     'Anime4K_Upscale_CNN_x2_S.glsl',
     'Anime4K_Darken_HQ.glsl',
 ];
+const ANIME4K_MIN_SIZE = 128; // 合法着色器远大于此；拦截 0 字节/截断的残留文件
 
-/** 读 Anime4K 着色器链（mpv --glsl-shaders 分隔符 win=';' posix=':'）；任一文件缺失返回 '' 跳过注入。 */
+/** 单个着色器文件是否完整可用：存在、非空/截断、且头部含作者版权行（拦截镜像/代理返回的大体积错误页）。 */
+function anime4kFileOk(p) {
+    try {
+        if (!fs.existsSync(p) || fs.statSync(p).size < ANIME4K_MIN_SIZE) return false;
+        return fs.readFileSync(p, 'utf8').slice(0, 1024).includes('bloc97');
+    } catch (e) { return false; }
+}
+
+/** 读 Anime4K 着色器链（mpv --glsl-shaders 分隔符 win=';' posix=':'）；任一文件缺失/损坏返回 '' 跳过注入。 */
 function buildAnime4kChain() {
     const dir = path.join(RESOURCES_ROOT, 'vendor', 'anime4k');
     const files = ANIME4K_FILES.map((f) => path.join(dir, f));
-    if (!files.every((f) => fs.existsSync(f))) return '';
+    if (!files.every(anime4kFileOk)) return '';
     return files.join(process.platform === 'win32' ? ';' : ':');
 }
 
-// Anime4K 着色器源（bloc97/Anime4K v4.1，仓库按功能分子目录）：启动时自动补齐缺失文件，免手动下载
-const ANIME4K_BASE = 'https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/';
+// Anime4K 着色器源（bloc97/Anime4K v4.1，仓库按功能分子目录）：启动时自动补齐缺失文件，免手动下载。
+// 多镜像下载加固：raw.githubusercontent 直连失败 → jsdelivr CDN（单文件上限 20MB，glsl 远小于此）→
+// ghfast.top 加速代理。镜像/代理可能回错误页（HTTP 200 假成功），按内容含 "Anime4K" 校验。
 const ANIME4K_URLS = {
     'Anime4K_Clamp_Highlights.glsl': 'Restore/Anime4K_Clamp_Highlights.glsl',
     'Anime4K_Restore_CNN_M.glsl': 'Restore/Anime4K_Restore_CNN_M.glsl',
@@ -61,20 +72,44 @@ const ANIME4K_URLS = {
     'Anime4K_Upscale_CNN_x2_S.glsl': 'Upscale/Anime4K_Upscale_CNN_x2_S.glsl',
     'Anime4K_Darken_HQ.glsl': 'Experimental-Effects/Anime4K_Darken_HQ.glsl',
 };
+const ANIME4K_MIRRORS = [
+    (rel) => `https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/${rel}`,
+    (rel) => `https://cdn.jsdelivr.net/gh/bloc97/Anime4K@master/glsl/${rel}`,
+    (rel) => `https://ghfast.top/https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/${rel}`,
+];
 
-/** 启动自动补齐 Anime4K 着色器（已存在的跳过；网络失败静默降级，不阻断启动）。 */
+/** 单个着色器多镜像下载：任一镜像成功写盘返回 true；全部失败返回 false（不抛出，换下一个文件继续）。 */
+async function downloadAnime4kOne(dest, rel) {
+    for (const toUrl of ANIME4K_MIRRORS) {
+        try {
+            const res = await fetch(toUrl(rel), {
+                redirect: 'follow',
+                signal: AbortSignal.timeout(12000),
+                headers: { 'User-Agent': 'video-pc/1.0' },
+            });
+            if (!res.ok) continue;
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length < ANIME4K_MIN_SIZE || !buf.toString('utf8').includes('Anime4K')) continue;
+            fs.writeFileSync(dest, buf);
+            console.log(`[anime4k] ${rel} <- ${toUrl(rel)}`);
+            return true;
+        } catch (e) { /* 换下一个镜像 */ }
+    }
+    console.warn(`[anime4k] 全部镜像下载失败: ${rel}`);
+    return false;
+}
+
+/** 启动自动补齐 Anime4K 着色器（完整文件跳过，残留/损坏文件重下；网络失败静默降级，不阻断启动）。
+ *  单个文件失败不中断其余，下次启动只补缺失的。 */
 async function ensureAnime4k() {
     const dir = path.join(RESOURCES_ROOT, 'vendor', 'anime4k');
+    let allOk = true;
     for (const [file, rel] of Object.entries(ANIME4K_URLS)) {
         const dest = path.join(dir, file);
-        if (fs.existsSync(dest)) continue;
-        try {
-            const res = await fetch(ANIME4K_BASE + rel, { redirect: 'follow' });
-            if (!res.ok) return false;
-            fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-        } catch (e) { return false; }
+        if (anime4kFileOk(dest)) continue;
+        if (!(await downloadAnime4kOne(dest, rel))) allOk = false;
     }
-    return true;
+    return allOk;
 }
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -279,7 +314,7 @@ app.whenReady().then(() => {
             } catch (e) { /* not in PATH */ }
             return '';
         })();
-        const anime4kOk = ANIME4K_FILES.every((f) => fs.existsSync(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
+        const anime4kOk = ANIME4K_FILES.every((f) => anime4kFileOk(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
         const mpvPath = mpv.binary || '';
         return {
             ffmpeg: { ready: !!ffmpegPath, downloading: require('./ffmpeg').isEnsuring() },
@@ -290,7 +325,49 @@ app.whenReady().then(() => {
     });
 
     // mpv 起播资产：lua 快捷键提示脚本 + input.conf 自定义步长（设置页可调），
-    // 均写 userData 供 --scripts / --input-conf 加载；改步长后经 vpc:update-hotkeys 重写
+    // 均写 userData 供 --scripts-append / --input-conf 加载；改步长后经 vpc:update-hotkeys 重写。
+    // input.conf 合并用户全局键位：--input-conf 会取代 mpv 默认 input.conf 加载（而不是追加），
+    // 因此生成文件里保留用户自己的 input.conf 行，且放在应用段之后（mpv 同键后绑定优先 → 用户自定义不被覆盖）。
+    const VPC_CONF_MARK = '# ---- video-pc custom bindings ----';
+    const VPC_CONF_END = '# ---- video-pc custom bindings end ----';
+
+    /** 用户全局 mpv input.conf 路径：WIN %APPDATA%\mpv\input.conf；POSIX ~/.config/mpv/input.conf。 */
+    function getUserMpvInputConfPath() {
+        return process.platform === 'win32'
+            ? path.join(process.env.APPDATA || '', 'mpv', 'input.conf')
+            : path.join(os.homedir(), '.config', 'mpv', 'input.conf');
+    }
+
+    /** 读用户全局 input.conf 并剔除本应用旧版写入的 video-pc 段，返回用户原始行（写坏不阻断）。 */
+    function readUserMpvInputConf() {
+        try {
+            const p = getUserMpvInputConfPath();
+            if (!fs.existsSync(p)) return [];
+            const lines = String(fs.readFileSync(p, 'utf8')).split(/\r?\n/);
+            const out = [];
+            let inSection = false;
+            for (const ln of lines) {
+                const t = ln.trim();
+                if (t === VPC_CONF_MARK) { inSection = true; continue; }
+                if (t === VPC_CONF_END) { inSection = false; continue; }
+                if (!inSection) out.push(ln);
+            }
+            return out;
+        } catch (e) { return []; }
+    }
+
+    /** 收集 input.conf 已绑定的键名（首个空白分隔 token；跳过注释/空行），应用段据此跳过冲突键。 */
+    function inputConfBoundKeys(lines) {
+        const keys = new Set();
+        for (const ln of lines) {
+            const t = ln.trim();
+            if (!t || t.startsWith('#')) continue;
+            const key = t.split(/\s+/, 1)[0];
+            if (key) keys.add(key);
+        }
+        return keys;
+    }
+
     function writeMpvAssets() {
         try {
             const hk = (settings && settings.get('playerHotkeys')) || {};
@@ -307,17 +384,29 @@ app.whenReady().then(() => {
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'vpc-hints.lua'), lua, 'utf8');
-            // input.conf：键位固定，步长取自设置（mpv 语法：add speed 支持小数步长）
+            // input.conf：键位固定，步长取自设置（mpv 语法：add speed 支持小数步长）。
+            // 用户已绑定过的键不重复写入应用段；用户原始行追加在应用段后，同键冲突以用户为准。
+            const userLines = readUserMpvInputConf();
+            const userKeys = inputConfBoundKeys(userLines);
+            const bind = (key, cmd) => (userKeys.has(key) ? [] : [`${key} ${cmd}`]);
+            const defaults = [
+                ...bind('LEFT', `seek -${seek}`),
+                ...bind('RIGHT', `seek ${seek}`),
+                ...bind('UP', `add volume ${vol}`),
+                ...bind('DOWN', `add volume -${vol}`),
+                ...bind('[', `add speed -${speed}`),
+                ...bind(']', `add speed ${speed}`),
+                ...bind('BS', 'set speed 1'),
+                ...bind('SPACE', 'cycle pause'),
+                ...bind('f', 'cycle fullscreen'),
+            ];
             const conf = [
-                `LEFT seek -${seek}`,
-                `RIGHT seek ${seek}`,
-                `UP add volume ${vol}`,
-                `DOWN add volume -${vol}`,
-                `[ add speed -${speed}`,
-                `] add speed ${speed}`,
-                'BS set speed 1',
-                'SPACE cycle pause',
-                'f cycle fullscreen',
+                VPC_CONF_MARK,
+                ...defaults,
+                VPC_CONF_END,
+                '',
+                '# 以下为用户全局 mpv input.conf 的键位（自动合并，请编辑全局文件或此段上方）',
+                ...userLines,
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'input.conf'), conf, 'utf8');
@@ -560,7 +649,7 @@ app.whenReady().then(() => {
         });
         if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
         const p = r.filePaths[0];
-        if (!mpv.setCustomPath(p)) return { ok: false, reason: '所选文件不存在或无法访问' };
+        if (!mpv.setCustomPath(p)) return { ok: false, reason: '所选文件不存在或不是有效的 mpv' };
         settings.set('mpvPath', p);
         return { ok: true, path: p };
     });
