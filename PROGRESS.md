@@ -215,7 +215,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T5，2026-08）
+## 8.8 进行中任务批次（T1~T8，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -224,3 +224,6 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 已完成 |
 | T4 | UI 按钮/组件/字体布局检查清单式优化：工具栏 select/input/btn 高度对齐 40px + gap 10px；新增 .md-btn-danger-text 并应用到删除/清空/恢复默认等按钮；#live-status 右对齐样式移入 CSS；全局字号 14px + tip-line 12px + dark 资产状态色对比；:focus-visible 轮廓 2px/1px；pill 间距统一 6px；输入框/下载项/文件行补 hover | 已完成 |
 | T5 | Kazumi XPath 规则引擎适配（独立排期，待用户确认） | 待确认 |
+| T6 | 翻页架构重设计：统一分页模型 + 每页条数限制/可设置、标准页码分页器、按源+分类 LRU 翻页缓存、当前源搜索真分页、聚合搜索组内翻页、收藏/历史分页 | 进行中 |
+| T7 | UI 布局与说明系统重设计：ⓘ 信息点展开组件（长说明收起）、设置页字号层级与全屏/非全屏响应式列数（1/2/3 列）、按钮组件统一复核 | 待开始 |
+| T8 | mpv 播放器设置增强：快捷键键位自定义（按键捕获+恢复默认+冲突提示）、Anime4K 档位选择（均衡/细节/修复）、中文化显示（窗口标题/OSD 字体/中文反馈） | 待开始 |
