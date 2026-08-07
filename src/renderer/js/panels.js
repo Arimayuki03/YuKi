@@ -471,10 +471,10 @@ function pickRoot() {
 
 /** 拉取并渲染目录列表（200ms 未返回先显示 loading；needRoot 转引导态；分页重置回第一页）。 */
 function listFile(relPath) {
-    const loadingTimer = setTimeout(() => $('#loadingToast').show(), 200);
+    const loadingTimer = setTimeout(() => showLoading(), 200);
     window.vpc.fileList(relPath || '').then((info) => {
         clearTimeout(loadingTimer);
-        $('#loadingToast').hide();
+        hideLoading();
         if (!info) { warnToast('载入失败'); return; }
         if (info.needRoot) { currentRoot = ''; currentParent = '.'; renderNeedRoot(); return; }
         const parent = info.parent;
@@ -493,7 +493,7 @@ function listFile(relPath) {
         renderLocalPage();
     }).catch(() => {
         clearTimeout(loadingTimer);
-        $('#loadingToast').hide();
+        hideLoading();
         warnToast('载入失败');
     });
 }
@@ -519,13 +519,13 @@ function confirmNewFolder(yes) {
     const name = $('#newFolderContent').val().trim();
     $('#newFolderContent').val('');
     if (yes !== 1 || name.length === 0) return;
-    $('#loadingToast').show();
+    showLoading();
     window.vpc.fileNewFolder(currentRoot, name).then((r) => {
-        $('#loadingToast').hide();
+        hideLoading();
         if (r && r.ok) listFile(currentRoot);
         else warnToast('新增失败');
     }).catch(() => {
-        $('#loadingToast').hide();
+        hideLoading();
         warnToast('新增失败');
     });
 }
@@ -541,13 +541,13 @@ function confirmDelFolder(yes) {
     if (yes !== 1 || !pendingDelFolder) { pendingDelFolder = null; return; }
     const { path, refreshPath } = pendingDelFolder;
     pendingDelFolder = null;
-    $('#loadingToast').show();
+    showLoading();
     window.vpc.fileDelFolder(path).then((r) => {
-        $('#loadingToast').hide();
+        hideLoading();
         if (r && r.ok) listFile(refreshPath);
         else warnToast('删除失败');
     }).catch(() => {
-        $('#loadingToast').hide();
+        hideLoading();
         warnToast('删除失败');
     });
 }
@@ -561,13 +561,13 @@ function showDelFileDialog(path) {
 function confirmDelFile(yes) {
     closeDialog('delFile');
     if (yes !== 1) return;
-    $('#loadingToast').show();
+    showLoading();
     window.vpc.fileDelFile(currentFile).then((r) => {
-        $('#loadingToast').hide();
+        hideLoading();
         if (r && r.ok) listFile(currentRoot);
         else warnToast('删除失败');
     }).catch(() => {
-        $('#loadingToast').hide();
+        hideLoading();
         warnToast('删除失败');
     });
 }

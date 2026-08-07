@@ -177,12 +177,18 @@ function renderPagerBox($box, opts) {
 
 function openDialog(id) {
     // overlay 为 flex 居中容器：不能用 show()（会恢复成 block 导致弹窗靠左上）
-    $('#' + id).css('display', 'flex');
+    const el = $('#' + id);
+    clearTimeout(el.data('_outT')); // T30：取消退场延迟隐藏，防重开同 id 时被误藏
+    el.removeClass('dlg-out').css('display', 'flex');
     if (dialogStack.indexOf(id) < 0) dialogStack.push(id);
 }
 
 function closeDialog(id) {
-    $('#' + id).hide();
+    const el = $('#' + id);
+    // T30：退场动画（.dlg-out 淡出缩小）后再隐藏；no-anim 下过渡被禁也不影响隐藏时机
+    clearTimeout(el.data('_outT'));
+    el.addClass('dlg-out');
+    el.data('_outT', setTimeout(() => el.hide().removeClass('dlg-out'), 150));
     const i = dialogStack.lastIndexOf(id);
     if (i >= 0) dialogStack.splice(i, 1);
     // 确认框被 Esc/其他方式关闭时按取消处理，避免 Promise 挂死
@@ -246,15 +252,31 @@ let warnToastTimer = null;
 
 function warnToast(msg) {
     $('#warnToastContent').text(msg);
-    $('#warnToast').show();
+    $('#warnToast').removeClass('out').show();
     if (warnToastTimer) clearTimeout(warnToastTimer);
     // 展示时长随文案长度伸缩（1.6~5s），长提示不会看不完就消失
     const dur = Math.min(5000, Math.max(1600, String(msg).length * 80));
-    warnToastTimer = setTimeout(() => { $('#warnToast').hide(); warnToastTimer = null; }, dur);
+    // T30：退场淡出（snackOut）替代瞬间消失
+    warnToastTimer = setTimeout(() => {
+        $('#warnToast').addClass('out');
+        warnToastTimer = setTimeout(() => {
+            $('#warnToast').hide().removeClass('out'); warnToastTimer = null;
+        }, 200);
+    }, dur);
 }
 
-function showLoading() { $('#loadingToast').show(); }
-function hideLoading() { $('#loadingToast').hide(); }
+// T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐
+let _loadingHideT = null;
+function showLoading() {
+    clearTimeout(_loadingHideT);
+    $('#loadingToast').removeClass('out').show();
+}
+function hideLoading() {
+    const el = $('#loadingToast');
+    if (!el.is(':visible')) return;
+    el.addClass('out');
+    _loadingHideT = setTimeout(() => el.hide().removeClass('out'), 160);
+}
 
 // ---------------------------------------------------------------- 换肤
 

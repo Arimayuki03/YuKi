@@ -189,6 +189,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T15~T20 批次**：下载页卡片化 + 总网速（T15）、danger-tonal/弹窗按钮去透明（T16）、设置导航加大/字体颜色移位/背景区重排/动画复选框/快捷键独立板块/select 统一 240px（T17）、侧栏去 brand（T18）、详情页全选栏上移 + 集数胶囊 + 倒序按钮紧邻（T19）、文案再精简（T20）。
 - **T21~T25 批次**：倒序按钮归位播放勾选集左侧 + 收藏按钮间距（T21）、界面动画改下拉筛选框（T22）、snackbar 弹出后跳移修复（T23/snackIn）、资产→扩展改名 + 系统置底 + mpv 状态行超格修复（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）。
 - **T26~T29 批次**：外观卡布局字号统一（T26）、缓存两卡等高（T27）、侧栏直链改名 + 本地文件独立板块（T28）、源配置迁入设置一级菜单源设置（T29）。
+- **T30 批次**：动画体验整体优化：M3 变弧 loading（淡入淡出 + 载入文案）、toast/弹窗退场动画、卡片错峰入场、easing 统一。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -219,7 +220,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T29，2026-08）
+## 8.8 进行中任务批次（T1~T30，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -252,3 +253,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T27 | 缓存页两卡等高：.settings-grid .tool-card[data-setcat=cache] 加 align-self:stretch，同排时框一样大 | 已完成 |
 | T28 | 侧栏「直链播放」改「直链」；「工具面板」改「本地文件」独立板块：删顶部页签（含本地文件切换按钮）直显本地文件卡，showToolPanel 删改 ensureLocalPanel 首次进入懒加载（app.js showView tools 挂钩）；tools-tabs/set-check 死 CSS 清理 | 已完成 |
 | T29 | 源配置迁入设置一级菜单「源设置」（导航位置：扩展与系统之间）：载入视频源/视频历史源/直播源/直播历史源/屏蔽源五卡整体迁入 settings-grid（data-setcat=source，控件 id 与卡片内样式不变，绑定维持原位）；home/player/live 引导文案同步改「设置→源设置」 | 已完成 |
+| T30 | 动画体验整体优化：loading 升级 M3 变弧 spinner（md-dash 弧长伸缩）+ scrim 淡入/关闭淡出 + 「载入中…」文案；warnToast 退场淡出（snackOut）；弹窗退场动画（dlg-out 淡出缩小 150ms 延迟隐藏，重开清 timer 防误藏 + pointer-events 禁点）；vod-card 前 10 张错峰入场（30ms/张）；view/card/dialog/snackbar easing 统一 cubic-bezier(.2,.7,.3,1)；panels.js 12 处 loadingToast 直引改 show/hideLoading 统一淡出；no-anim 开关自动兼容（过渡被禁不影响隐藏时机） | 已完成 |

@@ -404,14 +404,16 @@ html, body {
     box-shadow: 0 3px 5px -1px var(--md-shadow), 0 6px 10px rgba(0,0,0,0.14), 0 1px 18px rgba(0,0,0,0.12);
 }
 
-/* ── Loading overlay ── */
+/* ── Loading overlay（T30：遮罩淡入 + M3 变弧 spinner + 载入文案，关闭淡出见 .out） ── */
 #loadingToast {
     display: none;
     position: fixed;
     inset: 0;
     z-index: 200;
     background: var(--md-scrim);
+    animation: ldIn .18s ease;
 }
+#loadingToast.out { opacity:0; transition:opacity .15s ease; }
 
 /* centering wrapper 钬� separates position from rotation */
 .md-progress-wrap {
@@ -419,13 +421,14 @@ html, body {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
+    text-align: center;
 }
 
 .md-progress {
     display: block;
     width: 48px;
     height: 48px;
-    animation: md-spin 0.8s linear infinite;
+    animation: md-spin 0.9s linear infinite;
 }
 
 .md-progress circle {
@@ -433,10 +436,23 @@ html, body {
     stroke: var(--md-primary);
     stroke-width: 4;
     stroke-linecap: round;
-    stroke-dasharray: 94 32;
+    /* M3 indeterminate：容器旋转同时弧长伸缩（T30，比固定弧匀速转更灵动） */
+    animation: md-dash 1.4s ease-in-out infinite;
+}
+
+/* 载入文案（scrim 底上浅色小字，T30） */
+.md-progress-text {
+    margin-top:12px; font-size:12.5px; letter-spacing:.5px;
+    color:rgba(255,255,255,.88); text-shadow:0 1px 2px rgba(0,0,0,.3);
 }
 
 @keyframes md-spin { to { transform: rotate(360deg); } }
+@keyframes ldIn { from { opacity:0; } to { opacity:1; } }
+@keyframes md-dash {
+    0%   { stroke-dasharray:1 125;  stroke-dashoffset:0; }
+    50%  { stroke-dasharray:90 36;  stroke-dashoffset:-28; }
+    100% { stroke-dasharray:90 36;  stroke-dashoffset:-124; }
+}
 
 
 /* ---- PC 端补充样式 ---- */
@@ -925,7 +941,7 @@ body.nav-collapsed .main-nav-item { justify-content:center; padding:12px 0; gap:
 body.nav-collapsed .main-nav-item span { display:none; }
 body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 
-/* ===== 界面动画 ===== */
+/* ===== 界面动画（T30：easing 统一 cubic-bezier(.2,.7,.3,1) 更顺滑；卡片错峰入场） ===== */
 @keyframes viewIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
 @keyframes cardIn { from { opacity:0; transform:scale(.96); } to { opacity:1; transform:none; } }
 @keyframes dlgIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
@@ -933,11 +949,31 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 /* Snackbar 入场动画：末态保留水平居中位移（T23：viewIn 的 transform:none 会在动画结束后
    覆盖 translateX(-50%) 导致 toast 弹出后向右跳移，改用专用 keyframes） */
 @keyframes snackIn { from { opacity:0; transform:translate(-50%, 10px); } to { opacity:1; transform:translate(-50%, 0); } }
-.view.active { animation:viewIn .25s ease; }
-.vod-card { animation:cardIn .25s ease both; }
-.md-dialog { animation:dlgIn .18s ease; }
+/* Snackbar 退场（T30）：淡出下移，替代原先瞬间消失 */
+@keyframes snackOut { to { opacity:0; transform:translate(-50%, 8px); } }
+#warnToast.out .md-snackbar { animation:snackOut .18s ease forwards; }
+/* 弹窗退场（T30）：overlay 淡出 + 卡片缩小淡出，closeDialog 加 .dlg-out 延迟隐藏 */
+.md-dialog-overlay.dlg-out { opacity:0; transition:opacity .14s ease; pointer-events:none; }
+.md-dialog-overlay.dlg-out .md-dialog {
+    animation:none; opacity:0; transform:scale(.96);
+    transition:opacity .14s ease, transform .14s ease;
+}
+.view.active { animation:viewIn .25s cubic-bezier(.2,.7,.3,1); }
+.vod-card { animation:cardIn .28s cubic-bezier(.2,.7,.3,1) both; }
+/* 卡片错峰入场（T30）：前 10 张逐张出现，延迟封顶，翻页/渐进加载同样生效 */
+.vod-card:nth-child(2)  { animation-delay:.03s; }
+.vod-card:nth-child(3)  { animation-delay:.06s; }
+.vod-card:nth-child(4)  { animation-delay:.09s; }
+.vod-card:nth-child(5)  { animation-delay:.12s; }
+.vod-card:nth-child(6)  { animation-delay:.15s; }
+.vod-card:nth-child(7)  { animation-delay:.18s; }
+.vod-card:nth-child(8)  { animation-delay:.21s; }
+.vod-card:nth-child(9)  { animation-delay:.24s; }
+.vod-card:nth-child(10) { animation-delay:.27s; }
+.md-dialog { animation:dlgIn .18s cubic-bezier(.2,.7,.3,1); }
+.md-dialog-overlay { animation:ldIn .15s ease; }
 #cover-float img { animation:floatIn .18s ease; }
-#warnToast .md-snackbar { animation:snackIn .2s ease; }
+#warnToast .md-snackbar { animation:snackIn .2s cubic-bezier(.2,.7,.3,1); }
 .main-nav-item { transition:background .15s, color .15s, padding .2s ease; }
 
 /* 禁用动画（设置页开关）：全局关掉过渡与动画 */
