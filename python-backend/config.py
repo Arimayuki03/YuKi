@@ -17,6 +17,7 @@ import os
 import json
 import logging
 from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor
 
 import app as spider_app
 import hoststate
@@ -108,27 +109,50 @@ class ConfigManager:
             if pref:
                 entries = sorted(entries,
                                  key=lambda it: 0 if (it or {}).get('name') == pref else 1)
+            sub_cfgs = {}   # 成功解析的子仓配置（含主条目），供 T44 跨仓合并
+            chosen = None
             for item in entries:
                 sub = (item or {}).get('url', '')
                 if not sub:
                     continue
+                name = item.get('name')
                 try:
-                    logger.info('multi-repo: trying entry %s', item.get('name'))
+                    logger.info('multi-repo: trying entry %s', name)
                     sub_text = self._fetch_config(sub)
                     sub_cfg = json.loads(sub_text)
                     if not isinstance(sub_cfg.get('sites'), list) or not sub_cfg['sites']:
                         raise ValueError('entry has no sites')
+                    sub_cfgs[sub] = sub_cfg
                     prepared = self._prepare(sub_cfg, sub)
                     if prepared['summary']['sites'] > 0:
-                        self._apply(prepared)
-                        self._save_repo_pref(item.get('name'))
-                        return prepared['summary']
-                    logger.warning('multi-repo entry [%s] built 0 sites, try next', item.get('name'))
-                    errors.append('%s: 0 sites' % item.get('name'))
+                        chosen = (item, prepared)
+                        break
+                    logger.warning('multi-repo entry [%s] built 0 sites, try next', name)
+                    errors.append('%s: 0 sites' % name)
                 except Exception as e:
-                    logger.warning('multi-repo entry failed [%s]: %s', item.get('name'), e)
-                    errors.append('%s: %s' % (item.get('name'), str(e)[:60]))
-            raise ValueError('all multi-repo entries failed; first error: %s' % (errors[0] if errors else 'empty'))
+                    # T44：偏好条目偶发超时时再给一次机会，避免仓漂移
+                    if name and name == self._repo_pref():
+                        try:
+                            logger.info('multi-repo: retry preferred entry %s once', name)
+                            sub_text = self._fetch_config(sub)
+                            sub_cfg = json.loads(sub_text)
+                            if isinstance(sub_cfg.get('sites'), list) and sub_cfg['sites']:
+                                sub_cfgs[sub] = sub_cfg
+                                prepared = self._prepare(sub_cfg, sub)
+                                if prepared['summary']['sites'] > 0:
+                                    chosen = (item, prepared)
+                                    break
+                        except Exception as e2:
+                            logger.warning('multi-repo retry failed [%s]: %s', name, e2)
+                    logger.warning('multi-repo entry failed [%s]: %s', name, e)
+                    errors.append('%s: %s' % (name, str(e)[:60]))
+            if not chosen:
+                raise ValueError('all multi-repo entries failed; first error: %s' % (errors[0] if errors else 'empty'))
+            item, prepared = chosen
+            self._merge_repo_extras(prepared, sub_cfgs, entries)
+            self._apply(prepared)
+            self._save_repo_pref(item.get('name'))
+            return prepared['summary']
         if not isinstance(cfg.get('sites'), list):
             raise ValueError('invalid config: missing sites')
         prepared = self._prepare(cfg, url_or_json)
@@ -178,6 +202,86 @@ class ConfigManager:
         self.lives = prepared['lives']
         self.wallpaper = prepared['wallpaper']
         self.source_url = prepared['source_url']
+
+    # ------------------------------------------------ 多仓合并（T44）
+
+    def _merge_repo_extras(self, prepared, sub_cfgs, entries):
+        """T44：主条目出影片源，其余条目的 lives/sites 并行补拉后合并去重。
+
+        避免单一仓命中时直播源缺失/视频源变少（仓漂移）。
+        只增不删：主条目内容原样保留，合并失败静默跳过。
+        """
+        primary_src = prepared['source_url']
+        pending = []   # 尚未拉取过的条目 url（选中之后直接 break，未及拉取）
+        for it in entries:
+            u = (it or {}).get('url', '')
+            if u and u != primary_src and u not in sub_cfgs:
+                pending.append(u)
+
+        def fetch(url):
+            try:
+                return url, json.loads(self._fetch_config(url))
+            except Exception as e:
+                logger.warning('multi-repo merge: fetch %s failed: %s', url, str(e)[:60])
+                return url, None
+
+        if pending:
+            with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+                for url, cfg in pool.map(fetch, pending):
+                    if cfg is not None:
+                        sub_cfgs[url] = cfg
+        self._merge_lives(prepared, sub_cfgs)
+        self._merge_sites(prepared, sub_cfgs)
+        prepared['summary']['lives'] = len(prepared['lives'])
+        prepared['summary']['sites'] = len(prepared['sites'])
+
+    @staticmethod
+    def _iter_live_urls(l):
+        """展平一条 live 的所有实际 url（兼容嵌套 channels 形式）。"""
+        if isinstance(l, dict) and isinstance(l.get('channels'), list):
+            for c in l['channels']:
+                for u in ((c or {}).get('urls') or []):
+                    yield str(u)
+        else:
+            yield str((l or {}).get('url') or '')
+
+    def _merge_lives(self, prepared, sub_cfgs):
+        """跨仓合并 lives：按 url 去重，主条目优先保留。"""
+        merged, seen = [], set()
+        for cfg in [sub_cfgs.get(prepared['source_url'])] + [c for u, c in sub_cfgs.items()
+                                                              if u != prepared['source_url']]:
+            if not cfg:
+                continue
+            for l in (cfg.get('lives') or []):
+                urls = [u for u in self._iter_live_urls(l) if u]
+                key = '|'.join(sorted(urls)) if urls else json.dumps(l, sort_keys=True)[:200]
+                if not urls or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(l)
+        prepared['lives'] = merged
+
+    def _merge_sites(self, prepared, sub_cfgs):
+        """跨仓合并 sites：按 key 去重（主条目优先），其余条目的站点追加构建。"""
+        existing = {s.key for s in prepared['sites']}
+        added = 0
+        for url, cfg in sub_cfgs.items():
+            if url == prepared['source_url']:
+                continue
+            for item in cfg.get('sites') or []:
+                key = item.get('key') or ''
+                if not key or key in existing:
+                    continue
+                try:
+                    site = self._build_site(item, url)
+                    if site:
+                        prepared['sites'].append(site)
+                        existing.add(key)
+                        added += 1
+                except Exception as e:
+                    logger.warning('multi-repo merge site [%s] failed: %s', key, str(e)[:60])
+        if added:
+            logger.info('multi-repo merge: +%d sites from other entries', added)
 
     # ------------------------------------------------------------ 明细
 

@@ -200,6 +200,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T41 批次**：横屏封面也算有封面：coverFadeIn 检出横图加 landscape 类，卡片改 object-fit:contain 完整显示（此前固定竖版框裁中间细条看似没封面）；修复搜索进行中点单源筛选后往下滑看到其他源影片（后到 SSE 组未按 _curSrc 隐藏）；修复壁纸遮罩选项与描述相反（low/high 的 veil 数值写反互换）；屏蔽源弹窗恢复 max-height:50vh 滚轮滚动。
 - **T42 批次**：封面补拉：列表无 vod_pic 但详情有的卡片，后台逐个 detailContent 补封面（fillMissingCovers 并发 3/每次渲染上限 24，卡片标 data-cover-missing，vodCard 增 data-source，绑定加载令牌切页中止）；屏蔽源弹窗保留滚轮滑动但隐藏滚动条。
 - **T43 批次**：搜索中点详情转圈久修复（优先级划分：点开详情 > 搜索拉页 > 封面补拉）：Detail.open 先 abortCoverFill 中止后台补拉让路（根因：同一 JS 源共享 QuickJS 上下文，JsEngine.call 持锁串行，详情排在补拉/拉页后面）；详情就绪后恢复补拉；搜索流式期间暂缓补拉待 done 后统一补；封面补拉改只补当前屏幕可见卡片（IntersectionObserver 上下预热 300px），并发改 5。
+- **T44 批次**：直播源消失/视频源变少根治（多仓跨条目合并）：根因是偏好仓 supermeguo18（6 个直播源）偶发超时，回退仓 bizhangjie🐶1 只有 1 条无效 lives（无 url）且站点 key 不同触发重新探测屏蔽。修复：多仓命中主条目后并行补拉其余条目，lives 按 url 去重合并（嵌套 channels 展平、无 url 丢弃），sites 按 key 去重合并（主条目优先，只增不删）；偏好条目首次失败自动重试一次防偶发超时仓漂移。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -230,7 +231,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T43，2026-08）
+## 8.8 进行中任务批次（T1~T44，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -277,3 +278,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T41 | 用户反馈四连：①横屏封面也算有封面：coverFadeIn 加载完成后检出 naturalWidth>naturalHeight 加 landscape 类，ui.css .vod-cover img.landscape 改 object-fit:contain 完整显示（此前固定 160/220 竖版框 + cover 裁中间细条，看似没封面） ②修复搜索进行中点单源筛选后往下滑看到其他源影片：search.js renderGroup 末尾按 _curSrc 隐藏后到的非目标源组（此前仅切换时对存量组 toggle，SSE 后到组直接按「全部」模式追加） ③修复壁纸遮罩选项与描述相反：ui.css data-dim low/high 的 --wall-veil 数值互换（低=62% 背景更醒目，高=90% 内容更清晰） ④屏蔽源弹窗恢复滚轮滚动：blocked_list 加回 max-height:50vh;overflow-y:auto（T40 曾整体移除） | 已完成 |
 | T42 | 用户反馈二连：①封面补拉：common.js 新增 fillMissingCovers（找容器内 data-cover-missing 占位图卡片，并发 3 逐个 doAction detailContent 取 vod_pic 换入，每次渲染上限 24 张，写入前校验 isValid 与卡片仍在 DOM）；vodCoverImg 无封面时给 img 标 data-cover-missing，home.js vodCard 增 src 参数写 data-source（首页/分类/源内搜索渲染后挂 _fillCovers 绑定 _loadToken 中止），search.js _paintGrp 同挂（卡片本就注入 data-source） ②屏蔽源弹窗可滚轮滑动但隐藏滚动条：ui.css #blocked_list scrollbar-width:none + ::-webkit-scrollbar display:none（保留 T41 内联 max-height/overflow） | 已完成 |
 | T43 | 搜索中点详情转圈久 + 封面补收紧（优先级：点开详情 > 搜索拉页 > 封面补拉）：根因同一 JS 源共享 QuickJS 上下文、JsEngine.call 持锁串行，详情请求排在后台补拉/搜索拉页后面 → ①common.js 补拉重写为世代制：abortCoverFill（世代自增+清队列+断开观察器），fillMissingCovers 改 IntersectionObserver 只补屏幕可见卡（rootMargin 上下 300px，入视口才入队），worker 池并发改 5（_coverFillPump/_coverFillWorker），同容器旧观察器先断开防累积，120s 安全释放 ②detail.js open 入口先 abortCoverFill 让路；load 成功后恢复补拉（搜索仍在流式时只补首页区不碰搜索区） ③search.js 流式期间 _paintGrp 暂缓补拉（!this.es 才补），done/error 收尾后 _fillAllCovers 统一补各组 | 已完成 |
+| T44 | 直播源消失/视频源变少根治（多仓跨条目合并）：根因偏好仓 supermeguo18（6 直播源）raw.githubusercontent 超时回退 bizhangjie🐶1（仅 1 条无 url 的无效 lives），且仓间站点 key 不同触发探测重新屏蔽 → ①config.py 多仓命中主条目后 _merge_repo_extras 并行补拉其余条目（ThreadPoolExecutor ≤4）：_merge_lives 按 url 去重合并（_iter_live_urls 嵌套 channels 展平，无 url 条目丢弃，主条目优先），_merge_sites 按 key 去重追加构建（主条目优先只增不删），summary 计数同步更新 ②偏好条目首次拉取失败自动重试一次（防偶发超时仓漂移） | 已完成 |
