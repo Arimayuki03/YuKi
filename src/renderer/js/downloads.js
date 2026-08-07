@@ -123,6 +123,10 @@ const Downloads = {
 
     render(items) {
         this._tasks = items || [];
+        // 总网速（T15）：汇总进行中任务速度，无任务时隐藏
+        const speed = this._tasks.reduce((a, t) => a + (t.status === 'active' ? (t.speed || 0) : 0), 0);
+        if (speed > 0) $('#dl-speed').text(`总速度 ${fmtSize(speed)}/s`).show();
+        else $('#dl-speed').hide();
         const list = $('#dl-list');
         if (!this._tasks.length) {
             list.empty(); // 空列表留白，不显示引导文案（T11）

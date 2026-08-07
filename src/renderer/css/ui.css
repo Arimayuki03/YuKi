@@ -169,6 +169,10 @@ html, body {
    悬停/按下波纹用 error 色（::after 覆写 currentColor），与 md-dialog-btn.error 同款。 */
 .md-btn-danger-text { background: transparent; color: var(--md-error); }
 .md-btn-danger-text::after { background: var(--md-error); }
+/* 危险操作不透明按钮（T16）：error-container 底色，替换透明 danger-text */
+.md-btn-danger-tonal { background: var(--md-error-container, #5c2a2a); color: var(--md-on-error-container, #ffb4ab); }
+.md-btn-danger-tonal:hover { filter:brightness(1.1); }
+.md-btn-danger-tonal::after { background: var(--md-error); }
 
 /* ── Toolbar ── */
 .md-toolbar {
@@ -355,7 +359,7 @@ html, body {
     letter-spacing: 0.1px;
     font-family: inherit;
     cursor: pointer;
-    background: transparent;
+    background: var(--md-surface-container-high); /* 不透明底（T16：举一反三，动作按钮均有底色） */
     color: var(--md-primary);
     position: relative;
     overflow: hidden;
@@ -452,7 +456,6 @@ html, body {
     background:var(--md-surface-container);
     border-right:1px solid var(--md-outline-variant);
 }
-.brand { font-size:18px; font-weight:700; padding:8px 12px 20px; color:var(--md-primary); letter-spacing:1px; }
 .main-nav-item {
     display:flex; align-items:center; gap:12px;
     padding:12px 14px; border-radius:20px;
@@ -473,7 +476,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 /* 设置独立视图容器（T12 二级菜单：一级分类导航 + 二级详情卡片区；居中限宽，窄窗不贴边） */
 .settings-wrap {
     width:100%; max-width:1060px; margin:0 auto; padding:0 16px; box-sizing:border-box;
-    display:grid; grid-template-columns:170px 1fr; gap:0 20px; align-items:start;
+    display:grid; grid-template-columns:200px 1fr; gap:0 20px; align-items:start;
 }
 @media (min-width:1500px) { .settings-wrap { max-width:1320px; } }
 @media (min-width:2200px) { .settings-wrap { max-width:1680px; } }
@@ -482,7 +485,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .settings-nav { display:flex; flex-direction:column; gap:6px; position:sticky; top:0; }
 @media (max-width:900px) { .settings-nav { flex-direction:row; flex-wrap:wrap; margin-bottom:14px; position:static; } }
 .settings-nav-item {
-    padding:8px 16px; border-radius:18px; font-size:14px; cursor:pointer; text-align:center;
+    padding:11px 18px; border-radius:20px; font-size:15px; cursor:pointer; text-align:center;
     border:1px solid var(--md-outline-variant);
     background:var(--md-surface-container-high); color:var(--md-on-surface-variant);
     user-select:none; transition:background .15s, color .15s, border-color .15s;
@@ -516,10 +519,16 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 @media (min-width:1500px) { .settings-grid { grid-template-columns:repeat(3, 1fr); } }
 /* 设置页标签字号层级：标题 15px 加粗（.tool-card-title），标签 13px，正文随视图 14px */
 .settings-grid .tip-line { font-size:13px; line-height:1.5; }
-/* 卡片内下拉框可收缩：避免 min-width:200px 在窄列里撑破卡片 */
-.settings-grid .md-select { min-width:0; flex:1 1 auto; }
+/* 卡片内下拉框统一长度（T17：筛选框长度大小统一） */
+.settings-grid .md-select { width:240px; min-width:0; flex:none; max-width:100%; }
 /* 设置页按钮统一样式与大小（避免 md-btn / md-btn-sm 混用显得参差） */
 .settings-grid .md-btn { height:38px; padding:0 18px; font-size:13.5px; border-radius:19px; white-space:nowrap; }
+/* 普通复选框设置项（T17：界面动画等，替代 md-switch） */
+.set-check {
+    display:inline-flex; align-items:center; gap:8px; margin-top:14px;
+    font-size:14px; color:var(--md-on-surface); cursor:pointer; user-select:none;
+}
+.set-check input { width:18px; height:18px; margin:0; accent-color:var(--md-primary); cursor:pointer; }
 /* 收藏/历史页工具条：标签筛选行；搜索框已并入顶部 view-toolbar（T13，与首页同规格） */
 .rec-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 12px; }
 .rec-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:20px; }
@@ -672,9 +681,13 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 
 /* 播放线路 / 选集 */
 .play-srcs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
-/* 选集排序工具行（集数计数 + 正序/倒序切换） */
+/* 选集排序工具行（集数计数胶囊 + 紧邻的正序/倒序切换） */
 .ep-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-.ep-toolbar .ep-count { font-size:13px; color:var(--md-on-surface-variant); }
+.ep-toolbar .ep-count {
+    font-size:13px; color:var(--md-on-surface-variant);
+    padding:5px 14px; border-radius:16px;
+    border:1px solid var(--md-outline-variant); background:var(--md-surface-container-high);
+}
 .play-src { padding:6px 16px; border-radius:20px; font-size:13px; cursor:pointer;
     border:1px solid var(--md-outline-variant);
     background:var(--md-surface-container-high); color:var(--md-on-surface-variant); user-select:none; }
@@ -702,7 +715,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .ep-dl-one:hover { color:var(--md-primary); }
 /* 选集网格下方下载操作栏（卡片式：全选在左，计数+下载按钮靠右） */
 .ep-dl-bar {
-    display:flex; align-items:center; gap:14px; margin-top:12px;
+    display:flex; align-items:center; gap:14px; margin:0 0 12px;
     padding:10px 14px;
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
     border-radius:12px;
@@ -725,6 +738,8 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     max-width:560px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .dl-spacer { flex:1; }
+/* 下载页总网速指示（T15） */
+.dl-speed { font-size:13px; font-weight:600; color:var(--md-primary); }
 .dl-list { display:flex; flex-direction:column; gap:10px; }
 .dl-item { background:var(--md-surface-container); border:1px solid var(--md-outline-variant); border-radius:14px; padding:12px 16px; }
 .dl-item-top { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
@@ -921,9 +936,8 @@ html.dark[data-color="cyan"] {
 .nav-collapse-btn:hover { background:var(--md-surface-container-high); }
 .nav-collapse-btn svg { width:22px; height:22px; fill:currentColor; transition:transform .2s; }
 #main-nav { transition:flex-basis .2s ease, padding .2s ease; }
-.main-nav-item span, .brand { transition:opacity .15s; }
+.main-nav-item span { transition:opacity .15s; }
 body.nav-collapsed #main-nav { flex-basis:64px; padding:16px 8px; }
-body.nav-collapsed .brand { font-size:0; padding:8px 0 20px; }
 body.nav-collapsed .main-nav-item { justify-content:center; padding:12px 0; gap:0; }
 body.nav-collapsed .main-nav-item span { display:none; }
 body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
@@ -1000,7 +1014,7 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .ep-check { width:20px; height:20px; border-radius:6px; }
     .ep-check.checked::after { left:6px; top:2px; width:5px; height:10px; }
     .ep-dl-one { font-size:15px; }
-    .ep-dl-bar { margin-top:16px; padding:14px 18px; }
+    .ep-dl-bar { margin-bottom:16px; padding:14px 18px; }
     .ep-dl-check-all { font-size:16px; }
     .ep-dl-count { font-size:16px; }
     .rec-check { width:22px; height:22px; border-radius:7px; }

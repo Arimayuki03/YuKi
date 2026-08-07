@@ -24,7 +24,6 @@
     <div id="app">
         <!-- 主导航（桌面布局） -->
         <nav id="main-nav">
-            <div class="brand">影视 PC</div>
             <div class="main-nav-item active" data-view="home">
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
                 <span>首页</span>
@@ -107,9 +106,9 @@
                 <div class="view-toolbar">
                     <input id="view-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
                     <label class="rec-checkall" id="view-favorites-checkall-wrap" style="display:none"><input type="checkbox" id="view-favorites-checkall">全选</label>
-                    <button id="view-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-text" style="display:none">删除勾选</button>
+                    <button id="view-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                     <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选删除</button>
-                    <button id="view-favorites-clear" class="md-btn md-btn-sm md-btn-danger-text">清空收藏</button>
+                    <button id="view-favorites-clear" class="md-btn md-btn-sm md-btn-danger-tonal">清空收藏</button>
                 </div>
                 <div class="rec-bar">
                     <div id="view-favorites-tags" class="rec-tags">
@@ -127,9 +126,9 @@
                 <div class="view-toolbar">
                     <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
                     <label class="rec-checkall" id="view-history-checkall-wrap" style="display:none"><input type="checkbox" id="view-history-checkall">全选</label>
-                    <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-text" style="display:none">删除勾选</button>
+                    <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                     <button id="view-history-multidel" class="md-btn md-btn-sm">多选删除</button>
-                    <button id="view-history-clear" class="md-btn md-btn-sm md-btn-danger-text">清空历史</button>
+                    <button id="view-history-clear" class="md-btn md-btn-sm md-btn-danger-tonal">清空历史</button>
                 </div>
                 <div id="view-history-grid" class="vod-grid"></div>
                 <div id="view-history-pager" class="pager"></div>
@@ -139,7 +138,7 @@
             <section id="view-direct" class="view">
                 <div class="tool-card direct-card">
                     <div class="tool-card-title">直链播放</div>
-                    <div class="tip-line pad0">粘贴视频直链（m3u8/mp4/flv 等）或分享页链接，自动解析并用 mpv 播放。</div>
+                    <div class="tip-line pad0">粘贴视频直链（m3u8/mp4/flv 等）或分享页链接，自动解析并播放。</div>
                     <div class="md-field">
                         <input id="direct_play_url" class="md-input" type="text" placeholder="视频链接（http/https/rtmp）…" />
                     </div>
@@ -157,12 +156,15 @@
             <section id="view-downloads" class="view">
                 <div class="downloads-wrap">
                     <div class="tool-card">
+                        <div class="tool-card-title">下载管理</div>
+                        <div class="tip-line pad0">粘贴 HTTP / 磁力链接后回车添加；m3u8 自动走切片合成通道。</div>
                         <div class="search-bar">
-                            <input id="dl-uri" class="md-input" type="text" placeholder="粘贴 HTTP / 磁力链接（magnet:…），回车添加" />
+                            <input id="dl-uri" class="md-input" type="text" placeholder="视频链接（http/https/magnet:…），回车添加" />
                             <button id="dl-add" class="md-btn md-btn-filled">新建下载</button>
                             <button id="dl-add-file" class="md-btn md-btn-tonal">种子文件</button>
                         </div>
                         <div class="dl-settings">
+                            <span id="dl-speed" class="dl-speed" style="display:none"></span>
                             <span class="dl-spacer"></span>
                             <button id="dl-clear-failed" class="md-btn md-btn-sm md-btn-tonal">删除失败下载</button>
                             <button id="dl-clear" class="md-btn md-btn-sm md-btn-tonal">清除已完成</button>
@@ -237,7 +239,7 @@
                         <div id="tool-local" class="tool-panel">
                             <div class="tool-card">
                                 <div class="tool-card-title">本地文件</div>
-                                <div class="tip-line pad0">管理并播放本机视频：出于安全仅能访问你指定的根目录（白名单机制），首次使用请先点「更换根目录」选择一个本地文件夹。</div>
+                                <div class="tip-line pad0">管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹。</div>
                                 <div class="tip-line pad0 info-tip">
                                     <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                                     <div class="info-body"><span class="info-label">使用说明（点开查看）</span>
@@ -274,7 +276,8 @@
                 <div class="settings-wrap">
                     <div class="settings-nav" id="settings-nav">
                         <span class="settings-nav-item active" data-cat="appearance">外观</span>
-                        <span class="settings-nav-item" data-cat="play">播放与快捷键</span>
+                        <span class="settings-nav-item" data-cat="play">播放</span>
+                        <span class="settings-nav-item" data-cat="hotkey">快捷键</span>
                         <span class="settings-nav-item" data-cat="download">下载</span>
                         <span class="settings-nav-item" data-cat="cache">缓存</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
@@ -295,6 +298,16 @@
                             </select>
                             <input id="set_theme_pick" class="color-pick" type="color" value="#1e6c45" title="自定义主题颜色">
                             <button id="set_theme_clear" class="md-btn md-btn-tonal">恢复</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">字体颜色</div>
+                        <div class="color-row">
+                            <select id="set_textcolor" class="md-select">
+                                <option value="">默认（跟随主题）</option>
+                                <option value="#000000">纯黑（高对比）</option>
+                                <option value="#FFFFFF">纯白（适合深色背景）</option>
+                            </select>
+                            <input id="set_textcolor_pick" class="color-pick" type="color" value="#304c3a" title="自定义字体颜色">
+                            <button id="set_textcolor_clear" class="md-btn md-btn-tonal">恢复</button>
                         </div>
                         <div class="tip-line pad0" style="margin-top:12px;">明暗模式</div>
                         <select id="set_colormode" class="md-select">
@@ -320,27 +333,17 @@
                             <option value="125">较大（125%）</option>
                             <option value="150">特大（150%）</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">字体颜色</div>
-                        <div class="color-row">
-                            <select id="set_textcolor" class="md-select">
-                                <option value="">默认（跟随主题）</option>
-                                <option value="#000000">纯黑（高对比）</option>
-                                <option value="#FFFFFF">纯白（适合深色背景）</option>
-                            </select>
-                            <input id="set_textcolor_pick" class="color-pick" type="color" value="#304c3a" title="自定义字体颜色">
-                            <button id="set_textcolor_clear" class="md-btn md-btn-tonal">恢复</button>
-                        </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">壁纸</div>
+                        <div class="tip-line pad0" style="margin-top:12px;">背景</div>
                         <div class="wall-row">
+                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
+                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除背景</button>
                             <select id="set_walldim" class="md-select">
                                 <option value="">遮罩强度 · 标准</option>
-                                <option value="low">遮罩 · 弱（壁纸更醒目）</option>
+                                <option value="low">遮罩 · 弱（背景更醒目）</option>
                                 <option value="high">遮罩 · 强（内容更清晰）</option>
                             </select>
-                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
-                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除壁纸</button>
                         </div>
-                        <label class="md-switch"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画</span></label>
+                        <label class="set-check"><input type="checkbox" id="set_anim" checked>界面动画</label>
                         <div class="tip-line pad0" style="margin-top:12px;">每页影片数量</div>
                         <select id="set_pagesize" class="md-select">
                             <option value="" selected>自动（铺满窗口）</option>
@@ -351,7 +354,7 @@
                         </select>
                     </div>
                     <div class="tool-card" data-setcat="play">
-                        <div class="tool-card-title">播放与快捷键</div>
+                        <div class="tool-card-title">播放</div>
                         <div class="tip-line pad0" title="0 = 不设定，100 = 最大">预设音量</div>
                         <div class="md-field short-num">
                             <input id="set_volume" class="md-input" type="number" min="0" max="100" placeholder="0" />
@@ -402,7 +405,10 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="保存后下次起播生效">快捷键步长</div>
+                    </div>
+                    <div class="tool-card" data-setcat="hotkey">
+                        <div class="tool-card-title">快捷键（mpv）</div>
+                        <div class="tip-line pad0" title="保存后下次起播生效">按键步长</div>
                         <div class="hotkey-grid">
                             <div>
                                 <div class="tip-line pad0">快退 / 快进（秒）</div>
@@ -423,7 +429,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="点击键位后按下新键即可修改，保存后下次起播生效">快捷键键位</div>
+                        <div class="tip-line pad0" style="margin-top:12px;" title="点击键位后按下新键即可修改，保存后下次起播生效">键位自定义</div>
                         <div id="hotkey_rows"></div>
                         <div class="wall-row">
                             <button id="hotkey_reset" class="md-btn md-btn-tonal">恢复默认键位</button>
@@ -508,7 +514,7 @@
                                 <div class="info-detail">还原外观/播放等偏好，不删除收藏、历史与已载入的源。</div>
                             </div>
                         </div>
-                        <button id="set_reset" class="md-btn md-btn-tonal md-btn-danger-text">恢复默认设置</button>
+                        <button id="set_reset" class="md-btn md-btn-danger-tonal">恢复默认设置</button>
                         <div class="tip-line pad0" id="app_version" style="margin-top:14px;"></div>
                     </div>
                     <div class="tool-card" data-setcat="asset">
