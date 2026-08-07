@@ -60,6 +60,8 @@ html.dark {
 html, body {
     height: 100%;
     font-family: Roboto, -apple-system, system-ui, sans-serif;
+    /* 正文基准字号 14px（T4 统一：正文 13~14px，tip-line 12px） */
+    font-size: 14px;
     background: var(--md-surface);
     color: var(--md-on-surface);
     -webkit-tap-highlight-color: transparent;
@@ -162,6 +164,11 @@ html, body {
 .md-btn-sm { height: 32px; padding: 0 16px; border-radius: 16px; font-size: 13px; }
 
 .md-btn-full { width: 100%; }
+
+/* 危险/删除类按钮：透明底 + error 文字（基于 .md-btn 基础样式），
+   悬停/按下波纹用 error 色（::after 覆写 currentColor），与 md-dialog-btn.error 同款。 */
+.md-btn-danger-text { background: transparent; color: var(--md-error); }
+.md-btn-danger-text::after { background: var(--md-error); }
 
 /* 钰悫晲 Toolbar 钰悫晲 */
 .md-toolbar {
@@ -429,8 +436,10 @@ html, body {
 
 
 /* ---- PC 端补充样式 ---- */
-.tip-line{padding:12px 16px;color:var(--md-on-surface-variant,#8a8a8a);font-size:13px}
+.tip-line{padding:12px 16px;color:var(--md-on-surface-variant,#8a8a8a);font-size:12px}
 .tip-line.pad0{padding:0 0 10px}
+/* 直播状态指示：右侧对齐（margin-left:auto）、单行不换行、padding 归零（原 inline 样式移入 CSS） */
+#live-status{margin-left:auto;padding:0;flex:none;white-space:nowrap}
 
 /* ══════ Phase 2 主 UI（桌面布局） ══════ */
 /* 覆盖移动端壳：#app 改为左导航 + 右内容，取消 600px 限宽 */
@@ -513,22 +522,26 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .local-desc p:last-child { margin-bottom:0; }
 .tool-card .md-field { margin: 4px 0 12px; }
 
-/* 视图工具条 / 选择器 */
-.view-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+/* 视图工具条 / 选择器：flex 横排可换行，gap 统一 10px；
+   工具条内 select/input/btn 高度对齐 40px，避免 44/36/40 参差。 */
+.view-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:16px; }
+.view-toolbar .md-select { height:40px; min-width:180px; flex:0 1 auto; }
+.view-toolbar .md-input { height:40px; }
 .md-select {
     height:44px; padding:0 12px; min-width:200px;
     border:1px solid var(--md-outline); border-radius:10px;
     background:var(--md-surface); color:var(--md-on-surface);
     font-size:14px; font-family:inherit; outline:none;
+    transition:border-color 0.15s, background 0.15s;
 }
 .md-select:focus { border-color:var(--md-primary); }
 .md-select-sm { height:32px; min-width:0; font-size:13px; }
 .dl-set-label { font-size:13px; color:var(--md-on-surface-variant); }
 
-/* 分类 tabs */
-.class-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
-/* 首页当前源搜索框：位于工具栏源选择器右侧、刷新左侧 */
-.home-search { flex:1 1 auto; max-width:300px; height:36px; font-size:13px; border-radius:18px; }
+/* 分类 tabs：小间距统一 6px */
+.class-tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+/* 首页当前源搜索框：位于工具栏源选择器右侧、刷新左侧；高度与工具栏控件对齐 40px */
+.home-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:20px; }
 .class-tab {
     padding:6px 16px; border-radius:20px; font-size:13px; cursor:pointer;
     border:1px solid var(--md-outline-variant);
@@ -589,7 +602,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .detail-desc p:last-child { margin-bottom:0; }
 
 /* 播放线路 / 选集 */
-.play-srcs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+.play-srcs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
 /* 选集排序工具行（集数计数 + 正序/倒序切换） */
 .ep-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
 .ep-toolbar .ep-count { font-size:13px; color:var(--md-on-surface-variant); }
@@ -598,7 +611,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     background:var(--md-surface-container-high); color:var(--md-on-surface-variant); user-select:none; }
 .play-src:hover { background:var(--md-secondary-container); }
 .play-src.active { background:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
-.ep-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; }
+.ep-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:6px; }
 .ep-btn { height:38px; border:1px solid var(--md-outline-variant); border-radius:10px;
     background:var(--md-surface-container); color:var(--md-on-surface);
     font-size:13px; font-family:inherit; cursor:pointer; white-space:nowrap;
@@ -964,3 +977,28 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
 .asset-missing .asset-icon { color:#d32f2f; }
 .asset-missing { border-left:3px solid #d32f2f; }
 .asset-row code { font-size:12px; background:var(--md-surface-container-highest); padding:1px 6px; border-radius:4px; }
+
+/* ===== 悬停反馈（T4）：为缺少 hover 的可交互元素补统一反馈 =====
+   输入框/下拉框 hover 用 primary 淡化边框（:not(:focus) 防覆盖聚焦态）；
+   下载项/文件行/选集勾选框补背景或边框反馈。 */
+.md-input:hover:not(:focus),
+.md-select:hover:not(:focus) { border-color: color-mix(in srgb, var(--md-primary) 35%, var(--md-outline)); }
+.dl-item:hover { border-color: var(--md-outline); background: var(--md-surface-container-high); }
+.file-item:hover { background: var(--md-surface-container-high); }
+.ep-check:hover { border-color: var(--md-primary); }
+
+/* ===== 键盘导航焦点可见性（T4）：仅 Tab 键聚焦（:focus-visible）显示轮廓，
+   鼠标点击不出现；2px 实线 + 1px 偏移，使用主题 primary 色 ===== */
+:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 1px;
+}
+
+/* ===== 深色模式状态色对比（T4）：资产状态图标/描边在深色底用亮色变体，
+   避免 #2e7d32/#d32f2f 在深底偏暗看不清 ===== */
+html.dark .asset-ok .asset-icon { color:#81c784; }
+html.dark .asset-ok { border-left-color:#81c784; }
+html.dark .asset-downloading .asset-icon { color:#ffb74d; }
+html.dark .asset-downloading { border-left-color:#ffb74d; }
+html.dark .asset-missing .asset-icon { color:#ff8a80; }
+html.dark .asset-missing { border-left-color:#ff8a80; }

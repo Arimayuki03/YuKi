@@ -155,7 +155,7 @@ const Downloads = {
         } else if (t.status === 'complete') {
             btns = `<button class="md-btn md-btn-tonal" data-act="play" data-gid="${t.gid}">▶ 播放</button>`;
         }
-        btns += `${btns ? ' ' : ''}<button class="md-btn" data-act="remove" data-gid="${t.gid}">删除</button>`;
+        btns += `${btns ? ' ' : ''}<button class="md-btn md-btn-danger-text" data-act="remove" data-gid="${t.gid}">删除</button>`;
         return `<div class="dl-item">
             <div class="dl-item-top"><span class="dl-name" title="${this._esc(t.name)}">${this._esc(t.name || t.gid)}</span><span class="dl-status dl-st-${t.status}">${status}</span></div>
             <div class="dl-bar"><div class="dl-bar-fill" style="width:${bar}%;"></div></div>

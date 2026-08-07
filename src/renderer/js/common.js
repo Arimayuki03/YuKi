@@ -282,8 +282,8 @@ function _fontSizePct(v) {
  * 100% 时移除注入恢复默认（基准值取自 ui.css 各选择器原始字号）。
  */
 const _TEXT_SCALE_BASE = [
-    ['.view', 16], ['.vod-name', 13], ['.vod-remarks', 11], ['.rec-site', 10.5],
-    ['.tip-line, .class-tab', 13],
+    ['.view', 14], ['.vod-name', 13], ['.vod-remarks', 11], ['.rec-site', 10.5],
+    ['.tip-line', 12], ['.class-tab', 13],
     ['.md-select, .main-nav-item, .live-name', 14],
     ['.md-input', 16], ['.detail-title', 24],
     ['.detail-meta, .detail-sub', 13], ['.detail-desc', 14],
