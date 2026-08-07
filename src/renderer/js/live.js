@@ -20,6 +20,7 @@ const Live = {
     group: '',
     _inited: false,
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
+    _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
 
     init() {
         if (this._inited) return;
@@ -78,6 +79,7 @@ const Live = {
 
     /** 从 /sites 拉取 lives + 设置里自定义的直播源（配置载入完成后调用）。 */
     async load() {
+        ++this._probeToken; // 作废进行中的探测批次（重载下拉）
         try {
             const st = await getJson('/sites');
             // 部分配置用 {group, channels:[{name, urls}]} 嵌套形式，先展平再归一化
@@ -123,6 +125,8 @@ const Live = {
         const idx = parseInt($('#live-select').val(), 10);
         const live = this.lives[idx];
         if (!live) return;
+        const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
+        $('#live-status').hide();
         showLoading();
         try {
             const data = await doAction('fetchText', { url: live.url });
@@ -134,29 +138,62 @@ const Live = {
             this.group = '';
             this.renderGroups();
             this.renderList();
-            // 网页/非直播源内容解析不出频道：给出可操作的提示
             if (!this.channels.length) {
+                // 网页/非直播源内容解析不出频道：给出可操作的提示
                 const isHtml = /<html|<!doctype/i.test(text);
                 $('#live-list').html(isHtml
                     ? '<div class="tip-line">该地址返回的是网页而非直播源（txt / m3u），无法解析出频道。请改用直播源文件地址（通常以 .txt / .m3u 结尾）。</div>'
                     : '<div class="tip-line">直播源没有解析到频道（所有频道均不可用或地址无效）</div>');
-            }
-            // 探活：检测频道可用性，过滤不可用频道
-            if (this.channels.length && window.vpc && window.vpc.probeUrls) {
-                try {
-                    const results = await window.vpc.probeUrls(channels.map((c) => c.url));
-                    const filtered = channels.filter((c, i) => results[i]);
-                    const hidden = channels.length - filtered.length;
-                    this.channels = filtered;
-                    this.renderGroups();
-                    this.renderList();
-                    if (hidden > 0) warnToast(`已隐藏 ${hidden} 个不可用频道，剩余 ${filtered.length} 个`);
-                } catch (e) { /* 探测失败不阻塞 */ }
+                return;
             }
         } catch (e) {
-            $('#live-list').html('<div class="tip-line">直播源载入失败</div>');
+            if (token === this._probeToken) $('#live-list').html('<div class="tip-line">直播源载入失败</div>');
+            return;
         } finally {
-            hideLoading();
+            if (token === this._probeToken) hideLoading();
+        }
+        // 频道立即渲染完毕，可用性在后台静默分批探测（不再占用 loading 遮罩）
+        if (window.vpc && window.vpc.probeUrls) this._probeChannels(token);
+    },
+
+    /** 静默分批探测频道可用性：每批 50 串行 probeUrls，返回后原地过滤并刷新列表。
+     *  token 与当前 _probeToken 不一致（已切源/刷新）时丢弃本批结果。 */
+    async _probeChannels(token) {
+        const BATCH = 50;
+        const status = $('#live-status');
+        const all = this.channels.slice();
+        const kept = new Array(all.length).fill(true);
+        let done = 0;
+        const alive = () => token === this._probeToken;
+
+        status.text(`正在检测频道可用性 0/${all.length} …`).show();
+        try {
+            for (let i = 0; i < all.length; i += BATCH) {
+                if (!alive()) return;
+                const batch = all.slice(i, i + BATCH);
+                const results = await window.vpc.probeUrls(batch.map((c) => c.url));
+                if (!alive()) return; // 探测期间已切源/刷新，丢弃本批
+                results.forEach((ok, j) => { kept[i + j] = !!ok; });
+                done += results.length;
+                this.channels = all.filter((c, k) => kept[k]);
+                // 保持当前选中分组：该分组已被过滤空则回退「全部」
+                if (this.group && !this.channels.some((c) => c.group === this.group)) this.group = '';
+                this.renderGroups();
+                this.renderList();
+                status.text(`正在检测频道可用性 ${done}/${all.length} …`).show();
+            }
+            if (!alive()) return;
+            const hidden = all.length - this.channels.length;
+            status.text(hidden > 0 ? `已过滤 ${hidden} 个不可用频道` : '全部频道可用').show();
+            setTimeout(() => { if (alive()) status.hide(); }, 5000);
+        } catch (e) {
+            // 探测异常：静默清空状态位，保留全部频道（撤销已过滤结果）
+            if (alive()) {
+                this.channels = all;
+                this.renderGroups();
+                this.renderList();
+                status.hide();
+            }
         }
     },
 
@@ -208,8 +245,10 @@ const Live = {
         const box = $('#live-groups').empty();
         const groups = [];
         this.channels.forEach((c) => { if (groups.indexOf(c.group) < 0) groups.push(c.group); });
-        box.append('<span class="class-tab active" data-group="">全部</span>');
-        groups.forEach((g) => box.append(`<span class="class-tab" data-group="${escHtml(g)}">${escHtml(g)}</span>`));
+        // 按 this.group 标记 active（探测刷新原地重渲染时保持当前选中分组，勿总重置为「全部」）
+        const tab = (g, label) => `<span class="class-tab${this.group === g ? ' active' : ''}" data-group="${escHtml(g)}">${escHtml(label)}</span>`;
+        box.append(tab('', '全部'));
+        groups.forEach((g) => box.append(tab(g, g)));
     },
 
     renderList() {

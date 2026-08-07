@@ -216,7 +216,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
-| T1 | 直播静默探测与自动刷新（HEAD→GET 回退防误杀） | 待派发 |
+| T1 | 直播静默探测与自动刷新（HEAD→GET 回退防误杀）：已实现静默分批探测 + HEAD→GET 回退 | 已完成 |
 | T2 | mpv 本地配置兼容（scripts-append + input.conf 合并）+ Anime4K 多镜像下载加固 | 待派发 |
 | T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 待派发 |
 | T4 | UI 按钮/组件/字体布局检查清单式优化 | 待派发 |

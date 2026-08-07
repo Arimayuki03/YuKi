@@ -501,21 +501,39 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:settings-get', () => settings.all());
     ipcMain.handle('vpc:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
 
-    // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）
+    // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
+    // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
+    // GET 收到任意响应即判活，立即释放连接不拉流；3xx 视为可用。
     ipcMain.handle('vpc:probe-urls', async (_e, urls) => {
         if (!Array.isArray(urls) || !urls.length) return [];
-        const probeOne = (url, timeoutMs = 3500) => new Promise((resolve) => {
+        const probeOne = (url) => new Promise((resolve) => {
             const str = String(url);
             if (!/^https?:\/\//i.test(str)) { resolve(true); return; } // RTMP/RTSP 默认放行
             const mod = str.startsWith('https') ? https : http;
-            const timer = setTimeout(() => { req.destroy(); resolve(false); }, timeoutMs);
-            const req = mod.request(str, { method: 'HEAD', timeout: timeoutMs }, (res) => {
-                clearTimeout(timer);
-                res.resume(); // 消费响应体
-                resolve(res.statusCode >= 200 && res.statusCode < 500);
+            const attempt = (method, timeoutMs, onDone) => {
+                let settled = false;
+                const done = (v) => { if (settled) return; settled = true; onDone(v); };
+                let req;
+                let timer;
+                try {
+                    req = mod.request(str, { method, timeout: timeoutMs }, (res) => {
+                        clearTimeout(timer);
+                        const code = res.statusCode || 0;
+                        if (method === 'GET') { res.resume(); req.destroy(); done(true); return; } // 任意响应即判活，不拉流
+                        if (code >= 300 && code < 400) { res.resume(); done(true); return; }        // 3xx 视为可用
+                        if (code === 403 || code === 405 || code === 501) { res.resume(); done(null); return; } // HEAD 被拒 → 回退 GET
+                        res.resume();
+                        done(code >= 200 && code < 500);
+                    });
+                } catch (e) { done(null); return; } // 构造失败同样走 GET 兜底
+                timer = setTimeout(() => { req.destroy(); done(null); }, timeoutMs);
+                req.on('error', () => { clearTimeout(timer); done(null); });
+                req.end();
+            };
+            attempt('HEAD', 3000, (head) => {
+                if (head === null) attempt('GET', 4000, (v) => resolve(!!v)); // GET 出错/超时(null) → false
+                else resolve(head);
             });
-            req.on('error', () => { clearTimeout(timer); resolve(false); });
-            req.end();
         });
         const results = new Array(urls.length);
         let idx = 0;
