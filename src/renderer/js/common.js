@@ -6,7 +6,7 @@
  * 依赖：jQuery（先于本文件加载）。主 UI 各视图（home/search/detail）与
  * 辅助面板（panels.js）共用本文件的全局函数。
  */
-/* global $ */
+/* global $, doAction */
 
 let backend = { base: '', token: '' };
 
@@ -96,8 +96,11 @@ function coverFadeIn(img) {
  * - onload 淡入 / onerror 换兜底图（换后置空 onerror 防死循环）
  */
 function vodCoverImg(pic) {
-    const src = escHtml(normalizePic(pic) || vodPlaceholder());
-    return `<img src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">`;
+    const p = normalizePic(pic);
+    // T42：无封面卡标 data-cover-missing，供 fillMissingCovers 后台从详情补拉
+    const miss = p ? '' : ' data-cover-missing="1"';
+    const src = escHtml(p || vodPlaceholder());
+    return `<img src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"${miss} onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">`;
 }
 
 /** 去除富文本简介中的 HTML 标签（源数据常带 <p>/<br> 等），保留段落换行与文字。 */
@@ -130,6 +133,47 @@ function normalizePic(pic) {
     if (p.startsWith('//')) p = 'https:' + p;
     if (!/^(https?:|data:)/i.test(p)) return '';
     return p.split(' ').join('%20');
+}
+
+/**
+ * 封面补拉（T42）：部分源列表数据不带 vod_pic 但详情里有，占位图卡片
+ * 后台逐个取 detailContent 补上封面（并发 3，每次渲染最多补 24 张）。
+ * 卡片需带 data-id/data-source；isValid 返回 false（已切源/切页）即中止；
+ * 卡片已不在 DOM（重渲染）则跳过写入。补到的图沿用统一封面标签规则。
+ */
+async function fillMissingCovers(container, isValid) {
+    const box = $(container);
+    if (!box.length) return;
+    const cards = box.find('.vod-cover img[data-cover-missing="1"]')
+        .closest('.vod-card')
+        .filter(function () { return String($(this).data('id') || '') !== ''; })
+        .slice(0, 24);
+    if (!cards.length) return;
+    let idx = 0;
+    const one = async (card) => {
+        const el = $(card);
+        const site = String(el.data('source') || '');
+        const id = String(el.data('id') || '');
+        if (!site || !id) return;
+        let pic = '';
+        try {
+            const d = await doAction('detailContent', { site, ids: JSON.stringify([id]) });
+            const vod = (d && d.list && d.list[0]) || null;
+            pic = normalizePic(vod && vod.vod_pic);
+        } catch (e) { return; }
+        if (!pic) return;
+        if (isValid && !isValid()) return;
+        if (!document.contains(el[0])) return; // 卡片已被重渲染替换
+        el.removeAttr('data-cover-missing');
+        el.find('.vod-cover').html(vodCoverImg(pic));
+    };
+    const worker = async () => {
+        while (idx < cards.length) {
+            if (isValid && !isValid()) return;
+            await one(cards[idx++]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, cards.length) }, worker));
 }
 
 /** 字节数 → 可读大小。 */

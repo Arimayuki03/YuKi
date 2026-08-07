@@ -198,6 +198,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T39 批次**：设置页下载/系统卡并入全宽组（与扩展状态同宽，非全屏 880px、全屏 span 2）；每页条数拆为首页/搜索/收藏/历史四项独立设置（pageSizeOf(key)，首页兼容旧键 listPageSize），直播改铺满一屏容量后翻页（liveFitPageSize 按 grid 列数×可见行数估算）；修复搜索页点来源标签不筛选的 bug（jQuery each 内 .bind(this) 覆盖了元素 this）。
 - **T40 批次**：屏蔽逻辑改逐分类探测（任一分类有资源即不屏蔽，此前只查首个分类会误屏蔽）+ 屏蔽列表弹窗去滚动条；收藏多选拆删除/标记想看/标记已看三操作并删清空按钮，历史多选移除全选；下载新建空输入给反馈；本地文件刷新内容无变化不重渲防闪烁；每页影片数量去注释改两列网格布局（非全屏不再挤行）；移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补二次确认；直播源消失根治：多仓配置载入优先上次成功条目（last_repo.txt 跨重启持久化）防不同次命中不同仓致 lives 漂移。
 - **T41 批次**：横屏封面也算有封面：coverFadeIn 检出横图加 landscape 类，卡片改 object-fit:contain 完整显示（此前固定竖版框裁中间细条看似没封面）；修复搜索进行中点单源筛选后往下滑看到其他源影片（后到 SSE 组未按 _curSrc 隐藏）；修复壁纸遮罩选项与描述相反（low/high 的 veil 数值写反互换）；屏蔽源弹窗恢复 max-height:50vh 滚轮滚动。
+- **T42 批次**：封面补拉：列表无 vod_pic 但详情有的卡片，后台逐个 detailContent 补封面（fillMissingCovers 并发 3/每次渲染上限 24，卡片标 data-cover-missing，vodCard 增 data-source，绑定加载令牌切页中止）；屏蔽源弹窗保留滚轮滑动但隐藏滚动条。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -228,7 +229,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T41，2026-08）
+## 8.8 进行中任务批次（T1~T42，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -273,3 +274,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T39 | 设置宽度 + 分页面条数 + 搜索筛选 bug（用户四连）：①ui.css 下载/系统卡从 680px 限宽组移入全宽组（非全屏 grid-column:1/-1 限 880px 与扩展状态同宽，全屏 ≥1500px span 2 与扩展同宽） ②每页条数拆四项独立设置：common.js listPageSize/pageSizeSync 改 pageSizeOf(key)（pageSizeHome/pageSizeSearch/pageSizeFavorites/pageSizeHistory，按 key 缓存，首页回退旧键 listPageSize 兼容迁移），index.html 单下拉改四下拉（首页/搜索/收藏/历史各 20~120 五档），panels.js load/change 同步四项，home _pageSize/_adaptiveTarget（改 async + await）、search run 恢复 _size、records 工厂加 pageSizeKey 参数（Favorites/HistoryView 各自传键） ③直播改铺满一屏后翻页：live.js 新增 liveFitPageSize（#live-list 宽÷230 列数 × 可见高÷55 行数）替代原设置×3 ④修复搜索页点来源标签不筛选：根因 jQuery .each(function) 内 this 是 DOM 元素却被 .bind(this) 覆盖成 Search 对象 → 改闭包变量 cur | 已完成 |
 | T40 | 用户反馈十三连：①屏蔽源查看弹窗去滚动条（blocked_list 删 max-height/overflow 内联样式） ②屏蔽逻辑改逐分类探测：home.js _probeSites 推荐位空后逐分类 categoryContent，任一分类有资源即不屏蔽（此前只查首个分类），单分类出错跳过继续 ③收藏多选拆三操作：工具栏新增标记想看/标记已看按钮（tagChecked 批量写 tag），入口按钮改「多选」，删「清空收藏」按钮（清空仅历史保留） ④历史多选删全选（checkall 仅 withTags 视图绑定/同步） ⑤下载新建空输入给 toast 反馈并聚焦输入框 ⑥本地文件刷新防闪烁：listFile 加 silent 参数，目录指纹（路径+条目 dir/名/时间）不变跳过重渲提示「目录内容无变化」 ⑦每页影片数量去注释文案 ⑧非全屏布局优化：四项改 .pagesize-grid 两列网格（标签定宽右对齐 + 下拉等宽 110px，≤700px 折单列） ⑨移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补 confirmDialog（panels.js global 补声明） ⑩直播源消失根治：config.py 多仓载入优先上次成功条目（last_repo_name 存 data_dir/last_repo.txt 跨重启持久化，sorted 置顶），/sites state 增 repo 字段供排查 | 已完成 |
 | T41 | 用户反馈四连：①横屏封面也算有封面：coverFadeIn 加载完成后检出 naturalWidth>naturalHeight 加 landscape 类，ui.css .vod-cover img.landscape 改 object-fit:contain 完整显示（此前固定 160/220 竖版框 + cover 裁中间细条，看似没封面） ②修复搜索进行中点单源筛选后往下滑看到其他源影片：search.js renderGroup 末尾按 _curSrc 隐藏后到的非目标源组（此前仅切换时对存量组 toggle，SSE 后到组直接按「全部」模式追加） ③修复壁纸遮罩选项与描述相反：ui.css data-dim low/high 的 --wall-veil 数值互换（低=62% 背景更醒目，高=90% 内容更清晰） ④屏蔽源弹窗恢复滚轮滚动：blocked_list 加回 max-height:50vh;overflow-y:auto（T40 曾整体移除） | 已完成 |
+| T42 | 用户反馈二连：①封面补拉：common.js 新增 fillMissingCovers（找容器内 data-cover-missing 占位图卡片，并发 3 逐个 doAction detailContent 取 vod_pic 换入，每次渲染上限 24 张，写入前校验 isValid 与卡片仍在 DOM）；vodCoverImg 无封面时给 img 标 data-cover-missing，home.js vodCard 增 src 参数写 data-source（首页/分类/源内搜索渲染后挂 _fillCovers 绑定 _loadToken 中止），search.js _paintGrp 同挂（卡片本就注入 data-source） ②屏蔽源弹窗可滚轮滑动但隐藏滚动条：ui.css #blocked_list scrollbar-width:none + ::-webkit-scrollbar display:none（保留 T41 内联 max-height/overflow） | 已完成 |

@@ -9,7 +9,7 @@
  * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, pageSizeOf */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, pageSizeOf, fillMissingCovers */
 
 const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
@@ -139,6 +139,9 @@ const Search = {
             return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
         }).join('');
         $(`#${gid}-grid`).html(cards);
+        // T42：列表无封面但详情有的卡片后台补拉（卡片已带 data-source；
+        // 新搜索会清空结果容器，补拉写入前校验卡片仍在 DOM）
+        fillMissingCovers(`#${gid}-grid`);
         $(`#${gid}-hint`).toggle(!focused && grp.list.length > size);
         renderPagerBox($(`#${gid}-pager`), focused
             ? { page, pagecount, onJump: (pg) => this._paintGrp(gid, pg) }

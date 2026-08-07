@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers */
 
 const Home = {
     sites: [],
@@ -249,7 +249,15 @@ const Home = {
     _appendGrid(items) {
         const grid = $('#home-grid');
         if (grid.children('.tip-line').length) grid.empty();
-        items.forEach((v) => grid.append(vodCard(v)));
+        items.forEach((v) => grid.append(vodCard(v, this.site)));
+        this._fillCovers();
+    },
+
+    /** 列表无封面但详情有的卡片：后台逐个从 detailContent 补拉封面（T42）；
+     *  绑定当前加载令牌，切源/切分类/切页后旧补拉自动中止。 */
+    _fillCovers() {
+        const token = this._loadToken;
+        fillMissingCovers('#home-grid', () => token === this._loadToken);
     },
 
     /** 窗口放大后卡片不够铺满：首页推荐位继续补拉（沿用当前加载令牌）。 */
@@ -424,8 +432,9 @@ const Home = {
         const grid = $('#home-grid').empty();
         if (!list.length) { grid.html('<div class="tip-line">暂无内容</div>'); return; }
         list.forEach((v) => {
-            grid.append(vodCard(v));
+            grid.append(vodCard(v, this.site));
         });
+        this._fillCovers();
     },
 
     /** 统一分页器（common.js renderPagerBox）：搜索/分类模式共用，跳页回调按模式分发。 */
@@ -441,9 +450,10 @@ const Home = {
     },
 };
 
-// 复用于 search.js 的卡片渲染（封面标签由 common.js vodCoverImg 统一生成，T31）
-function vodCard(v) {
-    return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(v.vod_name)}" tabindex="0">
+// 复用于 search.js 的卡片渲染（封面标签由 common.js vodCoverImg 统一生成，T31；
+// src 参数写入 data-source 供 T42 封面补拉定位源）
+function vodCard(v, src) {
+    return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(v.vod_name)}"${src != null ? ` data-source="${escHtml(src)}"` : ''} tabindex="0">
         <div class="vod-cover">${vodCoverImg(v.vod_pic)}</div>
         <div class="vod-name" title="${escHtml(v.vod_name)}">${escHtml(v.vod_name)}</div>
         <div class="vod-remarks">${escHtml(v.vod_remarks || '')}</div>

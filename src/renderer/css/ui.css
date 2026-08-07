@@ -315,6 +315,10 @@ html, body {
 
 .md-dialog-body .md-input { margin-top: 8px; }
 
+/* 屏蔽源列表（T42）：保留滚轮滑动（内联 max-height + overflow-y:auto）但隐藏滚动条 */
+#blocked_list { scrollbar-width:none; }
+#blocked_list::-webkit-scrollbar { width:0; height:0; display:none; }
+
 .md-dialog-list {
     padding: 8px 0 16px;
 }
