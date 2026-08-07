@@ -28,6 +28,7 @@ const Home = {
     searchWord: '',
     _pageCache: null,   // 懒初始化 Map：key site|tid → { pagecount, pages: Map<pg, list> }
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
+    _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
 
     async init() {
         if (this._inited) return;
@@ -70,6 +71,17 @@ const Home = {
             const st = await getJson('/sites');
             all = (st && st.sites) || [];
         } catch (e) { all = []; }
+        // 源集合变更（配置自动重载后 key 集不同）：旧探测/屏蔽记录不再适用，
+        // 重置后重新探测，否则新配置的源永远不会被筛选（T25）
+        const sig = all.map((s) => s.key).join('|');
+        if (this._allSites.length && sig !== this._allSites.map((s) => s.key).join('|')) {
+            this._probeToken++; // 进行中的旧探测写入前校验世代，结果丢弃
+            this._probing = false; // 释放锁，允许对新集合重新发起探测
+            try {
+                await window.vpc.settingsSet('probedSites', []);
+                await window.vpc.settingsSet('blockedSites', []);
+            } catch (e) { /* 重置失败不阻断主流程 */ }
+        }
         this._allSites = all;
         const blocked = await this._getBlocked();
         this.sites = all.filter((s) => blocked.indexOf(s.key) < 0);
@@ -111,6 +123,7 @@ const Home = {
     async _probeSites() {
         if (this._probing || !this._allSites.length) return;
         this._probing = true;
+        const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
         try {
             const s = (await window.vpc.settingsGet()) || {};
             const probed = {};
@@ -143,6 +156,7 @@ const Home = {
                 while (idx < pending.length) { await probeOne(pending[idx++]); }
             };
             await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
+            if (token !== this._probeToken) return; // 源集合已换（配置重载），旧结果不再适用
             await window.vpc.settingsSet('probedSites', Object.keys(probed));
             if (changed) {
                 await window.vpc.settingsSet('blockedSites', Array.from(blocked));

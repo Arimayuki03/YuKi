@@ -747,7 +747,7 @@ function initSettingsPanel() {
             $('#set_textcolor_pick').val(s.textColor);
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
-        $('#set_anim').prop('checked', s.animEnabled !== false);
+        $('#set_anim').val(s.animEnabled !== false ? 'on' : 'off'); // 界面动画（T22：筛选框）
         if (s.listPageSize) $('#set_pagesize').val(s.listPageSize); // 每页条数（空=自动）
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
@@ -940,10 +940,11 @@ function initSettingsPanel() {
         if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
         warnToast('Anime4K 档位已保存，下次起播生效');
     });
-    // 界面动画开关
+    // 界面动画筛选框（T22：由开关改为下拉）
     $('#set_anim').on('change', function () {
-        window.vpc.settingsSet('animEnabled', this.checked);
-        applySkin({ animEnabled: this.checked });
+        const on = this.value === 'on';
+        window.vpc.settingsSet('animEnabled', on);
+        applySkin({ animEnabled: on });
     });
     // 每页影片数量：持久化并作废渲染层缓存，下次进列表页生效
     $('#set_pagesize').on('change', function () {
@@ -1215,7 +1216,7 @@ async function refreshAssetStatus() {
         box.html('<div class="tip-line" style="color:var(--md-error)">查询失败</div>');
         return;
     }
-    if (!status) { box.html('<div class="tip-line">暂无资产信息</div>'); return; }
+    if (!status) { box.html('<div class="tip-line">暂无扩展信息</div>'); return; }
     _assetStatus = status; // 缓存供 Anime4K 开关启用时提示真实着色器状态
     const items = [
         { key: 'ffmpeg', label: 'ffmpeg（视频缩略图 / m3u8 下载合成）', s: status.ffmpeg },
@@ -1227,16 +1228,17 @@ async function refreshAssetStatus() {
         let icon, cls, hint;
         if (s.ready) {
             icon = '✔'; cls = 'asset-ok';
-            hint = (key === 'mpv' && s.path) ? `已就绪 · ${s.path}` : '已就绪';
+            hint = '已就绪'; // T24：mpv 完整路径只进悬停 title，避免长路径撑破行
         } else if (s.downloading) {
             icon = '⏳'; cls = 'asset-downloading'; hint = '后台下载中…';
         } else {
             icon = '✘'; cls = 'asset-missing'; hint = '未安装';
         }
-        return `<div class="asset-row ${cls}" title="${hint}">
+        const tip = (key === 'mpv' && s.ready && s.path) ? `已就绪 · ${s.path}` : hint;
+        return `<div class="asset-row ${cls}" title="${escHtml(tip)}">
             <span class="asset-icon">${icon}</span>
             <span class="asset-label">${escHtml(label)}</span>
-            <span class="asset-hint">${hint}</span>
+            <span class="asset-hint">${escHtml(hint)}</span>
         </div>`;
     }).join('');
     box.html(rows);

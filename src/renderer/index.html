@@ -280,8 +280,8 @@
                         <span class="settings-nav-item" data-cat="hotkey">快捷键</span>
                         <span class="settings-nav-item" data-cat="download">下载</span>
                         <span class="settings-nav-item" data-cat="cache">缓存</span>
+                        <span class="settings-nav-item" data-cat="asset">扩展</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
-                        <span class="settings-nav-item" data-cat="asset">资产</span>
                     </div>
                     <div class="settings-grid">
                     <div class="tool-card" data-setcat="appearance">
@@ -343,7 +343,13 @@
                                 <option value="high">遮罩 · 强（内容更清晰）</option>
                             </select>
                         </div>
-                        <label class="set-check"><input type="checkbox" id="set_anim" checked>界面动画</label>
+                        <div class="settings-item">
+                            <label>界面动画</label>
+                            <select id="set_anim" class="md-select">
+                                <option value="on" selected>开启</option>
+                                <option value="off">关闭</option>
+                            </select>
+                        </div>
                         <div class="tip-line pad0" style="margin-top:12px;">每页影片数量</div>
                         <select id="set_pagesize" class="md-select">
                             <option value="" selected>自动（铺满窗口）</option>
@@ -518,8 +524,8 @@
                         <div class="tip-line pad0" id="app_version" style="margin-top:14px;"></div>
                     </div>
                     <div class="tool-card" data-setcat="asset">
-                        <div class="tool-card-title">资产状态</div>
-                        <div class="tip-line pad0">以下为应用运行所需的本地二进制资产就绪情况。</div>
+                        <div class="tool-card-title">扩展状态</div>
+                        <div class="tip-line pad0">应用依赖的本地组件（播放器 / 下载引擎等）就绪情况。</div>
                         <div id="asset-status-list" class="asset-status-list" style="margin-top:10px;">
                             <div class="tip-line">查询中…</div>
                         </div>
@@ -531,7 +537,7 @@
                         </div>
                         <div class="tip-line pad0 info-tip" style="margin-top:6px;">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">资产安装方式</span>
+                            <div class="info-body"><span class="info-label">扩展安装方式</span>
                                 <div class="info-detail">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
                             </div>
                         </div>

@@ -187,6 +187,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **系统**：托盘驻留/后台播放（U43/46）、隐身模式（U47）、恢复默认（U50）、缓存目录自定义（U49/48）、资产状态卡（决策 82）、mpv 自定义路径（FEATURES#6）、鼠标侧键导航（U92/97/63/67）、本地文件卡片网格预览图分页（U105/114/115/112）、直链播放视图（U18/37）、侧栏收缩（U38）、回到顶部（U40）、自定义应用图标（8.7.3）。
 - **T9~T14 批次**：边下边播（T9/simulDownload 默认关）、dlTimer 空闲自停（T10）、按钮去透明化 + 下载空态留白（T11）、设置二级菜单 + 文案精简 + 字号 6 档分级（T12）、收藏/历史工具条对齐首页（T13）、封面淡入防闪烁（T14/coverFadeIn）。
 - **T15~T20 批次**：下载页卡片化 + 总网速（T15）、danger-tonal/弹窗按钮去透明（T16）、设置导航加大/字体颜色移位/背景区重排/动画复选框/快捷键独立板块/select 统一 240px（T17）、侧栏去 brand（T18）、详情页全选栏上移 + 集数胶囊 + 倒序按钮紧邻（T19）、文案再精简（T20）。
+- **T21~T25 批次**：倒序按钮归位播放勾选集左侧 + 收藏按钮间距（T21）、界面动画改下拉筛选框（T22）、snackbar 弹出后跳移修复（T23/snackIn）、资产→扩展改名 + 系统置底 + mpv 状态行超格修复（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -217,7 +218,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T20，2026-08）
+## 8.8 进行中任务批次（T1~T25，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -237,7 +238,12 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T14 | 封面刷新闪烁优化：卡片/详情封面 img 初始透明，加载完成经 coverFadeIn 加 loaded 淡入（0.25s），加载期间由占位底色托底，兼容缓存命中 complete 直加 | 已完成 |
 | T15 | 下载页仿直链播放卡片样式（标题+说明+输入行）+ 总网速显示（dl-speed 汇总 active 任务速度，render 时刷新） | 已完成 |
 | T16 | 透明按钮全量去透明化：新增 .md-btn-danger-tonal（error-container 底）替换全部 md-btn-danger-text（清空收藏/历史、删除勾选×2、恢复默认）；弹窗 md-dialog-btn 补 surface 底色 | 已完成 |
-| T17 | 设置页再整理：一级导航加大（15px/200px 列）；字体颜色移至主题色下；壁纸区改名「背景」且选图/移除按钮前置遮罩后置；界面动画改普通复选框（.set-check）；快捷键（步长+键位）拆独立一级板块 hotkey；卡片内 select 统一 240px 宽 | 已完成 |
+| T17 | 设置页再整理：一级导航加大（15px/200px 列）；字体颜色移至主题色下；壁纸区改名「背景」且选图/移除按钮前置遮罩后置；界面动画改普通复选框（.set-check，T22 再改下拉筛选框）；快捷键（步长+键位）拆独立一级板块 hotkey；卡片内 select 统一 240px 宽 | 已完成 |
 | T18 | 侧栏移除「影视 PC」brand 文字（首页本就首位，同步清理 .brand 相关 CSS） | 已完成 |
 | T19 | 详情页选集区重排：全选/勾选操作栏移至视频源按钮下方；共 X 集改胶囊框；倒序按钮移至集数旁紧邻 | 已完成 |
 | T20 | 举一反三文案精简：直链播放去 mpv 术语、本地文件说明短语化 | 已完成 |
+| T21 | 详情页倒序按钮移至播放勾选集左侧（同 md-btn-tonal/sm 样式大小一致）；收藏/想看/已看按钮行改 flex gap 12px 加大间距 | 已完成 |
+| T22 | 界面动画改下拉筛选框（开启/关闭，与遮罩下拉同款；animEnabled 持久化不变） | 已完成 |
+| T23 | 修复设置 toast 弹出后向右跳移：snackbar 入场动画 viewIn 末态 transform:none 覆盖居中 translateX(-50%)，改专用 snackIn keyframes 末态保留居中位移 | 已完成 |
+| T24 | 设置一级菜单「资产」改「扩展」（卡片标题扩展状态/安装方式）；系统移至导航最底；mpv 状态行长路径超格修复（路径只进悬停 title，hint 仅显示已就绪 + asset-hint 省略号保护） | 已完成 |
+| T25 | 启动时屏蔽源未筛选修复：配置自动重载后源 key 集变化，旧 probedSites/blockedSites 不再匹配致新源不被过滤；loadSites 检测 key 集变化则重置记录并重新探测，_probeToken 世代校验使进行中的旧探测写入作废 | 已完成 |

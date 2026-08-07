@@ -681,6 +681,8 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 
 /* 播放线路 / 选集 */
 .play-srcs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+/* 详情页操作按钮行：收藏/想看/已看加大间距（T21） */
+.detail-actions { display:flex; gap:12px; margin-top:14px; }
 /* 选集排序工具行（集数计数胶囊 + 紧邻的正序/倒序切换） */
 .ep-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
 .ep-toolbar .ep-count {
@@ -947,11 +949,14 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 @keyframes cardIn { from { opacity:0; transform:scale(.96); } to { opacity:1; transform:none; } }
 @keyframes dlgIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
 @keyframes floatIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
+/* Snackbar 入场动画：末态保留水平居中位移（T23：viewIn 的 transform:none 会在动画结束后
+   覆盖 translateX(-50%) 导致 toast 弹出后向右跳移，改用专用 keyframes） */
+@keyframes snackIn { from { opacity:0; transform:translate(-50%, 10px); } to { opacity:1; transform:translate(-50%, 0); } }
 .view.active { animation:viewIn .25s ease; }
 .vod-card { animation:cardIn .25s ease both; }
 .md-dialog { animation:dlgIn .18s ease; }
 #cover-float img { animation:floatIn .18s ease; }
-#warnToast .md-snackbar { animation:viewIn .2s ease; }
+#warnToast .md-snackbar { animation:snackIn .2s ease; }
 .main-nav-item { transition:background .15s, color .15s, padding .2s ease; }
 
 /* 禁用动画（设置页开关）：全局关掉过渡与动画 */
@@ -1048,7 +1053,7 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
 .asset-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:8px; background:var(--md-surface-container-low); font-size:14px; }
 .asset-icon { font-size:16px; width:20px; text-align:center; flex-shrink:0; }
 .asset-label { flex:1; color:var(--md-on-surface); }
-.asset-hint { font-size:12px; color:var(--md-on-surface-variant); flex-shrink:0; }
+.asset-hint { font-size:12px; color:var(--md-on-surface-variant); flex:0 1 auto; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .asset-ok .asset-icon { color:#2e7d32; }
 .asset-ok { border-left:3px solid #2e7d32; }
 .asset-downloading .asset-icon { color:#ed6c02; }

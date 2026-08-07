@@ -206,15 +206,16 @@ const Detail = {
         }
         html += `<div class="play-srcs">${this.sources.map((s, i) =>
             `<span class="play-src ${i === this.activeSource ? 'active' : ''}" data-idx="${i}">${escHtml(s.from)} (${s.episodes.length})</span>`).join('')}</div>`;
-        // 全选/勾选操作栏紧跟视频源按钮（T19）；集数胶囊 + 倒序按钮紧邻其下
+        // 全选/勾选操作栏紧跟视频源按钮（T19）；倒序按钮置播放勾选集左侧、同款样式（T21）
         html += `<div class="ep-dl-bar">
             <label class="ep-dl-check-all"><input type="checkbox" id="ep-check-all">全选</label>
             <span class="dl-spacer"></span>
             <span class="ep-dl-count" id="ep-dl-count"></span>
+            <button id="ep-order" class="md-btn md-btn-tonal md-btn-sm"></button>
             <button id="ep-play-selected" class="md-btn md-btn-tonal md-btn-sm">▶ 播放勾选集</button>
             <button id="ep-dl-selected" class="md-btn md-btn-tonal md-btn-sm">⬇ 下载勾选集</button>
         </div>`;
-        html += `<div class="ep-toolbar"><span class="ep-count" id="ep-count"></span><button id="ep-order" class="md-btn md-btn-sm"></button></div>`;
+        html += `<div class="ep-toolbar"><span class="ep-count" id="ep-count"></span></div>`;
         html += '<div id="ep-list" class="ep-grid"></div>';
         $('#detail-body').html(html);
         this.renderEpisodes();
