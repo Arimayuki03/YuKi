@@ -77,10 +77,16 @@ function vodPlaceholder() {
  * 封面淡入（T14）：img 初始 opacity:0，加载完成加 loaded 过渡显现，
  * 避免加载完成瞬间突然弹出/换兜底图时的闪烁；complete 检查兼容缓存命中时
  * load 事件可能先于属性挂载触发的情况。
+ * T41：横屏封面也算有封面——加载完成后检出横图加 landscape 类，
+ * 卡片内改 contain 完整显示（此前固定竖版框裁中间细条，看似没封面）。
  */
 function coverFadeIn(img) {
-    if (img.complete && img.naturalWidth) { img.classList.add('loaded'); return; }
-    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+    const show = () => {
+        if (img.naturalWidth > img.naturalHeight) img.classList.add('landscape');
+        img.classList.add('loaded');
+    };
+    if (img.complete && img.naturalWidth) { show(); return; }
+    img.addEventListener('load', show, { once: true });
 }
 
 /**

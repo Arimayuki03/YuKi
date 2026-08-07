@@ -110,12 +110,17 @@ const Search = {
         const head = `<div class="src-group" data-source="${escHtml(src)}"><div class="src-head">${escHtml(payload.name || src)} <span class="src-count">${total}</span></div>`;
         // 来源筛选标签：带结果数，点击只看该源
         $('#search-filters').append(`<span class="class-tab" data-src="${escHtml(src)}" title="只看该源的结果">${escHtml(payload.name || src)}（${total}）</span>`);
-        if (!total) { box.append(head + '<div class="tip-line">该源无结果</div></div>'); return; }
-        // 组内分页：数据已全量在手，纯前端切片，统一分页器驱动
-        const gid = 'sg' + (this._grpSeq++);
-        this._grpLists[gid] = { src, list };
-        box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="src-hint tip-line" id="${gid}-hint" style="display:none">仅显示前 ${SEARCH_PAGE_SIZE} 条 · 点上方来源标签分页看全部</div><div class="pager" id="${gid}-pager"></div></div>`);
-        this._paintGrp(gid, 1);
+        if (!total) { box.append(head + '<div class="tip-line">该源无结果</div></div>'); }
+        else {
+            // 组内分页：数据已全量在手，纯前端切片，统一分页器驱动
+            const gid = 'sg' + (this._grpSeq++);
+            this._grpLists[gid] = { src, list };
+            box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="src-hint tip-line" id="${gid}-hint" style="display:none">仅显示前 ${SEARCH_PAGE_SIZE} 条 · 点上方来源标签分页看全部</div><div class="pager" id="${gid}-pager"></div></div>`);
+            this._paintGrp(gid, 1);
+        }
+        // T41 修复：搜索进行中已切到单源视图时，新到达的组要立即按筛选隐藏
+        //（此前后到的组直接按「全部」模式追加，往下滑会看到其他源的影片）
+        if (this._curSrc && src !== this._curSrc) box.children('.src-group').last().hide();
     },
 
     /**
