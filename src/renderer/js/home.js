@@ -445,30 +445,10 @@ const Home = {
     },
 };
 
-// 复用于 search.js 的卡片渲染
-/**
- * 无封面/拉取失败统一兜底图：独立设计的资产文件
- * （assets/cover-fallback.svg，渐变底 + 胶片齿孔 + 播放标志）。
- */
-function vodPlaceholder() {
-    return 'assets/cover-fallback.svg';
-}
-
-/**
- * 封面淡入（T14）：img 初始 opacity:0，加载完成加 loaded 过渡显现，
- * 避免加载完成瞬间突然弹出/换兜底图时的闪烁；complete 检查兼容缓存命中时
- * load 事件可能先于属性挂载触发的情况。
- */
-function coverFadeIn(img) {
-    if (img.complete && img.naturalWidth) { img.classList.add('loaded'); return; }
-    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
-}
-
+// 复用于 search.js 的卡片渲染（封面标签由 common.js vodCoverImg 统一生成，T31）
 function vodCard(v) {
-    // referrerpolicy=no-referrer：大量图床带防盗链，不带 Referer 才能取到封面
-    const pic = normalizePic(v.vod_pic) || vodPlaceholder();
     return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(v.vod_name)}" tabindex="0">
-        <div class="vod-cover"><img src="${escHtml(pic)}" alt="" loading="lazy" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'"></div>
+        <div class="vod-cover">${vodCoverImg(v.vod_pic)}</div>
         <div class="vod-name" title="${escHtml(v.vod_name)}">${escHtml(v.vod_name)}</div>
         <div class="vod-remarks">${escHtml(v.vod_remarks || '')}</div>
     </div>`;

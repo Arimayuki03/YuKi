@@ -63,6 +63,37 @@ function escHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/* ---------------- 封面图统一渲染（T31 可维护性：三处渲染点收口于此，避免参数漂移） ---------------- */
+
+/**
+ * 无封面/拉取失败统一兜底图：独立设计的资产文件
+ * （assets/cover-fallback.svg，渐变底 + 胶片齿孔 + 播放标志）。
+ */
+function vodPlaceholder() {
+    return 'assets/cover-fallback.svg';
+}
+
+/**
+ * 封面淡入（T14）：img 初始 opacity:0，加载完成加 loaded 过渡显现，
+ * 避免加载完成瞬间突然弹出/换兜底图时的闪烁；complete 检查兼容缓存命中时
+ * load 事件可能先于属性挂载触发的情况。
+ */
+function coverFadeIn(img) {
+    if (img.complete && img.naturalWidth) { img.classList.add('loaded'); return; }
+    img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+}
+
+/**
+ * 统一生成封面 img 标签（T31）：
+ * - loading=lazy + decoding=async：列表页首屏外封面延迟加载/异步解码，降主线程卡顿
+ * - referrerpolicy=no-referrer：大量图床带防盗链，不带 Referer 才能取到封面
+ * - onload 淡入 / onerror 换兜底图（换后置空 onerror 防死循环）
+ */
+function vodCoverImg(pic) {
+    const src = escHtml(normalizePic(pic) || vodPlaceholder());
+    return `<img src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">`;
+}
+
 /** 去除富文本简介中的 HTML 标签（源数据常带 <p>/<br> 等），保留段落换行与文字。 */
 function stripHtml(s) {
     return String(s || '')

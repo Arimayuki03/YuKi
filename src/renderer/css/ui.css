@@ -1,3 +1,23 @@
+/* ============================================================
+   ui.css 板块索引（T31 可维护性：按关键词搜索定位，不带行号防漂移）
+   1. 主题变量        → :root / html.dark（缩放/字号由 applySkin 写 html 内联 zoom）
+   2. Reset 与基础布局 → Reset
+   3. MD3 表单控件     → M3 Outlined Text Field / md-select
+   4. MD3 按钮        → M3 Buttons / danger-text
+   5. 顶部工具条      → Toolbar
+   6. 本地文件        → File List / 本地视频卡片 / 分页条
+   7. MD3 弹层        → M3 Dialog / M3 Snackbar / Loading overlay
+   8. 设置页          → settings-wrap / settings-nav / settings-grid / tool-card
+   9. 详情页          → detail-head / detail-cover / ep-
+   10. 收藏/历史       → 收藏 / 历史视图 / rec- / 多选删除
+   11. 封面放大浮层    → cover-float
+   12. 壁纸模式        → body.has-wallpaper / --wall-veil
+   13. 内置主题色      → html[data-color]
+   14. 直链播放        → direct-card
+   15. 侧栏收缩        → body.nav-collapsed
+   动画 keyframes（viewIn/cardIn/snackIn/snackOut/md-spin/md-dash）集中在各板块尾部
+   ============================================================ */
+
 :root {
     --md-primary:                  #006C4C;
     --md-on-primary:               #FFFFFF;
@@ -514,10 +534,29 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .tool-panel { display:none; }
 .tool-panel.active { display:block; }
 /* 设置页分类卡片（T7）：显式列数控制——窄窗单列、常规 2 列、全屏宽屏 3 列，
-   避免 auto-fill 在超宽屏折出过多窄列 */
+   避免 auto-fill 在超宽屏折出过多窄列。
+   T31 非全屏适配：单列断点与 .settings-wrap（900px）对齐，避免 760~900 之间
+   导航已横排但卡片仍挤两列；高内容分类横跨全宽并限宽，短卡片限宽防超宽 */
 .settings-grid { display:grid; grid-template-columns:repeat(2, 1fr); gap:0 16px; align-items:start; }
-@media (max-width:760px) { .settings-grid { grid-template-columns:1fr; } }
+@media (max-width:900px) { .settings-grid { grid-template-columns:1fr; } }
 @media (min-width:1500px) { .settings-grid { grid-template-columns:repeat(3, 1fr); } }
+/* T31：表单密集的高卡片（外观/播放/快捷键）与多卡分类（源设置）横跨全宽，
+   max-width 限宽防止全屏 3 列时拉得过宽 */
+.settings-grid .tool-card[data-setcat="appearance"],
+.settings-grid .tool-card[data-setcat="play"],
+.settings-grid .tool-card[data-setcat="hotkey"],
+.settings-grid .tool-card[data-setcat="source"] { grid-column:1 / -1; max-width:880px; }
+/* T31：短内容单卡（下载/扩展/系统）限宽，避免宽屏下横向拉空 */
+.settings-grid .tool-card[data-setcat="download"],
+.settings-grid .tool-card[data-setcat="asset"],
+.settings-grid .tool-card[data-setcat="system"] { max-width:680px; }
+@media (min-width:1500px) {
+    /* 全宽分类在 3 列模式下仍横跨两列，保持内容宽度层级一致 */
+    .settings-grid .tool-card[data-setcat="appearance"],
+    .settings-grid .tool-card[data-setcat="play"],
+    .settings-grid .tool-card[data-setcat="hotkey"],
+    .settings-grid .tool-card[data-setcat="source"] { grid-column:span 2; }
+}
 /* 设置页标签字号层级：标题 15px 加粗（.tool-card-title），标签 13px，正文随视图 14px */
 .settings-grid .tip-line { font-size:13px; line-height:1.5; }
 /* 卡片内下拉框统一长度（T17：筛选框长度大小统一） */

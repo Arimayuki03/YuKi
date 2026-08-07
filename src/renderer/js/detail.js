@@ -174,7 +174,7 @@ const Detail = {
 
     render(vod) {
         this._lastVod = vod;
-        const pic = normalizePic(vod.vod_pic) || (typeof vodPlaceholder === 'function' ? vodPlaceholder() : '');
+        // 封面标签统一由 common.js vodCoverImg 生成（T31：无图时显兜底占位图）
         // 源数据简介常带 <p>/<br> 等 HTML 标签：剥离后自动分段（含无换行超长段的按句拆分）
         // 简介置于封面右侧信息栏（导演/演员之下），带「简介」标签
         const descText = stripHtml(vod.vod_content);
@@ -185,7 +185,7 @@ const Detail = {
         }
         let html = `
         <div class="detail-head">
-            <div class="detail-cover">${pic ? `<img src="${escHtml(pic)}" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='assets/cover-fallback.svg'">` : ''}</div>
+            <div class="detail-cover">${vodCoverImg(vod.vod_pic)}</div>
             <div class="detail-info">
                 <div class="detail-title">${escHtml(vod.vod_name || this.vodName)}</div>
                 <div class="detail-meta">${this.metaLine(vod)}</div>

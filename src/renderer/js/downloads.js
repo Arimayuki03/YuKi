@@ -130,10 +130,31 @@ const Downloads = {
         const list = $('#dl-list');
         if (!this._tasks.length) {
             list.empty(); // 空列表留白，不显示引导文案（T11）
+            this._fps = [];
             return;
         }
         this._tip('');
-        list.html(this._tasks.map((t) => this._itemHtml(t)).join(''));
+        // T31 性能：主进程每秒推送一次列表，无变化时跳过 DOM 重建；
+        // gid 序列不变时按指纹只换有变化的条目，避免整列表 reflow 与封面/按钮状态丢失
+        const fps = this._tasks.map((t) => this._fp(t));
+        const prev = this._fps || [];
+        const sameSeq = prev.length === fps.length && this._tasks.every((t, i) => (this._prevGids || [])[i] === t.gid);
+        if (sameSeq && fps.every((f, i) => f === prev[i])) { this._prevGids = this._tasks.map((t) => t.gid); return; }
+        if (sameSeq) {
+            const children = list.children();
+            fps.forEach((f, i) => {
+                if (f !== prev[i]) children[i].outerHTML = this._itemHtml(this._tasks[i]);
+            });
+        } else {
+            list.html(this._tasks.map((t) => this._itemHtml(t)).join(''));
+        }
+        this._fps = fps;
+        this._prevGids = this._tasks.map((t) => t.gid);
+    },
+
+    /** 条目渲染指纹（T31）：影响 HTML 输出的字段集，全同则跳过该条目更新 */
+    _fp(t) {
+        return [t.gid, t.name, t.status, t.percent, t.done, t.total, t.speed, t.connections, t.errorMessage].join('|');
     },
 
     _itemHtml(t) {

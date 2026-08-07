@@ -100,14 +100,13 @@ function normTag(t) { return (t === undefined || t === null) ? 'want' : t; }
 
 /** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面左上角加想看/已看标签，无标签不显示）。 */
 function recCard(v, editable, withTags) {
-    const pic = normalizePic(v.pic) || (typeof vodPlaceholder === 'function' ? vodPlaceholder() : '');
     const tag = normTag(v.tag);
     return `<div class="vod-card" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" data-name="${escHtml(v.name)}" tabindex="0">
         <span class="rec-check" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="勾选后可批量删除"></span>
         ${withTags && tag ? `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→已看→取消">${tag === 'seen' ? '已看' : '想看'}</span>` : ''}
         <button class="rec-del" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>
         ${editable ? `<button class="rec-edit" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : ''}
-        <div class="vod-cover"><img src="${escHtml(pic)}" alt="" loading="lazy" referrerpolicy="no-referrer" onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">${v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : ''}</div>
+        <div class="vod-cover">${vodCoverImg(v.pic)}${v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : ''}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(v.name)}</div>
         <div class="vod-remarks">${escHtml(v.remarks || '')}</div>
     </div>`;
