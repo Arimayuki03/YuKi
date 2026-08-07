@@ -139,7 +139,7 @@ function normalizePic(pic) {
  * 封面补拉（T42/T43）：部分源列表数据不带 vod_pic 但详情里有，占位图卡片
  * 后台取 detailContent 补上封面。优先级设计：用户点开详情 > 搜索拉页 >
  * 封面补拉——Detail.open 调 abortCoverFill() 立即中止后台补拉让路；
- * 只补当前屏幕可见卡片（IntersectionObserver，上下预热 300px），并发 5。
+ * 只补当前屏幕可见卡片（IntersectionObserver，上下预热 300px），并发 10。
  * 卡片需带 data-id/data-source；isValid 返回 false（已切源/切页）即中止；
  * 卡片已不在 DOM（重渲染）则跳过写入。
  */
@@ -193,9 +193,9 @@ function fillMissingCovers(container, isValid) {
     cards.each(function () { io.observe(this); });
 }
 
-/** worker 池调度：并发上限 5（T43），队列有活就拉起，跑完自退。 */
+/** worker 池调度：并发上限 10（T43 定 5，T45 提至 10），队列有活就拉起，跑完自退。 */
 function _coverFillPump() {
-    while (_coverFillBusy < 5 && _coverFillQueue.length) {
+    while (_coverFillBusy < 10 && _coverFillQueue.length) {
         _coverFillBusy++;
         _coverFillWorker().finally(() => {
             _coverFillBusy--;

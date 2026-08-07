@@ -2,7 +2,7 @@
 
 > 续作开发只需读本文件。本文档已整合原 `重构方案.md`、`PHASE0_依赖矩阵.md`、`BUILD.md`、`FEATURES.md`、`PROGRESS.md` 五份文档，其余 md 已删除。
 > 约定：改动架构/链路前先更新「§4 架构决策」；新增功能后在「§7 功能清单」补一行；收尾跑 `npm run test:all` 全绿。
-> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L131 · §6 构建打包 L146 · §7 前端注意与功能 L166（注意事项 L168 / 功能概览 L178）· §8 已知坑位 L189 · §8.7 待完成 L211 · §8.8 进行中任务 L218
+> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L131 · §6 构建打包 L146 · §7 前端注意与功能 L166（注意事项 L168 / 功能概览 L178）· §8 已知坑位 L198 · §8.7 待完成 L220 · §8.8 进行中任务 L227
 
 ---
 
@@ -71,7 +71,7 @@ npm run build:py
 10. **方法调用桥**：`__VPC_CALL__(method, argsJson)`；异步方法返回 `'__PROMISE__'`，Python 侧 `execute_pending_job()` 泵微任务（上限 10 万次）后 `__VPC_FETCH_RESULT__()` 取结果。
 11. **JsSpider 动态子类**：base Spider 按类隔离单例，多 JS 站点必须 `type(f'JsSpider_{key}', ...)` 各自建类。
 12. **config 热更新协议**：`do=setting&name=config&text=<URL或JSON>` → ConfigManager.load，立即返回 `{code:202}`，后台线程执行，`do=configTask` 查状态（loading/done/error）。热更新必须"先纯构建（_prepare）后一次性热换（_apply）"，禁止先 destroy_all。另提供 `do=loadConfig`、`GET /sites`。
-13. **站点类型支持面**：type=3 Python（http .py / 内联）、type=4 与 type=3+http .js 直链（JS spider）、type=0/1 CMS（苹果 CMS JSON/XML，`cms_spider.py` 纯 HTTP）。api 相对路径按配置 URL urljoin。TVBox jar 型源（api=csp_XXX）与 drpy 源识别后跳过，勿当 Python 源码执行；spider.jar 依赖 Android API，勿尝试 JRE。多仓 config（顶层 `urls`）按序预检兜底（上限 12 条），首个 `sites>0` 生效。
+13. **站点类型支持面**：type=3 Python（http .py / 内联）、type=4 与 type=3+http .js 直链（JS spider）、type=0/1 CMS（苹果 CMS JSON/XML，`cms_spider.py` 纯 HTTP）。api 相对路径按配置 URL urljoin。TVBox jar 型源（api=csp_XXX）与 drpy 源识别后跳过，勿当 Python 源码执行；spider.jar 依赖 Android API，勿尝试 JRE。多仓 config（顶层 `urls`）优先上次成功条目（last_repo.txt，T40），首个 `sites>0` 的条目作主仓；命中后并行补拉其余条目跨仓合并（T44）：lives 按 url 去重（嵌套 channels 展平）、sites 按 key 去重追加，主仓优先只增不删；偏好条目首次失败自动重试一次。
 14. **JS init 双协议**：CatVod 单文件收字符串（`init_protocol='string'`）；TVBox/FongMi 多模块源收对象 `{skey, stype, ext}`（`'fongmi'`）。
 
 ### 前端与 UI
@@ -185,22 +185,15 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **收藏/历史**：视图工厂共用（U16/17/39）、搜索+标签（U89/61）、多选删除（U63）、编辑标题（U41/57）、源标识徽章化（U29/69/78/57）、跨源去重（决策 81）。
 - **外观**：主题色/自定义色（U19/101/73）、明暗/缩放/字号数值化（U26/35/71/55）、壁纸遮罩（U19/76）、字体颜色大小（U31）、动画开关（U46/39）、弹窗 flex 居中修复（U113/54）、隐藏滚动条（U62）、4K 自适应（U56）、圆角统一（U52/54）、设置布局（U53/87/114）、占位封面资产（U51/68/56）、UI 清单式优化（T4：工具栏控件对齐 / danger 按钮 / 焦点轮廓 / 字体间距 hover 统一）。
 - **系统**：托盘驻留/后台播放（U43/46）、隐身模式（U47）、恢复默认（U50）、缓存目录自定义（U49/48）、资产状态卡（决策 82）、mpv 自定义路径（FEATURES#6）、鼠标侧键导航（U92/97/63/67）、本地文件卡片网格预览图分页（U105/114/115/112）、直链播放视图（U18/37）、侧栏收缩（U38）、回到顶部（U40）、自定义应用图标（8.7.3）。
-- **T9~T14 批次**：边下边播（T9/simulDownload 默认关）、dlTimer 空闲自停（T10）、按钮去透明化 + 下载空态留白（T11）、设置二级菜单 + 文案精简 + 字号 6 档分级（T12）、收藏/历史工具条对齐首页（T13）、封面淡入防闪烁（T14/coverFadeIn）。
-- **T15~T20 批次**：下载页卡片化 + 总网速（T15）、danger-tonal/弹窗按钮去透明（T16）、设置导航加大/字体颜色移位/背景区重排/动画复选框/快捷键独立板块/select 统一 240px（T17）、侧栏去 brand（T18）、详情页全选栏上移 + 集数胶囊 + 倒序按钮紧邻（T19）、文案再精简（T20）。
-- **T21~T25 批次**：倒序按钮归位播放勾选集左侧 + 收藏按钮间距（T21）、界面动画改下拉筛选框（T22）、snackbar 弹出后跳移修复（T23/snackIn）、资产→扩展改名 + 系统置底 + mpv 状态行超格修复（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）。
-- **T26~T29 批次**：外观卡布局字号统一（T26）、缓存两卡等高（T27）、侧栏直链改名 + 本地文件独立板块（T28）、源配置迁入设置一级菜单源设置（T29）。
-- **T30 批次**：动画体验整体优化：M3 变弧 loading（淡入淡出 + 载入文案）、toast/弹窗退场动画、卡片错峰入场、easing 统一。
-- **T31 批次**：设置页非全屏适配（单列断点对齐 900px、高内容分类横跨全宽限 880px、短卡限宽 680px）；性能：封面 decoding=async + 下载列表按指纹增量渲染；可维护性：封面 img 收口 common.js vodCoverImg（home/records/detail 三处参数漂移根治）、ui.css 文件头板块索引。
-- **T32~T35 批次**：外观背景区选图/移除按钮移至遮罩下拉下方（T32）；删除类操作二次确认补全（清除已完成/历史源✕/直播源✕，T33）；直播频道列表分页（同首页分页器规格，每页影片数×3，T34；收藏/历史/搜索已有分页无需改）；直播可用性本地缓存（首次探测落盘，进页/切源默认用缓存，手动点刷新才重探，T35）。
-- **T36 批次**：扩展状态卡并入全宽组（非全屏半宽下内容挤窄）；搜索每源结果 20 条上限根治（后端聚合搜索改每源拉前 3 页去重合并，遇空页即停）；每页条数全站对齐首页（adaptivePageSize 收口 common.js，收藏/历史/搜索/直播「自动」模式同首页窗口自适应估算，搜索页条数随设置不再固定 30）。
-- **T37 批次**：收藏/历史/搜索「自动」分页触发修复：「自动」估算上限收至 24（此前大窗口估算 36~120，20 几条记录不分页），新增「20 条」每页条数选项；首页分类保持铺满窗口行为不变。
-- **T38 批次**：分页体系定稿：收藏/历史固定每页 20 条超过即分页（不再走设置/自动）；搜索「全部」视图每组限显前 20 条，点来源标签进单源视图启用分页器翻全部；后端单源搜索取消 3 页限制拉全部页（空页/短页/整页无新增即停，50 页防护）；「自动（铺满窗口）」模式整体移除（adaptivePageSize 删除，设置项只剩 20/24/36/60/120，仅首页/直播生效）。
-- **T39 批次**：设置页下载/系统卡并入全宽组（与扩展状态同宽，非全屏 880px、全屏 span 2）；每页条数拆为首页/搜索/收藏/历史四项独立设置（pageSizeOf(key)，首页兼容旧键 listPageSize），直播改铺满一屏容量后翻页（liveFitPageSize 按 grid 列数×可见行数估算）；修复搜索页点来源标签不筛选的 bug（jQuery each 内 .bind(this) 覆盖了元素 this）。
+- **T9~T20 批次**（细节见 §8.8 表）：边下边播开关（T9）、dlTimer 空闲自停防泄漏（T10）、按钮去透明化（T11/T16）、设置二级菜单+字号 6 档（T12/T17）、收藏/历史工具条对齐首页（T13）、封面淡入防闪烁（T14）、下载页卡片化+总网速（T15）、侧栏去 brand（T18）、详情页全选栏上移+集数胶囊+倒序紧邻（T19）、文案精简（T20）。
+- **T21~T35 批次**（细节见 §8.8 表）：倒序按钮归位+收藏按钮间距（T21）、动画改下拉筛选框（T22）、snackbar 跳移修复（T23）、资产→扩展改名+系统置底（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）、外观卡布局统一（T26）、缓存两卡等高（T27）、直链改名+本地文件独立板块（T28）、源配置迁入设置一级菜单（T29）、动画体验整体优化 M3 loading/退场/错峰入场（T30）、设置页非全屏适配+性能+封面 img 收口 vodCoverImg（T31）、背景区按钮重排（T32）、删除类二次确认补全（T33）、直播频道分页（T34）、直播可用性本地缓存 liveProbeCache（T35）。
+- **T36~T39 批次**（细节见 §8.8 表）：扩展卡并入全宽组+搜索每源多页拉取+条数全站对齐（T36）、「自动」分页上限收 24+新增 20 条选项（T37）、分页体系定稿：收藏/历史固定 20 条、搜索全部视图限 20 条点来源进单源翻页、后端拉全部页、「自动铺满」模式移除（T38）、设置卡宽度归组+每页条数拆四项独立设置 pageSizeOf(key)+直播铺满一屏 liveFitPageSize+搜索来源筛选 bug（T39）。
 - **T40 批次**：屏蔽逻辑改逐分类探测（任一分类有资源即不屏蔽，此前只查首个分类会误屏蔽）+ 屏蔽列表弹窗去滚动条；收藏多选拆删除/标记想看/标记已看三操作并删清空按钮，历史多选移除全选；下载新建空输入给反馈；本地文件刷新内容无变化不重渲防闪烁；每页影片数量去注释改两列网格布局（非全屏不再挤行）；移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补二次确认；直播源消失根治：多仓配置载入优先上次成功条目（last_repo.txt 跨重启持久化）防不同次命中不同仓致 lives 漂移。
 - **T41 批次**：横屏封面也算有封面：coverFadeIn 检出横图加 landscape 类，卡片改 object-fit:contain 完整显示（此前固定竖版框裁中间细条看似没封面）；修复搜索进行中点单源筛选后往下滑看到其他源影片（后到 SSE 组未按 _curSrc 隐藏）；修复壁纸遮罩选项与描述相反（low/high 的 veil 数值写反互换）；屏蔽源弹窗恢复 max-height:50vh 滚轮滚动。
 - **T42 批次**：封面补拉：列表无 vod_pic 但详情有的卡片，后台逐个 detailContent 补封面（fillMissingCovers 并发 3/每次渲染上限 24，卡片标 data-cover-missing，vodCard 增 data-source，绑定加载令牌切页中止）；屏蔽源弹窗保留滚轮滑动但隐藏滚动条。
 - **T43 批次**：搜索中点详情转圈久修复（优先级划分：点开详情 > 搜索拉页 > 封面补拉）：Detail.open 先 abortCoverFill 中止后台补拉让路（根因：同一 JS 源共享 QuickJS 上下文，JsEngine.call 持锁串行，详情排在补拉/拉页后面）；详情就绪后恢复补拉；搜索流式期间暂缓补拉待 done 后统一补；封面补拉改只补当前屏幕可见卡片（IntersectionObserver 上下预热 300px），并发改 5。
 - **T44 批次**：直播源消失/视频源变少根治（多仓跨条目合并）：根因是偏好仓 supermeguo18（6 个直播源）偶发超时，回退仓 bizhangjie🐶1 只有 1 条无效 lives（无 url）且站点 key 不同触发重新探测屏蔽。修复：多仓命中主条目后并行补拉其余条目，lives 按 url 去重合并（嵌套 channels 展平、无 url 丢弃），sites 按 key 去重合并（主条目优先，只增不删）；偏好条目首次失败自动重试一次防偶发超时仓漂移。
+- **T45 批次**：封面补拉并发 5→10（_coverFillPump，可见卡才入队+详情让路机制不变，提速不阻塞用户操作）；文档整理：§7 功能清单 T9~T39 流水账压缩为三行摘要（细节统一查 §8.8 表，消除双份维护），决策 13 同步 T44 多仓合并机制，TOC 锚点行号重新校准。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -231,7 +224,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T44，2026-08）
+## 8.8 进行中任务批次（T1~T45，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -279,3 +272,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T42 | 用户反馈二连：①封面补拉：common.js 新增 fillMissingCovers（找容器内 data-cover-missing 占位图卡片，并发 3 逐个 doAction detailContent 取 vod_pic 换入，每次渲染上限 24 张，写入前校验 isValid 与卡片仍在 DOM）；vodCoverImg 无封面时给 img 标 data-cover-missing，home.js vodCard 增 src 参数写 data-source（首页/分类/源内搜索渲染后挂 _fillCovers 绑定 _loadToken 中止），search.js _paintGrp 同挂（卡片本就注入 data-source） ②屏蔽源弹窗可滚轮滑动但隐藏滚动条：ui.css #blocked_list scrollbar-width:none + ::-webkit-scrollbar display:none（保留 T41 内联 max-height/overflow） | 已完成 |
 | T43 | 搜索中点详情转圈久 + 封面补收紧（优先级：点开详情 > 搜索拉页 > 封面补拉）：根因同一 JS 源共享 QuickJS 上下文、JsEngine.call 持锁串行，详情请求排在后台补拉/搜索拉页后面 → ①common.js 补拉重写为世代制：abortCoverFill（世代自增+清队列+断开观察器），fillMissingCovers 改 IntersectionObserver 只补屏幕可见卡（rootMargin 上下 300px，入视口才入队），worker 池并发改 5（_coverFillPump/_coverFillWorker），同容器旧观察器先断开防累积，120s 安全释放 ②detail.js open 入口先 abortCoverFill 让路；load 成功后恢复补拉（搜索仍在流式时只补首页区不碰搜索区） ③search.js 流式期间 _paintGrp 暂缓补拉（!this.es 才补），done/error 收尾后 _fillAllCovers 统一补各组 | 已完成 |
 | T44 | 直播源消失/视频源变少根治（多仓跨条目合并）：根因偏好仓 supermeguo18（6 直播源）raw.githubusercontent 超时回退 bizhangjie🐶1（仅 1 条无 url 的无效 lives），且仓间站点 key 不同触发探测重新屏蔽 → ①config.py 多仓命中主条目后 _merge_repo_extras 并行补拉其余条目（ThreadPoolExecutor ≤4）：_merge_lives 按 url 去重合并（_iter_live_urls 嵌套 channels 展平，无 url 条目丢弃，主条目优先），_merge_sites 按 key 去重追加构建（主条目优先只增不删），summary 计数同步更新 ②偏好条目首次拉取失败自动重试一次（防偶发超时仓漂移） | 已完成 |
+| T45 | 封面补拉提档 + 文档整理：①common.js _coverFillPump 并发上限 5→10（只补可见卡+Detail.open abortCoverFill 让路机制不变，提速不阻塞用户操作） ②PROGRESS.md 整理：§7 功能清单 T9~T39 十行流水账压缩为三行批次摘要（细节统一查 §8.8 表消除双份维护漂移），决策 13 同步 T40/T44 多仓偏好与跨仓合并机制，TOC 锚点行号重新校准 | 已完成 |
