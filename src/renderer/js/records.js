@@ -6,7 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除，工具栏可一键清空。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, Detail, listPageSize, renderPagerBox */
+/* global $, escHtml, normalizePic, warnToast, Detail, listPageSize, renderPagerBox, adaptivePageSize */
 
 async function recGet(key) {
     try {
@@ -237,8 +237,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                 grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
                 return;
             }
-            // 客户端分页：超过每页条数（设置值优先，自动回退 36）才分页
-            const size = (await listPageSize()) || 36;
+            // 客户端分页：每页条数与首页一致（T36：设置值优先，「自动」回退窗口自适应估算）
+            const size = (await listPageSize()) || adaptivePageSize();
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
             const slice = list.slice((this._page - 1) * size, this._page * size);

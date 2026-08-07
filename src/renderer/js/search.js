@@ -8,13 +8,14 @@
  * 分页（T6）：每个源分组内部用统一分页器翻页，每页 SEARCH_PAGE_SIZE 条，
  * 数据已由 SSE 一次给全，纯前端切片，避免单源千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, listPageSize, adaptivePageSize */
 
-const SEARCH_PAGE_SIZE = 30;
+const SEARCH_PAGE_SIZE = 30; // 兜底值；实际每页条数跟随「每页影片数量」设置（T36）
 
 const Search = {
     es: null,
     _inited: false,
+    _size: 0,        // 本次搜索生效的每页条数（run 时按设置解析一次）
     _grpSeq: 0,      // 分组 id 自增序号（分页容器唯一定位）
     _grpLists: {},   // gid → { src, list }（SSE 已给全量，纯前端切片翻页）
 
@@ -49,9 +50,11 @@ const Search = {
         if (this.es) { try { this.es.close(); } catch (e) { /* ignore */ } this.es = null; }
     },
 
-    run() {
+    async run() {
         const word = $('#search-keyword').val().trim();
         if (!word) { warnToast('请输入关键字'); return; }
+        // T36：每页条数与首页一致（设置值优先，「自动」回退窗口自适应估算）
+        this._size = (await listPageSize()) || adaptivePageSize() || SEARCH_PAGE_SIZE;
         this.stop();
         $('#search-results').empty();
         this._grpLists = {}; // 新搜索：重置分组数据
@@ -108,12 +111,13 @@ const Search = {
         this._renderGrpPage(gid, 1);
     },
 
-    /** 分组翻页渲染：按 SEARCH_PAGE_SIZE 切片 + 统一分页器。 */
+    /** 分组翻页渲染：按每页条数切片 + 统一分页器（T36：条数跟随设置）。 */
     _renderGrpPage(gid, page) {
         const grp = this._grpLists[gid];
         if (!grp) return;
-        const pagecount = Math.ceil(grp.list.length / SEARCH_PAGE_SIZE);
-        const slice = grp.list.slice((page - 1) * SEARCH_PAGE_SIZE, page * SEARCH_PAGE_SIZE);
+        const size = this._size || SEARCH_PAGE_SIZE;
+        const pagecount = Math.ceil(grp.list.length / size);
+        const slice = grp.list.slice((page - 1) * size, page * size);
         const cards = slice.map((v) => {
             const html = vodCard(v);
             return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);

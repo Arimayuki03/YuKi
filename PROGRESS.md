@@ -192,6 +192,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T30 批次**：动画体验整体优化：M3 变弧 loading（淡入淡出 + 载入文案）、toast/弹窗退场动画、卡片错峰入场、easing 统一。
 - **T31 批次**：设置页非全屏适配（单列断点对齐 900px、高内容分类横跨全宽限 880px、短卡限宽 680px）；性能：封面 decoding=async + 下载列表按指纹增量渲染；可维护性：封面 img 收口 common.js vodCoverImg（home/records/detail 三处参数漂移根治）、ui.css 文件头板块索引。
 - **T32~T35 批次**：外观背景区选图/移除按钮移至遮罩下拉下方（T32）；删除类操作二次确认补全（清除已完成/历史源✕/直播源✕，T33）；直播频道列表分页（同首页分页器规格，每页影片数×3，T34；收藏/历史/搜索已有分页无需改）；直播可用性本地缓存（首次探测落盘，进页/切源默认用缓存，手动点刷新才重探，T35）。
+- **T36 批次**：扩展状态卡并入全宽组（非全屏半宽下内容挤窄）；搜索每源结果 20 条上限根治（后端聚合搜索改每源拉前 3 页去重合并，遇空页即停）；每页条数全站对齐首页（adaptivePageSize 收口 common.js，收藏/历史/搜索/直播「自动」模式同首页窗口自适应估算，搜索页条数随设置不再固定 30）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -222,7 +223,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T35，2026-08）
+## 8.8 进行中任务批次（T1~T36，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -261,3 +262,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T33 | 删除类操作二次确认补全：下载页「清除已完成」（clearDone）、源设置历史源✕（removeConfigHistory）、直播源✕（removeLiveSource）三处补 confirmDialog；其余删除入口（收藏/历史单条+多选+清空、下载单删+清失败、本地文件/文件夹、缓存清理、恢复默认）盘点确认已有确认 | 已完成 |
 | T34 | 直播频道列表分页：新增 #live-pager 容器 + renderPagerBox（同首页/收藏历史规格）；每页频道数 = 每页影片数×3（频道行紧凑，至少 60），切分组/切源回第一页，探测过滤后当前页自动 clamp；索引保留完整 channels 位置（点击播放不受分页影响）；搜索页（源内 30 条/页）与收藏/历史（listPageSize 客户端分页）盘点确认已有分页无需改 | 已完成 |
 | T35 | 直播可用性本地缓存：探测结果按源 URL 存 settings.liveProbeCache（{ts, dead:[不可用频道 url]}，最多 20 个源超出丢最旧）；进页/切源默认按缓存过滤不再探测（状态栏提示「已按缓存结果过滤 N 个 · 点刷新重新检测」，5s 自隐）；仅手动点「刷新」重新全量探测并更新缓存；首次无缓存仍探测一次建缓存；探测异常不写缓存保留旧值 | 已完成 |
+| T36 | 用户反馈三连修复：①扩展状态卡非全屏半宽内容挤窄 → 从短卡限宽组移入全宽组（grid-column:1/-1 限 880px，与外观/播放/快捷键/源设置同规格） ②搜索每源只见 20 条：根因非前端分页而是 CMS 源搜索接口服务端分页（limit=20）且聚合搜索只拉 pg=1 → server.py 新增 _search_source_pages 每源拉前 3 页合并去重（遇空页/短页即停，异常不抛），aggregate_search 与 SSE /search/stream 均接入，前端每源最多可见 60 条并正常翻页 ③每页条数全站对齐首页：新增 common.js adaptivePageSize（首页 _adaptiveTarget 收口于此），收藏/历史 render、搜索 run/_renderGrpPage、直播 _pageSize 的「自动」回退从固定 36 改自适应估算；搜索页每页条数从固定 30 改为跟随「每页影片数量」设置 | 已完成 |

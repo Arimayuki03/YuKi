@@ -154,6 +154,23 @@ async function listPageSize() {
 function invalidatePageSizeCache() { _pageSizeCache = null; }
 
 /**
+ * 「自动」模式下的每页条数（T36 收口）：估算铺满可视区所需卡片数
+ * （列数×行数，下限 36 上限 120）；首页/收藏/历史/直播分页共用，
+ * 保证各页「自动」行为一致。
+ */
+function adaptivePageSize() {
+    try {
+        const grid = document.getElementById('home-grid') || document.querySelector('.vod-grid');
+        const w = (grid && grid.clientWidth) || window.innerWidth;
+        const top = grid ? grid.getBoundingClientRect().top : 0;
+        // 列宽 140 + 间距 16；行高 ≈ 封面 + 两行文字 ≈ 285
+        const cols = Math.max(3, Math.floor((w + 16) / 156));
+        const rows = Math.max(3, Math.ceil((window.innerHeight - top + 285) / 285));
+        return Math.min(120, Math.max(36, cols * rows));
+    } catch (e) { return 36; }
+}
+
+/**
  * 统一分页器：首页/上一页/页码（当前页±2 连号 + 首尾页，空隙省略号）/下一页/末页 + 跳转输入。
  * opts: { page, pagecount, onJump }；pagecount ≤ 1 时清空不渲染。
  */

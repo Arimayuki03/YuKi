@@ -234,6 +234,30 @@ def dispatch_action(form):
         return 500, '{"code":500,"msg":"%s"}' % str(e).replace('"', "'")
 
 
+def _search_source_pages(runner, word, max_pages=3):
+    """单源搜索拉前 max_pages 页合并去重（T36：CMS 源搜索接口服务端分页，
+    默认 limit=20，只拉首页前端只能看到 20 条）；遇空页即停，异常不抛。"""
+    merged = []
+    seen = set()
+    for pg in range(1, max_pages + 1):
+        try:
+            data = json.loads(spider_app.searchContent(runner, word, '0', str(pg)))
+        except Exception:
+            break
+        items = data.get('list') or []
+        if not items:
+            break
+        for it in items:
+            key = it.get('vod_id') or it.get('vod_name')
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(it)
+        if len(items) < 10:  # 短页视为末页（部分源 list 短于分页条数）
+            break
+    return merged
+
+
 def aggregate_search(word, timeout=15):
     """线程池并发搜索全部可搜站点，单源超时/异常不拖累整体。"""
     merged = []
@@ -242,13 +266,13 @@ def aggregate_search(word, timeout=15):
         return {'list': merged}
     with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
         futures = {
-            pool.submit(spider_app.searchContent, s.runner, word, '0', '1'): s
+            pool.submit(_search_source_pages, s.runner, word): s
             for s in site_list
         }
         for fut, s in futures.items():
             try:
-                data = json.loads(fut.result(timeout=timeout))
-                for item in data.get('list', []):
+                items = fut.result(timeout=timeout)
+                for item in items:
                     item.setdefault('source', s.key)
                     merged.append(item)
             except Exception as e:
@@ -336,14 +360,13 @@ def create_app():
                 return
             with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
                 futures = {
-                    pool.submit(spider_app.searchContent, s.runner, word, '0', '1'): s
+                    pool.submit(_search_source_pages, s.runner, word): s
                     for s in site_list
                 }
                 for fut in as_completed(futures, timeout=30):
                     s = futures[fut]
                     try:
-                        data = json.loads(fut.result(timeout=0.1))
-                        items = data.get('list', [])
+                        items = fut.result(timeout=0.1)
                     except Exception as e:
                         logger.warning('sse search source %s failed: %s', s.key, e)
                         items = []

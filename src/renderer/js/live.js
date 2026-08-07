@@ -12,7 +12,7 @@
  * 播放：首地址交主进程 mpv；未真正开播时主进程自动切换备用线路
  * （vpc:play-retry/failed 事件提示）。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, listPageSize, renderPagerBox */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, listPageSize, renderPagerBox, adaptivePageSize */
 
 const Live = {
     lives: [],
@@ -131,8 +131,8 @@ const Live = {
         const live = this.lives[idx];
         if (!live) return;
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
-        // T34：每页频道数跟随「每页影片数量」设置（频道行紧凑取 3 倍，至少 60）
-        this._pageSize = Math.max(60, (((await listPageSize()) || 36) * 3));
+        // T34：每页频道数跟随「每页影片数量」（「自动」同首页自适应估算；频道行紧凑取 3 倍，至少 60）
+        this._pageSize = Math.max(60, (((await listPageSize()) || adaptivePageSize()) * 3));
         this._page = 1;
         $('#live-status').hide();
         showLoading();

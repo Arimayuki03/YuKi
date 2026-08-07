@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox, adaptivePageSize */
 
 const Home = {
     sites: [],
@@ -210,17 +210,9 @@ const Home = {
         this._extendHome(token);
     },
 
-    /** 估算铺满可视区需要的卡片数（列数×行数，下限 36 上限 120，控制单次拉取总量）。 */
+    /** 估算铺满可视区需要的卡片数（T36：收口至 common.js adaptivePageSize，各页共用）。 */
     _adaptiveTarget() {
-        try {
-            const grid = document.getElementById('home-grid');
-            const w = (grid && grid.clientWidth) || window.innerWidth;
-            const top = grid ? grid.getBoundingClientRect().top : 0;
-            // 列宽 140 + 间距 16；行高 ≈ 封面 + 两行文字 ≈ 285
-            const cols = Math.max(3, Math.floor((w + 16) / 156));
-            const rows = Math.max(3, Math.ceil((window.innerHeight - top + 285) / 285));
-            return Math.min(120, Math.max(36, cols * rows));
-        } catch (e) { return 36; }
+        return adaptivePageSize();
     },
 
     /** 逐页拉首个分类内容去重追加，每拉到一批立即增量渲染（上限 3 页）。 */
