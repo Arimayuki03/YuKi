@@ -194,6 +194,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T32~T35 批次**：外观背景区选图/移除按钮移至遮罩下拉下方（T32）；删除类操作二次确认补全（清除已完成/历史源✕/直播源✕，T33）；直播频道列表分页（同首页分页器规格，每页影片数×3，T34；收藏/历史/搜索已有分页无需改）；直播可用性本地缓存（首次探测落盘，进页/切源默认用缓存，手动点刷新才重探，T35）。
 - **T36 批次**：扩展状态卡并入全宽组（非全屏半宽下内容挤窄）；搜索每源结果 20 条上限根治（后端聚合搜索改每源拉前 3 页去重合并，遇空页即停）；每页条数全站对齐首页（adaptivePageSize 收口 common.js，收藏/历史/搜索/直播「自动」模式同首页窗口自适应估算，搜索页条数随设置不再固定 30）。
 - **T37 批次**：收藏/历史/搜索「自动」分页触发修复：「自动」估算上限收至 24（此前大窗口估算 36~120，20 几条记录不分页），新增「20 条」每页条数选项；首页分类保持铺满窗口行为不变。
+- **T38 批次**：分页体系定稿：收藏/历史固定每页 20 条超过即分页（不再走设置/自动）；搜索「全部」视图每组限显前 20 条，点来源标签进单源视图启用分页器翻全部；后端单源搜索取消 3 页限制拉全部页（空页/短页/整页无新增即停，50 页防护）；「自动（铺满窗口）」模式整体移除（adaptivePageSize 删除，设置项只剩 20/24/36/60/120，仅首页/直播生效）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -224,7 +225,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T37，2026-08）
+## 8.8 进行中任务批次（T1~T38，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -265,3 +266,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T35 | 直播可用性本地缓存：探测结果按源 URL 存 settings.liveProbeCache（{ts, dead:[不可用频道 url]}，最多 20 个源超出丢最旧）；进页/切源默认按缓存过滤不再探测（状态栏提示「已按缓存结果过滤 N 个 · 点刷新重新检测」，5s 自隐）；仅手动点「刷新」重新全量探测并更新缓存；首次无缓存仍探测一次建缓存；探测异常不写缓存保留旧值 | 已完成 |
 | T36 | 用户反馈三连修复：①扩展状态卡非全屏半宽内容挤窄 → 从短卡限宽组移入全宽组（grid-column:1/-1 限 880px，与外观/播放/快捷键/源设置同规格） ②搜索每源只见 20 条：根因非前端分页而是 CMS 源搜索接口服务端分页（limit=20）且聚合搜索只拉 pg=1 → server.py 新增 _search_source_pages 每源拉前 3 页合并去重（遇空页/短页即停，异常不抛），aggregate_search 与 SSE /search/stream 均接入，前端每源最多可见 60 条并正常翻页 ③每页条数全站对齐首页：新增 common.js adaptivePageSize（首页 _adaptiveTarget 收口于此），收藏/历史 render、搜索 run/_renderGrpPage、直播 _pageSize 的「自动」回退从固定 36 改自适应估算；搜索页每页条数从固定 30 改为跟随「每页影片数量」设置 | 已完成 |
 | T37 | 收藏/历史超过 20 几条不出分页器修复：根因是「自动」模式 adaptivePageSize 按大窗口估算 36~120，记录数少于估算值时 pagecount=1 不渲染分页器 → 收藏/历史 render 与搜索 run 的「自动」回退改 adaptivePageSize(24) 上限 24（超 24 条即分页）；设置「每页影片数量」新增「20 条」选项（listPageSize 白名单同步加 20）；首页分类保持铺满窗口自适应不变（源数据量大本来就有分页器） | 已完成 |
+| T38 | 分页体系定稿（用户四连要求）：①收藏/历史移除「自动」模式，固定每页 20 条（RECORDS_PAGE_SIZE）超过即出底部分页器 ②搜索后端取消最大页数限制：_search_source_pages 从拉前 3 页改拉全部页（空页/短页/整页无新增即停防伪分页死循环，max_pages=50 仅作防护上限），aggregate_search 超时 15s→60s、SSE as_completed 30s→120s 且超时异常仍发 done 事件防前端挂死 ③搜索页「全部」视图每组限显前 20 条不出分页器（附提示行），点来源标签进单源视图才启用分页器翻看全部（_paintGrp 按 _curSrc 判 focused） ④「自动（铺满窗口）」模式整体移除：删 common.js adaptivePageSize，新增 pageSizeSync 同步版，listPageSize 空/非法默认 20，首页 _pageSize/_adaptiveTarget 与直播 _pageSize 改直取设置值，设置下拉移除自动选项文案改「每页影片数量（首页/直播）」 | 已完成 |

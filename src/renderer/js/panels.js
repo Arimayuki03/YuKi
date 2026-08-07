@@ -749,7 +749,7 @@ function initSettingsPanel() {
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
         $('#set_anim').val(s.animEnabled !== false ? 'on' : 'off'); // 界面动画（T22：筛选框）
-        if (s.listPageSize) $('#set_pagesize').val(s.listPageSize); // 每页条数（空=自动）
+        if (s.listPageSize) $('#set_pagesize').val(s.listPageSize); // 每页条数（T38：已移除「自动」，空/非法默认 20）
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));

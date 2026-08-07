@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox, adaptivePageSize */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox, pageSizeSync */
 
 const Home = {
     sites: [],
@@ -210,9 +210,9 @@ const Home = {
         this._extendHome(token);
     },
 
-    /** 估算铺满可视区需要的卡片数（T36：收口至 common.js adaptivePageSize，各页共用）。 */
+    /** 铺满首页的目标卡片数（T38：跟随「每页影片数量」设置，默认 20）。 */
     _adaptiveTarget() {
-        return adaptivePageSize();
+        return pageSizeSync();
     },
 
     /** 逐页拉首个分类内容去重追加，每拉到一批立即增量渲染（上限 3 页）。 */
@@ -296,10 +296,9 @@ const Home = {
         }
     },
 
-    /** 生效的每页条数：设置值优先，空（自动）回退窗口自适应铺满估算。 */
+    /** 生效的每页条数（T38：直接取设置值，默认 20，已移除「自动」模式）。 */
     async _pageSize() {
-        const n = await listPageSize();
-        return n > 0 ? n : this._adaptiveTarget();
+        return await listPageSize();
     },
 
     /**

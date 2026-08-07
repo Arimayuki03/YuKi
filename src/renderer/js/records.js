@@ -6,7 +6,9 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除，工具栏可一键清空。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, Detail, listPageSize, renderPagerBox, adaptivePageSize */
+/* global $, escHtml, normalizePic, warnToast, Detail, renderPagerBox */
+
+const RECORDS_PAGE_SIZE = 20; // T38：收藏/历史固定每页 20 条，超过即分页（不再走「自动」估算）
 
 async function recGet(key) {
     try {
@@ -237,9 +239,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                 grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
                 return;
             }
-            // 客户端分页：设置值优先；「自动」回退窗口自适应估算但上限 24，
-            // 避免条数不多（如 20 几条）时估算值偏大而不分页
-            const size = (await listPageSize()) || adaptivePageSize(24);
+            // 客户端分页（T38）：固定每页 20 条，超过即出底部分页器（与首页同款分页组件）
+            const size = RECORDS_PAGE_SIZE;
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
             const slice = list.slice((this._page - 1) * size, this._page * size);

@@ -234,9 +234,10 @@ def dispatch_action(form):
         return 500, '{"code":500,"msg":"%s"}' % str(e).replace('"', "'")
 
 
-def _search_source_pages(runner, word, max_pages=3):
-    """单源搜索拉前 max_pages 页合并去重（T36：CMS 源搜索接口服务端分页，
-    默认 limit=20，只拉首页前端只能看到 20 条）；遇空页即停，异常不抛。"""
+def _search_source_pages(runner, word, max_pages=50):
+    """单源搜索拉全部页合并去重（T38：取消 3 页限制，CMS 源搜索接口
+    服务端分页 limit=20）；遇空页/短页/整页无新增即停（防部分源伪分页死循环），
+    max_pages 仅作安全防护上限，异常不抛。"""
     merged = []
     seen = set()
     for pg in range(1, max_pages + 1):
@@ -247,19 +248,24 @@ def _search_source_pages(runner, word, max_pages=3):
         items = data.get('list') or []
         if not items:
             break
+        added = 0
         for it in items:
             key = it.get('vod_id') or it.get('vod_name')
             if key in seen:
                 continue
             seen.add(key)
             merged.append(it)
+            added += 1
         if len(items) < 10:  # 短页视为末页（部分源 list 短于分页条数）
+            break
+        if added == 0:  # 整页全是重复：该源无真实分页，停
             break
     return merged
 
 
-def aggregate_search(word, timeout=15):
-    """线程池并发搜索全部可搜站点，单源超时/异常不拖累整体。"""
+def aggregate_search(word, timeout=60):
+    """线程池并发搜索全部可搜站点（T38 起单源拉全部页，耗时变长放宽超时），
+    单源超时/异常不拖累整体。"""
     merged = []
     site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
     if not site_list or not word:
@@ -363,16 +369,20 @@ def create_app():
                     pool.submit(_search_source_pages, s.runner, word): s
                     for s in site_list
                 }
-                for fut in as_completed(futures, timeout=30):
-                    s = futures[fut]
-                    try:
-                        items = fut.result(timeout=0.1)
-                    except Exception as e:
-                        logger.warning('sse search source %s failed: %s', s.key, e)
-                        items = []
-                    payload = json.dumps({'source': s.key, 'name': s.name, 'list': items},
-                                         ensure_ascii=False)
-                    yield f'data: {payload}\n\n'
+                try:
+                    # T38：单源拉全部页耗时变长，放宽到 120s；超时仍发 done 事件防前端挂死
+                    for fut in as_completed(futures, timeout=120):
+                        s = futures[fut]
+                        try:
+                            items = fut.result(timeout=0.1)
+                        except Exception as e:
+                            logger.warning('sse search source %s failed: %s', s.key, e)
+                            items = []
+                        payload = json.dumps({'source': s.key, 'name': s.name, 'list': items},
+                                             ensure_ascii=False)
+                        yield f'data: {payload}\n\n'
+                except Exception as e:
+                    logger.warning('sse search overall timeout: %s', e)
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 

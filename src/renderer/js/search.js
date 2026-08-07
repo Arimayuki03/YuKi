@@ -5,17 +5,18 @@
  *   data: {"source": key, "name": 名称, "list": [...]}
  * 全部结束发 event: done。逐源流式追加渲染；结果项点击进详情。
  * 来源筛选：每收到一个源生成一枚筛选标签，点击只看该源结果。
- * 分页（T6）：每个源分组内部用统一分页器翻页，每页 SEARCH_PAGE_SIZE 条，
- * 数据已由 SSE 一次给全，纯前端切片，避免单源千百条撑爆 DOM。
+ * 分页（T38）：「全部」视图每组限显前 20 条（无分页器，超出的点上
+ * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
+ * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, listPageSize, adaptivePageSize */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox */
 
-const SEARCH_PAGE_SIZE = 30; // 兜底值；实际每页条数跟随「每页影片数量」设置（T36）
+const SEARCH_PAGE_SIZE = 20; // T38：固定每页 20 条，超过即分页（不再走「自动」估算）
 
 const Search = {
     es: null,
     _inited: false,
-    _size: 0,        // 本次搜索生效的每页条数（run 时按设置解析一次）
+    _curSrc: '',     // 当前筛选源（空 = 「全部」视图，限显前 20 条）
     _grpSeq: 0,      // 分组 id 自增序号（分页容器唯一定位）
     _grpLists: {},   // gid → { src, list }（SSE 已给全量，纯前端切片翻页）
 
@@ -30,15 +31,17 @@ const Search = {
             const el = $(e.currentTarget);
             Detail.open(el.data('source'), el.data('id'), el.data('name'));
         });
-        // 来源筛选标签：全部 / 单源
+        // 来源筛选标签：全部（限显前 20 条）/ 单源（分页看全部）
         $('#search-filters').on('click', '.class-tab', (e) => {
             const el = $(e.currentTarget);
             $('#search-filters .class-tab').removeClass('active');
             el.addClass('active');
-            const src = el.data('src') || '';
+            this._curSrc = String(el.data('src') || '');
             $('#search-results .src-group').each(function () {
-                $(this).toggle(!src || $(this).data('source') === src);
-            });
+                $(this).toggle(!this._curSrc || $(this).data('source') === this._curSrc);
+            }.bind(this));
+            // 切换视图后重渲：全部→限显首页，单源→启用分页器
+            Object.keys(this._grpLists).forEach((gid) => this._paintGrp(gid, 1));
         });
     },
 
@@ -53,12 +56,11 @@ const Search = {
     async run() {
         const word = $('#search-keyword').val().trim();
         if (!word) { warnToast('请输入关键字'); return; }
-        // T36：每页条数设置值优先；「自动」回退自适应估算但上限 24，少量结果也能出分页器
-        this._size = (await listPageSize()) || adaptivePageSize(24) || SEARCH_PAGE_SIZE;
         this.stop();
         $('#search-results').empty();
         this._grpLists = {}; // 新搜索：重置分组数据
         this._grpSeq = 0;
+        this._curSrc = '';
         // 重置来源筛选栏（默认「全部」）
         $('#search-filters').html('<span class="class-tab active" data-src="">全部</span>').show();
         $('#search-status').text('搜寻中…').show();
@@ -107,22 +109,29 @@ const Search = {
         // 组内分页：数据已全量在手，纯前端切片，统一分页器驱动
         const gid = 'sg' + (this._grpSeq++);
         this._grpLists[gid] = { src, list };
-        box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="pager" id="${gid}-pager"></div></div>`);
-        this._renderGrpPage(gid, 1);
+        box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="src-hint tip-line" id="${gid}-hint" style="display:none">仅显示前 ${SEARCH_PAGE_SIZE} 条 · 点上方来源标签分页看全部</div><div class="pager" id="${gid}-pager"></div></div>`);
+        this._paintGrp(gid, 1);
     },
 
-    /** 分组翻页渲染：按每页条数切片 + 统一分页器（T36：条数跟随设置）。 */
-    _renderGrpPage(gid, page) {
+    /**
+     * 分组渲染（T38）：「全部」视图每组限显前 SEARCH_PAGE_SIZE 条不出分页器
+     * （优先按源分类浏览）；点来源标签进单源视图后启用分页器翻看全部。
+     */
+    _paintGrp(gid, page) {
         const grp = this._grpLists[gid];
         if (!grp) return;
-        const size = this._size || SEARCH_PAGE_SIZE;
-        const pagecount = Math.ceil(grp.list.length / size);
+        const focused = this._curSrc && grp.src === this._curSrc;
+        const size = SEARCH_PAGE_SIZE;
+        const pagecount = focused ? Math.ceil(grp.list.length / size) : 1;
         const slice = grp.list.slice((page - 1) * size, page * size);
         const cards = slice.map((v) => {
             const html = vodCard(v);
             return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
         }).join('');
         $(`#${gid}-grid`).html(cards);
-        renderPagerBox($(`#${gid}-pager`), { page, pagecount, onJump: (pg) => this._renderGrpPage(gid, pg) });
+        $(`#${gid}-hint`).toggle(!focused && grp.list.length > size);
+        renderPagerBox($(`#${gid}-pager`), focused
+            ? { page, pagecount, onJump: (pg) => this._paintGrp(gid, pg) }
+            : { page: 1, pagecount: 1 });
     },
 };

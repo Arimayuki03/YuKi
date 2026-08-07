@@ -139,36 +139,22 @@ function fmtSize(n) {
 
 let _pageSizeCache = null; // 每页条数设置缓存（变更后由 invalidatePageSizeCache 作废）
 
-/** 每页条数设置：返回 20/24/36/60/120；0 = 自动（由调用方按窗口自适应）。 */
+/** 每页条数设置：返回 20/24/36/60/120，空/非法默认 20（T38：已移除「自动」模式）。 */
 async function listPageSize() {
     if (_pageSizeCache !== null) return _pageSizeCache;
     try {
         const s = (await window.vpc.settingsGet()) || {};
         const n = parseInt(s.listPageSize, 10);
-        _pageSizeCache = [20, 24, 36, 60, 120].indexOf(n) >= 0 ? n : 0;
-    } catch (e) { _pageSizeCache = 0; }
+        _pageSizeCache = [20, 24, 36, 60, 120].indexOf(n) >= 0 ? n : 20;
+    } catch (e) { _pageSizeCache = 20; }
     return _pageSizeCache;
 }
 
+/** 每页条数同步版：缓存未建立时返回默认 20（首页铺满估算等同步场景用）。 */
+function pageSizeSync() { return _pageSizeCache || 20; }
+
 /** 设置页变更每页条数后调用，使缓存作废（下次进列表页即生效）。 */
 function invalidatePageSizeCache() { _pageSizeCache = null; }
-
-/**
- * 「自动」模式下的每页条数（T36 收口）：估算铺满可视区所需卡片数
- * （列数×行数，下限 36 上限 120）；首页铺满用默认上限，收藏/历史/
- * 搜索传 cap=36 限制条数，保证条数不多时也能出分页器。
- */
-function adaptivePageSize(cap) {
-    try {
-        const grid = document.getElementById('home-grid') || document.querySelector('.vod-grid');
-        const w = (grid && grid.clientWidth) || window.innerWidth;
-        const top = grid ? grid.getBoundingClientRect().top : 0;
-        // 列宽 140 + 间距 16；行高 ≈ 封面 + 两行文字 ≈ 285
-        const cols = Math.max(3, Math.floor((w + 16) / 156));
-        const rows = Math.max(3, Math.ceil((window.innerHeight - top + 285) / 285));
-        return Math.min(cap || 120, Math.max(36, cols * rows));
-    } catch (e) { return 36; }
-}
 
 /**
  * 统一分页器：首页/上一页/页码（当前页±2 连号 + 首尾页，空隙省略号）/下一页/末页 + 跳转输入。
