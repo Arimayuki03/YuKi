@@ -6,9 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除，工具栏可一键清空。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, Detail, renderPagerBox */
-
-const RECORDS_PAGE_SIZE = 20; // T38：收藏/历史固定每页 20 条，超过即分页（不再走「自动」估算）
+/* global $, escHtml, normalizePic, warnToast, Detail, renderPagerBox, pageSizeOf */
 
 async function recGet(key) {
     try {
@@ -143,8 +141,8 @@ async function confirmRecEdit() {
     warnToast('已保存');
 }
 
-/** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）。两页均支持多选删除与搜索。 */
-function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
+/** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。两页均支持多选删除与搜索。 */
+function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSizeKey) {
     return {
         _inited: false,
         _selectMode: false, // 多选删除模式：卡片点击改为切换勾选
@@ -239,8 +237,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                 grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
                 return;
             }
-            // 客户端分页（T38）：固定每页 20 条，超过即出底部分页器（与首页同款分页组件）
-            const size = RECORDS_PAGE_SIZE;
+            // 客户端分页（T39）：每页条数取本页单独设置（收藏/历史各自一项，默认 20），超过即出底部分页器
+            const size = await pageSizeOf(pageSizeKey);
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
             const slice = list.slice((this._page - 1) * size, this._page * size);
@@ -337,5 +335,5 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
     };
 }
 
-const Favorites = makeRecordView('view-favorites', 'favorites', '暂无收藏。打开影片详情页点“收藏”按钮即可添加。', true, true);
-const HistoryView = makeRecordView('view-history', 'history', '暂无播放历史。打开影片详情页会自动记录。', true, false);
+const Favorites = makeRecordView('view-favorites', 'favorites', '暂无收藏。打开影片详情页点“收藏”按钮即可添加。', true, true, 'pageSizeFavorites');
+const HistoryView = makeRecordView('view-history', 'history', '暂无播放历史。打开影片详情页会自动记录。', true, false, 'pageSizeHistory');

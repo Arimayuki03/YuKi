@@ -12,7 +12,22 @@
  * 播放：首地址交主进程 mpv；未真正开播时主进程自动切换备用线路
  * （vpc:play-retry/failed 事件提示）。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, listPageSize, renderPagerBox */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox */
+
+/**
+ * T39：直播每页频道数 = 铺满一屏的容量（铺满后才翻页）。
+ * 频道列表为 auto-fill minmax(220px,1fr) gap 10 的 grid，行高 ≈ 45 + 10 间距。
+ */
+function liveFitPageSize() {
+    try {
+        const box = document.getElementById('live-list');
+        const w = (box && box.clientWidth) || window.innerWidth;
+        const cols = Math.max(1, Math.floor((w + 10) / 230));
+        const top = box ? box.getBoundingClientRect().top : 0;
+        const rows = Math.max(3, Math.floor((window.innerHeight - top) / 55));
+        return cols * rows;
+    } catch (e) { return 108; }
+}
 
 const Live = {
     lives: [],
@@ -131,8 +146,8 @@ const Live = {
         const live = this.lives[idx];
         if (!live) return;
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
-        // T34：每页频道数跟随「每页影片数量」（频道行紧凑取 3 倍，至少 60；T38 起无「自动」回退）
-        this._pageSize = Math.max(60, ((await listPageSize()) * 3));
+        // T39：每页频道数 = 铺满一屏的容量，铺满后才翻页（不再跟随每页影片数设置）
+        this._pageSize = liveFitPageSize();
         this._page = 1;
         $('#live-status').hide();
         showLoading();
@@ -312,7 +327,7 @@ const Live = {
             $('#live-pager').empty();
             return;
         }
-        const size = this._pageSize || 108;
+        const size = this._pageSize || liveFitPageSize();
         const pagecount = Math.ceil(shown.length / size);
         this._page = Math.min(Math.max(1, this._page), pagecount);
         shown.slice((this._page - 1) * size, this._page * size).forEach(({ c, i }) => {

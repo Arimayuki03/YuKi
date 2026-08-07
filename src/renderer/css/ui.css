@@ -542,22 +542,24 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 @media (min-width:1500px) { .settings-grid { grid-template-columns:repeat(3, 1fr); } }
 /* T31：表单密集的高卡片（外观/播放/快捷键）与多卡分类（源设置）横跨全宽，
    max-width 限宽防止全屏 3 列时拉得过宽；
-   T36：扩展状态卡含组件状态行 + 安装说明，并入全宽组（原半宽下内容挤窄） */
+   T36：扩展状态卡含组件状态行 + 安装说明，并入全宽组（原半宽下内容挤窄）；
+   T39：下载/系统卡同规格并入全宽组（与扩展状态同宽） */
 .settings-grid .tool-card[data-setcat="appearance"],
 .settings-grid .tool-card[data-setcat="play"],
 .settings-grid .tool-card[data-setcat="hotkey"],
 .settings-grid .tool-card[data-setcat="asset"],
-.settings-grid .tool-card[data-setcat="source"] { grid-column:1 / -1; max-width:880px; }
-/* T31：短内容单卡（下载/系统）限宽，避免宽屏下横向拉空 */
+.settings-grid .tool-card[data-setcat="source"],
 .settings-grid .tool-card[data-setcat="download"],
-.settings-grid .tool-card[data-setcat="system"] { max-width:680px; }
+.settings-grid .tool-card[data-setcat="system"] { grid-column:1 / -1; max-width:880px; }
 @media (min-width:1500px) {
-    /* 全宽分类在 3 列模式下仍横跨两列，保持内容宽度层级一致 */
+    /* 全宽分类在 3 列模式下仍横跨两列，保持内容宽度层级一致（T39：下载/系统同组） */
     .settings-grid .tool-card[data-setcat="appearance"],
     .settings-grid .tool-card[data-setcat="play"],
     .settings-grid .tool-card[data-setcat="hotkey"],
     .settings-grid .tool-card[data-setcat="asset"],
-    .settings-grid .tool-card[data-setcat="source"] { grid-column:span 2; }
+    .settings-grid .tool-card[data-setcat="source"],
+    .settings-grid .tool-card[data-setcat="download"],
+    .settings-grid .tool-card[data-setcat="system"] { grid-column:span 2; }
 }
 /* 设置页标签字号层级：标题 15px 加粗（.tool-card-title），标签 13px，正文随视图 14px */
 .settings-grid .tip-line { font-size:13px; line-height:1.5; }

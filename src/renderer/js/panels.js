@@ -749,7 +749,11 @@ function initSettingsPanel() {
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
         $('#set_anim').val(s.animEnabled !== false ? 'on' : 'off'); // 界面动画（T22：筛选框）
-        if (s.listPageSize) $('#set_pagesize').val(s.listPageSize); // 每页条数（T38：已移除「自动」，空/非法默认 20）
+        // 每页条数（T39：首页/搜索/收藏/历史各自一项；首页兼容旧键 listPageSize）
+        if (s.pageSizeHome || s.listPageSize) $('#set_pagesize_home').val(s.pageSizeHome || s.listPageSize);
+        if (s.pageSizeSearch) $('#set_pagesize_search').val(s.pageSizeSearch);
+        if (s.pageSizeFavorites) $('#set_pagesize_fav').val(s.pageSizeFavorites);
+        if (s.pageSizeHistory) $('#set_pagesize_history').val(s.pageSizeHistory);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -947,11 +951,14 @@ function initSettingsPanel() {
         window.vpc.settingsSet('animEnabled', on);
         applySkin({ animEnabled: on });
     });
-    // 每页影片数量：持久化并作废渲染层缓存，下次进列表页生效
-    $('#set_pagesize').on('change', function () {
-        window.vpc.settingsSet('listPageSize', this.value);
-        if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
-        warnToast('每页条数已保存，下次进入列表页生效');
+    // 每页影片数量（T39：首页/搜索/收藏/历史各自持久化，作废渲染层缓存，下次进列表页生效）
+    [['#set_pagesize_home', 'pageSizeHome'], ['#set_pagesize_search', 'pageSizeSearch'],
+     ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory']].forEach(([sel, key]) => {
+        $(sel).on('change', function () {
+            window.vpc.settingsSet(key, this.value);
+            if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
+            warnToast('每页条数已保存，下次进入对应页面生效');
+        });
     });
     // 关闭主窗口行为
     $('#set_closeaction').on('change', function () {

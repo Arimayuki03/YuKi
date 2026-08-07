@@ -295,14 +295,43 @@
                             <option value="on" selected>开启</option>
                             <option value="off">关闭</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量（首页/直播）</div>
-                        <select id="set_pagesize" class="md-select">
-                            <option value="20" selected>20 条</option>
-                            <option value="24">24 条</option>
-                            <option value="36">36 条</option>
-                            <option value="60">60 条</option>
-                            <option value="120">120 条</option>
-                        </select>
+                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量（T39：各页可单独设置，直播铺满一屏后自动翻页）</div>
+                        <div class="wall-row" style="margin-top:6px;">
+                            <span class="tip-line pad0">首页</span>
+                            <select id="set_pagesize_home" class="md-select">
+                                <option value="20" selected>20 条</option>
+                                <option value="24">24 条</option>
+                                <option value="36">36 条</option>
+                                <option value="60">60 条</option>
+                                <option value="120">120 条</option>
+                            </select>
+                            <span class="tip-line pad0">搜索</span>
+                            <select id="set_pagesize_search" class="md-select">
+                                <option value="20" selected>20 条</option>
+                                <option value="24">24 条</option>
+                                <option value="36">36 条</option>
+                                <option value="60">60 条</option>
+                                <option value="120">120 条</option>
+                            </select>
+                        </div>
+                        <div class="wall-row" style="margin-top:8px;">
+                            <span class="tip-line pad0">收藏</span>
+                            <select id="set_pagesize_fav" class="md-select">
+                                <option value="20" selected>20 条</option>
+                                <option value="24">24 条</option>
+                                <option value="36">36 条</option>
+                                <option value="60">60 条</option>
+                                <option value="120">120 条</option>
+                            </select>
+                            <span class="tip-line pad0">历史</span>
+                            <select id="set_pagesize_history" class="md-select">
+                                <option value="20" selected>20 条</option>
+                                <option value="24">24 条</option>
+                                <option value="36">36 条</option>
+                                <option value="60">60 条</option>
+                                <option value="120">120 条</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="tool-card" data-setcat="play">
                         <div class="tool-card-title">播放</div>

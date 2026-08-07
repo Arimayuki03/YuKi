@@ -9,13 +9,14 @@
  * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, pageSizeOf */
 
-const SEARCH_PAGE_SIZE = 20; // T38：固定每页 20 条，超过即分页（不再走「自动」估算）
+const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
 const Search = {
     es: null,
     _inited: false,
+    _size: 0,        // 本次搜索生效的每页条数（run 时按设置解析一次）
     _curSrc: '',     // 当前筛选源（空 = 「全部」视图，限显前 20 条）
     _grpSeq: 0,      // 分组 id 自增序号（分页容器唯一定位）
     _grpLists: {},   // gid → { src, list }（SSE 已给全量，纯前端切片翻页）
@@ -36,10 +37,12 @@ const Search = {
             const el = $(e.currentTarget);
             $('#search-filters .class-tab').removeClass('active');
             el.addClass('active');
-            this._curSrc = String(el.data('src') || '');
+            const cur = String(el.data('src') || '');
+            this._curSrc = cur;
+            // T39 修复：jQuery each 内 this 是 DOM 元素，不能 .bind(this)（此前导致点源不筛选）
             $('#search-results .src-group').each(function () {
-                $(this).toggle(!this._curSrc || $(this).data('source') === this._curSrc);
-            }.bind(this));
+                $(this).toggle(!cur || String($(this).data('source')) === cur);
+            });
             // 切换视图后重渲：全部→限显首页，单源→启用分页器
             Object.keys(this._grpLists).forEach((gid) => this._paintGrp(gid, 1));
         });
@@ -56,6 +59,8 @@ const Search = {
     async run() {
         const word = $('#search-keyword').val().trim();
         if (!word) { warnToast('请输入关键字'); return; }
+        // T39：每页条数取「搜索页」单独设置（默认 20）
+        this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
         this.stop();
         $('#search-results').empty();
         this._grpLists = {}; // 新搜索：重置分组数据
@@ -121,7 +126,7 @@ const Search = {
         const grp = this._grpLists[gid];
         if (!grp) return;
         const focused = this._curSrc && grp.src === this._curSrc;
-        const size = SEARCH_PAGE_SIZE;
+        const size = this._size || SEARCH_PAGE_SIZE;
         const pagecount = focused ? Math.ceil(grp.list.length / size) : 1;
         const slice = grp.list.slice((page - 1) * size, page * size);
         const cards = slice.map((v) => {

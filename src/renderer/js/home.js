@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox, pageSizeSync */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf */
 
 const Home = {
     sites: [],
@@ -210,16 +210,16 @@ const Home = {
         this._extendHome(token);
     },
 
-    /** 铺满首页的目标卡片数（T38：跟随「每页影片数量」设置，默认 20）。 */
-    _adaptiveTarget() {
-        return pageSizeSync();
+    /** 铺满首页的目标卡片数（T39：跟随「首页每页条数」设置，默认 20）。 */
+    async _adaptiveTarget() {
+        return await pageSizeOf('pageSizeHome');
     },
 
     /** 逐页拉首个分类内容去重追加，每拉到一批立即增量渲染（上限 3 页）。 */
     async _extendHome(token) {
         if (!this._fillTid) return;
         let guard = 0;
-        while (this._homeList.length < this._adaptiveTarget()
+        while (this._homeList.length < (await this._adaptiveTarget())
             && this._fillPg < 3 && guard++ < 3) {
             this._fillPg += 1;
             let items = [];
@@ -251,7 +251,7 @@ const Home = {
     async _onResize() {
         const token = this._loadToken;
         if (this.mode === 'home') {
-            if (!this._homeList.length || this._homeList.length >= this._adaptiveTarget()) return;
+            if (!this._homeList.length || this._homeList.length >= (await this._adaptiveTarget())) return;
             await this._extendHome(token);
         }
     },
@@ -296,9 +296,9 @@ const Home = {
         }
     },
 
-    /** 生效的每页条数（T38：直接取设置值，默认 20，已移除「自动」模式）。 */
+    /** 生效的每页条数（T39：首页单独设置 pageSizeHome，默认 20）。 */
     async _pageSize() {
-        return await listPageSize();
+        return await pageSizeOf('pageSizeHome');
     },
 
     /**

@@ -195,6 +195,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T36 批次**：扩展状态卡并入全宽组（非全屏半宽下内容挤窄）；搜索每源结果 20 条上限根治（后端聚合搜索改每源拉前 3 页去重合并，遇空页即停）；每页条数全站对齐首页（adaptivePageSize 收口 common.js，收藏/历史/搜索/直播「自动」模式同首页窗口自适应估算，搜索页条数随设置不再固定 30）。
 - **T37 批次**：收藏/历史/搜索「自动」分页触发修复：「自动」估算上限收至 24（此前大窗口估算 36~120，20 几条记录不分页），新增「20 条」每页条数选项；首页分类保持铺满窗口行为不变。
 - **T38 批次**：分页体系定稿：收藏/历史固定每页 20 条超过即分页（不再走设置/自动）；搜索「全部」视图每组限显前 20 条，点来源标签进单源视图启用分页器翻全部；后端单源搜索取消 3 页限制拉全部页（空页/短页/整页无新增即停，50 页防护）；「自动（铺满窗口）」模式整体移除（adaptivePageSize 删除，设置项只剩 20/24/36/60/120，仅首页/直播生效）。
+- **T39 批次**：设置页下载/系统卡并入全宽组（与扩展状态同宽，非全屏 880px、全屏 span 2）；每页条数拆为首页/搜索/收藏/历史四项独立设置（pageSizeOf(key)，首页兼容旧键 listPageSize），直播改铺满一屏容量后翻页（liveFitPageSize 按 grid 列数×可见行数估算）；修复搜索页点来源标签不筛选的 bug（jQuery each 内 .bind(this) 覆盖了元素 this）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -225,7 +226,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T38，2026-08）
+## 8.8 进行中任务批次（T1~T39，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -267,3 +268,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T36 | 用户反馈三连修复：①扩展状态卡非全屏半宽内容挤窄 → 从短卡限宽组移入全宽组（grid-column:1/-1 限 880px，与外观/播放/快捷键/源设置同规格） ②搜索每源只见 20 条：根因非前端分页而是 CMS 源搜索接口服务端分页（limit=20）且聚合搜索只拉 pg=1 → server.py 新增 _search_source_pages 每源拉前 3 页合并去重（遇空页/短页即停，异常不抛），aggregate_search 与 SSE /search/stream 均接入，前端每源最多可见 60 条并正常翻页 ③每页条数全站对齐首页：新增 common.js adaptivePageSize（首页 _adaptiveTarget 收口于此），收藏/历史 render、搜索 run/_renderGrpPage、直播 _pageSize 的「自动」回退从固定 36 改自适应估算；搜索页每页条数从固定 30 改为跟随「每页影片数量」设置 | 已完成 |
 | T37 | 收藏/历史超过 20 几条不出分页器修复：根因是「自动」模式 adaptivePageSize 按大窗口估算 36~120，记录数少于估算值时 pagecount=1 不渲染分页器 → 收藏/历史 render 与搜索 run 的「自动」回退改 adaptivePageSize(24) 上限 24（超 24 条即分页）；设置「每页影片数量」新增「20 条」选项（listPageSize 白名单同步加 20）；首页分类保持铺满窗口自适应不变（源数据量大本来就有分页器） | 已完成 |
 | T38 | 分页体系定稿（用户四连要求）：①收藏/历史移除「自动」模式，固定每页 20 条（RECORDS_PAGE_SIZE）超过即出底部分页器 ②搜索后端取消最大页数限制：_search_source_pages 从拉前 3 页改拉全部页（空页/短页/整页无新增即停防伪分页死循环，max_pages=50 仅作防护上限），aggregate_search 超时 15s→60s、SSE as_completed 30s→120s 且超时异常仍发 done 事件防前端挂死 ③搜索页「全部」视图每组限显前 20 条不出分页器（附提示行），点来源标签进单源视图才启用分页器翻看全部（_paintGrp 按 _curSrc 判 focused） ④「自动（铺满窗口）」模式整体移除：删 common.js adaptivePageSize，新增 pageSizeSync 同步版，listPageSize 空/非法默认 20，首页 _pageSize/_adaptiveTarget 与直播 _pageSize 改直取设置值，设置下拉移除自动选项文案改「每页影片数量（首页/直播）」 | 已完成 |
+| T39 | 设置宽度 + 分页面条数 + 搜索筛选 bug（用户四连）：①ui.css 下载/系统卡从 680px 限宽组移入全宽组（非全屏 grid-column:1/-1 限 880px 与扩展状态同宽，全屏 ≥1500px span 2 与扩展同宽） ②每页条数拆四项独立设置：common.js listPageSize/pageSizeSync 改 pageSizeOf(key)（pageSizeHome/pageSizeSearch/pageSizeFavorites/pageSizeHistory，按 key 缓存，首页回退旧键 listPageSize 兼容迁移），index.html 单下拉改四下拉（首页/搜索/收藏/历史各 20~120 五档），panels.js load/change 同步四项，home _pageSize/_adaptiveTarget（改 async + await）、search run 恢复 _size、records 工厂加 pageSizeKey 参数（Favorites/HistoryView 各自传键） ③直播改铺满一屏后翻页：live.js 新增 liveFitPageSize（#live-list 宽÷230 列数 × 可见高÷55 行数）替代原设置×3 ④修复搜索页点来源标签不筛选：根因 jQuery .each(function) 内 this 是 DOM 元素却被 .bind(this) 覆盖成 Search 对象 → 改闭包变量 cur | 已完成 |

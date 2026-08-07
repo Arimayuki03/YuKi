@@ -137,24 +137,29 @@ function fmtSize(n) {
 
 // ---------------------------------------------------------------- 分页
 
-let _pageSizeCache = null; // 每页条数设置缓存（变更后由 invalidatePageSizeCache 作废）
+let _pageSizeCache = {}; // 每页条数设置缓存（key → 值；变更后由 invalidatePageSizeCache 整体作废）
+const PAGE_SIZE_OPTIONS = [20, 24, 36, 60, 120];
 
-/** 每页条数设置：返回 20/24/36/60/120，空/非法默认 20（T38：已移除「自动」模式）。 */
-async function listPageSize() {
-    if (_pageSizeCache !== null) return _pageSizeCache;
+/**
+ * 分页面每页条数设置（T39：首页/搜索/收藏/历史可单独设置）。
+ * key：pageSizeHome / pageSizeSearch / pageSizeFavorites / pageSizeHistory；
+ * 返回 20/24/36/60/120，空/非法默认 20；首页额外回退旧键 listPageSize（兼容升级前设置）。
+ */
+async function pageSizeOf(key) {
+    if (_pageSizeCache[key]) return _pageSizeCache[key];
     try {
         const s = (await window.vpc.settingsGet()) || {};
-        const n = parseInt(s.listPageSize, 10);
-        _pageSizeCache = [20, 24, 36, 60, 120].indexOf(n) >= 0 ? n : 20;
-    } catch (e) { _pageSizeCache = 20; }
-    return _pageSizeCache;
+        let n = parseInt(s[key], 10);
+        if (!(PAGE_SIZE_OPTIONS.indexOf(n) >= 0) && key === 'pageSizeHome') {
+            n = parseInt(s.listPageSize, 10); // 旧版单一设置迁移
+        }
+        _pageSizeCache[key] = PAGE_SIZE_OPTIONS.indexOf(n) >= 0 ? n : 20;
+    } catch (e) { _pageSizeCache[key] = 20; }
+    return _pageSizeCache[key];
 }
 
-/** 每页条数同步版：缓存未建立时返回默认 20（首页铺满估算等同步场景用）。 */
-function pageSizeSync() { return _pageSizeCache || 20; }
-
-/** 设置页变更每页条数后调用，使缓存作废（下次进列表页即生效）。 */
-function invalidatePageSizeCache() { _pageSizeCache = null; }
+/** 设置页变更每页条数后调用，使缓存整体作废（下次进列表页即生效）。 */
+function invalidatePageSizeCache() { _pageSizeCache = {}; }
 
 /**
  * 统一分页器：首页/上一页/页码（当前页±2 连号 + 首尾页，空隙省略号）/下一页/末页 + 跳转输入。
