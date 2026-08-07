@@ -366,7 +366,9 @@ app.whenReady().then(() => {
             } catch (e) { /* not in PATH */ }
             return '';
         })();
-        const anime4kOk = ANIME4K_FILES.every((f) => anime4kFileOk(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
+        // 三档位所需着色器全集（去重）均就绪才算 Anime4K 可用（T8 后不再有单一 FILES 清单）
+        const anime4kFiles = [...new Set(Object.values(ANIME4K_CHAINS).flat())];
+        const anime4kOk = anime4kFiles.every((f) => anime4kFileOk(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
         const mpvPath = mpv.binary || '';
         return {
             ffmpeg: { ready: !!ffmpegPath, downloading: require('./ffmpeg').isEnsuring() },
