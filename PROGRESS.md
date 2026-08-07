@@ -191,6 +191,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T26~T29 批次**：外观卡布局字号统一（T26）、缓存两卡等高（T27）、侧栏直链改名 + 本地文件独立板块（T28）、源配置迁入设置一级菜单源设置（T29）。
 - **T30 批次**：动画体验整体优化：M3 变弧 loading（淡入淡出 + 载入文案）、toast/弹窗退场动画、卡片错峰入场、easing 统一。
 - **T31 批次**：设置页非全屏适配（单列断点对齐 900px、高内容分类横跨全宽限 880px、短卡限宽 680px）；性能：封面 decoding=async + 下载列表按指纹增量渲染；可维护性：封面 img 收口 common.js vodCoverImg（home/records/detail 三处参数漂移根治）、ui.css 文件头板块索引。
+- **T32~T35 批次**：外观背景区选图/移除按钮移至遮罩下拉下方（T32）；删除类操作二次确认补全（清除已完成/历史源✕/直播源✕，T33）；直播频道列表分页（同首页分页器规格，每页影片数×3，T34；收藏/历史/搜索已有分页无需改）；直播可用性本地缓存（首次探测落盘，进页/切源默认用缓存，手动点刷新才重探，T35）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -221,7 +222,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T31，2026-08）
+## 8.8 进行中任务批次（T1~T35，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -256,3 +257,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T29 | 源配置迁入设置一级菜单「源设置」（导航位置：扩展与系统之间）：载入视频源/视频历史源/直播源/直播历史源/屏蔽源五卡整体迁入 settings-grid（data-setcat=source，控件 id 与卡片内样式不变，绑定维持原位）；home/player/live 引导文案同步改「设置→源设置」 | 已完成 |
 | T30 | 动画体验整体优化：loading 升级 M3 变弧 spinner（md-dash 弧长伸缩）+ scrim 淡入/关闭淡出 + 「载入中…」文案；warnToast 退场淡出（snackOut）；弹窗退场动画（dlg-out 淡出缩小 150ms 延迟隐藏，重开清 timer 防误藏 + pointer-events 禁点）；vod-card 前 10 张错峰入场（30ms/张）；view/card/dialog/snackbar easing 统一 cubic-bezier(.2,.7,.3,1)；panels.js 12 处 loadingToast 直引改 show/hideLoading 统一淡出；no-anim 开关自动兼容（过渡被禁不影响隐藏时机） | 已完成 |
 | T31 | 设置页非全屏适配 + 性能 + 可维护性：①适配：settings-grid 单列断点 760→900（与 settings-wrap 导航横排断点对齐）；外观/播放/快捷键/源设置高内容分类 grid-column 横跨全宽限 max-width:880px，下载/扩展/系统短卡限宽 680px，全屏 3 列时全宽分类 span 2 保持层级一致 ②性能：封面 img 增 decoding=async（异步解码降主线程卡顿）；下载列表渲染改指纹增量（gid 序列不变时只换变化条目，全同直接跳过，避免每秒全量 DOM 重建） ③可维护性：vodPlaceholder/coverFadeIn 从 home.js 迁至 common.js，新增 vodCoverImg 统一生成封面标签（lazy/async/no-referrer/淡入/兜底），home/records/detail 三处手写 img 收口（detail 缺 lazy/decoding 的参数漂移根治）；ui.css 文件头增板块索引注释（关键词定位不带行号防漂移） | 已完成 |
+| T32 | 外观设置背景区重排：遮罩强度下拉置顶，选择本地图片/移除背景两按钮移至其下方单独一行（wall-row 拆两行） | 已完成 |
+| T33 | 删除类操作二次确认补全：下载页「清除已完成」（clearDone）、源设置历史源✕（removeConfigHistory）、直播源✕（removeLiveSource）三处补 confirmDialog；其余删除入口（收藏/历史单条+多选+清空、下载单删+清失败、本地文件/文件夹、缓存清理、恢复默认）盘点确认已有确认 | 已完成 |
+| T34 | 直播频道列表分页：新增 #live-pager 容器 + renderPagerBox（同首页/收藏历史规格）；每页频道数 = 每页影片数×3（频道行紧凑，至少 60），切分组/切源回第一页，探测过滤后当前页自动 clamp；索引保留完整 channels 位置（点击播放不受分页影响）；搜索页（源内 30 条/页）与收藏/历史（listPageSize 客户端分页）盘点确认已有分页无需改 | 已完成 |
+| T35 | 直播可用性本地缓存：探测结果按源 URL 存 settings.liveProbeCache（{ts, dead:[不可用频道 url]}，最多 20 个源超出丢最旧）；进页/切源默认按缓存过滤不再探测（状态栏提示「已按缓存结果过滤 N 个 · 点刷新重新检测」，5s 自隐）；仅手动点「刷新」重新全量探测并更新缓存；首次无缓存仍探测一次建缓存；探测异常不写缓存保留旧值 | 已完成 |

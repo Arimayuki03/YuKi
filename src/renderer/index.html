@@ -99,6 +99,7 @@
                 </div>
                 <div id="live-groups" class="class-tabs"></div>
                 <div id="live-list" class="live-list"></div>
+                <div id="live-pager" class="pager"></div>
             </section>
 
             <!-- 收藏（多选删除：进入选择模式后勾选卡片批量移除） -->
@@ -279,13 +280,15 @@
                         </select>
                         <div class="tip-line pad0" style="margin-top:12px;">背景</div>
                         <div class="wall-row">
-                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
-                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除背景</button>
                             <select id="set_walldim" class="md-select">
                                 <option value="">遮罩强度 · 标准</option>
                                 <option value="low">遮罩 · 弱（背景更醒目）</option>
                                 <option value="high">遮罩 · 强（内容更清晰）</option>
                             </select>
+                        </div>
+                        <div class="wall-row">
+                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
+                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除背景</button>
                         </div>
                         <div class="tip-line pad0" style="margin-top:12px;">界面动画</div>
                         <select id="set_anim" class="md-select">

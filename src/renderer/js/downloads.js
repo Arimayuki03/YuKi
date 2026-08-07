@@ -81,6 +81,8 @@ const Downloads = {
     },
 
     async clearDone() {
+        // T33：删除类操作统一二次确认（仅移除列表记录，已下载文件不受影响）
+        if (!await confirmDialog('清除所有已完成任务？已下载的文件不会被删除。', { okText: '清除' })) return;
         const r = await window.vpc.download.control('clear', {});
         if (!r.ok) warnToast(`清除失败：${r.reason}`);
     },

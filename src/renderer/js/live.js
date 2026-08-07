@@ -12,12 +12,14 @@
  * 播放：首地址交主进程 mpv；未真正开播时主进程自动切换备用线路
  * （vpc:play-retry/failed 事件提示）。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, listPageSize, renderPagerBox */
 
 const Live = {
     lives: [],
     channels: [],      // [{group, name, url}]
     group: '',
+    _page: 1,          // 频道列表当前页（T34：客户端分页，同首页分页器规格）
+    _pageSize: 0,      // 每页频道数：影片每页条数 ×3（频道行紧凑），切源时刷新
     _inited: false,
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
     _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
@@ -25,13 +27,15 @@ const Live = {
     init() {
         if (this._inited) return;
         this._inited = true;
-        $('#live-select').on('change', () => this.loadChannels());
-        $('#live-refresh').on('click', () => this.loadChannels());
+        $('#live-select').on('change', () => this.loadChannels(false));
+        // T35：手动刷新才重新探测可用性，平时进页/切源直接用本地缓存
+        $('#live-refresh').on('click', () => this.loadChannels(true));
         $('#live-groups').on('click', '.class-tab', (e) => {
             const g = String($(e.currentTarget).data('group'));
             $('#live-groups .class-tab').removeClass('active');
             $(e.currentTarget).addClass('active');
             this.group = g;
+            this._page = 1; // 切分组回第一页
             this.renderList();
         });
         $('#live-list').on('click', '.live-item', (e) => {
@@ -121,11 +125,15 @@ const Live = {
         await this.loadChannels();
     },
 
-    async loadChannels() {
+    /** force=true（手动点刷新）才重新探测；否则优先用本地可用性缓存（T35）。 */
+    async loadChannels(force) {
         const idx = parseInt($('#live-select').val(), 10);
         const live = this.lives[idx];
         if (!live) return;
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
+        // T34：每页频道数跟随「每页影片数量」设置（频道行紧凑取 3 倍，至少 60）
+        this._pageSize = Math.max(60, (((await listPageSize()) || 36) * 3));
+        this._page = 1;
         $('#live-status').hide();
         showLoading();
         try {
@@ -134,7 +142,21 @@ const Live = {
             const channels = live.url.split('?')[0].endsWith('.m3u') || text.trim().startsWith('#EXTM3U')
                 ? this.parseM3u(text)
                 : this.parseTxt(text);
-            this.channels = channels;
+            // T35：有本地可用性缓存且非手动刷新 → 直接按缓存过滤，不再探测
+            let cacheHit = false;
+            if (!force && channels.length) {
+                try {
+                    const s = (await window.vpc.settingsGet()) || {};
+                    const c = (s.liveProbeCache || {})[live.url];
+                    if (c && Array.isArray(c.dead)) {
+                        const dead = {};
+                        c.dead.forEach((u) => { dead[u] = 1; });
+                        this.channels = channels.filter((ch) => !dead[ch.url]);
+                        cacheHit = true;
+                    }
+                } catch (e) { /* 无缓存走首次探测 */ }
+            }
+            if (!cacheHit) this.channels = channels;
             this.group = '';
             this.renderGroups();
             this.renderList();
@@ -146,19 +168,29 @@ const Live = {
                     : '<div class="tip-line">直播源没有解析到频道（所有频道均不可用或地址无效）</div>');
                 return;
             }
+            if (cacheHit) {
+                // T35：缓存命中提示（手动刷新可重新探测）
+                const hidden = channels.length - this.channels.length;
+                $('#live-status').text(hidden > 0
+                    ? `已按缓存结果过滤 ${hidden} 个不可用频道 · 点「刷新」重新检测`
+                    : '已按缓存结果载入 · 点「刷新」重新检测').show();
+                setTimeout(() => { if (token === this._probeToken) $('#live-status').hide(); }, 5000);
+                return;
+            }
         } catch (e) {
             if (token === this._probeToken) $('#live-list').html('<div class="tip-line">直播源载入失败</div>');
             return;
         } finally {
             if (token === this._probeToken) hideLoading();
         }
-        // 频道立即渲染完毕，可用性在后台静默分批探测（不再占用 loading 遮罩）
-        if (window.vpc && window.vpc.probeUrls) this._probeChannels(token);
+        // 频道立即渲染完毕，可用性在后台静默分批探测（首次进入/手动刷新；不再占用 loading 遮罩）
+        if (window.vpc && window.vpc.probeUrls) this._probeChannels(token, live.url);
     },
 
     /** 静默分批探测频道可用性：每批 50 串行 probeUrls，返回后原地过滤并刷新列表。
-     *  token 与当前 _probeToken 不一致（已切源/刷新）时丢弃本批结果。 */
-    async _probeChannels(token) {
+     *  token 与当前 _probeToken 不一致（已切源/刷新）时丢弃本批结果；
+     *  探测完成后写入本地缓存（T35：下次进入直接用，手动刷新才重探）。 */
+    async _probeChannels(token, liveUrl) {
         const BATCH = 50;
         const status = $('#live-status');
         const all = this.channels.slice();
@@ -186,6 +218,8 @@ const Live = {
             const hidden = all.length - this.channels.length;
             status.text(hidden > 0 ? `已过滤 ${hidden} 个不可用频道` : '全部频道可用').show();
             setTimeout(() => { if (alive()) status.hide(); }, 5000);
+            // T35：探测结果落盘（下次进页/切源直接按缓存过滤）
+            this._saveProbeCache(liveUrl, all, kept);
         } catch (e) {
             // 探测异常：静默清空状态位，保留全部频道（撤销已过滤结果）
             if (alive()) {
@@ -195,6 +229,21 @@ const Live = {
                 status.hide();
             }
         }
+    },
+
+    /** T35：可用性探测结果写入 settings.liveProbeCache（按源 URL 索引，最多留 20 个源，超出丢最旧）。 */
+    async _saveProbeCache(url, all, kept) {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            const cache = s.liveProbeCache || {};
+            cache[url] = { ts: Date.now(), dead: all.filter((c, i) => !kept[i]).map((c) => c.url) };
+            const keys = Object.keys(cache);
+            if (keys.length > 20) {
+                keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
+                delete cache[keys[0]];
+            }
+            await window.vpc.settingsSet('liveProbeCache', cache);
+        } catch (e) { /* 写缓存失败不影响本次探测结果展示 */ }
     },
 
     /** TXT 直播源：组名,#genre# 为分组行；频道名,url[,url...] 为频道行（多地址留作备用线路）。 */
@@ -253,13 +302,29 @@ const Live = {
 
     renderList() {
         const box = $('#live-list').empty();
+        // T34 分页：先按分组过滤再切片，索引保留在完整 channels 中的位置（点击播放用）
+        const shown = [];
         this.channels.forEach((c, i) => {
-            if (this.group && c.group !== this.group) return;
+            if (!this.group || c.group === this.group) shown.push({ c, i });
+        });
+        if (!shown.length) {
+            box.html('<div class="tip-line">该分组下没有频道</div>');
+            $('#live-pager').empty();
+            return;
+        }
+        const size = this._pageSize || 108;
+        const pagecount = Math.ceil(shown.length / size);
+        this._page = Math.min(Math.max(1, this._page), pagecount);
+        shown.slice((this._page - 1) * size, this._page * size).forEach(({ c, i }) => {
             box.append(`<div class="live-item" data-idx="${i}" tabindex="0">
                 <span class="live-name">${escHtml(c.name)}</span>
                 <span class="live-group">${escHtml(c.group)}</span></div>`);
         });
-        if (!box.children().length) box.html('<div class="tip-line">该分组下没有频道</div>');
+        renderPagerBox($('#live-pager'), {
+            page: this._page,
+            pagecount,
+            onJump: (pg) => { this._page = pg; this.renderList(); },
+        });
     },
 
     /** 视图切入时惰性加载（首次进入或直播源有变更才拉取）。 */

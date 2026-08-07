@@ -132,6 +132,8 @@ async function removeConfigHistory(idx) {
     try {
         const s = (await window.vpc.settingsGet()) || {};
         const list = Array.isArray(s.configHistory) ? s.configHistory : [];
+        // T33：删除类操作统一二次确认
+        if (!await confirmDialog('删除该历史源记录？（仅移除记录，不影响已载入的配置）', { okText: '删除' })) return;
         list.splice(idx, 1);
         await window.vpc.settingsSet('configHistory', list);
         window._cfgHistoryCache = list;
@@ -273,6 +275,8 @@ async function removeLiveSource(idx) {
     try {
         const s = (await window.vpc.settingsGet()) || {};
         const list = Array.isArray(s.customLives) ? s.customLives : [];
+        // T33：删除类操作统一二次确认
+        if (!await confirmDialog('删除该直播源？', { okText: '删除' })) return;
         list.splice(idx, 1);
         await window.vpc.settingsSet('customLives', list);
         renderLiveSources(list);
