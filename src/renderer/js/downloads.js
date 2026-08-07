@@ -60,7 +60,8 @@ const Downloads = {
 
     async addUri() {
         const uri = $('#dl-uri').val().trim();
-        if (!uri) return;
+        // T40：空输入点新建也给反馈（此前静默无响应）
+        if (!uri) { warnToast('请先在上方输入框粘贴视频链接'); $('#dl-uri').trigger('focus'); return; }
         // m3u8 切片流 aria2 无法处理，走 ffmpeg 合成通道
         const isM3u8 = /\.m3u8(\?|#|$)/i.test(uri.split('?')[0]);
         const r = await window.vpc.download.control(isM3u8 ? 'addHls' : 'add', { uri });

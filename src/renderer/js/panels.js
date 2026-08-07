@@ -8,7 +8,7 @@
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
 /* global $, doAction, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading,
-          openDialog, closeDialog, registerEsc, Home, Live, Downloads */
+          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -155,6 +155,8 @@ async function refreshCacheSize() {
 }
 
 async function clearCache() {
+    // T40：清理前二次确认
+    if (!await confirmDialog('清理影片缓存？缓存清理后再次浏览会重新拉取。', { okText: '清理' })) return;
     try {
         const r = await doAction('clearCache', {});
         if (r && r.code === 200) {
@@ -411,9 +413,10 @@ function renderNeedRoot() {
     $('#local-pager').hide();
 }
 
-/** 刷新当前目录（不动导航栈；外部删除/拷入文件后手动同步视图）。 */
+/** 刷新当前目录（不动导航栈；外部删除/拷入文件后手动同步视图；
+ *  内容无变化时跳过重渲避免列表闪烁，T40）。 */
 function refreshLocal() {
-    listFile(currentRoot);
+    listFile(currentRoot, true);
 }
 
 /** 分页条上/下一页回调（包装一层：顶层 let 不挂 window，inline onclick 不直接引用）。 */
@@ -473,8 +476,16 @@ function pickRoot() {
     }).catch(() => warnToast('选择失败'));
 }
 
-/** 拉取并渲染目录列表（200ms 未返回先显示 loading；needRoot 转引导态；分页重置回第一页）。 */
-function listFile(relPath) {
+/** 目录指纹（T40 刷新防闪烁）：路径 + 各条目 dir/名/时间序列化；
+ *  刷新后指纹不变则跳过重渲（避免缩略图重拉导致列表闪烁）。 */
+function _localFp(st) {
+    return st.path + '|' + st.dirs.concat(st.videos, st.audios)
+        .map((n) => `${n.dir ? 1 : 0}:${n.name}:${n.time}`).join(',');
+}
+
+/** 拉取并渲染目录列表（200ms 未返回先显示 loading；needRoot 转引导态；分页重置回第一页；silent=手动刷新，内容无变化不重渲）。 */
+function listFile(relPath, silent) {
+    const prevFp = silent && _localPage && _localPageNo === 1 ? _localFp(_localPage) : '';
     const loadingTimer = setTimeout(() => showLoading(), 200);
     window.vpc.fileList(relPath || '').then((info) => {
         clearTimeout(loadingTimer);
@@ -492,7 +503,9 @@ function listFile(relPath) {
             else if (isLocalVideo(node.name)) videos.push(node);
             else if (isLocalAudio(node.name)) audios.push(node);
         });
-        _localPage = { path: currentRoot, parent, dirs, videos, audios };
+        const next = { path: currentRoot, parent, dirs, videos, audios };
+        if (prevFp && prevFp === _localFp(next)) { warnToast('目录内容无变化'); return; }
+        _localPage = next;
         _localPageNo = 1;
         renderLocalPage();
     }).catch(() => {
@@ -814,7 +827,9 @@ function initSettingsPanel() {
         window.vpc.settingsSet('theme', '');
         applySkin({ customColor: this.value });
     });
-    $('#set_theme_clear').on('click', () => {
+    $('#set_theme_clear').on('click', async () => {
+        // T40：恢复默认主题前二次确认
+        if (!await confirmDialog('恢复默认主题？自定义主题色会一并清除。', { okText: '恢复' })) return;
         $('#set_theme').val('');
         window.vpc.settingsSet('theme', '');
         window.vpc.settingsSet('customTheme', '');
@@ -848,7 +863,9 @@ function initSettingsPanel() {
         $('#set_textcolor').val('');
         applyTextColor(this.value);
     });
-    $('#set_textcolor_clear').on('click', () => {
+    $('#set_textcolor_clear').on('click', async () => {
+        // T40：恢复默认字体颜色前二次确认
+        if (!await confirmDialog('恢复默认字体颜色？', { okText: '恢复' })) return;
         $('#set_textcolor').val('');
         applyTextColor('');
     });
@@ -881,8 +898,9 @@ function initSettingsPanel() {
         };
         document.addEventListener('keydown', _hkNativeHandler, true);
     });
-    // 恢复默认键位
+    // 恢复默认键位（T40：二次确认）
     $('#hotkey_reset').on('click', async () => {
+        if (!await confirmDialog('恢复默认快捷键？自定义键位会一并清除。', { okText: '恢复' })) return;
         _hkKeys = HK_UI_ACTIONS.reduce((m, a) => { m[a[0]] = a[2]; return m; }, {});
         hkCancelCapture();
         await saveHotkeys();
@@ -1159,8 +1177,9 @@ async function chooseWallpaper() {
     warnToast('壁纸已设置');
 }
 
-/** 移除壁纸。 */
+/** 移除壁纸（T40：二次确认）。 */
 async function clearWallpaper() {
+    if (!await confirmDialog('移除当前背景壁纸？', { okText: '移除' })) return;
     window.vpc.settingsSet('wallpaper', '');
     window._wallpaperUrl = '';
     applySkin({ wallpaperUrl: '' });

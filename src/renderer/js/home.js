@@ -117,8 +117,9 @@ const Home = {
 
     /**
      * 后台探测无内容源：homeContent 推荐位有内容 → 通过；推荐位空则
-     * 复查首个分类 categoryContent；仍为空或出错 → 记入 blockedSites。
-     * 并发 4，只探测未探测过的源，结果持久化（可在源配置里恢复）。
+     * 逐个检查分类（T40：任一分类有资源即视为可用，不屏蔽；全部分类
+     * 为空或出错才记入 blockedSites）。并发 4，只探测未探测过的源，
+     * 结果持久化（可在源配置里恢复）。
      */
     async _probeSites() {
         if (this._probing || !this._allSites.length) return;
@@ -140,16 +141,20 @@ const Home = {
                     const d = await doAction('homeContent', { site: site.key, filter: 'false' });
                     if (((d && d.list) || []).length) ok = true;
                     else {
+                        // T40：任一分类有资源即不屏蔽（此前只查首个分类，
+                        // 首个分类恰好为空会误屏蔽）；逐个试到出结果为止
                         const cls = (d && d.class) || [];
-                        if (cls.length) {
-                            const tid = String(cls[0].type_id != null ? cls[0].type_id : '');
-                            const c = await doAction('categoryContent', {
-                                site: site.key, tid, pg: '1', filter: 'false', extend: '{}',
-                            });
-                            if (((c && c.list) || []).length) ok = true;
+                        for (let i = 0; i < cls.length && !ok; i++) {
+                            const tid = String(cls[i].type_id != null ? cls[i].type_id : '');
+                            try {
+                                const c = await doAction('categoryContent', {
+                                    site: site.key, tid, pg: '1', filter: 'false', extend: '{}',
+                                });
+                                if (((c && c.list) || []).length) ok = true;
+                            } catch (e) { /* 该分类出错跳过，继续看其他分类 */ }
                         }
                     }
-                } catch (e) { /* 探测失败视为无内容 */ }
+                } catch (e) { /* 推荐位获取失败视为无内容，继续按分类判断 */ }
                 if (!ok) { blocked.add(site.key); changed = true; }
             };
             const worker = async () => {

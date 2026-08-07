@@ -43,6 +43,47 @@ class ConfigManager:
         self.lives = []
         self.wallpaper = ''
         self.source_url = ''
+        # T40：多仓最近一次成功的条目名；重载时优先该条目，
+        # 避免不同次载入命中不同仓导致 lives 等数据漂移（直播源消失）
+        self.last_repo_name = ''
+        self._repo_pref_loaded = False
+
+    # ------------------------------------------------ 多仓条目偏好（T40）
+
+    @staticmethod
+    def _repo_pref_file():
+        try:
+            d = hoststate.get_data_dir()
+            if d:
+                os.makedirs(d, exist_ok=True)
+                return os.path.join(d, 'last_repo.txt')
+        except Exception:
+            pass
+        return ''
+
+    def _repo_pref(self):
+        """上次成功的多仓条目名（跨进程持久化，惰性读盘一次）。"""
+        if not self._repo_pref_loaded:
+            self._repo_pref_loaded = True
+            p = self._repo_pref_file()
+            if p:
+                try:
+                    with open(p, encoding='utf-8') as f:
+                        self.last_repo_name = f.read().strip()
+                except Exception:
+                    pass
+        return self.last_repo_name
+
+    def _save_repo_pref(self, name):
+        self.last_repo_name = name or ''
+        p = self._repo_pref_file()
+        if not p:
+            return
+        try:
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(self.last_repo_name)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 入口
 
@@ -62,6 +103,11 @@ class ConfigManager:
             if len(cfg['urls']) > MAX_MULTI_REPO_ENTRIES:
                 logger.info('multi-repo: only first %s of %s entries tried',
                             MAX_MULTI_REPO_ENTRIES, len(cfg['urls']))
+            # T40：优先重试上次成功的条目（置顶），保持 lives 等数据稳定
+            pref = self._repo_pref()
+            if pref:
+                entries = sorted(entries,
+                                 key=lambda it: 0 if (it or {}).get('name') == pref else 1)
             for item in entries:
                 sub = (item or {}).get('url', '')
                 if not sub:
@@ -75,6 +121,7 @@ class ConfigManager:
                     prepared = self._prepare(sub_cfg, sub)
                     if prepared['summary']['sites'] > 0:
                         self._apply(prepared)
+                        self._save_repo_pref(item.get('name'))
                         return prepared['summary']
                     logger.warning('multi-repo entry [%s] built 0 sites, try next', item.get('name'))
                     errors.append('%s: 0 sites' % item.get('name'))
@@ -229,6 +276,7 @@ class ConfigManager:
     def state(self):
         return {
             'source': self.source_url,
+            'repo': self.last_repo_name,
             'parses': self.parses,
             'flags': self.flags,
             'lives': self.lives,

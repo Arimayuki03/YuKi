@@ -102,14 +102,15 @@
                 <div id="live-pager" class="pager"></div>
             </section>
 
-            <!-- 收藏（多选删除：进入选择模式后勾选卡片批量移除） -->
+            <!-- 收藏（多选：进入选择模式后勾选卡片批量删除/标记想看/标记已看；T40 移除清空按钮） -->
             <section id="view-favorites" class="view">
                 <div class="view-toolbar">
                     <input id="view-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
                     <label class="rec-checkall" id="view-favorites-checkall-wrap" style="display:none"><input type="checkbox" id="view-favorites-checkall">全选</label>
                     <button id="view-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
-                    <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选删除</button>
-                    <button id="view-favorites-clear" class="md-btn md-btn-sm md-btn-danger-tonal">清空收藏</button>
+                    <button id="view-favorites-tagwant" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记想看</button>
+                    <button id="view-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记已看</button>
+                    <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                 </div>
                 <div class="rec-bar">
                     <div id="view-favorites-tags" class="rec-tags">
@@ -122,13 +123,12 @@
                 <div id="view-favorites-pager" class="pager"></div>
             </section>
 
-            <!-- 历史（多选删除：进入选择模式后勾选卡片批量移除） -->
+            <!-- 历史（多选删除：进入选择模式后勾选卡片批量移除；T40 移除全选） -->
             <section id="view-history" class="view">
                 <div class="view-toolbar">
                     <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
-                    <label class="rec-checkall" id="view-history-checkall-wrap" style="display:none"><input type="checkbox" id="view-history-checkall">全选</label>
                     <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
-                    <button id="view-history-multidel" class="md-btn md-btn-sm">多选删除</button>
+                    <button id="view-history-multidel" class="md-btn md-btn-sm">多选</button>
                     <button id="view-history-clear" class="md-btn md-btn-sm md-btn-danger-tonal">清空历史</button>
                 </div>
                 <div id="view-history-grid" class="vod-grid"></div>
@@ -295,42 +295,48 @@
                             <option value="on" selected>开启</option>
                             <option value="off">关闭</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量（T39：各页可单独设置，直播铺满一屏后自动翻页）</div>
-                        <div class="wall-row" style="margin-top:6px;">
-                            <span class="tip-line pad0">首页</span>
-                            <select id="set_pagesize_home" class="md-select">
-                                <option value="20" selected>20 条</option>
-                                <option value="24">24 条</option>
-                                <option value="36">36 条</option>
-                                <option value="60">60 条</option>
-                                <option value="120">120 条</option>
-                            </select>
-                            <span class="tip-line pad0">搜索</span>
-                            <select id="set_pagesize_search" class="md-select">
-                                <option value="20" selected>20 条</option>
-                                <option value="24">24 条</option>
-                                <option value="36">36 条</option>
-                                <option value="60">60 条</option>
-                                <option value="120">120 条</option>
-                            </select>
-                        </div>
-                        <div class="wall-row" style="margin-top:8px;">
-                            <span class="tip-line pad0">收藏</span>
-                            <select id="set_pagesize_fav" class="md-select">
-                                <option value="20" selected>20 条</option>
-                                <option value="24">24 条</option>
-                                <option value="36">36 条</option>
-                                <option value="60">60 条</option>
-                                <option value="120">120 条</option>
-                            </select>
-                            <span class="tip-line pad0">历史</span>
-                            <select id="set_pagesize_history" class="md-select">
-                                <option value="20" selected>20 条</option>
-                                <option value="24">24 条</option>
-                                <option value="36">36 条</option>
-                                <option value="60">60 条</option>
-                                <option value="120">120 条</option>
-                            </select>
+                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量</div>
+                        <div class="pagesize-grid">
+                            <div class="pagesize-cell">
+                                <span class="tip-line pad0">首页</span>
+                                <select id="set_pagesize_home" class="md-select">
+                                    <option value="20" selected>20 条</option>
+                                    <option value="24">24 条</option>
+                                    <option value="36">36 条</option>
+                                    <option value="60">60 条</option>
+                                    <option value="120">120 条</option>
+                                </select>
+                            </div>
+                            <div class="pagesize-cell">
+                                <span class="tip-line pad0">搜索</span>
+                                <select id="set_pagesize_search" class="md-select">
+                                    <option value="20" selected>20 条</option>
+                                    <option value="24">24 条</option>
+                                    <option value="36">36 条</option>
+                                    <option value="60">60 条</option>
+                                    <option value="120">120 条</option>
+                                </select>
+                            </div>
+                            <div class="pagesize-cell">
+                                <span class="tip-line pad0">收藏</span>
+                                <select id="set_pagesize_fav" class="md-select">
+                                    <option value="20" selected>20 条</option>
+                                    <option value="24">24 条</option>
+                                    <option value="36">36 条</option>
+                                    <option value="60">60 条</option>
+                                    <option value="120">120 条</option>
+                                </select>
+                            </div>
+                            <div class="pagesize-cell">
+                                <span class="tip-line pad0">历史</span>
+                                <select id="set_pagesize_history" class="md-select">
+                                    <option value="20" selected>20 条</option>
+                                    <option value="24">24 条</option>
+                                    <option value="36">36 条</option>
+                                    <option value="60">60 条</option>
+                                    <option value="120">120 条</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="play">
@@ -653,7 +659,7 @@
     <div id="blockedDialog" class="md-dialog-overlay">
         <div class="md-dialog">
             <div class="md-dialog-title">被屏蔽的源</div>
-            <div class="md-dialog-body" id="blocked_list" style="max-height:50vh;overflow-y:auto;"></div>
+            <div class="md-dialog-body" id="blocked_list"></div>
             <div class="md-dialog-actions">
                 <button onclick="closeDialog('blockedDialog')" class="md-dialog-btn">关闭</button>
             </div>

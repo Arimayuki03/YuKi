@@ -3,7 +3,7 @@
  *
  * 数据存 settings（favorites / history），条目 {site, siteName, vodId, name, pic, remarks, ts}，
  * 最新在前，上限 200 条。详情页打开时自动记入历史；收藏在详情页手动切换。
- * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除，工具栏可一键清空。
+ * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
 /* global $, escHtml, normalizePic, warnToast, Detail, renderPagerBox, pageSizeOf */
@@ -141,7 +141,7 @@ async function confirmRecEdit() {
     warnToast('已保存');
 }
 
-/** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。两页均支持多选删除与搜索。 */
+/** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。多选（T40）：收藏支持批量删除/标记想看/标记已看且保留全选；历史仅批量删除且无全选；清空按钮仅历史保留。 */
 function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSizeKey) {
     return {
         _inited: false,
@@ -184,14 +184,20 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     }
                     Detail.open(String(el.data('site')), String(el.data('id')), String(el.data('name')));
                 });
-            $(`#${viewName}-clear`).on('click', () => this.clear());
-            // 多选删除工具栏：进入/退出选择模式、全选、删除勾选
+            // 清空按钮仅历史页保留（T40：收藏页已删除该按钮）
+            if ($(`#${viewName}-clear`).length) $(`#${viewName}-clear`).on('click', () => this.clear());
+            // 多选工具栏：进入/退出选择模式；全选仅收藏页（T40：历史页已移除全选）
             $(`#${viewName}-multidel`).on('click', () => this.toggleSelectMode());
-            $(`#${viewName}-checkall`).on('change', (e) => {
-                $(`#${viewName}-grid .rec-check`).toggleClass('checked', e.currentTarget.checked);
-                $(`#${viewName}-grid .vod-card`).toggleClass('sel', e.currentTarget.checked);
-                this._syncSelBar();
-            });
+            if (withTags) {
+                $(`#${viewName}-checkall`).on('change', (e) => {
+                    $(`#${viewName}-grid .rec-check`).toggleClass('checked', e.currentTarget.checked);
+                    $(`#${viewName}-grid .vod-card`).toggleClass('sel', e.currentTarget.checked);
+                    this._syncSelBar();
+                });
+                // 批量标记想看/已看（T40）
+                $(`#${viewName}-tagwant`).on('click', () => this.tagChecked('want'));
+                $(`#${viewName}-tagseen`).on('click', () => this.tagChecked('seen'));
+            }
             $(`#${viewName}-delchecked`).on('click', () => this.removeChecked());
             // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）；过滤条件变化回第一页
             $(`#${viewName}-search`).on('input', (e) => {
@@ -276,10 +282,11 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             this._syncSelBar();
         },
 
-        /** 工具栏按钮文案/可见性跟随选择模式。 */
+        /** 工具栏按钮文案/可见性跟随选择模式（T40：收藏额外显标记按钮）。 */
         _syncSelToolbar() {
-            $(`#${viewName}-multidel`).text(this._selectMode ? '退出多选' : '多选删除');
+            $(`#${viewName}-multidel`).text(this._selectMode ? '退出多选' : '多选');
             $(`#${viewName}-checkall-wrap, #${viewName}-delchecked`).toggle(this._selectMode);
+            if (withTags) $(`#${viewName}-tagwant, #${viewName}-tagseen`).toggle(this._selectMode);
         },
 
         /** 勾选计数与按钮文案同步。 */
@@ -287,7 +294,26 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             const n = $(`#${viewName}-grid .rec-check.checked`).length;
             const total = $(`#${viewName}-grid .rec-check`).length;
             $(`#${viewName}-delchecked`).text(n ? `删除勾选（${n}）` : '删除勾选');
-            $(`#${viewName}-checkall`).prop('checked', total > 0 && n === total);
+            if (withTags) $(`#${viewName}-checkall`).prop('checked', total > 0 && n === total);
+        },
+
+        /** 批量标记勾选项想看/已看（仅收藏，T40）。 */
+        async tagChecked(tag) {
+            const keys = {};
+            $(`#${viewName}-grid .rec-check.checked`).each(function () {
+                keys[String($(this).data('site')) + '|' + String($(this).data('id'))] = 1;
+            });
+            const n = Object.keys(keys).length;
+            if (!n) { warnToast('请先勾选要标记的条目'); return; }
+            const list = await recGet(storeKey);
+            list.forEach((x) => {
+                if (keys[String(x.site) + '|' + String(x.vodId)]) x.tag = tag;
+            });
+            await recSet(storeKey, list);
+            this._selectMode = false;
+            this._syncSelToolbar();
+            await this.render();
+            warnToast(`已将 ${n} 条标记为${tag === 'seen' ? '已看' : '想看'}`);
         },
 
         /** 批量删除勾选项。 */
