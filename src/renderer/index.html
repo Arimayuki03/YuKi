@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <title>影视 PC</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=0,viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <link rel="stylesheet" href="css/ui.css">
+    <script src="js/jquery.min.js" defer></script>
+    <script src="js/common.js" defer></script>
+    <script src="js/panels.js" defer></script>
+    <script src="js/home.js" defer></script>
+    <script src="js/search.js" defer></script>
+    <script src="js/detail.js" defer></script>
+    <script src="js/player.js" defer></script>
+    <script src="js/records.js" defer></script>
+    <script src="js/downloads.js" defer></script>
+    <script src="js/live.js" defer></script>
+    <script src="js/app.js" defer></script>
+</head>
+
+<body>
+    <div id="app">
+        <!-- 主导航（桌面布局） -->
+        <nav id="main-nav">
+            <div class="brand">影视 PC</div>
+            <div class="main-nav-item active" data-view="home">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+                <span>首页</span>
+            </div>
+            <div class="main-nav-item" data-view="search">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                <span>搜索</span>
+            </div>
+            <div class="main-nav-item" data-view="live">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
+                <span>直播</span>
+            </div>
+            <div class="main-nav-item" data-view="favorites">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                <span>收藏</span>
+            </div>
+            <div class="main-nav-item" data-view="history">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                <span>历史</span>
+            </div>
+            <div class="main-nav-item" data-view="direct">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
+                <span>直链播放</span>
+            </div>
+            <div class="main-nav-item" data-view="downloads">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                <span>下载</span>
+            </div>
+            <div class="main-nav-item" data-view="tools">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg>
+                <span>工具面板</span>
+            </div>
+            <div class="main-nav-item" data-view="settings">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34-.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>
+                <span>设置</span>
+            </div>
+            <button id="nav-collapse" class="nav-collapse-btn" title="收缩/展开侧栏">
+                <svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+            </button>
+        </nav>
+
+        <!-- 视图区 -->
+        <div id="main-content">
+            <!-- 首页 -->
+            <section id="view-home" class="view active">
+                <div class="view-toolbar">
+                    <select id="site-select" class="md-select"></select>
+                    <input id="home-search" class="md-input home-search" type="text" placeholder="搜索当前源，回车搜索…" />
+                    <button id="home-refresh" class="md-btn md-btn-tonal">刷新</button>
+                </div>
+                <div id="home-class" class="class-tabs"></div>
+                <div id="home-grid" class="vod-grid"></div>
+                <div id="home-pager" class="pager"></div>
+            </section>
+
+            <!-- 搜索 -->
+            <section id="view-search" class="view">
+                <div class="search-bar">
+                    <input id="search-keyword" class="md-input" type="text" placeholder="输入关键字，多源聚合搜索…" />
+                    <button id="search-go" class="md-btn md-btn-filled">搜索</button>
+                </div>
+                <div id="search-filters" class="class-tabs" style="display:none"></div>
+                <div id="search-status" class="tip-line" style="display:none"></div>
+                <div id="search-results"></div>
+            </section>
+
+            <!-- 直播（config lives + 设置里的自定义源；源在“设置”页签维护） -->
+            <section id="view-live" class="view">
+                <div class="view-toolbar">
+                    <select id="live-select" class="md-select"></select>
+                    <button id="live-refresh" class="md-btn md-btn-tonal">刷新</button>
+                </div>
+                <div id="live-groups" class="class-tabs"></div>
+                <div id="live-list" class="live-list"></div>
+            </section>
+
+            <!-- 收藏（多选删除：进入选择模式后勾选卡片批量移除） -->
+            <section id="view-favorites" class="view">
+                <div class="view-toolbar">
+                    <span class="dl-spacer"></span>
+                    <label class="rec-checkall" id="view-favorites-checkall-wrap" style="display:none"><input type="checkbox" id="view-favorites-checkall">全选</label>
+                    <button id="view-favorites-delchecked" class="md-btn md-btn-sm" style="display:none">删除勾选</button>
+                    <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选删除</button>
+                    <button id="view-favorites-clear" class="md-btn md-btn-sm">清空收藏</button>
+                </div>
+                <div class="rec-bar">
+                    <input id="view-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
+                    <div id="view-favorites-tags" class="rec-tags">
+                        <span class="class-tab active" data-tag="">全部</span>
+                        <span class="class-tab" data-tag="want">想看</span>
+                        <span class="class-tab" data-tag="seen">已看</span>
+                    </div>
+                </div>
+                <div id="view-favorites-grid" class="vod-grid"></div>
+            </section>
+
+            <!-- 历史（多选删除：进入选择模式后勾选卡片批量移除） -->
+            <section id="view-history" class="view">
+                <div class="view-toolbar">
+                    <span class="dl-spacer"></span>
+                    <label class="rec-checkall" id="view-history-checkall-wrap" style="display:none"><input type="checkbox" id="view-history-checkall">全选</label>
+                    <button id="view-history-delchecked" class="md-btn md-btn-sm" style="display:none">删除勾选</button>
+                    <button id="view-history-multidel" class="md-btn md-btn-sm">多选删除</button>
+                    <button id="view-history-clear" class="md-btn md-btn-sm">清空历史</button>
+                </div>
+                <div class="rec-bar">
+                    <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
+                </div>
+                <div id="view-history-grid" class="vod-grid"></div>
+            </section>
+
+            <!-- 直链播放（从源配置迁入侧栏独立视图） -->
+            <section id="view-direct" class="view">
+                <div class="tool-card direct-card">
+                    <div class="tool-card-title">直链播放</div>
+                    <div class="tip-line pad0">粘贴视频直链（m3u8/mp4/flv 等）或分享页链接，自动解析并用 mpv 播放。</div>
+                    <div class="md-field">
+                        <input id="direct_play_url" class="md-input" type="text" placeholder="视频链接（http/https/rtmp）…" />
+                    </div>
+                    <button id="direct_play_go" class="md-btn md-btn-filled">播放</button>
+                </div>
+            </section>
+
+            <!-- 详情 -->
+            <section id="view-detail" class="view">
+                <button id="detail-back" class="md-btn md-btn-tonal back-btn">← 返回</button>
+                <div id="detail-body"></div>
+            </section>
+
+            <!-- 下载管理（aria2c；卡片化与其他页面统一；目录/并发数在「设置 → 下载」维护） -->
+            <section id="view-downloads" class="view">
+                <div class="downloads-wrap">
+                    <div class="tool-card">
+                        <div class="search-bar">
+                            <input id="dl-uri" class="md-input" type="text" placeholder="粘贴 HTTP / 磁力链接（magnet:…），回车添加" />
+                            <button id="dl-add" class="md-btn md-btn-filled">新建下载</button>
+                            <button id="dl-add-file" class="md-btn md-btn-tonal">种子文件</button>
+                        </div>
+                        <div class="dl-settings">
+                            <span class="dl-spacer"></span>
+                            <button id="dl-clear-failed" class="md-btn md-btn-sm">删除失败下载</button>
+                            <button id="dl-clear" class="md-btn md-btn-sm">清除已完成</button>
+                        </div>
+                        <div id="dl-tip" class="tip-line" style="display:none;"></div>
+                        <div id="dl-list" class="dl-list"></div>
+                    </div>
+                </div>
+            </section>
+            <!-- 工具面板（源配置 / 本地文件；设置已独立为侧栏底部入口） -->
+            <section id="view-tools" class="view">
+                <div class="tools-wrap">
+                    <div class="tools-tabs">
+                        <div class="tools-tab active" data-panel="tool-source">
+                            <svg class="tools-tab-icon" viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>
+                            源配置
+                        </div>
+                        <div class="tools-tab" data-panel="tool-local">
+                            <svg class="tools-tab-icon" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+                            本地文件
+                        </div>
+                    </div>
+                    <div class="tools-body">
+                        <!-- 源配置 -->
+                        <div id="tool-source" class="tool-panel active">
+                            <div class="tool-card">
+                                <div class="tool-card-title">载入视频源</div>
+                                <div class="tip-line pad0">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；需解析的影片链接会在播放时自动解析载入。</div>
+                                <div class="md-field">
+                                    <input id="setting_text" class="md-input" type="text" placeholder="配置地址（http/https）或 JSON…" />
+                                </div>
+                                <button onclick="setting()" class="md-btn md-btn-filled">载入配置</button>
+                            </div>
+                            <div class="tool-card">
+                                <div class="tool-card-title">视频历史源</div>
+                                <div class="tip-line pad0">成功载入的配置会自动记录；点击条目重新载入，点 ✕ 删除。</div>
+                                <div id="config_history" class="history-list"></div>
+                            </div>
+                            <div class="tool-card">
+                                <div class="tool-card-title">直播源</div>
+                                <div class="tip-line pad0">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取 lives）；配置里自带的直播源会自动载入。添加成功的直播源记录在下方「直播历史源」板块。</div>
+                                <div class="md-field">
+                                    <input id="live_src_url" class="md-input" type="text" placeholder="直播源地址（txt/m3u）或 TVBox 配置（JSON / .json 地址）…" />
+                                </div>
+                                <button id="live_src_add" class="md-btn md-btn-filled">添加直播源</button>
+                            </div>
+                            <div class="tool-card">
+                                <div class="tool-card-title">直播历史源</div>
+                                <div class="tip-line pad0">添加成功的自定义直播源会自动记录；点 ✕ 删除，删除后直播页同步更新。</div>
+                                <div id="live_src_list" class="history-list"></div>
+                            </div>
+                            <div class="tool-card">
+                                <div class="tool-card-title">屏蔽源</div>
+                                <div class="tip-line pad0" id="blocked_line">自动屏蔽探测后无内容的源，避免下拉里出现空源。</div>
+                                <div class="wall-row">
+                                    <button id="blocked_view" class="md-btn md-btn-tonal">查看屏蔽源</button>
+                                    <button id="blocked_restore" class="md-btn md-btn-tonal">恢复被屏蔽的源并重新探测</button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 本地文件（tool-card 半透明遮罩底，附详细说明） -->
+                        <div id="tool-local" class="tool-panel">
+                            <div class="tool-card">
+                                <div class="tool-card-title">本地文件</div>
+                                <div class="tip-line pad0">管理并播放本机视频：出于安全仅能访问你指定的根目录（白名单机制），首次使用请先点「更换根目录」选择一个本地文件夹。</div>
+                                <div class="local-desc">
+                                    <p>· 仅展示文件夹与视频/音频文件；单击视频/音频直接交 mpv 播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
+                                    <p>· 「上传文件」：把本机其他位置的视频复制到当前目录（会弹窗选文件）。</p>
+                                    <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
+                                    <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
+                                    <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
+                                </div>
+                                <div class="md-toolbar">
+                                    <button class="md-btn md-btn-tonal" onclick="uploadFile()">上传文件</button>
+                                    <button class="md-btn md-btn-tonal" onclick="showNewFolderDialog()">新建文件夹</button>
+                                    <button class="md-btn md-btn-tonal" onclick="pickRoot()">更换根目录</button>
+                                    <button class="md-btn md-btn-tonal" onclick="refreshLocal()">刷新</button>
+                                </div>
+                                <div id="file_list"></div>
+                                <!-- 本地文件分页条：仅多于一页时由 renderLocalPage 显示 -->
+                                <div id="local-pager" class="local-pager" style="display:none">
+                                    <button id="local-prev" class="md-btn md-btn-tonal" onclick="localPrev()">上一页</button>
+                                    <span id="local-page-info" class="local-page-info"></span>
+                                    <button id="local-next" class="md-btn md-btn-tonal" onclick="localNext()">下一页</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 设置（独立视图；分类卡片双列网格，见 ui.css .settings-grid） -->
+            <section id="view-settings" class="view">
+                <div class="settings-wrap settings-grid">
+                    <div class="tool-card">
+                        <div class="tool-card-title">外观</div>
+                        <div class="tip-line pad0">主题色（内置配色 + 取色器自定义）</div>
+                        <div class="color-row">
+                            <select id="set_theme" class="md-select">
+                                <option value="">默认绿</option>
+                                <option value="blue">天空蓝</option>
+                                <option value="purple">典雅紫</option>
+                                <option value="rose">玫瑰红</option>
+                                <option value="orange">琥珀橙</option>
+                                <option value="cyan">青碧</option>
+                            </select>
+                            <input id="set_theme_pick" class="color-pick" type="color" value="#1e6c45" title="自定义主题颜色">
+                            <button id="set_theme_clear" class="md-btn md-btn-tonal">恢复</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">明暗模式</div>
+                        <select id="set_colormode" class="md-select">
+                            <option value="auto">跟随系统</option>
+                            <option value="light">强制浅色</option>
+                            <option value="dark">强制深色</option>
+                        </select>
+                        <div class="tip-line pad0" style="margin-top:12px;">界面缩放（整体，60%~200%，填 100 恢复标准）</div>
+                        <div class="md-field short-num">
+                            <input id="set_fontsize" class="md-input" type="number" min="60" max="200" step="5" placeholder="100" />
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">字体大小（仅文字，80%~200%，填 100 恢复标准）</div>
+                        <div class="md-field short-num">
+                            <input id="set_textsize" class="md-input" type="number" min="80" max="200" step="5" placeholder="100" />
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">字体颜色</div>
+                        <div class="color-row">
+                            <select id="set_textcolor" class="md-select">
+                                <option value="">默认（跟随主题）</option>
+                                <option value="#000000">纯黑（高对比）</option>
+                                <option value="#FFFFFF">纯白（适合深色背景）</option>
+                            </select>
+                            <input id="set_textcolor_pick" class="color-pick" type="color" value="#304c3a" title="自定义字体颜色">
+                            <button id="set_textcolor_clear" class="md-btn md-btn-tonal">恢复</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">壁纸：可使用本地图片作为背景</div>
+                        <div class="wall-row">
+                            <select id="set_walldim" class="md-select">
+                                <option value="">遮罩强度 · 标准</option>
+                                <option value="low">遮罩 · 弱（壁纸更醒目）</option>
+                                <option value="high">遮罩 · 强（内容更清晰）</option>
+                            </select>
+                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
+                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除壁纸</button>
+                        </div>
+                        <label class="md-switch"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画（关闭后取消全部过渡动画）</span></label>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">播放与快捷键</div>
+                        <div class="tip-line pad0">预设音量（0 = 不设定，100 = 最大）</div>
+                        <div class="md-field short-num">
+                            <input id="set_volume" class="md-input" type="number" min="0" max="100" placeholder="0" />
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">默认倍速（起播时生效，播放中可用 [ ] 调整）</div>
+                        <select id="set_speed" class="md-select">
+                            <option value="0.5">0.5 倍</option>
+                            <option value="0.75">0.75 倍</option>
+                            <option value="1" selected>1.0 倍（标准）</option>
+                            <option value="1.25">1.25 倍</option>
+                            <option value="1.5">1.5 倍</option>
+                            <option value="2">2.0 倍</option>
+                            <option value="3">3.0 倍</option>
+                        </select>
+                        <label class="md-switch"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播（一集播完自动播下一集，需解析的源自动逐集解析）</span></label>
+                        <label class="md-switch"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置（下次播放同一影片自动跳转上次位置）</span></label>
+                        <label class="md-switch"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放（关闭窗口时不停止正在播放的影片）</span></label>
+                        <label class="md-switch"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式（不记录播放历史）</span></label>
+                        <label class="md-switch"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分（实时升频锐化，适合动漫；着色器启动时自动下载，首次启动稍候）</span></label>
+                        <div class="tip-line pad0" style="margin-top:12px;">mpv 语言偏好（多音轨/多字幕时优先选择，下次起播生效）</div>
+                        <div class="hotkey-grid">
+                            <div>
+                                <div class="tip-line pad0">音轨语言</div>
+                                <select id="set_alang" class="md-select">
+                                    <option value="" selected>自动（默认）</option>
+                                    <option value="zh">中文</option>
+                                    <option value="yue">粤语</option>
+                                    <option value="jpn">日语</option>
+                                    <option value="eng">英语</option>
+                                    <option value="kor">韩语</option>
+                                </select>
+                            </div>
+                            <div>
+                                <div class="tip-line pad0">字幕语言</div>
+                                <select id="set_slang" class="md-select">
+                                    <option value="" selected>自动（默认）</option>
+                                    <option value="zh">中文</option>
+                                    <option value="jpn">日语</option>
+                                    <option value="eng">英语</option>
+                                    <option value="kor">韩语</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">mpv 播放器快捷键步长（保存后下次起播生效）</div>
+                        <div class="hotkey-grid">
+                            <div>
+                                <div class="tip-line pad0">快进/快退（秒）</div>
+                                <div class="md-field short-num">
+                                    <input id="set_hotkey_seek" class="md-input" type="number" min="1" max="120" placeholder="5" />
+                                </div>
+                            </div>
+                            <div>
+                                <div class="tip-line pad0">音量步长（0-100）</div>
+                                <div class="md-field short-num">
+                                    <input id="set_hotkey_vol" class="md-input" type="number" min="1" max="20" placeholder="5" />
+                                </div>
+                            </div>
+                            <div>
+                                <div class="tip-line pad0">倍速步长</div>
+                                <div class="md-field short-num">
+                                    <input id="set_hotkey_speed" class="md-input" type="number" min="0.05" max="1" step="0.05" placeholder="0.1" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:10px;">键位：空格 暂停 · ←/→ 快退/快进 · ↑/↓ 音量 · [ ] 倍速 · Backspace 恢复原速 · , . 逐帧 · F 全屏</div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">下载</div>
+                        <div class="tip-line pad0" id="set_dl_dir_line">下载目录：默认（系统下载目录）</div>
+                        <div class="wall-row">
+                            <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
+                            <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:6px;">更换后下载引擎会重启，进行中任务中断但可断点续传。</div>
+                        <div class="tip-line pad0" style="margin-top:12px;">并发任务数</div>
+                        <select id="set_dl_concurrency" class="md-select">
+                            <option value="1">1 个</option>
+                            <option value="2">2 个</option>
+                            <option value="3" selected>3 个</option>
+                            <option value="5">5 个</option>
+                            <option value="8">8 个</option>
+                        </select>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">缓存</div>
+                        <div class="tip-line pad0" id="cache_size_line">当前缓存占用：统计中…</div>
+                        <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
+                        <div class="tip-line pad0" style="margin-top:10px;">清理范围：爬虫缓存、JS 本地存储与下载临时文件，不影响已载入的源与下载好的文件。</div>
+                        <div class="tip-line pad0" id="cache_dir_line" style="margin-top:12px;">缓存位置：默认</div>
+                        <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
+                        <div class="tip-line pad0" style="margin-top:6px;">更换后后端会重启，旧目录里的缓存不会自动迁移。</div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">系统</div>
+                        <div class="tip-line pad0">关闭主窗口时</div>
+                        <select id="set_closeaction" class="md-select">
+                            <option value="tray" selected>缩小至托盘（后台继续）</option>
+                            <option value="exit">直接退出</option>
+                            <option value="ask">每次询问</option>
+                        </select>
+                        <div class="tip-line pad0" style="margin-top:12px;">恢复默认设置：还原外观/播放等偏好，不删除收藏、历史与已载入的源。</div>
+                        <button id="set_reset" class="md-btn md-btn-tonal">恢复默认设置</button>
+                        <div class="tip-line pad0" id="app_version" style="margin-top:14px;"></div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">资产状态</div>
+                        <div class="tip-line pad0">以下为应用运行所需的本地二进制资产就绪情况。</div>
+                        <div id="asset-status-list" class="asset-status-list" style="margin-top:10px;">
+                            <div class="tip-line">查询中…</div>
+                        </div>
+                        <button id="asset-refresh" class="md-btn md-btn-tonal" style="margin-top:10px;">刷新状态</button>
+                        <div class="tip-line pad0" style="margin-top:8px;" id="mpv_path_line">mpv 路径：自动发现</div>
+                        <div style="margin-top:4px;display:flex;gap:8px;">
+                            <button id="pick_mpv_path" class="md-btn md-btn-tonal">指定 mpv.exe 路径</button>
+                            <button id="clear_mpv_path" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:6px;">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    
+        <!-- 回到顶部（当前视图滚动超出一屏后出现） -->
+        <button id="back-top" title="回到顶部">
+            <svg viewBox="0 0 24 24"><path d="M12 5l7 7-1.41 1.41L13 8.83V19h-2V8.83l-4.59 4.58L5 12z"/></svg>
+        </button>
+    </div>
+    
+    <!-- Dialog: 播放（Phase 2 预览兜底，Phase 4 接 mpv） -->
+    <div id="playerDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title" id="player-title">播放</div>
+            <div class="md-dialog-body">
+                <div id="player-note" style="display:none;color:var(--md-error)"></div>
+                <video id="player-video" controls style="display:none;width:100%;max-height:44vh;background:#000;border-radius:8px"></video>
+                <div class="player-url" id="player-url"></div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="player-close" class="md-dialog-btn">关闭</button>
+                <button id="player-copy" class="md-dialog-btn">复制地址</button>
+                <button id="player-preview" class="md-dialog-btn">预览</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 本地路径 -->
+    <div id="fileInfoDialog" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">本地路径</div>
+            <div class="md-dialog-body" id="fileUrl"></div>
+            <div class="md-dialog-actions">
+                <button onclick="pushFile(0)" class="md-dialog-btn">关闭</button>
+                <button onclick="pushFile(1)" class="md-dialog-btn">使用</button>
+            </div>
+        </div>
+    </div>
+    <!-- Dialog: 新建文件夹 -->
+    <div id="newFolder" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">新建文件夹</div>
+            <div class="md-dialog-body">
+                <input id="newFolderContent" class="md-input" type="text" placeholder="请输入文件夹名称..." />
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="confirmNewFolder(0)" class="md-dialog-btn">取消</button>
+                <button onclick="confirmNewFolder(1)" class="md-dialog-btn">确定</button>
+            </div>
+        </div>
+    </div>
+    <!-- Dialog: 删除文件夹 -->
+    <div id="delFolder" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">删除文件夹</div>
+            <div class="md-dialog-body" id="delFolderContent"></div>
+            <div class="md-dialog-actions">
+                <button onclick="confirmDelFolder(0)" class="md-dialog-btn">取消</button>
+                <button onclick="confirmDelFolder(1)" class="md-dialog-btn error">删除</button>
+            </div>
+        </div>
+    </div>
+    <!-- Dialog: 删除文件 -->
+    <div id="delFile" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">删除文件</div>
+            <div class="md-dialog-body" id="delFileContent"></div>
+            <div class="md-dialog-actions">
+                <button onclick="confirmDelFile(0)" class="md-dialog-btn">取消</button>
+                <button onclick="confirmDelFile(1)" class="md-dialog-btn error">删除</button>
+            </div>
+        </div>
+    </div>
+    <!-- Dialog: 编辑历史条目（改名） -->
+    <div id="editRecDialog" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">编辑记录</div>
+            <div class="md-dialog-body">
+                <div class="tip-line pad0">标题（仅改显示名称，不影响原片链接）</div>
+                <input id="edit_rec_name" class="md-input" type="text" placeholder="影片名称" />
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="cancelRecEdit()" class="md-dialog-btn">取消</button>
+                <button onclick="confirmRecEdit()" class="md-dialog-btn">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 查看被屏蔽的源 -->
+    <div id="blockedDialog" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">被屏蔽的源</div>
+            <div class="md-dialog-body" id="blocked_list" style="max-height:50vh;overflow-y:auto;"></div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('blockedDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 主题风格确认框（替代系统 window.confirm，与整体 UI 一致） -->
+    <div id="confirmDialog" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">确认操作</div>
+            <div class="md-dialog-body" id="confirm_content" style="white-space:pre-line;"></div>
+            <div class="md-dialog-actions">
+                <button id="confirm_cancel" class="md-dialog-btn">取消</button>
+                <button id="confirm_ok" class="md-dialog-btn">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Snackbar: 警告 -->
+    <div id="warnToast">
+        <div class="md-snackbar" id="warnToastContent"></div>
+    </div>
+    <!-- Loading -->
+    <div id="loadingToast">
+        <div class="md-progress-wrap">
+            <svg class="md-progress" viewBox="0 0 48 48">
+                <circle cx="24" cy="24" r="20"/>
+            </svg>
+        </div>
+    </div>
+</body>
+</html>

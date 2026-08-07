@@ -1,0 +1,91 @@
+{
+  "name": "video-pc",
+  "version": "0.1.0",
+  "description": "CatVod 影视聚合应用 PC 桌面端重构（Electron + Python 后端）",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "node scripts/download-binaries.js anime4k || exit 0",
+    "backend": "python-backend\\.venv\\Scripts\\python.exe python-backend\\server.py",
+    "smoke": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\smoke.py",
+    "test:py": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\run_all.py",
+    "test:js": "node scripts/check-js.js",
+    "test:all": "npm run test:py && npm run test:js",
+    "build:py": "node scripts/build-python.js",
+    "build:win": "npm run build:py && electron-builder --win",
+    "build:mac": "npm run build:py && electron-builder --mac",
+    "build:linux": "npm run build:py && electron-builder --linux",
+    "build": "npm run build:py && electron-builder"
+  },
+  "build": {
+    "appId": "com.video-pc.app",
+    "productName": "影视 PC",
+    "directories": {
+      "output": "dist"
+    },
+    "extraResources": [
+      {
+        "from": "python-dist",
+        "to": "python-backend"
+      },
+      {
+        "from": "vendor",
+        "to": "vendor",
+        "filter": [
+          "**/*",
+          "!**/.tmp/**",
+          "!**/.tmp"
+        ]
+      }
+    ],
+    "files": [
+      "src/**/*",
+      "python-backend/**/*",
+      "!python-backend/.venv/**",
+      "!python-backend/__pycache__/**",
+      "!python-backend/**/__pycache__/**",
+      "!python-backend/**/*.pyc",
+      "!python-backend/tests/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "zh_CN",
+        "en_US"
+      ],
+      "shortcutName": "影视 PC",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.entertainment"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Video"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "license": "MIT"
+}

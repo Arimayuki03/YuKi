@@ -1,0 +1,13 @@
+# PC 端宿主核心依赖（第三方爬虫插件的完整清单见 apk_analysis/PHASE0_依赖矩阵.md）
+# 注：ujson / pyquery 暂缓 —— ujson 在新版 Python 上可能无预编译轮子，
+# 待 Phase 3 冒烟测试按需补充。
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+requests>=2.32
+lxml>=5.3
+beautifulsoup4>=4.12
+pycryptodome>=3.20
+cachetools>=5.3
+# JS spider 宿主（quickjs-ng：import 名为 quickjs，cp310-abi3 轮子兼容 py3.14）
+quickjs-ng>=0.16

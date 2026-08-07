@@ -1,0 +1,22 @@
+﻿version: ?
+exports: ['Any', 'Callable', 'Context', 'Function', 'JSException', 'Object', 'StackOverflow', 'concurrent', 'json', 'test', 'threading']
+eval: 3
+add_callable ok
+callable: 7
+has eval_module = False
+has module = True
+has add_module = False
+has import_module = False
+has compile_module = False
+obj type: <class '_quickjs.Object'>
+.\.venv\Scripts\python.exe : Traceback (most recent call last):
+所在位置 行:1 字符: 68
++ ... on-backend; .\.venv\Scripts\python.exe -X utf8 js-engine\probe_qjs.py ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Arima\Desktop\video\video-pc\python-backend\js-engine\probe_qjs.py", line 34, in <module>
+    print('call f:', f('hello'))
+                     ~^^^^^^^^^
+TypeError: 'NoneType' object is not callable

@@ -1,0 +1,10 @@
+﻿module/import failed: TypeError Context.module() takes no keyword arguments
+get f1 type: <class '_quickjs.Object'>
+call f1: got:abc
+Object methods: ['json']
+o.m failed: AttributeError '_quickjs.Object' object has no attribute 'm'
+cat.js exists: True
+cat.js len: 474906 first 120: var e,pe,t=function(){return(t=Object.assign||function(e){for(var t,n=1,r=arguments.length;n<r;n++)for(var i in t=argume
+cat.js eval FAILED: JSException SyntaxError: unsupported keyword: export
+    at <input>:1:486258
+

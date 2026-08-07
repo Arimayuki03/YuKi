@@ -1,0 +1,134 @@
+/**
+ * python-bridge.js — Python 后端子进程管理
+ *
+ * 职责：spawn server.py → 解析 READY 行获得 port/token → 健康检查 →
+ * 崩溃后指数退避重启（1s/2s/4s...上限 60s，就绪后重置）。
+ *
+ * 打包模式（app.isPackaged）：启动 PyInstaller 单文件 exe
+ * （extraResources/python-backend/video-pc-backend.exe），无 venv 依赖。
+ */
+const { app } = require('electron');
+const { spawn } = require('child_process');
+const { EventEmitter } = require('events');
+const path = require('path');
+const fs = require('fs');
+
+const READY_RE = /VPC_BACKEND_READY port=(\d+) token=(\S+)/;
+const HEALTH_INTERVAL = 15000;
+const MAX_BACKOFF = 60000;
+
+class PythonBridge extends EventEmitter {
+    constructor(rootDir, resourcesRoot) {
+        super();
+        this.rootDir = rootDir;
+        this.resourcesRoot = resourcesRoot || rootDir;
+        // 开发模式：venv python + server.py；打包模式：PyInstaller 单文件 exe
+        if (app.isPackaged) {
+            this.backendDir = path.join(this.resourcesRoot, 'python-backend');
+            this.script = path.join(this.backendDir, 'video-pc-backend.exe');
+            this._isPackaged = true;
+        } else {
+            this.backendDir = path.join(this.rootDir, 'python-backend');
+            this.script = path.join(this.backendDir, 'server.py');
+            this._isPackaged = false;
+        }
+        this.proc = null;
+        this.info = null;          // { port, token, base }
+        this.stopping = false;
+        this.backoff = 1000;
+        this.healthTimer = null;
+        this.readyWaiters = [];
+        this.extraEnv = {};        // 附加环境变量（如自定义缓存目录 VPC_CACHE_DIR）
+    }
+
+    _pythonExe() {
+        if (this._isPackaged) return this.script; // PyInstaller exe 直接运行
+        const venv = path.join(this.backendDir, '.venv', 'Scripts', 'python.exe');
+        return fs.existsSync(venv) ? venv : 'python';
+    }
+
+    start() {
+        this.stopping = false;
+        this._spawn();
+    }
+
+    _spawn() {
+        if (this.stopping) return;
+        this.emit('state', 'starting');
+        const args = this._isPackaged ? [] : ['-X', 'utf8', this.script];
+        const proc = spawn(this._pythonExe(), args, {
+            cwd: this.backendDir,
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...this.extraEnv },
+        });
+        this.proc = proc;
+
+        let buf = '';
+        proc.stdout.on('data', (chunk) => {
+            buf += chunk.toString('utf8');
+            const m = buf.match(READY_RE);
+            if (m && !this.info) {
+                const port = parseInt(m[1], 10);
+                this.info = { port, token: m[2], base: `http://127.0.0.1:${port}` };
+                this.backoff = 1000;
+                this._startHealthCheck();
+                this.emit('ready', this.info);
+                this.readyWaiters.forEach((r) => r(this.info));
+                this.readyWaiters = [];
+            }
+        });
+        proc.stderr.on('data', (chunk) => {
+            process.stderr.write(`[python] ${chunk}`);
+        });
+        proc.on('exit', (code) => {
+            this._stopHealthCheck();
+            this.info = null;
+            this.proc = null;
+            if (this.stopping) return;
+            this.emit('state', 'restarting');
+            const delay = this.backoff;
+            this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
+            console.log(`[python-bridge] backend exited (code=${code}), restart in ${delay}ms`);
+            setTimeout(() => this._spawn(), delay);
+        });
+    }
+
+    _startHealthCheck() {
+        this._stopHealthCheck();
+        this.healthTimer = setInterval(async () => {
+            if (!this.info) return;
+            try {
+                const rsp = await fetch(`${this.info.base}/health`, { signal: AbortSignal.timeout(5000) });
+                if (!rsp.ok) throw new Error(`status ${rsp.status}`);
+            } catch (e) {
+                console.warn(`[python-bridge] health check failed: ${e.message}, killing for restart`);
+                if (this.proc) this.proc.kill();
+            }
+        }, HEALTH_INTERVAL);
+    }
+
+    _stopHealthCheck() {
+        if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
+    }
+
+    /** 供 IPC 调用：已就绪返回 info，否则等待（最多 timeoutMs）。 */
+    getInfo(timeoutMs = 30000) {
+        if (this.info) return Promise.resolve(this.info);
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                const i = this.readyWaiters.indexOf(waiter);
+                if (i >= 0) this.readyWaiters.splice(i, 1);
+                resolve(null);
+            }, timeoutMs);
+            const waiter = (info) => { clearTimeout(timer); resolve(info); };
+            this.readyWaiters.push(waiter);
+        });
+    }
+
+    stop() {
+        this.stopping = true;
+        this._stopHealthCheck();
+        if (this.proc) { this.proc.kill(); this.proc = null; }
+    }
+}
+
+module.exports = PythonBridge;

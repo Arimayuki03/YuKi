@@ -1,0 +1,19 @@
+﻿Context attrs: ['add_callable', 'eval', 'execute_pending_job', 'gc', 'get', 'globalThis', 'memory', 'module', 'parse_json', 'set', 'set_max_stack_size', 'set_memory_limit', 'set_time_limit']
+attempt0 OK, ret type: <class '_quickjs.Object'>
+static import failed: TypeError function takes exactly 1 argument (2 given)
+module obj dir: ['json']
+module json: {}
+async eval ret: <_quickjs.Object object at 0x000001FAAA3A8840> <class '_quickjs.Object'>
+has execute_pending_job
+.\.venv\Scripts\python.exe : Traceback (most recent call last):
+所在位置 行:1 字符: 68
++ ... on-backend; .\.venv\Scripts\python.exe -X utf8 js-engine\probe_qjs3.p ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Arima\Desktop\video\video-pc\python-backend\js-engine\probe_qjs3.py", line 57, in <module>
+    r = ctx.eval("JSON.stringify(_http('http://x', {}))")
+_quickjs.JSException: InternalError: Can not convert Python result to JS.
+    at <eval> (<input>:1:15)
+
