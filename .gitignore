@@ -9,5 +9,6 @@ python-backend/**/__pycache__/
 python-backend/smoke_result.txt
 tmp/
 tmp_spiders/
+/nul
 *.log
 .DS_Store
