@@ -136,44 +136,92 @@ function normalizePic(pic) {
 }
 
 /**
- * 封面补拉（T42）：部分源列表数据不带 vod_pic 但详情里有，占位图卡片
- * 后台逐个取 detailContent 补上封面（并发 3，每次渲染最多补 24 张）。
+ * 封面补拉（T42/T43）：部分源列表数据不带 vod_pic 但详情里有，占位图卡片
+ * 后台取 detailContent 补上封面。优先级设计：用户点开详情 > 搜索拉页 >
+ * 封面补拉——Detail.open 调 abortCoverFill() 立即中止后台补拉让路；
+ * 只补当前屏幕可见卡片（IntersectionObserver，上下预热 300px），并发 5。
  * 卡片需带 data-id/data-source；isValid 返回 false（已切源/切页）即中止；
- * 卡片已不在 DOM（重渲染）则跳过写入。补到的图沿用统一封面标签规则。
+ * 卡片已不在 DOM（重渲染）则跳过写入。
  */
-async function fillMissingCovers(container, isValid) {
+let _coverFillGen = 0;         // 世代：abortCoverFill 自增使在途补拉全部失效
+const _coverFillQueue = [];    // 待补卡片队列（进入视口才入队）
+let _coverFillBusy = 0;        // 在跑 worker 数（上限 5）
+const _coverFillIOs = [];      // 活跃观察器（同容器新观察前断开旧的）
+
+/** 中止后台封面补拉（用户点开详情等高优操作时调用，给详情请求让路）。 */
+function abortCoverFill() {
+    _coverFillGen++;
+    _coverFillQueue.length = 0;
+    while (_coverFillIOs.length) {
+        try { _coverFillIOs.pop().disconnect(); } catch (e) { /* ignore */ }
+    }
+}
+
+function fillMissingCovers(container, isValid) {
     const box = $(container);
     if (!box.length) return;
+    const gen = _coverFillGen;
+    const alive = () => gen === _coverFillGen && (!isValid || isValid());
     const cards = box.find('.vod-cover img[data-cover-missing="1"]')
         .closest('.vod-card')
-        .filter(function () { return String($(this).data('id') || '') !== ''; })
-        .slice(0, 24);
+        .filter(function () { return String($(this).data('id') || '') !== ''; });
     if (!cards.length) return;
-    let idx = 0;
-    const one = async (card) => {
-        const el = $(card);
+    // 同容器重渲染后旧观察器失去意义，先断开（防累积）
+    for (let i = _coverFillIOs.length - 1; i >= 0; i--) {
+        if (_coverFillIOs[i]._vpcBox === container) {
+            try { _coverFillIOs[i].disconnect(); } catch (e) { /* ignore */ }
+            _coverFillIOs.splice(i, 1);
+        }
+    }
+    const io = new IntersectionObserver((entries) => {
+        entries.forEach((ent) => {
+            if (!ent.isIntersecting) return;
+            io.unobserve(ent.target);
+            if (!alive() || !document.contains(ent.target)) return;
+            _coverFillQueue.push({ el: ent.target, alive });
+        });
+        _coverFillPump();
+    }, { rootMargin: '300px 0px' });
+    io._vpcBox = container;
+    _coverFillIOs.push(io);
+    setTimeout(() => {
+        // 安全释放：长时间未滚到的卡片下次渲染会重建观察器
+        try { io.disconnect(); } catch (e) { /* ignore */ }
+        const i = _coverFillIOs.indexOf(io);
+        if (i >= 0) _coverFillIOs.splice(i, 1);
+    }, 120000);
+    cards.each(function () { io.observe(this); });
+}
+
+/** worker 池调度：并发上限 5（T43），队列有活就拉起，跑完自退。 */
+function _coverFillPump() {
+    while (_coverFillBusy < 5 && _coverFillQueue.length) {
+        _coverFillBusy++;
+        _coverFillWorker().finally(() => {
+            _coverFillBusy--;
+            if (_coverFillQueue.length) _coverFillPump();
+        });
+    }
+}
+
+async function _coverFillWorker() {
+    while (_coverFillQueue.length) {
+        const item = _coverFillQueue.shift();
+        const el = $(item.el);
+        if (!item.alive() || !document.contains(item.el)) continue;
         const site = String(el.data('source') || '');
         const id = String(el.data('id') || '');
-        if (!site || !id) return;
+        if (!site || !id) continue;
         let pic = '';
         try {
             const d = await doAction('detailContent', { site, ids: JSON.stringify([id]) });
             const vod = (d && d.list && d.list[0]) || null;
             pic = normalizePic(vod && vod.vod_pic);
-        } catch (e) { return; }
-        if (!pic) return;
-        if (isValid && !isValid()) return;
-        if (!document.contains(el[0])) return; // 卡片已被重渲染替换
+        } catch (e) { continue; }
+        if (!pic || !item.alive() || !document.contains(item.el)) continue;
         el.removeAttr('data-cover-missing');
         el.find('.vod-cover').html(vodCoverImg(pic));
-    };
-    const worker = async () => {
-        while (idx < cards.length) {
-            if (isValid && !isValid()) return;
-            await one(cards[idx++]);
-        }
-    };
-    await Promise.all(Array.from({ length: Math.min(3, cards.length) }, worker));
+    }
 }
 
 /** 字节数 → 可读大小。 */

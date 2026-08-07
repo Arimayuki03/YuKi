@@ -199,6 +199,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T40 批次**：屏蔽逻辑改逐分类探测（任一分类有资源即不屏蔽，此前只查首个分类会误屏蔽）+ 屏蔽列表弹窗去滚动条；收藏多选拆删除/标记想看/标记已看三操作并删清空按钮，历史多选移除全选；下载新建空输入给反馈；本地文件刷新内容无变化不重渲防闪烁；每页影片数量去注释改两列网格布局（非全屏不再挤行）；移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补二次确认；直播源消失根治：多仓配置载入优先上次成功条目（last_repo.txt 跨重启持久化）防不同次命中不同仓致 lives 漂移。
 - **T41 批次**：横屏封面也算有封面：coverFadeIn 检出横图加 landscape 类，卡片改 object-fit:contain 完整显示（此前固定竖版框裁中间细条看似没封面）；修复搜索进行中点单源筛选后往下滑看到其他源影片（后到 SSE 组未按 _curSrc 隐藏）；修复壁纸遮罩选项与描述相反（low/high 的 veil 数值写反互换）；屏蔽源弹窗恢复 max-height:50vh 滚轮滚动。
 - **T42 批次**：封面补拉：列表无 vod_pic 但详情有的卡片，后台逐个 detailContent 补封面（fillMissingCovers 并发 3/每次渲染上限 24，卡片标 data-cover-missing，vodCard 增 data-source，绑定加载令牌切页中止）；屏蔽源弹窗保留滚轮滑动但隐藏滚动条。
+- **T43 批次**：搜索中点详情转圈久修复（优先级划分：点开详情 > 搜索拉页 > 封面补拉）：Detail.open 先 abortCoverFill 中止后台补拉让路（根因：同一 JS 源共享 QuickJS 上下文，JsEngine.call 持锁串行，详情排在补拉/拉页后面）；详情就绪后恢复补拉；搜索流式期间暂缓补拉待 done 后统一补；封面补拉改只补当前屏幕可见卡片（IntersectionObserver 上下预热 300px），并发改 5。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -229,7 +230,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T42，2026-08）
+## 8.8 进行中任务批次（T1~T43，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -275,3 +276,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T40 | 用户反馈十三连：①屏蔽源查看弹窗去滚动条（blocked_list 删 max-height/overflow 内联样式） ②屏蔽逻辑改逐分类探测：home.js _probeSites 推荐位空后逐分类 categoryContent，任一分类有资源即不屏蔽（此前只查首个分类），单分类出错跳过继续 ③收藏多选拆三操作：工具栏新增标记想看/标记已看按钮（tagChecked 批量写 tag），入口按钮改「多选」，删「清空收藏」按钮（清空仅历史保留） ④历史多选删全选（checkall 仅 withTags 视图绑定/同步） ⑤下载新建空输入给 toast 反馈并聚焦输入框 ⑥本地文件刷新防闪烁：listFile 加 silent 参数，目录指纹（路径+条目 dir/名/时间）不变跳过重渲提示「目录内容无变化」 ⑦每页影片数量去注释文案 ⑧非全屏布局优化：四项改 .pagesize-grid 两列网格（标签定宽右对齐 + 下拉等宽 110px，≤700px 折单列） ⑨移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补 confirmDialog（panels.js global 补声明） ⑩直播源消失根治：config.py 多仓载入优先上次成功条目（last_repo_name 存 data_dir/last_repo.txt 跨重启持久化，sorted 置顶），/sites state 增 repo 字段供排查 | 已完成 |
 | T41 | 用户反馈四连：①横屏封面也算有封面：coverFadeIn 加载完成后检出 naturalWidth>naturalHeight 加 landscape 类，ui.css .vod-cover img.landscape 改 object-fit:contain 完整显示（此前固定 160/220 竖版框 + cover 裁中间细条，看似没封面） ②修复搜索进行中点单源筛选后往下滑看到其他源影片：search.js renderGroup 末尾按 _curSrc 隐藏后到的非目标源组（此前仅切换时对存量组 toggle，SSE 后到组直接按「全部」模式追加） ③修复壁纸遮罩选项与描述相反：ui.css data-dim low/high 的 --wall-veil 数值互换（低=62% 背景更醒目，高=90% 内容更清晰） ④屏蔽源弹窗恢复滚轮滚动：blocked_list 加回 max-height:50vh;overflow-y:auto（T40 曾整体移除） | 已完成 |
 | T42 | 用户反馈二连：①封面补拉：common.js 新增 fillMissingCovers（找容器内 data-cover-missing 占位图卡片，并发 3 逐个 doAction detailContent 取 vod_pic 换入，每次渲染上限 24 张，写入前校验 isValid 与卡片仍在 DOM）；vodCoverImg 无封面时给 img 标 data-cover-missing，home.js vodCard 增 src 参数写 data-source（首页/分类/源内搜索渲染后挂 _fillCovers 绑定 _loadToken 中止），search.js _paintGrp 同挂（卡片本就注入 data-source） ②屏蔽源弹窗可滚轮滑动但隐藏滚动条：ui.css #blocked_list scrollbar-width:none + ::-webkit-scrollbar display:none（保留 T41 内联 max-height/overflow） | 已完成 |
+| T43 | 搜索中点详情转圈久 + 封面补收紧（优先级：点开详情 > 搜索拉页 > 封面补拉）：根因同一 JS 源共享 QuickJS 上下文、JsEngine.call 持锁串行，详情请求排在后台补拉/搜索拉页后面 → ①common.js 补拉重写为世代制：abortCoverFill（世代自增+清队列+断开观察器），fillMissingCovers 改 IntersectionObserver 只补屏幕可见卡（rootMargin 上下 300px，入视口才入队），worker 池并发改 5（_coverFillPump/_coverFillWorker），同容器旧观察器先断开防累积，120s 安全释放 ②detail.js open 入口先 abortCoverFill 让路；load 成功后恢复补拉（搜索仍在流式时只补首页区不碰搜索区） ③search.js 流式期间 _paintGrp 暂缓补拉（!this.es 才补），done/error 收尾后 _fillAllCovers 统一补各组 | 已完成 |

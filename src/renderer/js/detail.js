@@ -5,7 +5,7 @@
  * 解析 vod_play_from / vod_play_url（$$$ 分源、# 分集、$ 名址分隔），
  * 线路切换 + 选集，集数点击交给 Player.play()。
  */
-/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records */
+/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, fillMissingCovers */
 
 const Detail = {
     site: '',
@@ -71,6 +71,9 @@ const Detail = {
 
     open(site, vodId, fallbackName) {
         if (!site || !vodId) { warnToast('缺少站点或视频 ID'); return; }
+        // T43 优先级：用户点开详情最高优——立即中止后台封面补拉，
+        // 避免详情请求排在补拉请求后面等源引擎锁（转圈久）
+        abortCoverFill();
         this.backView = App.currentView === 'detail' ? this.backView : App.currentView;
         this.site = site;
         this.vodId = vodId;
@@ -129,6 +132,12 @@ const Detail = {
             this.activeSource = 0;
             await this._restoreLastSource();
             this.render(vod);
+            // T43：详情已就绪，后台恢复被中止的封面补拉（返回时占位卡能继续补上；
+            // 搜索仍在流式进行时不碰搜索区，避免再与该源拉页争锁）
+            try {
+                if (typeof Search === 'undefined' || !Search.es) fillMissingCovers('#home-grid, #search-results');
+                else fillMissingCovers('#home-grid');
+            } catch (e) { /* 补拉失败不影响详情 */ }
         } catch (e) {
             $('#detail-body').html('<div class="tip-line">详情载入失败</div>');
             warnToast('详情载入失败');

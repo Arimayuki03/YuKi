@@ -91,6 +91,7 @@ const Search = {
             this.es = null;
             $('#search-status').text(items ? `完成：${sources} 个源 · ${items} 条结果` : '无结果');
             if (!items) $('#search-results').html('<div class="tip-line">无结果</div>');
+            this._fillAllCovers();
         });
 
         es.onerror = () => {
@@ -99,8 +100,16 @@ const Search = {
             es.close();
             this.es = null;
             if (!sources) { $('#search-status').text('搜寻失败'); warnToast('搜寻失败'); }
-            else { $('#search-status').text(`完成：${sources} 个源 · ${items} 条结果`); }
+            else {
+                $('#search-status').text(`完成：${sources} 个源 · ${items} 条结果`);
+                this._fillAllCovers();
+            }
         };
+    },
+
+    /** 搜索结束后统一补拉各组封面（T43：流式期间暂缓，避免与源拉页争引擎锁）。 */
+    _fillAllCovers() {
+        Object.keys(this._grpLists).forEach((gid) => fillMissingCovers(`#${gid}-grid`));
     },
 
     renderGroup(payload, list) {
@@ -139,9 +148,9 @@ const Search = {
             return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
         }).join('');
         $(`#${gid}-grid`).html(cards);
-        // T42：列表无封面但详情有的卡片后台补拉（卡片已带 data-source；
-        // 新搜索会清空结果容器，补拉写入前校验卡片仍在 DOM）
-        fillMissingCovers(`#${gid}-grid`);
+        // T42/T43：列表无封面但详情有的卡片后台补拉（只补屏幕可见卡）；
+        // 流式搜索进行中暂缓，待 done 后统一补，避免与该源拉页争引擎锁
+        if (!this.es) fillMissingCovers(`#${gid}-grid`);
         $(`#${gid}-hint`).toggle(!focused && grp.list.length > size);
         renderPagerBox($(`#${gid}-pager`), focused
             ? { page, pagecount, onJump: (pg) => this._paintGrp(gid, pg) }
