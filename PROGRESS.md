@@ -115,7 +115,7 @@ npm run build:py
 46. **收藏/历史**（决策 39/81）：条目结构一致（site/vodId/name/pic/remarks/ts），存 settings 各上限 200 最新在前；records.js makeRecordView 工厂共用；历史在 Detail.open 自动写入（隐身模式 incognito 除外），**历史按片名去重合并**（跨源同名合并置顶，保留原显示名）；想看/已看 tag 三态（want/seen/''，normTag 归一，决策 74），详情按钮与收藏卡徽章双通道共写（setFavTag/getFavTag 唯一读写口，决策 66）。
 47. **空源自动探测屏蔽**（决策 41）：首屏就绪后异步探测未探过站点（probedSites 防重复），homeContent 推荐位有内容即过，否则复查首分类；空/错记入 blockedSites 过滤首页下拉（不打断当前选中源，被屏蔽自动切首源），并发 4；仅过滤首页下拉，搜索 SSE 仍全源聚合；源配置「屏蔽源」卡片可恢复重探、查看屏蔽源列表。
 48. **首页/分类渐进加载**（决策 51）：首屏数据一到立即 renderGrid + hideLoading，剩余铺满量后台逐页 _appendGrid 增量追加；_loadToken 令牌防串流（切源/切分类/翻页后旧循环回来先比令牌）；自适应目标 36~120；resize 补拉沿用当前令牌。首页搜索只走当前源自身 searchContent（决策 65），不走聚合 SSE。
-49. **搜索结果分组分页**（决策 80）：每源分组默认展示前 30 条（SEARCH_PAGE_SIZE=30），超出折叠，「展开全部 N 条」/「收起」；来源筛选纯前端 toggle src-group 不重发请求（决策 58）。
+49. **搜索结果分组分页**（决策 80，T6 改版）：每源分组内部统一分页器翻页，每页 30 条（SEARCH_PAGE_SIZE=30，纯前端切片）；来源筛选纯前端 toggle src-group 不重发请求（决策 58）。分类/当前源搜索一页一次请求 + 源+分类 LRU 页缓存；无 pagecount 的源暂报 pg+1、拉到空页修正（短页不当末页）。
 50. **直播源**：config `lives` 三形态（{name,url} 直链 / {group,channels} 嵌套 / proxy://do=live&ext=base64），live.js normalizeLive 统一归一化；频道文本经后端 do=fetchText 拉取（渲染层直 fetch 会被 CORS 拦），支持 txt(#genre#)/m3u；自定义源存 settings.customLives（TVBox 式导入：txt/m3u 地址、粘贴配置 JSON、.json 配置地址，展平嵌套 channels，上限 30，决策 52）；中文域名需 punycode；customLives 增删置 Live._dirty 强制重载（决策 42）。
 51. **换肤**（决策 40/73）：主题色 6 套内置（html[data-color] 覆写 MD3 变量）+ 自定义单基色 HSL 推导浅深两套（html.theme-custom，customColor 与 theme 互斥）；明暗 auto/light/dark 由 common.js applySkin 挂 html.dark 类（废弃 @media）；壁纸 vpc:pick-wallpaper 写 settings.wallpaper，渲染层 toFileUrl 铺 body + --wall-veil 遮罩三档；界面缩放 60~200 写 html.style.zoom，字体大小 80~200 注入临时样式表按基准字号等比（决策 55），change 钳制回写。
 52. **托盘驻留与关闭行为**（决策 46）：closeAction 三态 tray(默认)/exit/ask；托盘图标代码生成 16x16 PNG 免资源；bgPlay 开启时选退出但 mpv 在播也转托盘保播；isQuitting 区分真退出与托盘驻留；恢复默认设置只清偏好保留数据类键后 relaunch。
@@ -224,6 +224,6 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 已完成 |
 | T4 | UI 按钮/组件/字体布局检查清单式优化：工具栏 select/input/btn 高度对齐 40px + gap 10px；新增 .md-btn-danger-text 并应用到删除/清空/恢复默认等按钮；#live-status 右对齐样式移入 CSS；全局字号 14px + tip-line 12px + dark 资产状态色对比；:focus-visible 轮廓 2px/1px；pill 间距统一 6px；输入框/下载项/文件行补 hover | 已完成 |
 | T5 | Kazumi XPath 规则引擎适配（独立排期，待用户确认） | 待确认 |
-| T6 | 翻页架构重设计：统一分页模型 + 每页条数限制/可设置、标准页码分页器、按源+分类 LRU 翻页缓存、当前源搜索真分页、聚合搜索组内翻页、收藏/历史分页 | 进行中 |
+| T6 | 翻页架构重设计：废除分类"自适应铺满"连拉多页，改一页一次请求 + 每页条数限制（设置项 listPageSize 自动/24/36/60/120）；统一分页器 renderPagerBox（页码±2+首尾省略号+跳转输入）；按 源+分类 LRU 页缓存（32 分类×10 页，命中即显+后台静默刷新，切源清理）；当前源搜索真分页；聚合搜索组内翻页替代展开全部；收藏/历史客户端分页 | 已完成 |
 | T7 | UI 布局与说明系统重设计：ⓘ 信息点展开组件（长说明收起）、设置页字号层级与全屏/非全屏响应式列数（1/2/3 列）、按钮组件统一复核 | 待开始 |
 | T8 | mpv 播放器设置增强：快捷键键位自定义（按键捕获+恢复默认+冲突提示）、Anime4K 档位选择（均衡/细节/修复）、中文化显示（窗口标题/OSD 字体/中文反馈） | 待开始 |

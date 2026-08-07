@@ -565,9 +565,16 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .vod-remarks { font-size:11px; line-height:16px; min-height:16px; padding:0 10px 8px; color:var(--md-on-surface-variant);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
-/* 分页 */
-.pager { display:flex; align-items:center; gap:12px; justify-content:center; padding:20px 0; }
+/* 分页（T6 统一分页器：首页/上一页/页码/下一页/末页 + 跳转输入） */
+.pager { display:flex; align-items:center; gap:10px; justify-content:center; flex-wrap:wrap; padding:20px 0; }
 .pg-info { font-size:13px; color:var(--md-on-surface-variant); }
+.pager .pg-btn { height:36px; min-width:36px; padding:0 14px; font-size:13px; border-radius:18px; }
+.pager .pg-btn:disabled { opacity:.4; pointer-events:none; }
+/* 当前页高亮：主题色底 + 反色字 */
+.pager .pg-btn-active { background:var(--md-primary); color:var(--md-on-primary); }
+.pager .pg-dots { color:var(--md-on-surface-variant); user-select:none; }
+.pager .pg-jump { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); white-space:nowrap; }
+.pager .pg-jump-input { width:64px; height:36px; padding:0 8px; text-align:center; font-size:13px; }
 
 /* 搜索（圆角胶囊输入框） */
 .search-bar { display:flex; gap:12px; margin-bottom:8px; }
@@ -959,10 +966,6 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .main-nav-item { font-size:16px; }
     .mn-icon { width:26px; height:26px; }
 }
-
-/* ===== 搜索结果分组折叠/展开 ===== */
-.src-fold { margin:0; }
-.src-expand, .src-collapse { margin:6px 0 12px 0; display:block; width:100%; text-align:center; }
 
 /* ===== 资产状态（设置页） ===== */
 .asset-status-list { display:flex; flex-direction:column; gap:6px; }

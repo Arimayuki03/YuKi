@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, listPageSize, renderPagerBox */
 
 const Home = {
     sites: [],
@@ -23,16 +23,17 @@ const Home = {
     _fillTid: '',
     _fillPg: 0,
     _fillSeen: {},
-    // 分类模式同样自适应铺满：从当前页起逐页追加去重
-    _catList: [],
-    _catPg: 0,
-    _catSeen: {},
-    _loadToken: 0, // 加载令牌：切源/切分类后旧渐进拉取自动作废
+    // 分类/搜索模式：一页一次请求的标准分页（T6），页级 LRU 缓存 + 命中后台静默刷新
+    _catItems: [],
+    searchWord: '',
+    _pageCache: null,   // 懒初始化 Map：key site|tid → { pagecount, pages: Map<pg, list> }
+    _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
 
     async init() {
         if (this._inited) return;
         this._inited = true;
         $('#site-select').on('change', () => {
+            this._cacheDropSite(this.site); // 切源时清理旧源的页缓存
             this.site = $('#site-select').val();
             this.loadHome();
         });
@@ -43,16 +44,12 @@ const Home = {
         });
         $('#home-refresh').on('click', () => {
             if (this.mode === 'home') this.loadHome();
-            else if (this.mode === 'search') this.searchCurrent();
-            else this.loadCategory(this.tid, 1);
+            else if (this.mode === 'search') this.searchCurrent(this.page);
+            else this.loadCategory(this.tid, this.page, true); // 刷新绕过缓存重拉当前页
         });
         // 当前源搜索：回车触发；清空后回车回首页
         $('#home-search').on('keydown', (e) => {
             if (e.key === 'Enter') this.searchCurrent();
-        });
-        $('#home-pager').on('click', '.pg-btn', (e) => {
-            const pg = parseInt($(e.currentTarget).data('pg'), 10);
-            if (pg >= 1 && pg <= this.pagecount) this.loadCategory(this.tid, pg);
         });
         $('#home-class').on('click', '.class-tab', (e) => {
             const tid = String($(e.currentTarget).data('tid'));
@@ -154,6 +151,7 @@ const Home = {
                 this.sites = this._allSites.filter((x) => !blocked.has(x.key));
                 this._renderSiteSelect();
                 if (this.sites.length && !this.sites.some((x) => x.key === cur)) {
+                    this._cacheDropSite(cur); // 程序切源同样清理旧源缓存
                     this.site = this.sites[0].key;
                     $('#site-select').val(this.site);
                     this.loadHome();
@@ -171,6 +169,7 @@ const Home = {
         if (!this.site) return;
         this.mode = 'home';
         this.tid = '';
+        this.pagecount = 1;
         $('#home-search').val(''); // 退出搜索态
         const token = ++this._loadToken;
         showLoading();
@@ -242,41 +241,45 @@ const Home = {
         items.forEach((v) => grid.append(vodCard(v)));
     },
 
-    /** 窗口放大后卡片不够铺满：继续补拉（沿用当前加载令牌）。 */
+    /** 窗口放大后卡片不够铺满：首页推荐位继续补拉（沿用当前加载令牌）。 */
     async _onResize() {
         const token = this._loadToken;
         if (this.mode === 'home') {
             if (!this._homeList.length || this._homeList.length >= this._adaptiveTarget()) return;
             await this._extendHome(token);
-        } else if (this.mode === 'category') {
-            if (!this._catList.length || this._catList.length >= this._adaptiveTarget()) return;
-            if (this._catPg >= this.pagecount) return;
-            await this._extendCategory(token);
         }
     },
 
-    async loadCategory(tid, pg) {
+    /**
+     * 分类分页（T6 重设计）：一页一次请求，截断到每页条数后渲染标准分页器。
+     * 缓存命中立即渲染并后台静默重拉；force（刷新按钮）绕过缓存。
+     */
+    async loadCategory(tid, pg, force) {
         if (!this.site) return;
         this.mode = 'category';
         this.tid = tid;
         this.page = pg || 1;
         $('#home-search').val(''); // 切分类退出搜索态
         const token = ++this._loadToken;
-        this._catList = [];
-        this._catSeen = {};
-        this._catPg = this.page - 1;
+        const size = await this._pageSize();
+        if (token !== this._loadToken) return;
+        if (force) this._cacheDropPage(this.site, tid, this.page);
+        const cached = force ? null : this._cacheGet(this.site, tid, this.page);
+        if (cached) {
+            // 命中缓存：立即上屏，后台静默刷新（内容变化才重渲染）
+            if (cached.pagecount > 0) this.pagecount = cached.pagecount;
+            this._catItems = cached.list;
+            this.renderGrid(this._catItems);
+            this.renderPager();
+            $('#view-home').scrollTop(0);
+            this._refreshCatPage(token, tid, this.page, size);
+            return;
+        }
         showLoading();
         try {
-            // 拉取起始页；若卡片不足铺满窗口则继续补拉，全部在 loading 遮罩下完成
-            await this._fetchCatPage();
+            await this._fetchCat(tid, this.page, size);
             if (token !== this._loadToken) return;
-            let guard = 0;
-            while (this._catList.length < this._adaptiveTarget()
-                && this._catPg < this.pagecount && guard++ < 5) {
-                try { await this._fetchCatPage(); } catch (e) { break; }
-                if (token !== this._loadToken) return;
-            }
-            this.renderGrid(this._catList);
+            this.renderGrid(this._catItems);
             this.renderPager();
             // 切页后回到顶部
             $('#view-home').scrollTop(0);
@@ -287,59 +290,111 @@ const Home = {
         }
     },
 
-    /** 拉取下一页并去重入库，返回新增条数；pagecount 有值才更新。 */
-    async _fetchCatPage() {
-        this._catPg += 1;
-        let data = null;
-        try {
-            data = await doAction('categoryContent', {
-                site: this.site, tid: this.tid, pg: String(this._catPg), filter: 'false', extend: '{}',
-            });
-        } catch (e) { this._catPg -= 1; throw e; }
-        const pc = parseInt(data && data.pagecount, 10);
-        if (pc > 0) this.pagecount = pc;
-        let added = 0;
-        ((data && data.list) || []).forEach((v) => {
-            const k = v.vod_id + '|' + v.vod_name;
-            if (!this._catSeen[k]) { this._catSeen[k] = 1; this._catList.push(v); added++; }
-        });
-        return added;
+    /** 生效的每页条数：设置值优先，空（自动）回退窗口自适应铺满估算。 */
+    async _pageSize() {
+        const n = await listPageSize();
+        return n > 0 ? n : this._adaptiveTarget();
     },
 
     /**
-     * 分类模式渐进铺满：后台逐页拉取去重追加（每批立即增量渲染），
-     * 直到铺满窗口或翻完总页数（后台最多追 5 页，避免狂请求）。
-     * 分页器保留：点击页码从该页重新开始。
+     * 拉取单页并更新 pagecount 与缓存。
+     * pagecount 策略：源返回有效值直接采用；无 pagecount 的源有内容时暂报
+     * 还有下一页（pg+1），拉到空页再修正（部分源 list 短于显示条数，短页不能当末页）。
      */
-    async _extendCategory(token) {
-        let guard = 0;
-        while (this._catList.length < this._adaptiveTarget()
-            && this._catPg < this.pagecount && guard++ < 5) {
-            let added = 0;
-            try { added = await this._fetchCatPage(); } catch (e) { break; }
-            if (token !== this._loadToken) return;
-            if (added > 0) this._appendGrid(this._catList.slice(-added));
-            else if (this._catPg >= this.pagecount) break;
+    async _fetchCat(tid, pg, size) {
+        const data = await doAction('categoryContent', {
+            site: this.site, tid, pg: String(pg), filter: 'false', extend: '{}',
+        });
+        const raw = (data && data.list) || [];
+        const pc = parseInt(data && data.pagecount, 10);
+        let pagecount;
+        if (pc > 0) pagecount = pc;
+        else if (!raw.length) pagecount = Math.max(1, pg - 1); // 空页：上一页即末页
+        else pagecount = Math.max(this.pagecount || 1, pg + 1); // 无 pagecount：暂允试下一页
+        this.pagecount = pagecount;
+        this._catItems = raw.slice(0, size);
+        this._cachePut(this.site, tid, pg, this._catItems, pagecount);
+    },
+
+    /** 缓存命中后的后台静默重拉：令牌有效且仍在该页时才可能更新画面。 */
+    async _refreshCatPage(token, tid, pg, size) {
+        try {
+            const before = JSON.stringify(this._catItems.map((v) => v.vod_id));
+            await this._fetchCat(tid, pg, size);
+            if (token !== this._loadToken || this.mode !== 'category' || this.tid !== tid || this.page !== pg) return;
+            if (JSON.stringify(this._catItems.map((v) => v.vod_id)) !== before) this.renderGrid(this._catItems);
+            this.renderPager();
+        } catch (e) { /* 刷新失败不影响缓存展示 */ }
+    },
+
+    // ------------------------------------------------------------ 页缓存（LRU）
+
+    _cacheMap() {
+        if (!this._pageCache) this._pageCache = new Map();
+        return this._pageCache;
+    },
+
+    /** 命中同时把条目移到队尾（LRU）；未命中返回 null。 */
+    _cacheGet(site, tid, pg) {
+        const m = this._cacheMap();
+        const key = site + '|' + tid;
+        const e = m.get(key);
+        if (!e || !e.pages.has(pg)) return null;
+        m.delete(key); m.set(key, e);
+        return { list: e.pages.get(pg), pagecount: e.pagecount };
+    },
+
+    /** 写入页缓存：每分类最多 10 页、全局最多 32 个分类，超限淘汰最旧。 */
+    _cachePut(site, tid, pg, list, pagecount) {
+        const m = this._cacheMap();
+        const key = site + '|' + tid;
+        let e = m.get(key);
+        if (e) m.delete(key);
+        else e = { pagecount: 1, pages: new Map() };
+        e.pagecount = pagecount;
+        e.pages.set(pg, list);
+        if (e.pages.size > 10) e.pages.delete(e.pages.keys().next().value);
+        m.set(key, e);
+        if (m.size > 32) m.delete(m.keys().next().value);
+    },
+
+    _cacheDropPage(site, tid, pg) {
+        const e = this._cacheMap().get(site + '|' + tid);
+        if (e) e.pages.delete(pg);
+    },
+
+    _cacheDropSite(site) {
+        const m = this._cacheMap();
+        for (const k of Array.from(m.keys())) {
+            if (k.indexOf(site + '|') === 0) m.delete(k);
         }
     },
 
     /** 当前源搜索：走站点自身 searchContent（CMS 源 wd 参数），仅搜当前选中源。
-     *  输入清空后回车回到首页推荐位。 */
-    async searchCurrent() {
+     *  支持真分页（pg 参数）；输入清空后回车回到首页推荐位。 */
+    async searchCurrent(pg) {
         const wd = String($('#home-search').val() || '').trim();
         if (!wd) { if (this.mode === 'search') this.loadHome(); return; }
         if (!this.site) return;
         this.mode = 'search';
+        this.searchWord = wd;
+        this.page = pg || 1;
         const token = ++this._loadToken;
         showLoading();
         try {
-            const data = await doAction('searchContent', { site: this.site, word: wd, quick: '0', pg: '1' });
+            const size = await this._pageSize();
+            const data = await doAction('searchContent', { site: this.site, word: wd, quick: '0', pg: String(this.page) });
             if (token !== this._loadToken) return;
             $('#home-class .class-tab').removeClass('active');
-            const list = (data && data.list) || [];
+            const raw = (data && data.list) || [];
+            const pc = parseInt(data && data.pagecount, 10);
+            if (pc > 0) this.pagecount = pc;
+            else if (!raw.length) this.pagecount = Math.max(1, this.page - 1);
+            else this.pagecount = Math.max(this.pagecount || 1, this.page + 1);
+            const list = raw.slice(0, size);
             if (list.length) this.renderGrid(list);
             else $('#home-grid').html(`<div class="tip-line">当前源未找到与「${escHtml(wd)}」相关的内容</div>`);
-            $('#home-pager').empty();
+            this.renderPager();
         } catch (e) {
             warnToast('搜索失败');
         } finally {
@@ -363,13 +418,16 @@ const Home = {
         });
     },
 
+    /** 统一分页器（common.js renderPagerBox）：搜索/分类模式共用，跳页回调按模式分发。 */
     renderPager() {
-        const box = $('#home-pager').empty();
-        if (this.pagecount <= 1) return;
-        box.append(`<button class="md-btn md-btn-tonal pg-btn" data-pg="${this.page - 1}" ${this.page <= 1 ? 'disabled' : ''}>上一页</button>`);
-        // 自动铺满可能已跨多页：展示起始页/总页数
-        box.append(`<span class="pg-info">${this.page} / ${this.pagecount} 页 · 已自动铺满</span>`);
-        box.append(`<button class="md-btn md-btn-tonal pg-btn" data-pg="${Math.min(this.pagecount, this._catPg + 1)}" ${this._catPg >= this.pagecount ? 'disabled' : ''}>下一页</button>`);
+        renderPagerBox($('#home-pager'), {
+            page: this.page,
+            pagecount: this.pagecount,
+            onJump: (pg) => {
+                if (this.mode === 'search') this.searchCurrent(pg);
+                else this.loadCategory(this.tid, pg);
+            },
+        });
     },
 };
 

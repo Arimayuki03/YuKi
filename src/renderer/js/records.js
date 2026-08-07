@@ -6,7 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除，工具栏可一键清空。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, Detail */
+/* global $, escHtml, normalizePic, warnToast, Detail, listPageSize, renderPagerBox */
 
 async function recGet(key) {
     try {
@@ -149,6 +149,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
         _selectMode: false, // 多选删除模式：卡片点击改为切换勾选
         _q: '',   // 搜索关键字（片名/备注/源，不区分大小写）
         _tag: '', // 标签筛选（want/seen，空=全部；仅 withTags 视图生效）
+        _page: 1, // 客户端分页当前页（T6：超过每页条数时分页展示）
 
         init() {
             if (this._inited) return;
@@ -193,9 +194,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                 this._syncSelBar();
             });
             $(`#${viewName}-delchecked`).on('click', () => this.removeChecked());
-            // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）
+            // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）；过滤条件变化回第一页
             $(`#${viewName}-search`).on('input', (e) => {
                 this._q = String(e.currentTarget.value || '').trim().toLowerCase();
+                this._page = 1;
                 this.render();
             });
             if (withTags) {
@@ -205,6 +207,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                     $(`#${viewName}-tags .class-tab`).removeClass('active');
                     el.addClass('active');
                     this._tag = String(el.data('tag') || '');
+                    this._page = 1;
                     this.render();
                 });
                 // 卡片标签点击：想看 → 已看 → 取消（三态循环）
@@ -231,10 +234,21 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
             grid.toggleClass('selecting', this._selectMode);
             if (!list.length) {
                 if (this._selectMode) this.toggleSelectMode(); // 列表空时退出选择模式
+                $(`#${viewName}-pager`).empty();
                 grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
                 return;
             }
-            list.forEach((v) => grid.append(recCard(v, editable, withTags)));
+            // 客户端分页：超过每页条数（设置值优先，自动回退 36）才分页
+            const size = (await listPageSize()) || 36;
+            const pagecount = Math.ceil(list.length / size);
+            this._page = Math.min(Math.max(1, this._page), pagecount);
+            const slice = list.slice((this._page - 1) * size, this._page * size);
+            slice.forEach((v) => grid.append(recCard(v, editable, withTags)));
+            renderPagerBox($(`#${viewName}-pager`), {
+                page: this._page,
+                pagecount,
+                onJump: (pg) => { this._page = pg; this.render(); },
+            });
             this._syncSelBar();
         },
 

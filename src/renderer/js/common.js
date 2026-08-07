@@ -104,6 +104,75 @@ function fmtSize(n) {
     return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 }
 
+// ---------------------------------------------------------------- 分页
+
+let _pageSizeCache = null; // 每页条数设置缓存（变更后由 invalidatePageSizeCache 作废）
+
+/** 每页条数设置：返回 24/36/60/120；0 = 自动（由调用方按窗口自适应）。 */
+async function listPageSize() {
+    if (_pageSizeCache !== null) return _pageSizeCache;
+    try {
+        const s = (await window.vpc.settingsGet()) || {};
+        const n = parseInt(s.listPageSize, 10);
+        _pageSizeCache = [24, 36, 60, 120].indexOf(n) >= 0 ? n : 0;
+    } catch (e) { _pageSizeCache = 0; }
+    return _pageSizeCache;
+}
+
+/** 设置页变更每页条数后调用，使缓存作废（下次进列表页即生效）。 */
+function invalidatePageSizeCache() { _pageSizeCache = null; }
+
+/**
+ * 统一分页器：首页/上一页/页码（当前页±2 连号 + 首尾页，空隙省略号）/下一页/末页 + 跳转输入。
+ * opts: { page, pagecount, onJump }；pagecount ≤ 1 时清空不渲染。
+ */
+function renderPagerBox($box, opts) {
+    $box = $($box);
+    $box.empty().off('.vpager');
+    const page = opts.page || 1;
+    const total = opts.pagecount || 0;
+    if (total <= 1) return;
+    const btn = (pg, label, dis, extra) =>
+        `<button class="md-btn md-btn-tonal pg-btn ${extra || ''}" data-pg="${pg}" ${dis ? 'disabled' : ''}>${label}</button>`;
+    // 页码序列：当前页±2 + 首尾页，空隙处插入省略号占位
+    const nums = [1, total, page - 2, page - 1, page, page + 1, page + 2]
+        .filter((p) => p >= 1 && p <= total)
+        .filter((p, i, a) => a.indexOf(p) === i)
+        .sort((a, b) => a - b);
+    const seq = [];
+    let prev = 0;
+    nums.forEach((p) => {
+        if (p - prev > 1) seq.push('<span class="pg-dots">…</span>');
+        seq.push(p === page
+            ? `<button class="md-btn pg-btn pg-btn-active" data-pg="${p}">${p}</button>`
+            : btn(p, p, false));
+        prev = p;
+    });
+    const jump = `<span class="pg-jump">第 <input class="md-input pg-jump-input" type="number" min="1" max="${total}" placeholder="${page}"> 页</span>`;
+    $box.html(
+        btn(1, '首页', page <= 1)
+        + btn(page - 1, '上一页', page <= 1)
+        + seq.join('')
+        + btn(page + 1, '下一页', page >= total)
+        + btn(total, '末页', page >= total)
+        + jump
+    );
+    $box.on('click.vpager', '.pg-btn', (e) => {
+        const pg = parseInt($(e.currentTarget).attr('data-pg'), 10);
+        if (pg >= 1 && pg <= total && opts.onJump) opts.onJump(pg);
+    });
+    // 跳转输入：回车触发，越界钳制到合法值并回填
+    $box.on('keydown.vpager', '.pg-jump-input', (e) => {
+        if (e.key !== 'Enter') return;
+        let pg = parseInt(e.currentTarget.value, 10);
+        if (!Number.isFinite(pg)) pg = page;
+        pg = Math.min(total, Math.max(1, pg));
+        e.currentTarget.value = pg;
+        e.currentTarget.blur();
+        if (opts.onJump) opts.onJump(pg);
+    });
+}
+
 // ---------------------------------------------------------------- 对话框 / Esc
 
 function openDialog(id) {

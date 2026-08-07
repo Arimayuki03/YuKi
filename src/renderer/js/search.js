@@ -5,16 +5,18 @@
  *   data: {"source": key, "name": 名称, "list": [...]}
  * 全部结束发 event: done。逐源流式追加渲染；结果项点击进详情。
  * 来源筛选：每收到一个源生成一枚筛选标签，点击只看该源结果。
- * 分页：每个源分组默认展示 SEARCH_PAGE_SIZE 条，超出部分折叠，
- * 点击「展开全部 N 条」一次性展示，避免单源千百条撑爆 DOM。
+ * 分页（T6）：每个源分组内部用统一分页器翻页，每页 SEARCH_PAGE_SIZE 条，
+ * 数据已由 SSE 一次给全，纯前端切片，避免单源千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox */
 
 const SEARCH_PAGE_SIZE = 30;
 
 const Search = {
     es: null,
     _inited: false,
+    _grpSeq: 0,      // 分组 id 自增序号（分页容器唯一定位）
+    _grpLists: {},   // gid → { src, list }（SSE 已给全量，纯前端切片翻页）
 
     init() {
         if (this._inited) return;
@@ -37,20 +39,6 @@ const Search = {
                 $(this).toggle(!src || $(this).data('source') === src);
             });
         });
-        // 搜索结果分组展开/收起
-        $('#search-results')
-            .on('click', '.src-expand', function () {
-                const grp = $(this).closest('.src-group');
-                grp.find('.src-fold').show();
-                $(this).hide();
-                grp.find('.src-collapse').show();
-            })
-            .on('click', '.src-collapse', function () {
-                const grp = $(this).closest('.src-group');
-                grp.find('.src-fold').hide();
-                $(this).hide();
-                grp.find('.src-expand').show();
-            });
     },
 
     focus() {
@@ -66,6 +54,8 @@ const Search = {
         if (!word) { warnToast('请输入关键字'); return; }
         this.stop();
         $('#search-results').empty();
+        this._grpLists = {}; // 新搜索：重置分组数据
+        this._grpSeq = 0;
         // 重置来源筛选栏（默认「全部」）
         $('#search-filters').html('<span class="class-tab active" data-src="">全部</span>').show();
         $('#search-status').text('搜寻中…').show();
@@ -111,24 +101,24 @@ const Search = {
         // 来源筛选标签：带结果数，点击只看该源
         $('#search-filters').append(`<span class="class-tab" data-src="${escHtml(src)}" title="只看该源的结果">${escHtml(payload.name || src)}（${total}）</span>`);
         if (!total) { box.append(head + '<div class="tip-line">该源无结果</div></div>'); return; }
-        // 超过 SEARCH_PAGE_SIZE 条时折叠：首屏仅展示前 SEARCH_PAGE_SIZE 条，
-        // 底部附加「展开全部 N 条」按钮，点击一次性展示剩余条目
-        const show = list.slice(0, SEARCH_PAGE_SIZE);
-        const hidden = list.slice(SEARCH_PAGE_SIZE);
-        const cards = show.map((v) => {
+        // 组内分页：数据已全量在手，纯前端切片，统一分页器驱动
+        const gid = 'sg' + (this._grpSeq++);
+        this._grpLists[gid] = { src, list };
+        box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="pager" id="${gid}-pager"></div></div>`);
+        this._renderGrpPage(gid, 1);
+    },
+
+    /** 分组翻页渲染：按 SEARCH_PAGE_SIZE 切片 + 统一分页器。 */
+    _renderGrpPage(gid, page) {
+        const grp = this._grpLists[gid];
+        if (!grp) return;
+        const pagecount = Math.ceil(grp.list.length / SEARCH_PAGE_SIZE);
+        const slice = grp.list.slice((page - 1) * SEARCH_PAGE_SIZE, page * SEARCH_PAGE_SIZE);
+        const cards = slice.map((v) => {
             const html = vodCard(v);
-            return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(src)}"`);
+            return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
         }).join('');
-        let fold = '';
-        if (hidden.length) {
-            const hiddenCards = hidden.map((v) => {
-                const html = vodCard(v);
-                return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(src)}"`);
-            }).join('');
-            fold = `<div class="src-fold" style="display:none">${hiddenCards}</div>
-                <button class="src-expand md-btn md-btn-tonal md-btn-sm" data-src="${escHtml(src)}">展开全部 ${total} 条（已显示 ${SEARCH_PAGE_SIZE} 条）</button>
-                <button class="src-collapse md-btn md-btn-tonal md-btn-sm" data-src="${escHtml(src)}" style="display:none">收起</button>`;
-        }
-        box.append(head + `<div class="vod-grid">${cards}</div>${fold}</div>`);
+        $(`#${gid}-grid`).html(cards);
+        renderPagerBox($(`#${gid}-pager`), { page, pagecount, onJump: (pg) => this._renderGrpPage(gid, pg) });
     },
 };

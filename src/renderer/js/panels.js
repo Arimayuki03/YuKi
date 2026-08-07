@@ -628,6 +628,7 @@ function initSettingsPanel() {
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
         $('#set_anim').prop('checked', s.animEnabled !== false);
+        if (s.listPageSize) $('#set_pagesize').val(s.listPageSize); // 每页条数（空=自动）
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -787,6 +788,12 @@ function initSettingsPanel() {
     $('#set_anim').on('change', function () {
         window.vpc.settingsSet('animEnabled', this.checked);
         applySkin({ animEnabled: this.checked });
+    });
+    // 每页影片数量：持久化并作废渲染层缓存，下次进列表页生效
+    $('#set_pagesize').on('change', function () {
+        window.vpc.settingsSet('listPageSize', this.value);
+        if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
+        warnToast('每页条数已保存，下次进入列表页生效');
     });
     // 关闭主窗口行为
     $('#set_closeaction').on('change', function () {

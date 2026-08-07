@@ -120,6 +120,7 @@
                     </div>
                 </div>
                 <div id="view-favorites-grid" class="vod-grid"></div>
+                <div id="view-favorites-pager" class="pager"></div>
             </section>
 
             <!-- 历史（多选删除：进入选择模式后勾选卡片批量移除） -->
@@ -135,6 +136,7 @@
                     <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
                 </div>
                 <div id="view-history-grid" class="vod-grid"></div>
+                <div id="view-history-pager" class="pager"></div>
             </section>
 
             <!-- 直链播放（从源配置迁入侧栏独立视图） -->
@@ -309,6 +311,14 @@
                             <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除壁纸</button>
                         </div>
                         <label class="md-switch"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画（关闭后取消全部过渡动画）</span></label>
+                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量（分类/搜索/收藏/历史列表）</div>
+                        <select id="set_pagesize" class="md-select">
+                            <option value="" selected>自动（铺满窗口）</option>
+                            <option value="24">24 条</option>
+                            <option value="36">36 条</option>
+                            <option value="60">60 条</option>
+                            <option value="120">120 条</option>
+                        </select>
                     </div>
                     <div class="tool-card">
                         <div class="tool-card-title">播放与快捷键</div>
