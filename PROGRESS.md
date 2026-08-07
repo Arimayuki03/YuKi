@@ -188,6 +188,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T9~T14 批次**：边下边播（T9/simulDownload 默认关）、dlTimer 空闲自停（T10）、按钮去透明化 + 下载空态留白（T11）、设置二级菜单 + 文案精简 + 字号 6 档分级（T12）、收藏/历史工具条对齐首页（T13）、封面淡入防闪烁（T14/coverFadeIn）。
 - **T15~T20 批次**：下载页卡片化 + 总网速（T15）、danger-tonal/弹窗按钮去透明（T16）、设置导航加大/字体颜色移位/背景区重排/动画复选框/快捷键独立板块/select 统一 240px（T17）、侧栏去 brand（T18）、详情页全选栏上移 + 集数胶囊 + 倒序按钮紧邻（T19）、文案再精简（T20）。
 - **T21~T25 批次**：倒序按钮归位播放勾选集左侧 + 收藏按钮间距（T21）、界面动画改下拉筛选框（T22）、snackbar 弹出后跳移修复（T23/snackIn）、资产→扩展改名 + 系统置底 + mpv 状态行超格修复（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）。
+- **T26~T29 批次**：外观卡布局字号统一（T26）、缓存两卡等高（T27）、侧栏直链改名 + 本地文件独立板块（T28）、源配置迁入设置一级菜单源设置（T29）。
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -218,7 +219,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T25，2026-08）
+## 8.8 进行中任务批次（T1~T29，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -247,3 +248,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T23 | 修复设置 toast 弹出后向右跳移：snackbar 入场动画 viewIn 末态 transform:none 覆盖居中 translateX(-50%)，改专用 snackIn keyframes 末态保留居中位移 | 已完成 |
 | T24 | 设置一级菜单「资产」改「扩展」（卡片标题扩展状态/安装方式）；系统移至导航最底；mpv 状态行长路径超格修复（路径只进悬停 title，hint 仅显示已就绪 + asset-hint 省略号保护） | 已完成 |
 | T25 | 启动时屏蔽源未筛选修复：配置自动重载后源 key 集变化，旧 probedSites/blockedSites 不再匹配致新源不被过滤；loadSites 检测 key 集变化则重置记录并重新探测，_probeToken 世代校验使进行中的旧探测写入作废 | 已完成 |
+| T26 | 外观卡布局/字号统一：界面动画原用无样式定义的 .settings-item 致裸排错位，统一改 tip-line(13px)+控件模式与卡内其余项一致 | 已完成 |
+| T27 | 缓存页两卡等高：.settings-grid .tool-card[data-setcat=cache] 加 align-self:stretch，同排时框一样大 | 已完成 |
+| T28 | 侧栏「直链播放」改「直链」；「工具面板」改「本地文件」独立板块：删顶部页签（含本地文件切换按钮）直显本地文件卡，showToolPanel 删改 ensureLocalPanel 首次进入懒加载（app.js showView tools 挂钩）；tools-tabs/set-check 死 CSS 清理 | 已完成 |
+| T29 | 源配置迁入设置一级菜单「源设置」（导航位置：扩展与系统之间）：载入视频源/视频历史源/直播源/直播历史源/屏蔽源五卡整体迁入 settings-grid（data-setcat=source，控件 id 与卡片内样式不变，绑定维持原位）；home/player/live 引导文案同步改「设置→源设置」 | 已完成 |

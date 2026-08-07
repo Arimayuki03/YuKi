@@ -171,7 +171,7 @@ const Player = {
                 } catch (e) { /* 播放异常走兜底 */ }
             }
             const note = resolved && resolved.reason === 'no-parses'
-                ? '当前配置未含解析接口：请在”工具面板 → 源配置”载入含 parses 的配置后重试'
+                ? '当前配置未含解析接口：请在”设置 → 源设置”载入含 parses 的配置后重试'
                 : `解析失败：${(resolved && resolved.reason) || '未知错误'}`;
             this._seq = null; // 本集未起播，连播链终止
             this._showDialog(title, subtitle, '', url, note);

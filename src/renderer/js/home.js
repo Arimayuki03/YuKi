@@ -88,7 +88,7 @@ const Home = {
         this._renderSiteSelect();
         if (!this.sites.length) {
             $('#home-class').empty();
-            $('#home-grid').html('<div class="tip-line">尚未载入任何配置。请到“工具面板 → 源配置”，粘贴配置 URL 或 JSON 后点“载入配置”。</div>');
+            $('#home-grid').html('<div class="tip-line">尚未载入任何配置。请到“设置 → 源设置”，粘贴配置 URL 或 JSON 后点“载入配置”。</div>');
             $('#home-pager').empty();
             return;
         }
@@ -102,7 +102,7 @@ const Home = {
     _renderSiteSelect() {
         const sel = $('#site-select').empty();
         if (!this.sites.length) {
-            sel.append('<option value="">（无站点 · 请先在工具面板→源配置载入）</option>');
+            sel.append('<option value="">（无站点 · 请先在设置→源设置载入）</option>');
             return;
         }
         this.sites.forEach((s) => sel.append(`<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}</option>`));

@@ -493,23 +493,8 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .settings-nav-item:hover { background:var(--md-secondary-container); }
 .settings-nav-item.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
 
-/* 工具面板：桌面布局（顶部页签 + 卡片式内容，取消原 600px 移动壳） */
+/* 本地文件视图（T28：原工具面板页签移除，直显本地文件卡） */
 .tools-wrap { max-width: 1060px; margin: 0 auto; }
-.tools-tabs {
-    display:flex; gap:8px; margin-bottom:18px;
-    border-bottom:1px solid var(--md-outline-variant); padding-bottom:12px;
-}
-.tools-tab {
-    display:inline-flex; align-items:center; gap:8px;
-    padding:8px 20px; border-radius:18px; font-size:14px; cursor:pointer;
-    border:1px solid var(--md-outline-variant);
-    background:var(--md-surface-container-high); /* 不透明底（T11：与分类 tabs 一致的胶囊样式） */
-    color:var(--md-on-surface-variant); user-select:none;
-    transition:background .15s,color .15s;
-}
-.tools-tab:hover { background:var(--md-surface-container-high); }
-.tools-tab.active { background:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
-.tools-tab-icon { width:18px; height:18px; fill:currentColor; flex-shrink:0; }
 .tool-panel { display:none; }
 .tool-panel.active { display:block; }
 /* 设置页分类卡片（T7）：显式列数控制——窄窗单列、常规 2 列、全屏宽屏 3 列，
@@ -523,12 +508,8 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .settings-grid .md-select { width:240px; min-width:0; flex:none; max-width:100%; }
 /* 设置页按钮统一样式与大小（避免 md-btn / md-btn-sm 混用显得参差） */
 .settings-grid .md-btn { height:38px; padding:0 18px; font-size:13.5px; border-radius:19px; white-space:nowrap; }
-/* 普通复选框设置项（T17：界面动画等，替代 md-switch） */
-.set-check {
-    display:inline-flex; align-items:center; gap:8px; margin-top:14px;
-    font-size:14px; color:var(--md-on-surface); cursor:pointer; user-select:none;
-}
-.set-check input { width:18px; height:18px; margin:0; accent-color:var(--md-primary); cursor:pointer; }
+/* 缓存页两张卡片等高（T27：分类缓存/播放缓存同排时框一样大） */
+.settings-grid .tool-card[data-setcat="cache"] { align-self:stretch; }
 /* 收藏/历史页工具条：标签筛选行；搜索框已并入顶部 view-toolbar（T13，与首页同规格） */
 .rec-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 12px; }
 .rec-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:20px; }

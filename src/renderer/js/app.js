@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, initAuxPanels */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, initAuxPanels, ensureLocalPanel */
 
 const App = {
     currentView: 'home',
@@ -26,6 +26,7 @@ const App = {
         if (name === 'live') Live.enter();
         if (name === 'favorites') Favorites.enter();
         if (name === 'history') HistoryView.enter();
+        if (name === 'tools') ensureLocalPanel(); // T28：本地文件独立板块，首次进入懒加载
         if (!opts || opts.push !== false) {
             if (this._navStack[this._navStack.length - 1] !== name) {
                 this._navStack.push(name);

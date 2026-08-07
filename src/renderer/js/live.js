@@ -114,7 +114,7 @@ const Live = {
         if (!this.lives.length) {
             sel.append('<option value="">（无直播源）</option>');
             $('#live-groups').empty();
-            $('#live-list').html('<div class="tip-line">当前配置没有直播源。可到“工具面板 → 源配置 → 直播源”添加 txt/m3u 直播源或导入 TVBox 配置，也可载入含 lives 的配置。</div>');
+            $('#live-list').html('<div class="tip-line">当前配置没有直播源。可到“设置 → 源设置 → 直播源”添加 txt/m3u 直播源或导入 TVBox 配置，也可载入含 lives 的配置。</div>');
             return;
         }
         this.lives.forEach((l, i) => sel.append(`<option value="${i}">${escHtml(l.name || l.url)}</option>`));

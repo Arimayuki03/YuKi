@@ -22,12 +22,10 @@ let _assetStatus = null; // 最近一次资产就绪状态缓存（Anime4K 开�
 
 // ---------------------------------------------------------------- 面板切换
 
-function showToolPanel(name) {
-    $('.tools-tab').removeClass('active');
-    $(`.tools-tab[data-panel="${name}"]`).addClass('active');
-    $('.tool-panel').removeClass('active');
-    $(`#${name}`).addClass('active');
-    if (name === 'tool-local' && document.getElementById('file_list').innerHTML === '') listFile('');
+/** 本地文件板块（T28：原工具面板页签移除后直显）：首次进入懒加载根目录列表。 */
+function ensureLocalPanel() {
+    const list = document.getElementById('file_list');
+    if (list && list.innerHTML === '') listFile('');
 }
 
 // ---------------------------------------------------------------- 源配置
@@ -577,9 +575,8 @@ function confirmDelFile(yes) {
 // ---------------------------------------------------------------- 初始化（app.js 启动时调用一次）
 
 function initAuxPanels() {
-    showToolPanel('tool-source');
-    // 面板切换
-    $('.tools-tab').on('click', (e) => showToolPanel(String($(e.currentTarget).data('panel'))));
+    // T28：工具面板改本地文件独立板块，页签与 showToolPanel 已删；
+    // 源配置迁入设置→源设置，控件 id 不变，绑定维持原位
     // 历史源：点击载入 / ✕ 删除
     $('#config_history')
         .on('click', '.history-del', function (e) {
