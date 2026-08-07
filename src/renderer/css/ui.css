@@ -511,6 +511,23 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .wall-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
 /* 快捷键/语言偏好网格：auto-fill 自适应折列 */
 .hotkey-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; }
+/* mpv 键位自定义表（T8）：动作名 + 键位按钮；捕获中/冲突态高亮 */
+.hk-row {
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:7px 0; border-bottom:1px dashed var(--md-outline-variant);
+}
+.hk-row:last-child { border-bottom:none; }
+.hk-label { font-size:13px; color:var(--md-on-surface-variant); }
+.hk-key {
+    min-width:92px; height:32px; padding:0 12px; font-size:13px; font-family:inherit;
+    border:1px solid var(--md-outline); border-radius:8px;
+    background:var(--md-surface); color:var(--md-on-surface); cursor:pointer;
+    transition:border-color .15s, background .15s, color .15s;
+}
+.hk-key:hover { border-color:var(--md-primary); }
+.hk-key.capturing { border-color:var(--md-primary); background:var(--md-primary-container); color:var(--md-on-primary-container); }
+.hk-row.conflict .hk-key { border-color:var(--md-error); color:var(--md-error); }
+.hk-row.conflict .hk-label { color:var(--md-error); }
 .tool-card {
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
     border-radius:16px; padding:18px 20px; margin-bottom:16px;

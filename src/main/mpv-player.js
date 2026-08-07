@@ -127,7 +127,11 @@ class MpvPlayer extends EventEmitter {
             `--input-ipc-server=${this.ipcPath}`,
             '--sub-auto=no', '--sub-visibility=yes',
             `--osd-playing-msg=${opts.title || '影视 PC'}`,
+            // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
+            // 注意 ${media-title} 是 mpv 属性展开，必须用普通字符串避免被 JS 模板插值。
+            '--title=video-pc · ${media-title}',
         ];
+        if (WIN) args.push('--osd-font=Microsoft YaHei');
         if (opts.header && typeof opts.header === 'object') {
             const pairs = Object.entries(opts.header)
                 .filter(([, v]) => v != null && v !== '')

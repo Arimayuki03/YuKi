@@ -356,6 +356,12 @@
                         <label class="md-switch"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放（关闭窗口时不停止正在播放的影片）</span></label>
                         <label class="md-switch"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式（不记录播放历史）</span></label>
                         <label class="md-switch"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分（实时升频锐化，适合动漫；着色器启动时自动下载，首次启动稍候）</span></label>
+                        <div class="tip-line pad0" style="margin-top:6px;">Anime4K 档位（开启超分后选择，下次起播生效）</div>
+                        <select id="set_anime4k_mode" class="md-select">
+                            <option value="a" selected>均衡（Mode A · 默认）</option>
+                            <option value="aa">细节增强（Mode A+A · 低清片源）</option>
+                            <option value="restore">仅修复（不升频 · 高清片源）</option>
+                        </select>
                         <div class="tip-line pad0" style="margin-top:12px;">mpv 语言偏好（多音轨/多字幕时优先选择，下次起播生效）</div>
                         <div class="hotkey-grid">
                             <div>
@@ -401,7 +407,11 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:10px;">键位：空格 暂停 · ←/→ 快退/快进 · ↑/↓ 音量 · [ ] 倍速 · Backspace 恢复原速 · , . 逐帧 · F 全屏</div>
+                        <div class="tip-line pad0" style="margin-top:12px;">mpv 播放器快捷键（点击键位后按下新键即可修改，保存后下次起播生效）</div>
+                        <div id="hotkey_rows"></div>
+                        <div class="wall-row">
+                            <button id="hotkey_reset" class="md-btn md-btn-tonal">恢复默认键位</button>
+                        </div>
                     </div>
                     <div class="tool-card">
                         <div class="tool-card-title">下载</div>

@@ -34,15 +34,29 @@ const ParseWindow = require('./parse-window');
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 
-// Anime4K 实时超分着色器链（v4.1 Mode A：高光钳制→恢复→2x 升频→再恢复，动漫向）
-const ANIME4K_FILES = [
-    'Anime4K_Clamp_Highlights.glsl',
-    'Anime4K_Restore_CNN_M.glsl',
-    'Anime4K_Upscale_CNN_x2_M.glsl',
-    'Anime4K_Restore_CNN_S.glsl',
-    'Anime4K_Upscale_CNN_x2_S.glsl',
-    'Anime4K_Darken_HQ.glsl',
-];
+// Anime4K 实时超分着色器链（v4.1，动漫向）三档位（设置项 anime4kMode，T8）：
+// 均衡 Mode A：高光钳制→恢复→2x 升频→再恢复（默认）；细节 Mode A+A：先升频再恢复再升频（低清片源）；
+// 修复 Restore：只恢复细节不升频（已高清的片源）。所需着色器均在启动自动下载清单内。
+const ANIME4K_CHAINS = {
+    a: [
+        'Anime4K_Clamp_Highlights.glsl',
+        'Anime4K_Restore_CNN_M.glsl',
+        'Anime4K_Upscale_CNN_x2_M.glsl',
+        'Anime4K_Restore_CNN_S.glsl',
+        'Anime4K_Upscale_CNN_x2_S.glsl',
+        'Anime4K_Darken_HQ.glsl',
+    ],
+    aa: [
+        'Anime4K_Clamp_Highlights.glsl',
+        'Anime4K_Upscale_CNN_x2_M.glsl',
+        'Anime4K_Restore_CNN_M.glsl',
+        'Anime4K_Upscale_CNN_x2_M.glsl',
+    ],
+    restore: [
+        'Anime4K_Restore_CNN_M.glsl',
+        'Anime4K_Restore_CNN_S.glsl',
+    ],
+};
 const ANIME4K_MIN_SIZE = 128; // 合法着色器远大于此；拦截 0 字节/截断的残留文件
 
 /** 单个着色器文件是否完整可用：存在、非空/截断、且头部含作者版权行（拦截镜像/代理返回的大体积错误页）。 */
@@ -53,12 +67,18 @@ function anime4kFileOk(p) {
     } catch (e) { return false; }
 }
 
-/** 读 Anime4K 着色器链（mpv --glsl-shaders 分隔符 win=';' posix=':'）；任一文件缺失/损坏返回 '' 跳过注入。 */
-function buildAnime4kChain() {
+/** 读指定档位的 Anime4K 着色器链（mpv --glsl-shaders 分隔符 win=';' posix=':'）；任一文件缺失/损坏返回 '' 跳过注入。 */
+function buildAnime4kChain(mode) {
     const dir = path.join(RESOURCES_ROOT, 'vendor', 'anime4k');
-    const files = ANIME4K_FILES.map((f) => path.join(dir, f));
+    const files = (ANIME4K_CHAINS[mode] || ANIME4K_CHAINS.a).map((f) => path.join(dir, f));
     if (!files.every(anime4kFileOk)) return '';
     return files.join(process.platform === 'win32' ? ';' : ':');
+}
+
+/** 按当前设置读 Anime4K 着色器链：开关关闭或着色器未就绪返回 ''。 */
+function anime4kChainFromSettings() {
+    if (!(settings && settings.get('anime4k'))) return '';
+    return buildAnime4kChain(String(settings.get('anime4kMode') || 'a'));
 }
 
 // Anime4K 着色器源（bloc97/Anime4K v4.1，仓库按功能分子目录）：启动时自动补齐缺失文件，免手动下载。
@@ -400,38 +420,78 @@ app.whenReady().then(() => {
         return keys;
     }
 
+    /** 键名合法性：非空、不含空白与 input.conf 特殊字符（# 注释 ; 命令分隔 " 引号），限长。 */
+    const hkKeyOk = (k) => typeof k === 'string' && k.length >= 1 && k.length <= 24 && !/[\s#;"]/.test(k);
+
+    // 可自定义键位表（T8）：动作 id → 默认键；渲染层同表提供按键捕获 UI，
+    // 键位存 settings.playerHotkeys.keys，此处写入 input.conf（mpv 语法）。
+    const HK_DEF_KEYS = {
+        pause: 'SPACE', seekBack: 'LEFT', seekFwd: 'RIGHT',
+        volUp: 'UP', volDown: 'DOWN',
+        speedDown: '[', speedUp: ']', speedReset: 'BS',
+        frameBack: ',', frameFwd: '.', fullscreen: 'f',
+    };
+
     function writeMpvAssets() {
         try {
             const hk = (settings && settings.get('playerHotkeys')) || {};
             const seek = Math.max(1, Math.min(120, parseInt(hk.seek, 10) || 5));
             const vol = Math.max(1, Math.min(20, parseInt(hk.vol, 10) || 5));
             const speed = Math.max(0.05, Math.min(1, parseFloat(hk.speed) || 0.1));
-            const anime4kActive = !!(settings && settings.get('anime4k') && buildAnime4kChain());
+            // 自定义键位：只收合法键名，缺失动作回退默认
+            const keys = Object.assign({}, HK_DEF_KEYS);
+            if (hk.keys && typeof hk.keys === 'object') {
+                for (const id of Object.keys(HK_DEF_KEYS)) {
+                    if (hkKeyOk(hk.keys[id])) keys[id] = hk.keys[id];
+                }
+            }
+            const a4kChain = anime4kChainFromSettings();
+            const a4kLabels = { a: '均衡', aa: '细节增强', restore: '仅修复' };
+            const a4kHint = a4kChain
+                ? ` | Anime4K 超分: 开（${a4kLabels[String(settings.get('anime4kMode') || 'a')] || '均衡'}）`
+                : '';
             const scriptDir = path.join(app.getPath('userData'), 'mpv-scripts');
             fs.mkdirSync(scriptDir, { recursive: true });
+            // lua 提示：起播列键位（随自定义键位动态生成）+ 暂停状态中文 OSD 反馈
+            const hintParts = [
+                `${keys.pause} 暂停/继续`, `${keys.seekBack}/${keys.seekFwd} 快退/快进 ${seek}秒`,
+                `${keys.volUp}/${keys.volDown} 音量±${vol}`, `${keys.speedDown} ${keys.speedUp} 倍速∓${speed}`,
+                `${keys.speedReset} 恢复原速`, `${keys.frameBack} ${keys.frameFwd} 逐帧`, `${keys.fullscreen} 全屏`,
+            ];
             const lua = [
                 'mp.register_event("file-loaded", function()',
-                `  mp.osd_message("快捷键：空格 暂停/继续 | ←/→ 快退/快进 ${seek}秒 | ↑/↓ 音量±${vol} | [ ] 倍速∓${speed} | Backspace 恢复原速 | , . 逐帧 | F 全屏${anime4kActive ? ' | Anime4K 超分: 开' : ''}", 6)`,
+                `  mp.osd_message("快捷键：${hintParts.join(' | ')}${a4kHint}", 6)`,
+                'end)',
+                'mp.observe_property("pause", "boolean", function(_, v)',
+                '  if v ~= nil then mp.osd_message(v and "已暂停" or "继续播放", 1.5) end',
                 'end)',
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'vpc-hints.lua'), lua, 'utf8');
-            // input.conf：键位固定，步长取自设置（mpv 语法：add speed 支持小数步长）。
-            // 用户已绑定过的键不重复写入应用段；用户原始行追加在应用段后，同键冲突以用户为准。
+            // input.conf：键位取自设置（mpv 语法：add speed 支持小数步长），动作附中文 show-text 反馈。
+            // 同键重复只留首个；用户全局 input.conf 已绑定的键不写入应用段，用户行追加在后（同键以用户为准）。
             const userLines = readUserMpvInputConf();
             const userKeys = inputConfBoundKeys(userLines);
-            const bind = (key, cmd) => (userKeys.has(key) ? [] : [`${key} ${cmd}`]);
-            const defaults = [
-                ...bind('LEFT', `seek -${seek}`),
-                ...bind('RIGHT', `seek ${seek}`),
-                ...bind('UP', `add volume ${vol}`),
-                ...bind('DOWN', `add volume -${vol}`),
-                ...bind('[', `add speed -${speed}`),
-                ...bind(']', `add speed ${speed}`),
-                ...bind('BS', 'set speed 1'),
-                ...bind('SPACE', 'cycle pause'),
-                ...bind('f', 'cycle fullscreen'),
+            const bindings = [
+                [keys.pause, 'cycle pause', ''],
+                [keys.seekBack, `seek -${seek}`, `快退 ${seek} 秒`],
+                [keys.seekFwd, `seek ${seek}`, `快进 ${seek} 秒`],
+                [keys.volUp, `add volume ${vol}`, `音量 +${vol}`],
+                [keys.volDown, `add volume -${vol}`, `音量 -${vol}`],
+                [keys.speedDown, `add speed -${speed}`, `倍速 -${speed}`],
+                [keys.speedUp, `add speed ${speed}`, `倍速 +${speed}`],
+                [keys.speedReset, 'set speed 1', '已恢复原速 1.0x'],
+                [keys.frameBack, 'frame-back-step', '上一帧'],
+                [keys.frameFwd, 'frame-step', '下一帧'],
+                [keys.fullscreen, 'cycle fullscreen', ''],
             ];
+            const used = new Set();
+            const defaults = [];
+            for (const [key, cmd, msg] of bindings) {
+                if (!key || used.has(key) || userKeys.has(key)) continue;
+                used.add(key);
+                defaults.push(msg ? `${key} ${cmd}; show-text "${msg}"` : `${key} ${cmd}`);
+            }
             const conf = [
                 VPC_CONF_MARK,
                 ...defaults,
@@ -458,7 +518,7 @@ app.whenReady().then(() => {
             : null;
         mpv.audioLang = String(settings.get('playerAlang') || '');
         mpv.subLang = String(settings.get('playerSlang') || '');
-        mpv.anime4kShaders = settings.get('anime4k') ? buildAnime4kChain() : '';
+        mpv.anime4kShaders = anime4kChainFromSettings();
         writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示
         return { ok: true };
     });
@@ -475,8 +535,8 @@ app.whenReady().then(() => {
         const episodes = Array.isArray(meta.playlist) && meta.playlist.length
             ? meta.playlist
             : [{ url: payload.url, title }];
-        // Anime4K 开关实时生效（播放途中可切换，下次起播注入着色器）
-        mpv.anime4kShaders = settings.get('anime4k') ? buildAnime4kChain() : '';
+        // Anime4K 开关/档位实时生效（播放途中可切换，下次起播注入着色器）
+        mpv.anime4kShaders = anime4kChainFromSettings();
         // 断流重试上下文：记录本次会话首部 URL/标题/请求头（exit 时未播完可自动重连）
         mpv._lastUrls = episodes.map((e) => e.url);
         mpv._lastTitle = title;

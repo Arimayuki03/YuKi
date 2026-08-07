@@ -601,6 +601,102 @@ function initAuxPanels() {
     initSettingsPanel();
 }
 
+// ---------------------------------------------------------------- mpv 键位自定义（T8）
+
+// 动作表与主进程 HK_DEF_KEYS 一致：[id, 说明, 默认键]
+const HK_UI_ACTIONS = [
+    ['pause', '暂停 / 继续', 'SPACE'],
+    ['seekBack', '快退', 'LEFT'],
+    ['seekFwd', '快进', 'RIGHT'],
+    ['volUp', '音量加', 'UP'],
+    ['volDown', '音量减', 'DOWN'],
+    ['speedDown', '倍速减', '['],
+    ['speedUp', '倍速加', ']'],
+    ['speedReset', '恢复原速', 'BS'],
+    ['frameBack', '上一帧', ','],
+    ['frameFwd', '下一帧', '.'],
+    ['fullscreen', '全屏切换', 'f'],
+];
+let _hkKeys = HK_UI_ACTIONS.reduce((m, a) => { m[a[0]] = a[2]; return m; }, {});
+let _hkCapturing = null; // 正在捕获的动作 id
+let _hkNativeHandler = null; // 捕获阶段的 document keydown 监听（先于全局 Esc 派发）
+
+const _hkEsc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** 重复绑定的键名集合：同一键绑了两个动作时红标提示（mpv 以后绑定为准）。 */
+function hkConflicts() {
+    const seen = new Set(), dup = new Set();
+    for (const v of Object.values(_hkKeys)) { if (seen.has(v)) dup.add(v); seen.add(v); }
+    return dup;
+}
+
+function renderHotkeyRows() {
+    const dup = hkConflicts();
+    $('#hotkey_rows').html(HK_UI_ACTIONS.map(([id, label]) => `
+        <div class="hk-row${dup.has(_hkKeys[id]) ? ' conflict' : ''}" data-action="${id}">
+            <span class="hk-label">${label}</span>
+            <button type="button" class="hk-key${_hkCapturing === id ? ' capturing' : ''}" data-action="${id}">${_hkCapturing === id ? '按新键…（Esc 取消）' : _hkEsc(_hkKeys[id])}</button>
+        </div>`).join(''));
+}
+
+/** 浏览器键盘事件 → mpv 键名；不支持的键返回 null。Shift+字母按 mpv 习惯转大写。 */
+function hkEvToKey(e) {
+    const k = e.key;
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(k)) return null; // 单按修饰键不算
+    let base = '';
+    if (k === ' ') base = 'SPACE';
+    else if (k === 'ArrowLeft') base = 'LEFT';
+    else if (k === 'ArrowRight') base = 'RIGHT';
+    else if (k === 'ArrowUp') base = 'UP';
+    else if (k === 'ArrowDown') base = 'DOWN';
+    else if (k === 'Backspace') base = 'BS';
+    else if (k === 'Enter') base = 'ENTER';
+    else if (k === 'Escape') base = 'ESC';
+    else if (k === 'Tab') base = 'TAB';
+    else if (k === 'Home') base = 'HOME';
+    else if (k === 'End') base = 'END';
+    else if (k === 'PageUp') base = 'PGUP';
+    else if (k === 'PageDown') base = 'PGDWN';
+    else if (k === 'Delete') base = 'DEL';
+    else if (k === 'Insert') base = 'INS';
+    else if (/^F\d{1,2}$/i.test(k)) base = k.toUpperCase();
+    else if (k.length === 1) {
+        if (/[A-Za-z]/.test(k)) base = e.shiftKey ? k.toUpperCase() : k.toLowerCase();
+        else base = k;
+    } else return null;
+    let mod = '';
+    if (e.ctrlKey) mod += 'Ctrl+';
+    if (e.altKey) mod += 'Alt+';
+    // Shift+字母已转大写表达；其余 Shift 组合不支持
+    if (e.shiftKey && !/[A-Za-z]/.test(k)) return null;
+    return mod + base;
+}
+
+function hkStopListener() {
+    if (_hkNativeHandler) { document.removeEventListener('keydown', _hkNativeHandler, true); _hkNativeHandler = null; }
+}
+
+function hkCancelCapture() {
+    _hkCapturing = null;
+    hkStopListener();
+    renderHotkeyRows();
+}
+
+/** 步长 + 键位一起持久化，并通知主进程重写 mpv input.conf。 */
+async function saveHotkeys() {
+    const hk = {
+        seek: Math.max(1, Math.min(120, parseInt($('#set_hotkey_seek').val(), 10) || 5)),
+        vol: Math.max(1, Math.min(20, parseInt($('#set_hotkey_vol').val(), 10) || 5)),
+        speed: Math.max(0.05, Math.min(1, parseFloat($('#set_hotkey_speed').val()) || 0.1)),
+        keys: Object.assign({}, _hkKeys),
+    };
+    $('#set_hotkey_seek').val(hk.seek);
+    $('#set_hotkey_vol').val(hk.vol);
+    $('#set_hotkey_speed').val(hk.speed);
+    await window.vpc.settingsSet('playerHotkeys', hk);
+    if (window.vpc.updateHotkeys) window.vpc.updateHotkeys();
+}
+
 function initSettingsPanel() {
     // 播放设置：载入持久化值，改动即存
     window.vpc.settingsGet().then((s) => {
@@ -653,6 +749,11 @@ function initSettingsPanel() {
         if (hk.seek) $('#set_hotkey_seek').val(hk.seek);
         if (hk.vol) $('#set_hotkey_vol').val(hk.vol);
         if (hk.speed) $('#set_hotkey_speed').val(hk.speed);
+        if (hk.keys && typeof hk.keys === 'object') {
+            for (const [id] of HK_UI_ACTIONS) if (hk.keys[id]) _hkKeys[id] = hk.keys[id];
+        }
+        renderHotkeyRows();
+        if (s.anime4kMode) $('#set_anime4k_mode').val(s.anime4kMode);
         // 屏蔽源计数行
         updateBlockedLine(s);
     }).catch(() => { });
@@ -723,21 +824,42 @@ function initSettingsPanel() {
         $('#set_textcolor').val('');
         applyTextColor('');
     });
-    // 快捷键步长：持久化并通知主进程重写 mpv input.conf
-    const saveHotkeys = async () => {
-        const hk = {
-            seek: Math.max(1, Math.min(120, parseInt($('#set_hotkey_seek').val(), 10) || 5)),
-            vol: Math.max(1, Math.min(20, parseInt($('#set_hotkey_vol').val(), 10) || 5)),
-            speed: Math.max(0.05, Math.min(1, parseFloat($('#set_hotkey_speed').val()) || 0.1)),
-        };
-        $('#set_hotkey_seek').val(hk.seek);
-        $('#set_hotkey_vol').val(hk.vol);
-        $('#set_hotkey_speed').val(hk.speed);
-        await window.vpc.settingsSet('playerHotkeys', hk);
-        if (window.vpc.updateHotkeys) window.vpc.updateHotkeys();
+    // 快捷键步长/键位：持久化并通知主进程重写 mpv input.conf（saveHotkeys 见上方键位模块）
+    $('#set_hotkey_seek, #set_hotkey_vol, #set_hotkey_speed').on('change', async () => {
+        await saveHotkeys();
         warnToast('快捷键已保存，下次起播生效');
-    };
-    $('#set_hotkey_seek, #set_hotkey_vol, #set_hotkey_speed').on('change', saveHotkeys);
+    });
+    // 键位捕获：点击键位按钮后监听下一个按键；Esc 取消。
+    // 用捕获阶段原生监听：先于全局 Esc 派发（冒泡），避免取消时顺带关闭设置页
+    $('#hotkey_rows').on('click', '.hk-key', function () {
+        _hkCapturing = String($(this).data('action'));
+        renderHotkeyRows();
+        hkStopListener();
+        _hkNativeHandler = (e) => {
+            if (!_hkCapturing) { hkStopListener(); return; }
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.key === 'Escape') { hkCancelCapture(); return; }
+            const k = hkEvToKey(e);
+            if (!k) return; // 单按修饰键/不支持的键，继续等
+            const action = _hkCapturing;
+            _hkKeys[action] = k;
+            _hkCapturing = null;
+            hkStopListener();
+            renderHotkeyRows();
+            saveHotkeys();
+            if (hkConflicts().has(k)) warnToast(`注意：${k} 绑定了多个动作，播放时后绑定者生效`);
+            else warnToast(`已将「${HK_UI_ACTIONS.find((a) => a[0] === action)[1]}」设为 ${k}，下次起播生效`);
+        };
+        document.addEventListener('keydown', _hkNativeHandler, true);
+    });
+    // 恢复默认键位
+    $('#hotkey_reset').on('click', async () => {
+        _hkKeys = HK_UI_ACTIONS.reduce((m, a) => { m[a[0]] = a[2]; return m; }, {});
+        hkCancelCapture();
+        await saveHotkeys();
+        warnToast('已恢复默认键位，下次起播生效');
+    });
     // 默认倍速：持久化并通知主进程（下次起播生效）
     $('#set_speed').on('change', function () {
         window.vpc.settingsSet('playerSpeed', parseFloat(this.value) || 1);
@@ -783,6 +905,12 @@ function initSettingsPanel() {
         } else {
             warnToast('已关闭 Anime4K 超分');
         }
+    });
+    // Anime4K 档位：持久化并通知主进程（下次起播注入对应着色器链）
+    $('#set_anime4k_mode').on('change', function () {
+        window.vpc.settingsSet('anime4kMode', this.value);
+        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        warnToast('Anime4K 档位已保存，下次起播生效');
     });
     // 界面动画开关
     $('#set_anim').on('change', function () {
