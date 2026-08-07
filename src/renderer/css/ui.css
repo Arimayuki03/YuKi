@@ -54,7 +54,7 @@ html.dark {
    字体大小由注入样式表按基准字号等比缩放（见 _applyTextScale）。
    旧 data-fontsize / data-textsize 多档规则已废弃。 */
 
-/* 钰悫晲 Reset 钰悫晲 */
+/* ── Reset ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -114,7 +114,7 @@ html, body {
 
 .md-input::placeholder { color: var(--md-on-surface-variant); }
 
-/* 钰悫晲 M3 Buttons 钰悫晲 */
+/* ── M3 Buttons ── */
 .md-btn {
     display: inline-flex;
     align-items: center;
@@ -170,7 +170,7 @@ html, body {
 .md-btn-danger-text { background: transparent; color: var(--md-error); }
 .md-btn-danger-text::after { background: var(--md-error); }
 
-/* 钰悫晲 Toolbar 钰悫晲 */
+/* ── Toolbar ── */
 .md-toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -178,7 +178,7 @@ html, body {
     margin-bottom: 16px;
 }
 
-/* 钰悫晲 File List 钰悫晲 */
+/* ── File List ── */
 .file-item {
     display: flex;
     align-items: center;
@@ -375,7 +375,7 @@ html, body {
 .md-dialog-btn.error         { color: var(--md-error); }
 .md-dialog-btn.error::after  { background: var(--md-error); }
 
-/* 钰悫晲 M3 Snackbar 钰悫晲 */
+/* ── M3 Snackbar ── */
 #warnToast {
     display: none;
     position: fixed;
@@ -400,7 +400,7 @@ html, body {
     box-shadow: 0 3px 5px -1px var(--md-shadow), 0 6px 10px rgba(0,0,0,0.14), 0 1px 18px rgba(0,0,0,0.12);
 }
 
-/* 钰悫晲 Loading overlay 钰悫晲 */
+/* ── Loading overlay ── */
 #loadingToast {
     display: none;
     position: fixed;
