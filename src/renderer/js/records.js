@@ -237,8 +237,9 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags) {
                 grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
                 return;
             }
-            // 客户端分页：每页条数与首页一致（T36：设置值优先，「自动」回退窗口自适应估算）
-            const size = (await listPageSize()) || adaptivePageSize();
+            // 客户端分页：设置值优先；「自动」回退窗口自适应估算但上限 24，
+            // 避免条数不多（如 20 几条）时估算值偏大而不分页
+            const size = (await listPageSize()) || adaptivePageSize(24);
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
             const slice = list.slice((this._page - 1) * size, this._page * size);

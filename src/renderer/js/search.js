@@ -53,8 +53,8 @@ const Search = {
     async run() {
         const word = $('#search-keyword').val().trim();
         if (!word) { warnToast('请输入关键字'); return; }
-        // T36：每页条数与首页一致（设置值优先，「自动」回退窗口自适应估算）
-        this._size = (await listPageSize()) || adaptivePageSize() || SEARCH_PAGE_SIZE;
+        // T36：每页条数设置值优先；「自动」回退自适应估算但上限 24，少量结果也能出分页器
+        this._size = (await listPageSize()) || adaptivePageSize(24) || SEARCH_PAGE_SIZE;
         this.stop();
         $('#search-results').empty();
         this._grpLists = {}; // 新搜索：重置分组数据
