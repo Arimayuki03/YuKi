@@ -98,7 +98,7 @@ npm run build:py
 
 ### 推送/设置/解析
 31. **推送链路**：面板手动推送与局域网推送共用主进程 playPushedUrl（mpv + 通知 + `vpc:push-received`）；push-server 绑 0.0.0.0 随机端口 + token，仅收 http(s)，GET `/` 有说明页；非直链页面用 parse-window `captureDirect` 抓媒体请求；后端不处理 do=push。
-32. **设置持久化**：`settings.js` 存 `<userData>/settings.json`，键 camelCase。约定键：lastConfigUrl / playerVolume / customLives / dlDir / configHistory / favorites / history / theme / wallpaper / colorMode / fontSize / textSize / textColor / wallpaperDim / blockedSites / probedSites / playerHotkeys / navCollapsed / playerSpeed / autoNext / resumePos / bgPlay / animEnabled / closeAction / incognito / cacheDir / dlConcurrency / playerCacheMode / playerCacheDir 等。自定义数据键（customLives、lastConfigUrl、favorites、history、dlDir、cacheDir、playerCacheMode、playerCacheDir、configHistory）在 `settings.reset()` 中显式保留。
+32. **设置持久化**：`settings.js` 存 `<userData>/settings.json`，键 camelCase。约定键：lastConfigUrl / playerVolume / customLives / dlDir / configHistory / favorites / history / theme / wallpaper / colorMode / fontSize / textSize / textColor / wallpaperDim / blockedSites / probedSites / playerHotkeys / navCollapsed / playerSpeed / autoNext / resumePos / bgPlay / animEnabled / closeAction / incognito / cacheDir / dlConcurrency / playerCacheMode / playerCacheDir / simulDownload / hlsAdFilter / watchStats / recentWatches 等。自定义数据键（customLives、lastConfigUrl、favorites、history、dlDir、cacheDir、playerCacheMode、playerCacheDir、configHistory、watchStats、recentWatches）在 `settings.reset()` 中显式保留。
 33. **配置自动重载**：setting(name=config) 成功后渲染层存 URL 与历史；启动时主进程在 backend ready 后 POST do=setting 自动重载，成功发 `vpc:config-reloaded`，前端 Home/Live 刷新。
 34. **配置重载状态机**（修首屏）：主进程 `configReload = {reloading, url}`，backend ready 进入重载时同步置位，所有收尾路径经 `finishReload(ok, sites)` 复位并发 `vpc:config-reloaded`；渲染层经 `vpc:config-state` IPC 取权威状态，app.js waitConfigDone 双状态轮询。改动启动链路时保持该状态机。
 35. **VIP 解析**（决策 38/33）：parses 来自 config（/sites）。parse=1 全自动起播流程：地址已是媒体直链 → 直接 mpv；否则 type=1 JSON 接口优先直接 fetch（兼容 url/data.url/vurl/play_url 多字段，抓返回里的 Referer/UA 交 mpv，解出 .html 视为失败）→ 失败再 iframe 型隐藏 BrowserWindow（partition 'parse' 独立 session，webRequest.onBeforeRequest 捕获 resourceType=media 或媒体扩展名）→ 再失败 `vpc:capture-direct`（隐藏窗口直开链接抓页面自身播放器请求）。每接口 20s 超时按序尝试。解析窗口 sandbox=true + nodeIntegration=false + contextIsolation=true，用后即 destroy。mpv 经 `--http-header-fields` 注入 Referer。
@@ -195,6 +195,10 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T43 批次**：搜索中点详情转圈久修复（优先级划分：点开详情 > 搜索拉页 > 封面补拉）：Detail.open 先 abortCoverFill 中止后台补拉让路（根因：同一 JS 源共享 QuickJS 上下文，JsEngine.call 持锁串行，详情排在补拉/拉页后面）；详情就绪后恢复补拉；搜索流式期间暂缓补拉待 done 后统一补；封面补拉改只补当前屏幕可见卡片（IntersectionObserver 上下预热 300px），并发改 5。
 - **T44 批次**：直播源消失/视频源变少根治（多仓跨条目合并）：根因是偏好仓 supermeguo18（6 个直播源）偶发超时，回退仓 bizhangjie🐶1 只有 1 条无效 lives（无 url）且站点 key 不同触发重新探测屏蔽。修复：多仓命中主条目后并行补拉其余条目，lives 按 url 去重合并（嵌套 channels 展平、无 url 丢弃），sites 按 key 去重合并（主条目优先，只增不删）；偏好条目首次失败自动重试一次防偶发超时仓漂移。
 - **T45 批次**：封面补拉并发 5→10（_coverFillPump，可见卡才入队+详情让路机制不变，提速不阻塞用户操作）；文档整理：§7 功能清单 T9~T39 流水账压缩为三行摘要（细节统一查 §8.8 表，消除双份维护），决策 13 同步 T44 多仓合并机制，TOC 锚点行号重新校准。
+- **T46 批次**：Kazumi 规则系统补全——安装/更新时间追踪（installed_at/updated_at 持久化）、有效性检测（后台 4 并发搜索测试关键词标记 valid/invalid/captcha，列表徽标）、批量更新（后台 4 并发商店检查+版本比较+更新，保留安装时间）。（细节见 §8.8 表）
+- **T47 批次**：下载与播放增强——下载记录持久化（dl-records.json 跨重启恢复，删除/清空同步）、mpv 截图（快捷键 s 截图存图片/video-pc，原生 s 键与 IPC 双通道，设置页打开截图目录）。（细节见 §8.8 表）
+- **T48 批次**：「我的」页面——观看统计（累计时长/次数/部数 + 近 7 天条形图）与最近观看（卡片点击回详情），埋点在 mpv 退出时累计。（细节见 §8.8 表）
+- **T49 批次**：爬虫健壮性——Cookie 持久化（解析会话 Cookie 落盘，规则引擎自动带上）、视频源解析池（3 槽位独立 partition 并发解析）、HLS 广告过滤（m3u8 下载前剔除广告分段，设置开关）。（细节见 §8.8 表）
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -226,7 +230,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T45，2026-08）
+## 8.8 进行中任务批次（T1~T49，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -275,3 +279,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T43 | 搜索中点详情转圈久 + 封面补收紧（优先级：点开详情 > 搜索拉页 > 封面补拉）：根因同一 JS 源共享 QuickJS 上下文、JsEngine.call 持锁串行，详情请求排在后台补拉/搜索拉页后面 → ①common.js 补拉重写为世代制：abortCoverFill（世代自增+清队列+断开观察器），fillMissingCovers 改 IntersectionObserver 只补屏幕可见卡（rootMargin 上下 300px，入视口才入队），worker 池并发改 5（_coverFillPump/_coverFillWorker），同容器旧观察器先断开防累积，120s 安全释放 ②detail.js open 入口先 abortCoverFill 让路；load 成功后恢复补拉（搜索仍在流式时只补首页区不碰搜索区） ③search.js 流式期间 _paintGrp 暂缓补拉（!this.es 才补），done/error 收尾后 _fillAllCovers 统一补各组 | 已完成 |
 | T44 | 直播源消失/视频源变少根治（多仓跨条目合并）：根因偏好仓 supermeguo18（6 直播源）raw.githubusercontent 超时回退 bizhangjie🐶1（仅 1 条无 url 的无效 lives），且仓间站点 key 不同触发探测重新屏蔽 → ①config.py 多仓命中主条目后 _merge_repo_extras 并行补拉其余条目（ThreadPoolExecutor ≤4）：_merge_lives 按 url 去重合并（_iter_live_urls 嵌套 channels 展平，无 url 条目丢弃，主条目优先），_merge_sites 按 key 去重追加构建（主条目优先只增不删），summary 计数同步更新 ②偏好条目首次拉取失败自动重试一次（防偶发超时仓漂移） | 已完成 |
 | T45 | 封面补拉提档 + 文档整理：①common.js _coverFillPump 并发上限 5→10（只补可见卡+Detail.open abortCoverFill 让路机制不变，提速不阻塞用户操作） ②PROGRESS.md 整理：§7 功能清单 T9~T39 十行流水账压缩为三行批次摘要（细节统一查 §8.8 表消除双份维护漂移），决策 13 同步 T40/T44 多仓偏好与跨仓合并机制，TOC 锚点行号重新校准 | 已完成 |
+| T46 | Kazumi 规则系统补全：①安装/更新时间追踪（Plugin 增 installed_at/updated_at，add() 新装记 installed、更新保 installed 记 updated，内置规则导入也盖章，列表行悬停展示）②有效性检测（后台 4 并发按启用规则搜索测试关键词「海贼王」标记 valid/invalid/captcha，写回 validity_checked_at，列表徽标绿/红/橙，kazumiCheckValidity/kazumiValidityStatus 端点，前端轮询）③批量更新（后台 4 并发 fetch_shop_rule 拉最新版，版本数字段比较 _should_update，较新则 add() 覆盖保留安装时间，kazumiBatchUpdate/kazumiUpdateStatus 端点，前端 confirmDialog+轮询汇总 toast）④test_kazumi.py 增 9 用例（41 全绿），npm run test:all 全绿 | 已完成 |
+| T47 | 下载与播放增强：①下载记录持久化（新 dl-record.js 存 userData/dl-records.json 上限 200，完成/失败落盘，buildDlList 合并推送时按 gid 补回跨会话记录避免与实时任务重复，删除/清空/清失败同步删记录防复活，HLS 与 aria2 同一链路）②mpv 截图（mpv-player 增 screenshot() screenshot-to-file subtitles 模式 + 起播注入 --screenshot-directory/--screenshot-template 使原生 s 键也存图，HK 新增 screenshot 动作默认 s 键+lua 提示+绑定，设置页快捷键卡加「打开截图目录」按钮，vpc:mpv-screenshot/vpc:mpv-screenshot-dir IPC 截图到图片/video-pc 并弹通知） | 已完成 |
+| T48 | 「我的」页面（观看统计 + 最近观看）：①埋点 player.js 新增 _curMeta + _recordWatch，mpv 退出时（pos≥15s 计有效观看）累计 totalSeconds/sessionCount/titles 去重/daily 近 30 天分布，并 upsert recentWatches（site\|vodId 去重，无 id 按标题）上限 50 ②新增视图 my.js + 侧栏「我的」导航（历史后）+ #view-my 区块：三统计卡（累计时长/观看次数/观看部数）+ 近 7 天条形图（my-bar-chart）+ 最近观看网格（自定义卡片带时长角标与进度条，分页 24/页，有 site\|vodId 点击进详情，无则 toast）③ui.css 增 my-stats/my-bar/my-watch-dur 样式，index.html 增 script 引入 | 已完成 |
+| T49 | 爬虫健壮性：①Cookie 持久化（新 kazumi/cookie_jar.py 落盘 kazumi/cookies.json，CookieJar.set_domain_cookies/cookie_header 域名+父域匹配；RuleEngine 增 cookie_jar 参数 _do_request 自动带 Cookie 头；server.py kazumiCookieSet/List/Clear 端点；parse-window.js 捕获结束后读会话 Cookie 按域名回传后端；设置页 Kazumi 区加 Cookie 管理卡查看/清除；test_kazumi.py 增 CookieJar 5 例 + RuleEngine 带 Cookie 1 例）②视频源解析池（parse-window.js 改 3 独立 partition parse-0/1/2 槽位池 _acquire/_release，并发解析互不冲突——原共用 partition 的 session.webRequest 单例会被后注册者覆盖致并发丢请求）③HLS 广告过滤（hls-downloader.js 增 adFilter 参数 + filterAdSegments 重写播放列表：CUE-OUT/CUE-IN 之间分段 + DATERANGE ad 行 + /ad/、/ads/、/adbreak/、adsegment 路径特征分段剔除，相对地址解析绝对化，写临时 .m3u8 交 ffmpeg 后清理；设置项 hlsAdFilter 开关，addHls 读取） | 已完成 |

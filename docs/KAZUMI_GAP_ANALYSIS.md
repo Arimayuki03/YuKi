@@ -22,9 +22,9 @@
 | 在线规则商店 | ✅ KazumiRules 仓库浏览/安装/更新 | ✅ 已实现（GitHub/GitCode 镜像） | 无 |
 | 规则编辑器 | ✅ PluginEditorPage | ✅ 已实现（可视化表单编辑 + 保存/测试） | 无 |
 | 规则测试 | ✅ PluginTestPage | ✅ 已实现（编辑器内置测试按钮） | 无 |
-| 规则有效性追踪 | ✅ PluginValidityTracker | ❌ 未实现 | 可后续补充 |
-| 规则安装时间追踪 | ✅ PluginInstallTimeTracker | ❌ 未实现 | 可后续补充 |
-| 规则批量更新 | ✅ 4 并发批量更新 | ❌ 未实现 | 可后续补充 |
+| 规则有效性追踪 | ✅ PluginValidityTracker | ✅ 已实现（后台并发搜索测试关键词，标记 valid/invalid/captcha，UI 徽标） | 无 |
+| 规则安装时间追踪 | ✅ PluginInstallTimeTracker | ✅ 已实现（installedAt/updatedAt 持久化，列表悬停展示） | 无 |
+| 规则批量更新 | ✅ 4 并发批量更新 | ✅ 已实现（后台 4 并发商店检查+版本比较+更新） | 无 |
 
 ---
 
@@ -36,10 +36,10 @@
 | 剧集源（播放页） | ✅ chapterResult 提取剧集播放页 URL | ✅ 已实现 | 无 |
 | 真实视频流提取 | ✅ 无头 WebView 三机制 | ⚠️ 复用现有 captureDirect（单机制：拦截媒体请求） | 需增强 JS 注入与轮询兜底 |
 | 旧解析器（useLegacyParser） | ✅ iframe src 监听 | ❌ 未实现 | 可后续补充 |
-| 广告过滤（adBlocker） | ✅ HLS 广告过滤 | ❌ 未实现 | 可后续补充 |
+| 广告过滤（adBlocker） | ✅ HLS 广告过滤 | ✅ 已实现（m3u8 下载前过滤 CUE-OUT/CUE-IN + 广告路径分段，设置项开关） | 无 |
 | 验证码反爬 | ✅ AntiCrawlerConfig | ⚠️ 基础识别 + 手动过验证 | 需自动过验证流程 |
-| Cookie 管理 | ✅ PluginCookieManager | ❌ 未实现 | 需 Cookie 持久化 |
-| 视频源解析池 | ✅ VideoSourceResolverPool | ❌ 未实现（复用现有单窗口） | 可后续补充 |
+| Cookie 管理 | ✅ PluginCookieManager | ✅ 已实现（CookieJar 落盘 kazumi/cookies.json，解析会话 Cookie 回传，规则引擎请求自动带上，设置页查看/清除） | 无 |
+| 视频源解析池 | ✅ VideoSourceResolverPool | ✅ 已实现（3 独立 partition 槽位并发解析，互不冲突） | 无 |
 
 ---
 
@@ -73,7 +73,7 @@
 | Anime4K 超分 | ✅ 三档位 | ✅ 已实现（三档位） | 无 |
 | 外部播放器 | ✅ MethodChannel | ✅ 已实现（VLC 自动探测 + 自定义路径 + Referer 注入） | 无 |
 | 画中画（PiP） | ✅ Android PiP + 桌面 mini 窗 | ✅ 已实现（无边框置顶 mini 窗 320x180） | 无 |
-| 截屏 | ✅ PlayerScreenshotService | ❌ 未实现 | 可后续补充 |
+| 截屏 | ✅ PlayerScreenshotService | ✅ 已实现（mpv screenshot-to-file，快捷键 s 存图，settings 打开截图目录） | 无 |
 | 定时关机 | ✅ TimedShutdownService | ✅ 已实现（N 分钟倒计时 → 停 mpv → 系统关机） | 无 |
 | DLNA 投屏 | ✅ dlna_dart | ✅ 已实现（UPnP SSDP 发现 + SetAVTransportURI/Play/Stop） | 无 |
 | 音频会话 | ✅ audio_service / audio_session | ❌ 未实现（桌面端无系统媒体控制器） | 可后续补充 |
@@ -103,7 +103,7 @@
 | M3U8 下载 | ✅ 分段下载 + 广告过滤 + 断点续传 | ✅ 已实现（ffmpeg 合成） | 无 |
 | 直接下载 | ✅ Range 断点续传 | ✅ 已实现（aria2c） | 无 |
 | 下载通知 | ✅ flutter_foreground_task | ✅ 已实现（系统通知） | 无 |
-| 下载记录 | ✅ DownloadRecord / DownloadEpisode | ❌ 未实现（无持久化下载记录） | 可后续补充 |
+| 下载记录 | ✅ DownloadRecord / DownloadEpisode | ✅ 已实现（dl-records.json 持久化，跨重启恢复，删除/清除同步） | 无 |
 | 弹幕缓存 | ✅ 下载时缓存弹幕 | ❌ 未实现 | 可后续补充 |
 
 ---
@@ -136,7 +136,7 @@
 | 首页 | ✅ PopularPage | ✅ 已实现（CatVod 首页） | 无 |
 | 番剧时间表 | ✅ TimelinePage | ✅ 已实现（timeline.js + Bangumi API） | 无 |
 | 追番列表 | ✅ CollectPage | ✅ 已实现（收藏进度追踪 + 进度条） | 无 |
-| 我的 | ✅ MyPage（观看统计 + 最近观看） | ❌ 未实现 | 需新增页面 |
+| 我的 | ✅ MyPage（观看统计 + 最近观看） | ✅ 已实现（累计时长/次数/部数 + 近 7 天条形图 + 最近观看卡片点击回详情） | 无 |
 | 搜索 | ✅ SearchPage | ✅ 已实现（聚合搜索） | 无 |
 | 以图搜番 | ✅ ImageSearchPage | ✅ 已实现（URL/base64 上传） | 无 |
 | 详情页 | ✅ InfoPage | ✅ 已实现（Bangumi 完整详情弹窗：概览/分集/角色/评论/关联/制作） | 无 |
@@ -215,10 +215,11 @@
 1. **弹幕签名密钥**：弹弹 play API 需申请 DANDANAPI_APPID/DANDANAPI_KEY，未申请前无法实际加载弹幕。
 2. **Bangumi 镜像签名**：Bangumi 镜像 API 需 KAZUMI_APPID/KAZUMI_KEY，未申请前部分端点不可用。
 3. **验证码自动过验证**：当前仅实现手动过验证，自动过验证复杂度高。
-4. **Cookie 持久化**：验证后 Cookie 未持久化，重启后需重新验证。
-5. **视频源解析池**：当前复用单窗口 captureDirect，并发解析时可能冲突。
+4. **Cookie 持久化**：已实现（验证后 Cookie 落盘，重启复用）；但仅覆盖解析会话，验证码页需再次手动过验证时自动过验证未覆盖。
+5. **视频源解析池**：已实现（3 槽位独立 partition 并发解析）；前端批量解析仍串行，池为并发预留。
 6. **弹幕渲染**：弹幕 API 已接入但 mpv 独立窗口无法直接渲染弹幕，需额外弹幕渲染引擎。
 7. **未捕获异常兜底**：已添加全局 process.on('uncaughtException') 兜底防进程崩溃。
+8. **HLS 广告过滤**：下载路径已实现（CUE-OUT/CUE-IN + 广告路径分段，设置开关）；播放路径（mpv 实时过滤）未实现。
 
 ---
 
@@ -226,20 +227,20 @@
 
 | 类别 | 已完成 | 部分实现 | 未实现 |
 |------|--------|---------|--------|
-| 核心规则系统 | 11 | 0 | 3 |
-| 视频源获取 | 2 | 2 | 4 |
+| 核心规则系统 | 14 | 0 | 0 |
+| 视频源获取 | 5 | 2 | 1 |
 | 番剧元数据 | 9 | 0 | 1 |
-| 播放器与媒体 | 10 | 0 | 3 |
+| 播放器与媒体 | 11 | 0 | 2 |
 | 弹幕系统 | 3 | 0 | 4 |
-| 下载系统 | 4 | 0 | 2 |
+| 下载系统 | 5 | 0 | 1 |
 | 同步服务 | 2 | 1 | 1 |
 | WebView | 0 | 2 | 1 |
-| 页面与 UI | 13 | 2 | 1 |
+| 页面与 UI | 14 | 2 | 0 |
 | 主题与国际化 | 4 | 0 | 1 |
 | 平台配置 | 0 | 1 | 3 |
 | 测试与 CI | 1 | 0 | 2 |
-| **合计** | **59** | **8** | **26** |
-| **完成率** | **63%** | **9%** | **28%** |
+| **合计** | **68** | **8** | **17** |
+| **完成率** | **73%** | **9%** | **18%** |
 
 > 注：核心功能（规则引擎/播放/搜索/下载/Bangumi/SyncPlay/DLNA/WebDAV/编辑器/时间表等）已全部完成，剩余未实现项多为边缘功能或需第三方密钥/平台特定能力。
 
