@@ -84,9 +84,9 @@
 
 | 功能 | Kazumi 原版 | video-pc 现状 | 差距 |
 |------|------------|--------------|------|
-| 弹幕 API | ✅ DanDanPlay 开放平台（api.dandanplay.net） | ❌ 未实现（占位） | 需签名密钥（DANDANAPI_APPID/DANDANAPI_KEY） |
-| 弹幕签名 | ✅ HMAC-SHA256 | ❌ 未实现 | 需实现签名算法 |
-| 弹幕数据模型 | ✅ DanmakuEntry / DanmakuEpisodeResponse | ❌ 未实现 | 需数据模型 |
+| 弹幕 API | ✅ DanDanPlay 开放平台（api.dandanplay.net） | ✅ 已实现（HMAC-SHA256 签名） | 无 |
+| 弹幕签名 | ✅ HMAC-SHA256 | ✅ 已实现 | 无 |
+| 弹幕数据模型 | ✅ DanmakuEntry / DanmakuEpisodeResponse | ✅ 已实现 | 无 |
 | 弹幕渲染 | ✅ canvas_danmaku | ❌ 未实现 | 需弹幕渲染引擎 |
 | 弹幕开关/速度 | ✅ PlayerDanmakuController | ❌ 未实现 | 可后续补充 |
 | 离线弹幕 | ✅ 下载时缓存弹幕 JSON | ❌ 未实现 | 可后续补充 |
@@ -133,13 +133,13 @@
 | 功能 | Kazumi 原版 | video-pc 现状 | 差距 |
 |------|------------|--------------|------|
 | 首页 | ✅ PopularPage（无限滚动番剧网格 + 标签下拉） | ✅ 已实现（CatVod 首页） | 无 |
-| 番剧时间表 | ✅ TimelinePage（星期 TabBar + 季度选择） | ❌ 未实现 | 需新增页面 |
-| 追番列表 | ✅ CollectPage（WebDAV/Bangumi 同步） | ❌ 未实现 | 需新增页面 |
+| 番剧时间表 | ✅ TimelinePage（星期 TabBar + 季度选择） | ✅ 已实现（timeline.js + Bangumi API） | 无 |
+| 追番列表 | ✅ CollectPage（WebDAV/Bangumi 同步） | ✅ 已实现（收藏进度追踪） | 无 |
 | 我的 | ✅ MyPage（观看统计 + 最近观看） | ❌ 未实现 | 需新增页面 |
 | 搜索 | ✅ SearchPage（多源搜索 + 历史 + 标签） | ✅ 已实现（聚合搜索） | 无 |
-| 以图搜番 | ✅ ImageSearchPage（trace.moe） | ❌ 未实现（占位） | 需图片上传与识别 |
-| 详情页 | ✅ InfoPage（概览/吐槽/角色/关联/制作人员） | ⚠️ 部分实现（CatVod 详情 + Kazumi 源弹窗横幅） | 需完整详情页 |
-| 播放页 | ✅ VideoPage（弹幕画布 + 集/路切换 + 一起看） | ⚠️ 部分实现（mpv 独立窗口，无弹幕/一起看） | 需弹幕与一起看 |
+| 以图搜番 | ✅ ImageSearchPage（trace.moe） | ✅ 已实现（URL/base64 上传） | 无 |
+| 详情页 | ✅ InfoPage（概览/吐槽/角色/关联/制作人员） | ✅ 已实现（Bangumi 完整详情弹窗） | 无 |
+| 播放页 | ✅ VideoPage（弹幕画布 + 集/路切换 + 一起看） | ⚠️ 部分实现（mpv 独立窗口，弹幕 API 已接入但无渲染引擎） | 需弹幕渲染 |
 | 下载页 | ✅ DownloadPage（记录卡片 + 速度/状态） | ✅ 已实现（下载管理） | 无 |
 | 历史页 | ✅ HistoryPage（续播 + 删除） | ✅ 已实现（历史记录） | 无 |
 | 设置页 | ✅ SettingsPage（播放/资源/应用/其他） | ✅ 已实现（设置中心） | 无 |
@@ -186,12 +186,12 @@
 
 ## 13. 优先级建议
 
-### 高优先级（建议下期实现）
-1. **番剧时间表**：Bangumi 每日放送，用户追番必备。
-2. **追番列表**：收藏 + 观看进度追踪，与现有收藏/历史合并。
-3. **完整详情页**：Bangumi 番剧详情（角色/评论/关联）。
-4. **弹幕系统**：弹弹 play API（需申请签名密钥）。
-5. **以图搜番**：trace.moe 图片识别。
+### 高优先级（已全部完成 ✅）
+1. **番剧时间表**：Bangumi 每日放送，用户追番必备。✅ 已实现
+2. **追番列表**：收藏 + 观看进度追踪，与现有收藏/历史合并。✅ 已实现
+3. **完整详情页**：Bangumi 番剧详情（角色/评论/关联/制作人员）。✅ 已实现
+4. **弹幕系统**：弹弹 play API（需申请签名密钥）。✅ API 已接入（渲染引擎待补充）
+5. **以图搜番**：trace.moe 图片识别。✅ 已实现
 
 ### 中优先级（可后续补充）
 6. **规则编辑器**：可视化编辑 XPath/JSONPath。
