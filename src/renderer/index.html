@@ -598,6 +598,23 @@
                             <option value="exit">直接退出</option>
                             <option value="ask">每次询问</option>
                         </select>
+                        <div class="tip-line pad0" style="margin-top:12px;">外部播放器</div>
+                        <div class="wall-row">
+                            <button id="set_external_player_pick" class="md-btn md-btn-tonal">指定外部播放器路径</button>
+                            <button id="set_external_player_clear" class="md-btn md-btn-tonal">恢复默认</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:12px;">画中画 / 定时关机</div>
+                        <div class="wall-row">
+                            <button id="set_pip_open" class="md-btn md-btn-tonal">开启画中画小窗</button>
+                            <button id="set_pip_close" class="md-btn md-btn-tonal">关闭画中画</button>
+                        </div>
+                        <div class="md-field" style="margin-top:8px;">
+                            <input id="set_shutdown_minutes" class="md-input" type="number" min="0" max="600" placeholder="定时关机（分钟，0=取消）" />
+                        </div>
+                        <button id="set_shutdown_set" class="md-btn md-btn-tonal">设定定时关机</button>
+                        <div class="wall-row" style="margin-top:12px;">
+                            <button id="log-viewer-open" class="md-btn md-btn-tonal">查看应用日志</button>
+                        </div>
                         <div class="tip-line pad0 info-tip" style="margin-top:12px;">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">恢复默认设置</span>
@@ -758,6 +775,44 @@
                 <button onclick="closeDialog('kazumiEditorDialog')" class="md-dialog-btn">取消</button>
                 <button id="kazumi-editor-test" class="md-dialog-btn">测试规则</button>
                 <button id="kazumi-editor-save" class="md-dialog-btn" style="background:var(--md-primary);color:var(--md-on-primary);">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 日志查看器 -->
+    <div id="logViewerDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title">应用日志</div>
+            <div class="md-dialog-body" id="log-viewer-body" style="max-height:55vh;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.6;">
+                <div class="tip-line">载入中…</div>
+            </div>
+            <div class="md-dialog-body" style="display:flex;gap:8px;align-items:center;padding-top:0;">
+                <button id="log-prev" class="md-btn md-btn-tonal md-btn-sm">上一页</button>
+                <span id="log-page-info" class="tip-line"></span>
+                <button id="log-next" class="md-btn md-btn-tonal md-btn-sm">下一页</button>
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('logViewerDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 首次引导（新用户向导） -->
+    <div id="onboardingDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title">欢迎使用影视 PC</div>
+            <div class="md-dialog-body" style="line-height:1.8;">
+                <p><strong>影视 PC</strong> 是一个基于 CatVod 架构的影视聚合桌面端，现已整合 Kazumi 规则引擎。</p>
+                <p><strong>快速上手：</strong></p>
+                <p>1. 在「设置 → 源设置」粘贴配置地址载入视频源</p>
+                <p>2. 在「设置 → Kazumi 规则」管理番剧规则源（已内置 3 个默认规则）</p>
+                <p>3. 在「时间表」查看每日番剧更新</p>
+                <p>4. 搜索影片后在详情页选择「Kazumi 规则源」播放</p>
+                <p>5. 收藏影片可追踪观看进度，画中画小窗可置顶播放</p>
+                <p style="color:var(--md-on-surface-variant);font-size:12px;margin-top:16px;">本项目不收集任何用户数据。使用产生的数据和缓存应在 24 小时内清除。</p>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="onboarding-confirm" class="md-dialog-btn" style="background:var(--md-primary);color:var(--md-on-primary);">开始使用</button>
             </div>
         </div>
     </div>

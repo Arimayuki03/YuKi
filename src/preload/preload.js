@@ -138,4 +138,16 @@ contextBridge.exposeInMainWorld('vpc', {
         onDevices: (cb) => ipcRenderer.on('vpc:dlna-devices', (_e, devices) => cb(devices)),
         onError: (cb) => ipcRenderer.on('vpc:dlna-error', (_e, info) => cb(info)),
     },
+    /** 外部播放器：用 VLC/PotPlayer 等外部播放器播放 */
+    externalPlayer: (url, opts) => ipcRenderer.invoke('vpc:external-player', url, opts || {}),
+    pickExternalPlayer: () => ipcRenderer.invoke('vpc:pick-external-player'),
+    /** 画中画：开启/关闭 mini 置顶窗 */
+    pipOpen: () => ipcRenderer.invoke('vpc:pip-open', {}),
+    pipClose: () => ipcRenderer.invoke('vpc:pip-close'),
+    /** 定时关机：设定 N 分钟后关机（0 = 取消） */
+    shutdownTimer: (minutes) => ipcRenderer.invoke('vpc:shutdown-timer', minutes),
+    /** 日志查看器：分页获取应用日志 */
+    getLogs: (page, pageSize) => ipcRenderer.invoke('vpc:get-logs', page, pageSize),
+    /** 首次引导：标记已完成 */
+    onboardingDone: () => ipcRenderer.invoke('vpc:onboarding-done'),
 });

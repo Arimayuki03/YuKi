@@ -1264,6 +1264,127 @@ app.whenReady().then(() => {
         try { await dlna.stop(deviceUrl); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
     });
 
+    // ---- 外部播放器 ----
+    ipcMain.handle('vpc:external-player', async (_e, url, opts) => {
+        const header = (opts && opts.header) || {};
+        const title = (opts && opts.title) || '外部播放';
+        // 生成临时 m3u8/mp4 播放列表或直接传 URL
+        // Windows: 用系统默认程序打开；带 Referer 时无法用系统播放器，需用户指定 VLC 路径
+        let extPlayer = settings.get('externalPlayerPath') || '';
+        // 自动探测 PATH 中的 VLC
+        if (!extPlayer) {
+            try {
+                const { execSync } = require('child_process');
+                if (process.platform === 'win32') {
+                    const out = execSync('where vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                    extPlayer = out.split(/\r?\n/)[0] || '';
+                } else {
+                    const out = execSync('which vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                    extPlayer = out || '';
+                }
+            } catch (e) { /* PATH 中无 VLC */ }
+        }
+        if (!extPlayer) {
+            // 用系统默认程序打开（不带 Referer）
+            try {
+                await shell.openExternal(url);
+                return { ok: true, via: 'system-default' };
+            } catch (e) { return { ok: false, reason: 'no-external-player' }; }
+        }
+        // 用 VLC 打开（支持 Referer via --http-header-fields）
+        const args = [url];
+        if (header.Referer || header['User-Agent']) {
+            const pairs = [];
+            if (header.Referer) pairs.push(`Referer: ${header.Referer}`);
+            if (header['User-Agent']) pairs.push(`User-Agent: ${header['User-Agent']}`);
+            args.push(`--http-header-fields=${pairs.join(',')}`);
+        }
+        args.push(`--no-video-title-show`);
+        try {
+            const { spawn } = require('child_process');
+            spawn(extPlayer, args, { detached: true, stdio: 'ignore' }).unref();
+            return { ok: true, via: extPlayer };
+        } catch (e) { return { ok: false, reason: e.message }; }
+    });
+
+    ipcMain.handle('vpc:pick-external-player', async () => {
+        const r = await dialog.showOpenDialog(win, {
+            title: '选择外部播放器（如 VLC/PotPlayer）',
+            filters: [{ name: '可执行文件', extensions: ['exe', 'app', ''] }],
+            properties: ['openFile'],
+        });
+        if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
+        const p = r.filePaths[0];
+        settings.set('externalPlayerPath', p);
+        return { ok: true, path: p };
+    });
+
+    // ---- 画中画（mini 窗） ----
+    let pipWin = null;
+    ipcMain.handle('vpc:pip-open', (_e, opts) => {
+        if (pipWin && !pipWin.isDestroyed()) { pipWindow.focus(); return { ok: true }; }
+        pipWin = new BrowserWindow({
+            width: 320, height: 180, frame: false, alwaysOnTop: true,
+            skipTaskbar: true, resizable: true, minWidth: 160, minHeight: 90,
+            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+        });
+        pipWin.loadURL(`data:text/html,<body style="margin:0;background:#000;overflow:hidden"><div style="color:#fff;font-family:sans-serif;padding:8px;font-size:13px">画中画窗口已开启<br>mpv 播放时此窗口置顶<br>拖动边缘可调整大小</div></body>`);
+        pipWin.on('closed', () => { pipWin = null; });
+        return { ok: true };
+    });
+    ipcMain.handle('vpc:pip-close', () => { if (pipWin) { pipWin.close(); pipWin = null; } return { ok: true }; });
+    // mpv 播放时画中画窗口跟随置顶（不实际嵌入视频流，仅作置顶提示窗）
+    mpv.on('exit', () => { if (pipWin && !pipWin.isDestroyed()) pipWin.close(); });
+
+    // ---- 定时关机 ----
+    let shutdownTimer = null;
+    ipcMain.handle('vpc:shutdown-timer', (_e, minutes) => {
+        if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
+        if (!minutes || minutes <= 0) return { ok: true, msg: '已取消定时关机' };
+        shutdownTimer = setTimeout(() => {
+            // 播放停止后关机：先停 mpv 再关机
+            mpv.stop();
+            setTimeout(() => {
+                const { exec } = require('child_process');
+                if (process.platform === 'win32') {
+                    exec('shutdown /s /t 60 /c "影视 PC 定时关机"');
+                } else if (process.platform === 'darwin') {
+                    exec('osascript -e \'tell app "System Events" to shut down\'');
+                } else {
+                    exec('shutdown -h +1');
+                }
+            }, 2000);
+        }, minutes * 60 * 1000);
+        return { ok: true, msg: `已设定 ${minutes} 分钟后关机` };
+    });
+
+    // ---- 日志查看器 ----
+    ipcMain.handle('vpc:get-logs', async (_e, page, pageSize) => {
+        const logDir = path.join(app.getPath('userData'), '..', '.video-pc', 'logs');
+        const logs = [];
+        try {
+            const files = fs.readdirSync(logDir).filter(f => f.endsWith('.log')).sort().reverse();
+            for (const f of files.slice(0, 5)) {
+                const content = fs.readFileSync(path.join(logDir, f), 'utf8');
+                const lines = content.split(/\r?\n/).filter(Boolean);
+                logs.push({ file: f, lines: lines.slice(-200) }); // 每文件取最后 200 行
+            }
+        } catch (e) { /* 日志目录不存在 */ }
+        // 分页（纯内存切片）
+        const allLines = logs.flatMap(l => l.lines.map(line => ({ file: l.file, line })));
+        const total = allLines.length;
+        const pg = page || 1;
+        const ps = pageSize || 50;
+        const slice = allLines.slice((pg - 1) * ps, pg * ps);
+        return { ok: true, logs: slice, total, page: pg, pageSize: ps };
+    });
+
+    // ---- 首次引导状态 ----
+    ipcMain.handle('vpc:onboarding-done', () => {
+        settings.set('onboarded', true);
+        return { ok: true };
+    });
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

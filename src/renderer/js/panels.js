@@ -1130,6 +1130,66 @@ function initSettingsPanel() {
     window.vpc.onPushReceived((info) => {
         warnToast(`收到推送，已开始播放：${(info.url || '').slice(0, 60)}`);
     });
+    // 外部播放器：指定路径 / 恢复默认
+    $('#set_external_player_pick').on('click', async () => {
+        const r = await window.vpc.pickExternalPlayer();
+        if (r && r.ok) warnToast(`已指定外部播放器：${r.path}`);
+    });
+    $('#set_external_player_clear').on('click', async () => {
+        await window.vpc.settingsSet('externalPlayerPath', '');
+        warnToast('已恢复默认（自动探测 VLC）');
+    });
+    // 画中画：开启 / 关闭 mini 置顶窗
+    $('#set_pip_open').on('click', async () => {
+        const r = await window.vpc.pipOpen();
+        if (r && r.ok) warnToast('画中画小窗已开启');
+    });
+    $('#set_pip_close').on('click', async () => {
+        await window.vpc.pipClose();
+        warnToast('画中画小窗已关闭');
+    });
+    // 定时关机：设定 N 分钟后关机
+    $('#set_shutdown_set').on('click', async () => {
+        const minutes = parseInt($('#set_shutdown_minutes').val(), 10) || 0;
+        const r = await window.vpc.shutdownTimer(minutes);
+        if (r && r.ok) warnToast(r.msg || (minutes > 0 ? `已设定 ${minutes} 分钟后关机` : '已取消定时关机'));
+    });
+    // 日志查看器：打开 + 翻页
+    let _logPage = 1;
+    $('#log-viewer-open').on('click', async () => {
+        _logPage = 1;
+        openDialog('logViewerDialog');
+        await loadLogPage();
+    });
+    $('#log-prev').on('click', async () => { if (_logPage > 1) { _logPage--; await loadLogPage(); } });
+    $('#log-next').on('click', async () => { _logPage++; await loadLogPage(); });
+    async function loadLogPage() {
+        $('#log-viewer-body').html('<div class="tip-line">载入中…</div>');
+        try {
+            const r = await window.vpc.getLogs(_logPage, 50);
+            if (!r || !r.ok) { $('#log-viewer-body').html('<div class="tip-line">无日志</div>'); return; }
+            const total = r.total || 0;
+            const ps = r.pageSize || 50;
+            const pages = Math.max(1, Math.ceil(total / ps));
+            _logPage = Math.min(_logPage, pages);
+            $('#log-page-info').text(`第 ${_logPage} / ${pages} 页 · 共 ${total} 行`);
+            const html = (r.logs || []).map(l => `<div style="border-bottom:1px solid var(--md-outline-variant);padding:2px 4px;"><span style="color:var(--md-on-surface-variant)">[${l.file}]</span> ${escHtml(l.line)}</div>`).join('');
+            $('#log-viewer-body').html(html || '<div class="tip-line">无日志</div>');
+        } catch (e) { $('#log-viewer-body').html('<div class="tip-line">日志载入失败</div>'); }
+    }
+    // 首次引导：首次启动显示，确认后不再弹出
+    (async () => {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            if (!s.onboarded) {
+                openDialog('onboardingDialog');
+                $('#onboarding-confirm').off('click').on('click', () => {
+                    closeDialog('onboardingDialog');
+                    window.vpc.onboardingDone();
+                });
+            }
+        } catch (e) { /* 首次运行无 settings */ }
+    })();
 }
 
 /**
