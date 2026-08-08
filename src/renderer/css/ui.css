@@ -814,6 +814,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 #kazumi_rule_list .md-switch { margin:0; flex:none; }
 #kazumi_rule_list .history-item { display:flex; align-items:center; gap:10px; }
 #kazumi_rule_list .history-url { flex:1; min-width:0; }
+.kazumi-validity { flex:none; font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600; }
+.kazumi-validity-valid { color:var(--md-primary); background:var(--md-primary-container); }
+.kazumi-validity-invalid { color:var(--md-error); background:var(--md-error-container); }
+.kazumi-validity-captcha { color:var(--md-tertiary); background:var(--md-tertiary-container); }
 
 /* 规则商店 */
 .kazumi-shop-item { display:flex; align-items:center; gap:12px; padding:12px;
@@ -974,6 +978,25 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .vod-card { position:relative; }
 .rec-checkall { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); cursor:pointer; }
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
+
+/* ===== 「我的」页面：观看统计 + 最近观看 ===== */
+.my-stats-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.my-stat-box { text-align:center; padding:14px 8px; border-radius:12px;
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant); }
+.my-stat-value { font-size:22px; font-weight:700; color:var(--md-primary); line-height:1.2; }
+.my-stat-label { font-size:12px; color:var(--md-on-surface-variant); margin-top:4px; }
+.my-bar-chart { display:flex; align-items:flex-end; gap:6px; height:96px; margin-top:10px; padding-top:6px; }
+.my-bar-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end;
+    height:100%; min-width:0; }
+.my-bar { width:100%; max-width:28px; background:var(--md-primary-container); border-radius:4px 4px 0 0;
+    transition:height .3s; }
+.my-bar-col:first-child .my-bar { background:var(--md-primary); }
+.my-bar-label { font-size:11px; color:var(--md-on-surface-variant); margin-top:4px; white-space:nowrap; }
+/* 最近观看卡片：封面右下角时长角标 */
+.my-watch-dur { position:absolute; right:6px; bottom:6px; z-index:2;
+    background:rgba(0,0,0,.65); color:#fff; font-size:11px; padding:1px 6px;
+    border-radius:999px; pointer-events:none; }
+
 
 /* ===== 封面点击放大：原图保留在原位，另开全屏浮层（滚轮缩放，点击关闭） ===== */
 .detail-cover img { cursor:zoom-in; }

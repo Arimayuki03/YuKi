@@ -639,6 +639,7 @@ const HK_UI_ACTIONS = [
     ['frameBack', '上一帧', ','],
     ['frameFwd', '下一帧', '.'],
     ['fullscreen', '全屏切换', 'f'],
+    ['screenshot', '截图', 's'],
 ];
 let _hkKeys = HK_UI_ACTIONS.reduce((m, a) => { m[a[0]] = a[2]; return m; }, {});
 let _hkCapturing = null; // 正在捕获的动作 id
@@ -776,6 +777,7 @@ function initSettingsPanel() {
         $('#set_resumepos').prop('checked', s.resumePos !== false);
         $('#set_bgplay').prop('checked', s.bgPlay !== false);
         $('#set_simuldl').prop('checked', !!s.simulDownload); // 边下边播（默认关）
+        $('#set_hls_adfilter').prop('checked', !!s.hlsAdFilter); // m3u8 广告过滤（默认关）
         $('#set_anime4k').prop('checked', !!s.anime4k);
         // 系统：关闭行为 / 隐身模式 / 缓存位置
         $('#set_closeaction').val(s.closeAction || 'tray');
@@ -906,6 +908,11 @@ function initSettingsPanel() {
         await saveHotkeys();
         warnToast('已恢复默认键位，下次起播生效');
     });
+    // 打开截图目录（T46：mpv 截图功能）
+    $('#hotkey_screenshot_dir').on('click', async () => {
+        const r = await window.vpc.mpvScreenshotDir();
+        if (!r || !r.ok) warnToast('打开截图目录失败：' + ((r && r.reason) || '未知错误'));
+    });
     // 默认倍速：持久化并通知主进程（下次起播生效）
     $('#set_speed').on('change', function () {
         window.vpc.settingsSet('playerSpeed', parseFloat(this.value) || 1);
@@ -940,6 +947,11 @@ function initSettingsPanel() {
     $('#set_simuldl').on('change', function () {
         window.vpc.settingsSet('simulDownload', this.checked);
         warnToast(this.checked ? '已开启边下边播（下次起播生效）' : '已关闭边下边播');
+    });
+    // m3u8 广告过滤：仅持久化，addHls 时主进程读取（下一个任务生效）
+    $('#set_hls_adfilter').on('change', function () {
+        window.vpc.settingsSet('hlsAdFilter', this.checked);
+        warnToast(this.checked ? '已开启 m3u8 广告过滤（实验性）' : '已关闭 m3u8 广告过滤');
     });
     // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）

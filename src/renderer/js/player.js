@@ -23,6 +23,7 @@ const Player = {
     _playToken: 0,   // 起播令牌：exit 处理期间又发起新播放则放弃推进（防旧进程延迟退出误连播）
     _session: 0,     // 当前起播会话号（主进程 playUrl 返回；exit 事件据此匹配归属）
     _lastUrl: '',    // 最近一次交给 mpv 的地址（断流重连条件需媒体直链判定）
+    _curMeta: null,  // 最近一次成功起播的元信息 {site, title, subtitle, vodId}（观看统计/最近观看用）
     _carrySpeed: null,       // 连播时从上一集延续的倍速
     _carryFullscreen: null,  // 连播时从上一集延续的全屏状态
 
@@ -66,6 +67,8 @@ const Player = {
      * 10s 内收到过 ended 事件同样视为看完。提前关闭 → 终止连播链。
      */
     async _onExit(info) {
+        // 观看统计（「我的」页）：任何 mpv 会话真实退出都累计时长/次数，与连播链无关
+        this._recordWatch(info);
         const seq = this._seq;
         if (!seq) return;
         // 非当前会话的退出（切集时被杀旧进程的延迟退出/本地播放）不驱动连播
@@ -117,6 +120,56 @@ const Player = {
         this.play(seq.site, seq.flag, next.url, seq.title, next.name, seq.episodes, seq.index + 1);
     },
 
+    /** 观看统计埋点（「我的」页）：mpv 退出时累计观看时长/次数/每日分布，并更新最近观看列表。
+     *  fire-and-forget（不阻塞连播推进）。pos>=15s 才计一次有效观看，避免误触发计入。 */
+    async _recordWatch(info) {
+        if (!info || typeof info.pos !== 'number' || info.pos < 15) return;
+        const meta = this._curMeta || {};
+        const title = meta.title || '未知影片';
+        // 封面/来源尽量从详情页取（无则留空，最近观看卡片走占位图）
+        let pic = meta.pic || '';
+        let siteName = meta.siteName || '';
+        try {
+            if (typeof Detail !== 'undefined' && Detail.site) {
+                siteName = siteName || (Detail._siteName ? Detail._siteName(Detail.site) : '');
+                if (!pic && Detail._lastVod) pic = Detail._lastVod.vod_pic || '';
+            }
+        } catch (e) { /* ignore */ }
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            // ---- 观看统计 ----
+            const stats = s.watchStats || { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {} };
+            const now = new Date();
+            const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+            stats.totalSeconds = (stats.totalSeconds || 0) + Math.round(info.pos);
+            stats.sessionCount = (stats.sessionCount || 0) + 1;
+            if (!stats.titles) stats.titles = {};
+            stats.titles[title] = (stats.titles[title] || 0) + 1;
+            if (!stats.daily) stats.daily = {};
+            stats.daily[day] = (stats.daily[day] || 0) + Math.round(info.pos);
+            // 只保留近 30 天的每日分布（防无限增长）
+            const days = Object.keys(stats.daily).sort();
+            while (days.length > 30) { const oldest = days.shift(); delete stats.daily[oldest]; }
+            await window.vpc.settingsSet('watchStats', stats);
+            // ---- 最近观看（有 vodId 按 site|vodId 去重合并，无则按标题追加展示） ----
+            const rw = Array.isArray(s.recentWatches) ? s.recentWatches : [];
+            const percent = (info.duration > 0) ? Math.min(100, Math.round(info.pos / info.duration * 100)) : 0;
+            const entry = {
+                site: meta.site || '', vodId: meta.vodId || '',
+                name: title, pic: pic || '', remarks: meta.subtitle || '',
+                siteName, seconds: Math.round(info.pos), percent, ts: Date.now(),
+            };
+            const key = String(meta.site || '') + '|' + String(meta.vodId || '');
+            const idx = (key && key !== '|')
+                ? rw.findIndex((x) => String(x.site) + '|' + String(x.vodId) === key)
+                : rw.findIndex((x) => String(x.name) === title);
+            if (idx >= 0) rw.splice(idx, 1);
+            rw.unshift(entry);
+            if (rw.length > 50) rw.length = 50;
+            await window.vpc.settingsSet('recentWatches', rw);
+        } catch (e) { /* 统计保存失败不影响播放 */ }
+    },
+
     /**
      * @param site   站点 key
      * @param flag   线路名
@@ -146,6 +199,8 @@ const Player = {
         this._seq = (autoNext && Array.isArray(episodes) && (epIndex || 0) + 1 < episodes.length)
             ? { site, flag, title, episodes, index: epIndex || 0, vodId }
             : null;
+        // 记录本次播放元信息（观看统计 / 最近观看用；断流重连与单集播放同样可累计）
+        this._curMeta = { site, title, subtitle: subtitle || '', vodId };
 
         // Kazumi 源分支（kimi UI）：site 为 kazumi:规则名 时走规则引擎解析
         if (String(site).startsWith('kazumi:')) {

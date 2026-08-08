@@ -24,6 +24,10 @@ const Kazumi = {
         $('#kazumi_rule_clear').on('click', () => $('#kazumi_rule_json').val(''));
         $('#kazumi_rule_shop').on('click', () => this.openShopDialog());
         $('#kazumi_rule_editor').on('click', () => this.openEditorDialog());
+        $('#kazumi_rule_check').on('click', () => this.checkValidity());
+        $('#kazumi_rule_update').on('click', () => this.batchUpdate());
+        $('#kazumi_cookie_view').on('click', () => this.viewCookies());
+        $('#kazumi_cookie_clear').on('click', () => this.clearCookies());
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
@@ -63,16 +67,34 @@ const Kazumi = {
             box.html('<div class="tip-line">尚未导入任何 Kazumi 规则。</div>');
             return;
         }
-        box.html(this._rules.map((r) => `
+        box.html(this._rules.map((r) => {
+            const validInfo = this._validityLabel(r.validity);
+            const times = [r.installed_at ? '安装 ' + r.installed_at : '',
+                           r.updated_at && r.updated_at !== r.installed_at ? '更新 ' + r.updated_at : '']
+                .filter(Boolean).join(' · ');
+            return `
             <div class="history-item">
-                <span class="history-url" title="${escHtml(r.name)} v${escHtml(r.version || '')}">${escHtml(r.name)} <span style="color:var(--md-on-surface-variant);font-size:11px">v${escHtml(r.version || '')}</span></span>
+                <span class="history-url" title="${escHtml(r.name)} v${escHtml(r.version || '')}${times ? '\n' + escHtml(times) : ''}">${escHtml(r.name)} <span style="color:var(--md-on-surface-variant);font-size:11px">v${escHtml(r.version || '')}</span></span>
+                ${validInfo ? `<span class="kazumi-validity ${validInfo.cls}" title="${escHtml(validInfo.label)}">${escHtml(validInfo.label)}</span>` : ''}
                 <button class="history-btn kazumi-rule-edit" data-name="${escHtml(r.name)}" title="编辑规则">✎</button>
                 <label class="md-switch" style="margin:0;flex:none">
                     <input type="checkbox" class="kazumi-rule-toggle" data-name="${escHtml(r.name)}" ${r.enabled !== false ? 'checked' : ''}>
                     <span class="md-switch-track"></span>
                 </label>
                 <button class="history-btn kazumi-rule-del" data-name="${escHtml(r.name)}" title="删除该规则">✕</button>
-            </div>`).join(''));
+            </div>`;
+        }).join(''));
+    },
+
+    /** 有效性徽标：unknown 不显示，valid 绿，invalid 红，captcha 橙。 */
+    _validityLabel(validity) {
+        if (!validity || validity === 'unknown') return null;
+        const map = {
+            valid: { label: '有效', cls: 'kazumi-validity-valid' },
+            invalid: { label: '失效', cls: 'kazumi-validity-invalid' },
+            captcha: { label: '需验证', cls: 'kazumi-validity-captcha' },
+        };
+        return map[validity] || null;
     },
 
     /** 导入规则：解析 JSON 或 kazumi:// 链接，校验后调 kazumiAdd。 */
@@ -346,6 +368,93 @@ const Kazumi = {
             warnToast('操作失败');
             this.refreshRuleList();
         }
+    },
+
+    // ---------------------------------------------------------------- 有效性检测 / 批量更新
+
+    /** 查看已持久化的 Cookie（按域名分组统计）。 */
+    async viewCookies() {
+        try {
+            const rsp = await doAction('kazumiCookieList', {}, '/kazumi/action');
+            const cookies = (rsp && rsp.cookies) || {};
+            const count = (rsp && rsp.count) || 0;
+            if (!count) { warnToast('当前没有已保存的 Cookie'); return; }
+            const lines = Object.keys(cookies).map((d) => `${d}（${(cookies[d] || []).length} 个）`).join('；');
+            warnToast(`已保存 ${count} 个 Cookie：${lines}`);
+        } catch (e) { warnToast('查询 Cookie 失败'); }
+    },
+
+    /** 清除全部持久化 Cookie（验证码源之后可能需重新验证）。 */
+    async clearCookies() {
+        if (!await confirmDialog('清除所有已保存的 Cookie？之后验证码源可能需重新验证。', { okText: '清除' })) return;
+        try {
+            const rsp = await doAction('kazumiCookieClear', {}, '/kazumi/action');
+            if (rsp && rsp.code === 200) warnToast('已清除 Cookie');
+            else warnToast('清除失败');
+        } catch (e) { warnToast('清除失败'); }
+    },
+
+    /** 检测规则有效性：后台并发搜索测试关键词，标记 valid/invalid。 */
+    async checkValidity() {
+        try {
+            const rsp = await doAction('kazumiCheckValidity', {}, '/kazumi/action');
+            if (!rsp || !rsp.started) { warnToast('已有检测正在运行'); return; }
+            warnToast('正在检测规则有效性…');
+            this._pollTask('kazumiValidityStatus', (s) => {
+                const results = s.results || [];
+                const valid = results.filter((r) => r.validity === 'valid').length;
+                const invalid = results.filter((r) => r.validity === 'invalid').length;
+                const captcha = results.filter((r) => r.validity === 'captcha').length;
+                warnToast(`检测完成：有效 ${valid} · 失效 ${invalid}${captcha ? ` · 需验证 ${captcha}` : ''}`);
+                this.refreshRuleList();
+            });
+        } catch (e) {
+            warnToast('检测启动失败');
+        }
+    },
+
+    /** 批量更新：从商店拉取全部规则最新版，4 并发更新。 */
+    async batchUpdate() {
+        if (!await confirmDialog('将从规则商店批量检查并更新所有已安装规则，继续？', { okText: '更新' })) return;
+        try {
+            const rsp = await doAction('kazumiBatchUpdate', {}, '/kazumi/action');
+            if (!rsp || !rsp.started) { warnToast('已有批量更新正在运行'); return; }
+            warnToast('正在批量更新规则…');
+            this._pollTask('kazumiUpdateStatus', (s) => {
+                const results = s.results || [];
+                const updated = results.filter((r) => r.updated).length;
+                const upToDate = results.filter((r) => r.ok && !r.updated).length;
+                const failed = results.filter((r) => !r.ok).length;
+                warnToast(`更新完成：更新 ${updated} · 已最新 ${upToDate}${failed ? ` · 失败 ${failed}` : ''}`);
+                this.refreshRuleList();
+            });
+        } catch (e) {
+            warnToast('批量更新启动失败');
+        }
+    },
+
+    /** 轮询后台任务状态直至结束（running=false），回调收到最终状态。 */
+    _pollTask(statusDo, onDone) {
+        const el = $('#kazumi_rule_task');
+        const show = (t) => { if (el.length) { el.text(t).show(); } };
+        const hide = () => { if (el.length) el.hide(); };
+        const iv = setInterval(async () => {
+            try {
+                const rsp = await doAction(statusDo, {}, '/kazumi/action');
+                if (!rsp) return;
+                if (rsp.running) {
+                    show('任务进行中…');
+                    return;
+                }
+                clearInterval(iv);
+                hide();
+                if (onDone) onDone(rsp);
+            } catch (e) {
+                clearInterval(iv);
+                hide();
+                warnToast('任务查询失败');
+            }
+        }, 1200);
     },
 
     /** 是否存在已启用规则（详情页/搜索页据此显示入口）。 */
