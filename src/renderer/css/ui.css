@@ -811,6 +811,17 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 #kazumi_rule_list .history-item { display:flex; align-items:center; gap:10px; }
 #kazumi_rule_list .history-url { flex:1; min-width:0; }
 
+/* 规则商店 */
+.kazumi-shop-item { display:flex; align-items:center; gap:12px; padding:12px;
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
+    border-radius:12px; margin-bottom:8px; }
+.kazumi-shop-info { flex:1; min-width:0; }
+.kazumi-shop-name { font-size:14px; font-weight:600; color:var(--md-on-surface); }
+.kazumi-shop-desc { font-size:12px; color:var(--md-on-surface-variant); margin-top:2px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kazumi-shop-install { flex:none; }
+.kazumi-shop-install:disabled { opacity:.5; pointer-events:none; }
+
 /* 播放对话框（宽）+ URL 展示 */
 .md-dialog-wide { max-width:560px; }
 .player-url { margin-top:8px; font-size:12px; color:var(--md-on-surface-variant); word-break:break-all; }

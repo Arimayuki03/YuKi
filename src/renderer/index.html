@@ -548,6 +548,7 @@
                             <button id="kazumi_rule_add" class="md-btn md-btn-filled">导入规则</button>
                             <button id="kazumi_rule_paste" class="md-btn md-btn-tonal">从剪贴板导入</button>
                             <button id="kazumi_rule_clear" class="md-btn md-btn-tonal">清空</button>
+                            <button id="kazumi_rule_shop" class="md-btn md-btn-tonal">规则商店</button>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="kazumi">
@@ -687,6 +688,19 @@
             <div class="md-dialog-body" id="blocked_list" style="max-height:50vh;overflow-y:auto;"></div>
             <div class="md-dialog-actions">
                 <button onclick="closeDialog('blockedDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Kazumi 规则商店（kimi UI 设计） -->
+    <div id="kazumiShopDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title">Kazumi 规则商店</div>
+            <div class="md-dialog-body" id="kazumi-shop-body" style="max-height:60vh;overflow-y:auto;">
+                <div class="tip-line">载入中…</div>
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('kazumiShopDialog')" class="md-dialog-btn">关闭</button>
             </div>
         </div>
     </div>

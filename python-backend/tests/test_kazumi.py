@@ -207,6 +207,8 @@ class TestApiStrategy(unittest.TestCase):
 class TestPluginManager(unittest.TestCase):
     def setUp(self):
         self.mgr = PluginManager()
+        # 清空内置规则，隔离测试
+        self.mgr._plugins = []
 
     def test_add_and_list(self):
         p = Plugin.from_json({'api': '5', 'name': 'test', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})

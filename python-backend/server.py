@@ -501,6 +501,21 @@ def dispatch_kazumi_action(form):
                 'referer': headers.get('referer', ''),
             }, ensure_ascii=False)
 
+        # ---- 在线规则商店 ----
+        if do == 'kazumiShopCatalog':
+            catalog = kazumi_mgr.fetch_shop_catalog()
+            return 200, json.dumps({'code': 200, 'catalog': catalog}, ensure_ascii=False)
+
+        if do == 'kazumiShopInstall':
+            name = form.get('name', '')
+            if not name:
+                return 400, json.dumps({'code': 400, 'msg': 'name required'}, ensure_ascii=False)
+            plugin = kazumi_mgr.fetch_shop_rule(name)
+            if not plugin:
+                return 404, json.dumps({'code': 404, 'msg': 'rule not found or download failed'}, ensure_ascii=False)
+            ok, msg = kazumi_mgr.add(plugin)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)

@@ -16,6 +16,9 @@ from .plugin import Plugin
 
 logger = logging.getLogger('vpc.kazumi.manager')
 
+# 内置默认规则目录（随应用打包，首次启动自动导入）
+_BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+
 
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
@@ -25,6 +28,35 @@ class PluginManager:
         self._plugins = []  # list[Plugin]
         self._file = os.path.join(hoststate.get_data_dir(), 'kazumi', 'plugins.json')
         self._load()
+        self._import_builtin_rules()
+
+    # ---------------------------------------------------------------- 内置规则
+
+    def _import_builtin_rules(self):
+        """首次启动（plugins.json 不存在）时自动导入内置默认规则。"""
+        if os.path.exists(self._file):
+            return  # 已有用户规则，不覆盖
+        if not os.path.isdir(_BUILTIN_RULES_DIR):
+            return
+        imported = 0
+        for fn in os.listdir(_BUILTIN_RULES_DIR):
+            if not fn.endswith('.json'):
+                continue
+            path = os.path.join(_BUILTIN_RULES_DIR, fn)
+            try:
+                with open(path, encoding='utf-8') as f:
+                    plugin = Plugin.from_json(json.load(f))
+                err = plugin.validate()
+                if err:
+                    logger.warning('[kazumi] builtin rule %s invalid: %s', fn, err)
+                    continue
+                self._plugins.append(plugin)
+                imported += 1
+            except Exception as e:
+                logger.warning('[kazumi] builtin rule %s load failed: %s', fn, e)
+        if imported:
+            self._save()
+            logger.info('[kazumi] imported %d builtin rules', imported)
 
     # ---------------------------------------------------------------- 持久化
 
@@ -134,3 +166,39 @@ class PluginManager:
     def has_enabled(self):
         with self._lock:
             return any(p.enabled for p in self._plugins)
+
+    # ---------------------------------------------------------------- 在线规则商店
+
+    def fetch_shop_catalog(self):
+        """从 KazumiRules 仓库拉取规则目录（index.json）。"""
+        import requests
+        urls = [
+            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
+            'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json',
+        ]
+        for url in urls:
+            try:
+                rsp = requests.get(url, timeout=10, verify=False)
+                rsp.raise_for_status()
+                data = rsp.json()
+                logger.info('[kazumi] shop catalog loaded: %d rules from %s', len(data), url)
+                return data
+            except Exception as e:
+                logger.warning('[kazumi] shop catalog %s failed: %s', url, e)
+        return []
+
+    def fetch_shop_rule(self, name):
+        """从 KazumiRules 仓库下载单个规则。"""
+        import requests
+        urls = [
+            f'https://raw.githubusercontent.com/Predidit/KazumiRules/main/{name}.json',
+            f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json',
+        ]
+        for url in urls:
+            try:
+                rsp = requests.get(url, timeout=10, verify=False)
+                rsp.raise_for_status()
+                return Plugin.from_json(rsp.json())
+            except Exception as e:
+                logger.warning('[kazumi] shop rule %s from %s failed: %s', name, url, e)
+        return None

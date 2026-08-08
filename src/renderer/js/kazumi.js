@@ -22,6 +22,7 @@ const Kazumi = {
         $('#kazumi_rule_add').on('click', () => this.importRule());
         $('#kazumi_rule_paste').on('click', () => this.importFromClipboard());
         $('#kazumi_rule_clear').on('click', () => $('#kazumi_rule_json').val(''));
+        $('#kazumi_rule_shop').on('click', () => this.openShopDialog());
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
@@ -104,6 +105,63 @@ const Kazumi = {
             if (text) $('#kazumi_rule_json').val(text);
             this.importRule();
         } catch (e) { warnToast('读取剪贴板失败'); }
+    },
+
+    // ---------------------------------------------------------------- 在线规则商店
+
+    /** 打开规则商店弹窗。 */
+    async openShopDialog() {
+        openDialog('kazumiShopDialog');
+        $('#kazumi-shop-body').html('<div class="tip-line">正在加载规则商店…</div>');
+        try {
+            const rsp = await doAction('kazumiShopCatalog', {}, '/kazumi/action');
+            const catalog = (rsp && rsp.catalog) || [];
+            if (!catalog.length) {
+                $('#kazumi-shop-body').html('<div class="tip-line">规则商店为空或加载失败</div>');
+                return;
+            }
+            this._renderShopCatalog(catalog);
+        } catch (e) {
+            $('#kazumi-shop-body').html('<div class="tip-line">规则商店加载失败</div>');
+        }
+    },
+
+    _renderShopCatalog(catalog) {
+        const box = $('#kazumi-shop-body');
+        const installed = new Set(this._rules.map((r) => r.name.toLowerCase()));
+        box.html(catalog.map((item) => {
+            const name = item.name || '';
+            const version = item.version || '';
+            const isInstalled = installed.has(name.toLowerCase());
+            return `<div class="kazumi-shop-item" data-name="${escHtml(name)}">
+                <div class="kazumi-shop-info">
+                    <div class="kazumi-shop-name">${escHtml(name)} <span style="color:var(--md-on-surface-variant);font-size:11px">v${escHtml(version)}</span></div>
+                    <div class="kazumi-shop-desc">${escHtml(item.description || item.baseURL || '')}</div>
+                </div>
+                <button class="md-btn md-btn-tonal md-btn-sm kazumi-shop-install" data-name="${escHtml(name)}" ${isInstalled ? 'disabled' : ''}>
+                    ${isInstalled ? '已安装' : '安装'}
+                </button>
+            </div>`;
+        }).join(''));
+        box.find('.kazumi-shop-install').on('click', async (e) => {
+            const name = String($(e.currentTarget).data('name') || '');
+            if (!name) return;
+            showLoading();
+            try {
+                const rsp = await doAction('kazumiShopInstall', { name }, '/kazumi/action');
+                hideLoading();
+                if (rsp && rsp.code === 200) {
+                    warnToast(`规则「${name}」安装成功`);
+                    this.refreshRuleList();
+                    this.openShopDialog(); // 刷新商店状态
+                } else {
+                    warnToast('安装失败：' + ((rsp && rsp.msg) || '未知错误'));
+                }
+            } catch (e2) {
+                hideLoading();
+                warnToast('安装失败');
+            }
+        });
     },
 
     /** 删除规则（confirmDialog 二次确认）。 */
