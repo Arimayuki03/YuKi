@@ -608,6 +608,31 @@ def dispatch_kazumi_action(form):
                 logger.warning('[kazumi] image search failed: %s', e)
             return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
 
+        # ---- WebDAV 同步 ----
+        if do == 'kazumiWebdavSync':
+            url = form.get('url', '')
+            username = form.get('username', '')
+            password = form.get('password', '')
+            data_str = form.get('data', '{}')
+            try:
+                data = json.loads(data_str)
+            except Exception:
+                data = {}
+            ok = kazumi_mgr.webdav_sync(url, username, password, data)
+            return (200 if ok else 500), json.dumps({'code': 200 if ok else 500, 'msg': 'sync ok' if ok else 'sync failed'}, ensure_ascii=False)
+
+        if do == 'kazumiWebdavRestore':
+            url = form.get('url', '')
+            username = form.get('username', '')
+            password = form.get('password', '')
+            names_str = form.get('names', '[]')
+            try:
+                names = json.loads(names_str)
+            except Exception:
+                names = []
+            result = kazumi_mgr.webdav_restore(url, username, password, names)
+            return 200, json.dumps({'code': 200, 'data': result}, ensure_ascii=False)
+
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)

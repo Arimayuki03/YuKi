@@ -30,6 +30,9 @@ DANDAN_API = 'https://api.dandanplay.net'
 DANDAN_APPID = os.environ.get('DANDANAPI_APPID', '')
 DANDAN_KEY = os.environ.get('DANDANAPI_KEY', '')
 
+# WebDAV 同步（对齐 Kazumi webdav_client）
+WEBDAV_SYNC_ROOT = '/kazumiSync'
+
 
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
@@ -418,6 +421,59 @@ class PluginManager:
         except Exception as e:
             logger.warning('[kazumi] danmaku comments failed: %s', e)
             return []
+
+    # ---------------------------------------------------------------- WebDAV 同步
+
+    def webdav_sync(self, webdav_url, username, password, data):
+        """WebDAV 同步（收藏/历史/规则上传到远程）。"""
+        import requests
+        from requests.auth import HTTPBasicAuth
+        try:
+            auth = HTTPBasicAuth(username, password) if username else None
+            # 确保同步目录存在
+            sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
+            try:
+                requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=False)
+            except Exception:
+                pass  # 目录可能已存在
+            # 上传数据文件
+            for name, content in data.items():
+                file_url = f'{sync_dir}/{name}.json'
+                rsp = requests.put(
+                    file_url,
+                    data=json.dumps(content, ensure_ascii=False).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    auth=auth,
+                    timeout=15,
+                    verify=False,
+                )
+                rsp.raise_for_status()
+            logger.info('[kazumi] webdav sync ok: %d files', len(data))
+            return True
+        except Exception as e:
+            logger.warning('[kazumi] webdav sync failed: %s', e)
+            return False
+
+    def webdav_restore(self, webdav_url, username, password, names):
+        """WebDAV 恢复（从远程下载收藏/历史/规则）。"""
+        import requests
+        from requests.auth import HTTPBasicAuth
+        result = {}
+        try:
+            auth = HTTPBasicAuth(username, password) if username else None
+            sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
+            for name in names:
+                file_url = f'{sync_dir}/{name}.json'
+                try:
+                    rsp = requests.get(file_url, auth=auth, timeout=15, verify=False)
+                    if rsp.status_code == 200:
+                        result[name] = rsp.json()
+                except Exception:
+                    pass
+            logger.info('[kazumi] webdav restore ok: %d files', len(result))
+        except Exception as e:
+            logger.warning('[kazumi] webdav restore failed: %s', e)
+        return result
 
     # ---------------------------------------------------------------- 在线规则商店
 

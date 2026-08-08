@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -37,6 +37,9 @@ const Kazumi = {
             const enabled = !!e.currentTarget.checked;
             if (name) this.toggleRule(name, enabled);
         });
+        // WebDAV 同步
+        $('#webdav_sync').on('click', () => this.webdavSyncUI());
+        $('#webdav_restore').on('click', () => this.webdavRestoreUI());
         this.refreshRuleList();
     },
 
@@ -786,6 +789,83 @@ Kazumi.imageSearch = async function (imageFile) {
     } catch (e) {
         warnToast('以图搜番失败');
         return [];
+    }
+};
+
+// ---------------------------------------------------------------- WebDAV 同步
+
+/** WebDAV 同步：上传收藏/历史/规则到远程。 */
+Kazumi.webdavSync = async function (url, username, password) {
+    try {
+        const s = (await window.vpc.settingsGet()) || {};
+        const data = {
+            favorites: s.favorites || [],
+            history: s.history || [],
+            kazumiRules: this._rules || [],
+        };
+        const rsp = await doAction('kazumiWebdavSync', {
+            url, username, password, data: JSON.stringify(data),
+        }, '/kazumi/action');
+        return rsp && rsp.code === 200;
+    } catch (e) {
+        warnToast('WebDAV 同步失败');
+        return false;
+    }
+};
+
+/** WebDAV 恢复：从远程下载收藏/历史/规则。 */
+Kazumi.webdavRestore = async function (url, username, password) {
+    try {
+        const rsp = await doAction('kazumiWebdavRestore', {
+            url, username, password, names: JSON.stringify(['favorites', 'history', 'kazumiRules']),
+        }, '/kazumi/action');
+        if (rsp && rsp.code === 200 && rsp.data) {
+            const d = rsp.data;
+            if (d.favorites) await window.vpc.settingsSet('favorites', d.favorites);
+            if (d.history) await window.vpc.settingsSet('history', d.history);
+            if (d.kazumiRules) {
+                // 规则逐个导入
+                for (const rule of d.kazumiRules) {
+                    await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+                }
+                await this.refreshRuleList();
+            }
+            warnToast('WebDAV 恢复完成');
+            return true;
+        }
+        return false;
+    } catch (e) {
+        warnToast('WebDAV 恢复失败');
+        return false;
+    }
+};
+
+/** WebDAV 同步 UI 入口。 */
+Kazumi.webdavSyncUI = async function () {
+    const url = $('#webdav_url').val().trim();
+    const username = $('#webdav_username').val().trim();
+    const password = $('#webdav_password').val();
+    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    showLoading();
+    const ok = await this.webdavSync(url, username, password);
+    hideLoading();
+    warnToast(ok ? 'WebDAV 同步完成' : 'WebDAV 同步失败');
+};
+
+/** WebDAV 恢复 UI 入口。 */
+Kazumi.webdavRestoreUI = async function () {
+    const url = $('#webdav_url').val().trim();
+    const username = $('#webdav_username').val().trim();
+    const password = $('#webdav_password').val();
+    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    if (!await confirmDialog('从云端恢复将覆盖本地收藏、历史与规则，继续？', { okText: '恢复' })) return;
+    showLoading();
+    const ok = await this.webdavRestore(url, username, password);
+    hideLoading();
+    if (ok) {
+        // 刷新收藏/历史视图
+        if (typeof Favorites !== 'undefined' && Favorites.render) Favorites.render();
+        if (typeof HistoryView !== 'undefined' && HistoryView.render) HistoryView.render();
     }
 };
 

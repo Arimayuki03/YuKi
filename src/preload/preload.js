@@ -116,4 +116,26 @@ contextBridge.exposeInMainWorld('vpc', {
     mpvPath: () => ipcRenderer.invoke('vpc:mpv-path'),
     /** 资产就绪状态：ffmpeg / mpv / aria2 / Anime4K 是否就绪 */
     assetStatus: () => ipcRenderer.invoke('vpc:asset-status'),
+    /** SyncPlay 一起看：连接/断开/状态/文件/聊天 */
+    syncplay: {
+        connect: (opts) => ipcRenderer.invoke('vpc:syncplay-connect', opts),
+        disconnect: () => ipcRenderer.invoke('vpc:syncplay-disconnect'),
+        sendState: (pos, paused, seek) => ipcRenderer.invoke('vpc:syncplay-state', pos, paused, seek),
+        sendFile: (name, duration) => ipcRenderer.invoke('vpc:syncplay-file', name, duration),
+        sendChat: (msg) => ipcRenderer.invoke('vpc:syncplay-chat', msg),
+        onState: (cb) => ipcRenderer.on('vpc:syncplay-state', (_e, info) => cb(info)),
+        onChat: (cb) => ipcRenderer.on('vpc:syncplay-chat', (_e, info) => cb(info)),
+        onFile: (cb) => ipcRenderer.on('vpc:syncplay-file', (_e, info) => cb(info)),
+        onUsers: (cb) => ipcRenderer.on('vpc:syncplay-users', (_e, info) => cb(info)),
+        onDisconnect: (cb) => ipcRenderer.on('vpc:syncplay-disconnect', () => cb()),
+        onError: (cb) => ipcRenderer.on('vpc:syncplay-error', (_e, info) => cb(info)),
+    },
+    /** DLNA 投屏：搜索设备/投屏/停止 */
+    dlna: {
+        search: () => ipcRenderer.invoke('vpc:dlna-search'),
+        cast: (deviceUrl, mediaUrl, title) => ipcRenderer.invoke('vpc:dlna-cast', deviceUrl, mediaUrl, title),
+        stop: (deviceUrl) => ipcRenderer.invoke('vpc:dlna-stop', deviceUrl),
+        onDevices: (cb) => ipcRenderer.on('vpc:dlna-devices', (_e, devices) => cb(devices)),
+        onError: (cb) => ipcRenderer.on('vpc:dlna-error', (_e, info) => cb(info)),
+    },
 });

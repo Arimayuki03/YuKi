@@ -30,6 +30,8 @@ const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require
 const Settings = require('./settings');
 const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
+const SyncplayClient = require('./syncplay-client');
+const DlnaCaster = require('./dlna-caster');
 
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -140,6 +142,8 @@ const mpv = new MpvPlayer();
 const dl = new Downloader();
 const hls = new HlsDownloader();
 const pushServer = new PushServer();
+const syncplay = new SyncplayClient();
+const dlna = new DlnaCaster();
 let fileMgr = null;    // app ready 后初始化（依赖 userData 路径）
 let settings = null;   // app ready 后初始化（bridge 启动前，供读缓存目录等）
 let parseWin = null;   // 同上
@@ -1225,6 +1229,41 @@ app.whenReady().then(() => {
     createWindow();
     initTray();
 
+    // SyncPlay 事件转发到渲染层
+    syncplay.on('state', (info) => send('vpc:syncplay-state', info));
+    syncplay.on('chat', (info) => send('vpc:syncplay-chat', info));
+    syncplay.on('file', (info) => send('vpc:syncplay-file', info));
+    syncplay.on('users', (info) => send('vpc:syncplay-users', info));
+    syncplay.on('disconnect', () => send('vpc:syncplay-disconnect', {}));
+    syncplay.on('error', (err) => send('vpc:syncplay-error', { message: String(err.message || err) }));
+
+    // DLNA 事件转发
+    dlna.on('devices', (devices) => send('vpc:dlna-devices', devices));
+    dlna.on('error', (err) => send('vpc:dlna-error', { message: String(err.message || err) }));
+
+    // SyncPlay IPC
+    ipcMain.handle('vpc:syncplay-connect', async (_e, opts) => {
+        try {
+            await syncplay.connect(opts.server, opts.port, opts.username, opts.room, opts.useTls !== false);
+            return { ok: true };
+        } catch (e) { return { ok: false, reason: e.message }; }
+    });
+    ipcMain.handle('vpc:syncplay-disconnect', () => { syncplay.disconnect(); return { ok: true }; });
+    ipcMain.handle('vpc:syncplay-state', (_e, pos, paused, seek) => { syncplay.sendState(pos, paused, seek); return { ok: true }; });
+    ipcMain.handle('vpc:syncplay-file', (_e, name, duration) => { syncplay.sendFile(name, duration); return { ok: true }; });
+    ipcMain.handle('vpc:syncplay-chat', (_e, msg) => { syncplay.sendChat(msg); return { ok: true }; });
+
+    // DLNA IPC
+    ipcMain.handle('vpc:dlna-search', async () => {
+        try { await dlna.search(); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
+    });
+    ipcMain.handle('vpc:dlna-cast', async (_e, deviceUrl, mediaUrl, title) => {
+        try { await dlna.cast(deviceUrl, mediaUrl, title); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
+    });
+    ipcMain.handle('vpc:dlna-stop', async (_e, deviceUrl) => {
+        try { await dlna.stop(deviceUrl); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
+    });
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -1236,6 +1275,7 @@ app.on('window-all-closed', () => {
     mpv.stop();
     dl.stop();
     pushServer.stop();
+    syncplay.disconnect();
     bridge.stop();
     if (process.platform !== 'darwin') app.quit();
 });
