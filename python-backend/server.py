@@ -531,6 +531,41 @@ def dispatch_kazumi_action(form):
             info = kazumi_mgr.bangumi_info(subject_id)
             return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
 
+        if do == 'kazumiBangumiCalendar':
+            data = kazumi_mgr.bangumi_calendar()
+            return 200, json.dumps({'code': 200, 'calendar': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiTrends':
+            data = kazumi_mgr.bangumi_trends()
+            return 200, json.dumps({'code': 200, 'trends': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiEpisodes':
+            subject_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_episodes(subject_id)
+            return 200, json.dumps({'code': 200, 'episodes': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCharacters':
+            subject_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_characters(subject_id)
+            return 200, json.dumps({'code': 200, 'characters': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiStaff':
+            subject_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_staff(subject_id)
+            return 200, json.dumps({'code': 200, 'staff': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiComments':
+            subject_id = form.get('id', '')
+            limit = int(form.get('limit', '20'))
+            offset = int(form.get('offset', '0'))
+            data = kazumi_mgr.bangumi_comments(subject_id, limit, offset)
+            return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiRelations':
+            subject_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_relations(subject_id)
+            return 200, json.dumps({'code': 200, 'relations': data}, ensure_ascii=False)
+
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)

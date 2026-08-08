@@ -221,6 +221,98 @@ class PluginManager:
             logger.warning('[kazumi] bangumi calendar failed: %s', e)
             return []
 
+    def bangumi_trends(self):
+        """Bangumi 番剧趋势榜单（next.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API_NEXT}/p1/trending/subjects',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi trends failed: %s', e)
+            return []
+
+    def bangumi_episodes(self, subject_id):
+        """Bangumi 番剧分集信息（api.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API}/v0/episodes',
+                params={'subject_id': subject_id},
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi episodes failed: %s', e)
+            return None
+
+    def bangumi_characters(self, subject_id):
+        """Bangumi 番剧角色信息（api.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API}/v0/subjects/{subject_id}/characters',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi characters failed: %s', e)
+            return []
+
+    def bangumi_staff(self, subject_id):
+        """Bangumi 番剧制作人员（api.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API}/v0/subjects/{subject_id}/persons',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi staff failed: %s', e)
+            return []
+
+    def bangumi_comments(self, subject_id, limit=20, offset=0):
+        """Bangumi 番剧评论（next.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API_NEXT}/p1/subjects/{subject_id}/comments',
+                params={'limit': limit, 'offset': offset},
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi comments failed: %s', e)
+            return []
+
+    def bangumi_relations(self, subject_id):
+        """Bangumi 番剧关联（前传/续作链，api.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API}/v0/subjects/{subject_id}/subjects',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi relations failed: %s', e)
+            return []
+
     # ---------------------------------------------------------------- 在线规则商店
 
     def fetch_shop_catalog(self):

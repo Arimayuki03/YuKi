@@ -14,6 +14,7 @@
     <script src="js/search.js" defer></script>
     <script src="js/detail.js" defer></script>
     <script src="js/kazumi.js" defer></script>
+    <script src="js/timeline.js" defer></script>
     <script src="js/player.js" defer></script>
     <script src="js/records.js" defer></script>
     <script src="js/downloads.js" defer></script>
@@ -58,8 +59,12 @@
                 <span>本地文件</span>
             </div>
             <div class="main-nav-item" data-view="settings">
-                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34-.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>
                 <span>设置</span>
+            </div>
+            <div class="main-nav-item" data-view="timeline">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+                <span>时间表</span>
             </div>
             <button id="nav-collapse" class="nav-collapse-btn" title="收缩/展开侧栏">
                 <svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
@@ -89,6 +94,17 @@
                 <div id="search-filters" class="class-tabs" style="display:none"></div>
                 <div id="search-status" class="tip-line" style="display:none"></div>
                 <div id="search-results"></div>
+            </section>
+
+            <!-- 番剧时间表（Bangumi 每日放送） -->
+            <section id="view-timeline" class="view">
+                <div class="view-toolbar">
+                    <select id="timeline-season" class="md-select"></select>
+                    <button id="timeline-refresh" class="md-btn md-btn-tonal">刷新</button>
+                </div>
+                <div id="timeline-weekdays" class="class-tabs"></div>
+                <div id="timeline-grid" class="vod-grid"></div>
+                <div id="timeline-pager" class="pager"></div>
             </section>
 
             <!-- 直播（config lives + 设置里的自定义源；源在“设置”页签维护） -->
