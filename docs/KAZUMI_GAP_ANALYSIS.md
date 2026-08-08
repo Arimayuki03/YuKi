@@ -56,7 +56,7 @@
 | 番剧分集信息 | ✅ getBangumiEpisodeByID | ✅ 已实现（详情弹窗分集页签） | 无 |
 | 番剧评论 | ✅ getBangumiCommentsByID | ✅ 已实现（详情弹窗评论页签） | 无 |
 | 角色/Staff | ✅ getBangumiStaffByID / getCharatersByBangumiID | ✅ 已实现（详情弹窗角色/制作页签） | 无 |
-| 用户收藏同步 | ✅ updateBangumiById | ❌ 未实现 | 需 Bangumi token |
+| 用户收藏同步 | ✅ updateBangumiById | ✅ 已实现（设置页 Bangumi 同步卡：token 管理/测试连接/我的收藏/删除；详情弹窗追番下拉同步） | 无 |
 
 ---
 
@@ -113,9 +113,9 @@
 | 功能 | Kazumi 原版 | video-pc 现状 | 差距 |
 |------|------------|--------------|------|
 | WebDAV 同步 | ✅ webdav_client | ✅ 已实现（收藏/历史/规则上传/恢复） | 无 |
-| Bangumi 同步 | ✅ BangumiSyncService | ❌ 未实现 | 需 Bangumi token |
+| Bangumi 同步 | ✅ BangumiSyncService | ✅ 已实现（Access Token 收藏同步：详情弹窗追番 + 设置页收藏管理） | 无 |
 | 一起看（SyncPlay） | ✅ SyncPlay 协议客户端 | ✅ 已实现（TCP+TLS，Hello/State/Set/Chat 协议） | 无 |
-| 跨设备同步 | ✅ WebDAV + Bangumi | ⚠️ 部分实现（WebDAV 已完成，Bangumi 同步需 token） | 需 Bangumi token |
+| 跨设备同步 | ✅ WebDAV + Bangumi | ✅ 已实现（WebDAV 收藏/历史 + Bangumi 收藏双向同步） | 无 |
 
 ---
 
@@ -213,7 +213,7 @@
 ## 14. 技术债务与风险
 
 1. **弹幕签名密钥**：弹弹 play API 需申请 DANDANAPI_APPID/DANDANAPI_KEY，未申请前无法实际加载弹幕。
-2. **Bangumi 镜像签名**：Bangumi 镜像 API 需 KAZUMI_APPID/KAZUMI_KEY，未申请前部分端点不可用。
+2. **Bangumi 镜像签名**：Bangumi 镜像 API 的签名端点（KAZUMI_APPID/KAZUMI_KEY）未申请前部分端点不可用；用户收藏同步走的是 Access Token（已接入）。
 3. **验证码自动过验证**：当前仅实现手动过验证，自动过验证复杂度高。
 4. **Cookie 持久化**：已实现（验证后 Cookie 落盘，重启复用）；但仅覆盖解析会话，验证码页需再次手动过验证时自动过验证未覆盖。
 5. **视频源解析池**：已实现（3 槽位独立 partition 并发解析）；前端批量解析仍串行，池为并发预留。
@@ -229,18 +229,18 @@
 |------|--------|---------|--------|
 | 核心规则系统 | 14 | 0 | 0 |
 | 视频源获取 | 7 | 1 | 0 |
-| 番剧元数据 | 9 | 0 | 1 |
+| 番剧元数据 | 10 | 0 | 0 |
 | 播放器与媒体 | 11 | 0 | 2 |
 | 弹幕系统 | 3 | 0 | 4 |
 | 下载系统 | 5 | 0 | 1 |
-| 同步服务 | 2 | 1 | 1 |
+| 同步服务 | 4 | 0 | 0 |
 | WebView | 2 | 1 | 0 |
 | 页面与 UI | 15 | 1 | 0 |
 | 主题与国际化 | 5 | 0 | 0 |
 | 平台配置 | 0 | 1 | 3 |
 | 测试与 CI | 2 | 0 | 1 |
-| **合计** | **75** | **5** | **13** |
-| **完成率** | **81%** | **5%** | **14%** |
+| **合计** | **78** | **4** | **11** |
+| **完成率** | **84%** | **4%** | **12%** |
 
 > 注：核心功能（规则引擎/播放/搜索/下载/Bangumi/SyncPlay/DLNA/WebDAV/编辑器/时间表等）已全部完成，剩余未实现项多为边缘功能或需第三方密钥/平台特定能力。
 

@@ -19,7 +19,7 @@
 - 播放链路：复用现有 Player.play()，但 Kazumi 源需先经真实视频流提取（隐藏 BrowserWindow 抓 m3u8/mp4）。
 - **内置默认规则**：7sefun/DM84/enlie 三个规则首次启动自动导入，用户开箱即用。
 - **在线规则商店**：从 KazumiRules 仓库浏览/安装/更新规则（GitHub/GitCode 镜像）。
-- **Bangumi 元数据**：详情页 Kazumi 源弹窗顶部显示番剧封面/简介/评分（api.bgm.tv/next.bgm.tv）。
+- **Bangumi 元数据**：详情页 Kazumi 源弹窗顶部显示番剧封面/简介/评分（api.bangumi.lol / next.bangumi.lol 镜像）。
 - **验证码识别**：检测到验证码时标记源为「需验证」，点击打开验证页面（手动过验证后重试）。
 - **弹幕/以图搜番**：基础占位实现（弹弹 play API 需签名密钥，trace.moe 需图片上传）。
 
