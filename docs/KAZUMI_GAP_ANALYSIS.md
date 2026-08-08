@@ -123,9 +123,9 @@
 
 | 功能 | Kazumi 原版 | video-pc 现状 | 差距 |
 |------|------------|--------------|------|
-| 视频源解析 WebView | ✅ 多平台实现 | ⚠️ 复用现有 captureDirect（Electron BrowserWindow） | 需增强 JS 注入 |
+| 视频源解析 WebView | ✅ 多平台实现 | ✅ 已实现（Electron BrowserWindow 三机制：webRequest 拦截 + JS 注入轮询 + iframe 监听） | 无 |
 | 验证码 WebView | ✅ CaptchaWebviewController | ⚠️ 基础识别 + 手动过验证 | 需自动过验证 |
-| 异步会话 | ✅ AsyncSession / AsyncSerialQueue / AsyncSingleFlight | ❌ 未实现 | 可后续补充 |
+| 异步会话 | ✅ AsyncSession / AsyncSerialQueue / AsyncSingleFlight | ✅ 已实现（AsyncSingleFlight 同 key 并发去重 / AsyncSerialQueue FIFO 串行，接入 captureDirect 去重） | 无 |
 
 ---
 
@@ -148,7 +148,7 @@
 | 规则商店 | ✅ PluginShopPage | ✅ 已实现（在线商店弹窗） | 无 |
 | 首次引导 | ✅ OnboardingPage | ✅ 已实现（欢迎弹窗 + 快速上手指南） | 无 |
 | 日志查看 | ✅ LogsPage | ✅ 已实现（分页日志查看器弹窗） | 无 |
-| 关于页 | ✅ AboutPage | ⚠️ 部分实现（设置页系统板块含版本号/缓存清理/退出行为） | 可后续补充 |
+| 关于页 | ✅ AboutPage | ✅ 已实现（独立视图：应用标识/版本/技术栈/致谢/系统信息） | 无 |
 
 ---
 
@@ -234,13 +234,13 @@
 | 弹幕系统 | 3 | 0 | 4 |
 | 下载系统 | 5 | 0 | 1 |
 | 同步服务 | 2 | 1 | 1 |
-| WebView | 0 | 2 | 1 |
-| 页面与 UI | 14 | 2 | 0 |
+| WebView | 2 | 1 | 0 |
+| 页面与 UI | 15 | 1 | 0 |
 | 主题与国际化 | 5 | 0 | 0 |
 | 平台配置 | 0 | 1 | 3 |
 | 测试与 CI | 2 | 0 | 1 |
-| **合计** | **72** | **7** | **14** |
-| **完成率** | **77%** | **8%** | **15%** |
+| **合计** | **75** | **5** | **13** |
+| **完成率** | **81%** | **5%** | **14%** |
 
 > 注：核心功能（规则引擎/播放/搜索/下载/Bangumi/SyncPlay/DLNA/WebDAV/编辑器/时间表等）已全部完成，剩余未实现项多为边缘功能或需第三方密钥/平台特定能力。
 
