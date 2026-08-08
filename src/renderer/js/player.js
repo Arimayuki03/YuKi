@@ -83,6 +83,20 @@ const Player = {
         } else {
             done = (Date.now() - this._endedAt) < 10000;
         }
+        // 观看进度追踪：更新收藏条目的观看进度（仅当 seq 含 vodId 时）
+        if (seq.vodId && typeof Favorites !== 'undefined' && Favorites.updateProgress) {
+            try {
+                const percent = (info && typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0)
+                    ? (info.pos / info.duration) * 100
+                    : 0;
+                await Favorites.updateProgress(seq.site, seq.vodId, {
+                    currentEp: seq.index + 1,
+                    totalEps: seq.episodes.length,
+                    percent,
+                    ts: Date.now(),
+                });
+            } catch (e) { /* 进度更新失败不影响播放 */ }
+        }
         if (!done) {
             // 断流场景（开播≥15s 且剩余≥8s 的媒体直链）：主进程会自动重播本集一次，
             // 保留连播链等待重连后的新会话；其余情形视为用户提前关闭，终止连播
@@ -124,8 +138,13 @@ const Player = {
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
         try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
+        // 尝试从当前视图取 vodId（详情页连播时记录观看进度）
+        let vodId = '';
+        try {
+            if (typeof Detail !== 'undefined' && Detail.vodId) vodId = Detail.vodId;
+        } catch (e) { /* ignore */ }
         this._seq = (autoNext && Array.isArray(episodes) && (epIndex || 0) + 1 < episodes.length)
-            ? { site, flag, title, episodes, index: epIndex || 0 }
+            ? { site, flag, title, episodes, index: epIndex || 0, vodId }
             : null;
 
         // Kazumi 源分支（kimi UI）：site 为 kazumi:规则名 时走规则引擎解析

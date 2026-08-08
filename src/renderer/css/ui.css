@@ -935,6 +935,11 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     content:''; position:absolute; left:5px; top:1.5px; width:4px; height:9px;
     border:solid var(--md-on-primary); border-width:0 2px 2px 0; transform:rotate(45deg);
 }
+/* 观看进度条（收藏卡片底部） */
+.rec-progress { position:absolute; left:0; right:0; bottom:0; height:3px;
+    background:rgba(0,0,0,.3); border-radius:0 0 14px 14px; overflow:hidden; }
+.rec-progress-bar { height:100%; background:var(--md-primary); transition:width .3s; }
+.vod-card { position:relative; }
 .rec-checkall { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); cursor:pointer; }
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
 

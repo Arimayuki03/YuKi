@@ -101,6 +101,12 @@ function normTag(t) { return (t === undefined || t === null) ? 'want' : t; }
 /** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面左上角加想看/已看标签，无标签不显示）。 */
 function recCard(v, editable, withTags) {
     const tag = normTag(v.tag);
+    const progress = v.progress;
+    const progressHtml = progress && progress.totalEps
+        ? `<div class="rec-progress" title="观至第 ${progress.currentEp} 集 / 共 ${progress.totalEps} 集">
+             <div class="rec-progress-bar" style="width:${Math.min(100, Math.round(progress.percent || 0))}%"></div>
+           </div>`
+        : '';
     return `<div class="vod-card" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" data-name="${escHtml(v.name)}" tabindex="0">
         <span class="rec-check" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="勾选后可批量删除"></span>
         ${withTags && tag ? `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→已看→取消">${tag === 'seen' ? '已看' : '想看'}</span>` : ''}
@@ -109,6 +115,7 @@ function recCard(v, editable, withTags) {
         <div class="vod-cover">${vodCoverImg(v.pic)}${v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : ''}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(v.name)}</div>
         <div class="vod-remarks">${escHtml(v.remarks || '')}</div>
+        ${progressHtml}
     </div>`;
 }
 
@@ -314,6 +321,23 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             this._syncSelToolbar();
             await this.render();
             warnToast(`已将 ${n} 条标记为${tag === 'seen' ? '已看' : '想看'}`);
+        },
+
+        /** 观看进度追踪：更新收藏条目的观看进度（仅收藏）。 */
+        async updateProgress(site, vodId, progress) {
+            const list = await recGet(storeKey);
+            const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
+            if (!it) return;
+            it.progress = progress; // { currentEp, totalEps, percent, ts }
+            it.ts = Date.now(); // 置顶
+            await recSet(storeKey, list);
+        },
+
+        /** 获取收藏条目的观看进度。 */
+        async getProgress(site, vodId) {
+            const list = await recGet(storeKey);
+            const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
+            return it ? it.progress : null;
         },
 
         /** 批量删除勾选项。 */
