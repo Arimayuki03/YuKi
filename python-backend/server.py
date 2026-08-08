@@ -21,6 +21,13 @@ import secrets
 import logging
 import threading
 
+# 抑制 urllib3 InsecureRequestWarning（PC 端大量 verify=False 请求）
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)

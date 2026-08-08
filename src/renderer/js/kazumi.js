@@ -251,17 +251,27 @@ const Kazumi = {
 
     // ---------------------------------------------------------------- 在线规则商店
 
+    /** 规则商店 catalog 缓存（避免安装后重复拉取） */
+    _shopCatalog: null,
+
     /** 打开规则商店弹窗。 */
     async openShopDialog() {
         openDialog('kazumiShopDialog');
         $('#kazumi-shop-body').html('<div class="tip-line">正在加载规则商店…</div>');
         try {
+            // 有缓存且未过期（5 分钟）则直接用
+            if (this._shopCatalog && this._shopCatalog._ts && Date.now() - this._shopCatalog._ts < 300000) {
+                this._renderShopCatalog(this._shopCatalog);
+                return;
+            }
             const rsp = await doAction('kazumiShopCatalog', {}, '/kazumi/action');
             const catalog = (rsp && rsp.catalog) || [];
             if (!catalog.length) {
                 $('#kazumi-shop-body').html('<div class="tip-line">规则商店为空或加载失败</div>');
                 return;
             }
+            catalog._ts = Date.now();
+            this._shopCatalog = catalog;
             this._renderShopCatalog(catalog);
         } catch (e) {
             $('#kazumi-shop-body').html('<div class="tip-line">规则商店加载失败</div>');
@@ -271,7 +281,8 @@ const Kazumi = {
     _renderShopCatalog(catalog) {
         const box = $('#kazumi-shop-body');
         const installed = new Set(this._rules.map((r) => r.name.toLowerCase()));
-        box.html(catalog.map((item) => {
+        const items = Array.isArray(catalog) ? catalog : (catalog.items || []);
+        box.html(items.map((item) => {
             const name = item.name || '';
             const version = item.version || '';
             const isInstalled = installed.has(name.toLowerCase());
@@ -294,8 +305,9 @@ const Kazumi = {
                 hideLoading();
                 if (rsp && rsp.code === 200) {
                     warnToast(`规则「${name}」安装成功`);
-                    this.refreshRuleList();
-                    this.openShopDialog(); // 刷新商店状态
+                    await this.refreshRuleList();
+                    // 仅刷新安装按钮状态，不重新拉 catalog
+                    $(e.currentTarget).text('已安装').prop('disabled', true);
                 } else {
                     warnToast('安装失败：' + ((rsp && rsp.msg) || '未知错误'));
                 }

@@ -190,7 +190,7 @@ class PluginManager:
             rsp = requests.get(
                 f'{BANGUMI_API_NEXT}/p1/search/subjects',
                 params={'limit': limit, 'offset': 0, 'keyword': keyword},
-                timeout=10,
+                timeout=(5, 8),
                 verify=False,
             )
             rsp.raise_for_status()
@@ -206,7 +206,7 @@ class PluginManager:
         try:
             rsp = requests.get(
                 f'{BANGUMI_API}/v0/subjects/{subject_id}',
-                timeout=10,
+                timeout=(5, 8),
                 verify=False,
             )
             rsp.raise_for_status()
@@ -216,19 +216,23 @@ class PluginManager:
             return None
 
     def bangumi_calendar(self):
-        """Bangumi 每日放送（next.bgm.tv）。"""
+        """Bangumi 每日放送（next.bgm.tv），带重试。"""
         import requests
-        try:
-            rsp = requests.get(
-                f'{BANGUMI_API_NEXT}/p1/calendar',
-                timeout=10,
-                verify=False,
-            )
-            rsp.raise_for_status()
-            return rsp.json()
-        except Exception as e:
-            logger.warning('[kazumi] bangumi calendar failed: %s', e)
-            return []
+        for attempt in range(3):
+            try:
+                rsp = requests.get(
+                    f'{BANGUMI_API_NEXT}/p1/calendar',
+                    timeout=(5, 8),  # 连接 5s，读取 8s
+                    verify=False,
+                )
+                rsp.raise_for_status()
+                return rsp.json()
+            except Exception as e:
+                logger.warning('[kazumi] bangumi calendar attempt %d failed: %s', attempt + 1, e)
+                if attempt < 2:
+                    import time
+                    time.sleep(2)
+        return []
 
     def bangumi_trends(self):
         """Bangumi 番剧趋势榜单（next.bgm.tv）。"""
@@ -477,12 +481,21 @@ class PluginManager:
 
     # ---------------------------------------------------------------- 在线规则商店
 
+    # catalog 缓存（5 分钟 TTL，避免安装规则时重复拉取）
+    _shop_catalog_cache = None
+    _shop_catalog_ts = 0
+
     def fetch_shop_catalog(self):
-        """从 KazumiRules 仓库拉取规则目录（index.json）。"""
+        """从 KazumiRules 仓库拉取规则目录（index.json），5 分钟缓存。"""
+        import time
+        now = time.time()
+        if self._shop_catalog_cache and now - self._shop_catalog_ts < 300:
+            return self._shop_catalog_cache
         import requests
+        # 优先 GitCode 镜像（国内可达），GitHub 作为备用
         urls = [
-            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
             'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json',
+            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
         ]
         for url in urls:
             try:
@@ -490,17 +503,19 @@ class PluginManager:
                 rsp.raise_for_status()
                 data = rsp.json()
                 logger.info('[kazumi] shop catalog loaded: %d rules from %s', len(data), url)
+                self._shop_catalog_cache = data
+                self._shop_catalog_ts = now
                 return data
             except Exception as e:
                 logger.warning('[kazumi] shop catalog %s failed: %s', url, e)
         return []
 
     def fetch_shop_rule(self, name):
-        """从 KazumiRules 仓库下载单个规则。"""
+        """从 KazumiRules 仓库下载单个规则，优先 GitCode 镜像。"""
         import requests
         urls = [
-            f'https://raw.githubusercontent.com/Predidit/KazumiRules/main/{name}.json',
             f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json',
+            f'https://raw.githubusercontent.com/Predidit/KazumiRules/main/{name}.json',
         ]
         for url in urls:
             try:
