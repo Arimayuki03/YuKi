@@ -794,6 +794,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
     transition:background .15s, border-color .15s; }
 .kazumi-result-item:hover { background:var(--md-secondary-container); border-color:var(--md-primary); }
+/* 验证码源项（警示色边框） */
+.kazumi-captcha-item { border-color:var(--md-error); }
+.kazumi-captcha-item:hover { border-color:var(--md-error); background:var(--md-error-container); }
+.kazumi-captcha-item .kazumi-result-name { color:var(--md-error); }
 .kazumi-result-name { font-size:13px; color:var(--md-on-surface); display:block; }
 .kazumi-result-src { font-size:11px; color:var(--md-on-surface-variant); display:block;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }

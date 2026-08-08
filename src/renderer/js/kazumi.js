@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -275,6 +275,19 @@ const Kazumi = {
         const box = $('#kazumi-dialog-body');
         let html = '';
         results.forEach((r) => {
+            // 验证码源标记（kimi UI）
+            if (r.captcha) {
+                html += `<div class="kazumi-plugin-group">
+                    <div class="kazumi-plugin-head">${escHtml(r.pluginName)} <span class="src-count" style="color:var(--md-error)">需验证</span></div>
+                    <div class="kazumi-result-list">
+                        <div class="kazumi-result-item kazumi-captcha-item" data-plugin="${escHtml(r.pluginName)}" data-captcha-url="${escHtml(r.captchaUrl || '')}">
+                            <span class="kazumi-result-name">该源需要验证码验证</span>
+                            <span class="kazumi-result-src">点击打开验证页面，完成验证后自动重试</span>
+                        </div>
+                    </div>
+                </div>`;
+                return;
+            }
             const items = (r.data || []).map((it) => `
                 <div class="kazumi-result-item" data-plugin="${escHtml(r.pluginName)}" data-src="${escHtml(it.src)}" data-name="${escHtml(it.name)}">
                     <span class="kazumi-result-name">${escHtml(it.name)}</span>
@@ -287,7 +300,7 @@ const Kazumi = {
         });
         box.html(html);
         // 绑定点击：进入剧集解析
-        box.find('.kazumi-result-item').on('click', (e) => {
+        box.find('.kazumi-result-item:not(.kazumi-captcha-item)').on('click', (e) => {
             if (token !== this._dlgToken) return;
             const el = $(e.currentTarget);
             const pluginName = String(el.data('plugin') || '');
@@ -295,8 +308,27 @@ const Kazumi = {
             const name = String(el.data('name') || '');
             this._loadChapters(pluginName, src, name, token);
         });
+        // 绑定验证码点击：打开验证窗口
+        box.find('.kazumi-captcha-item').on('click', (e) => {
+            if (token !== this._dlgToken) return;
+            const el = $(e.currentTarget);
+            const url = String(el.data('captcha-url') || '');
+            if (url) this._openCaptchaWindow(url);
+        });
         // 异步补全 Bangumi 元数据（不阻塞交互）
         this._enrichBangumiMetadata(title, box, token);
+    },
+
+    /** 打开验证码验证窗口（隐藏 BrowserWindow，用户手动过验证）。 */
+    _openCaptchaWindow(url) {
+        // 复用现有 captureDirect 窗口机制（主进程隐藏窗口）
+        // 打开后用户手动完成验证，窗口关闭后自动重试搜索
+        warnToast('正在打开验证页面，请手动完成验证…');
+        window.vpc.captureDirect(url).then(() => {
+            warnToast('验证完成，请重新搜索');
+        }).catch(() => {
+            warnToast('验证窗口打开失败');
+        });
     },
 
     /** Bangumi 元数据补全：搜索首个结果取详情，插入弹窗顶部。 */
@@ -372,7 +404,32 @@ const Kazumi = {
             closeDialog('kazumiSourceDialog');
             Player.play('kazumi:' + pluginName, flag, url, title, name, episodes, Math.max(0, epIndex));
         });
+        // 弹幕入口（kimi UI）：播放时自动加载弹幕
+        box.find('.kazumi-ep-btn').on('contextmenu', (e) => {
+            e.preventDefault();
+            const el = $(e.currentTarget);
+            const name = String(el.data('name') || '');
+            warnToast(`弹幕功能开发中：${name}`);
+        });
     },
+};
+
+// ---------------------------------------------------------------- 弹幕（弹弹 play）
+
+/** 弹幕开关与加载（播放 Kazumi 源时自动调用）。 */
+Kazumi.loadDanmaku = async function (title, episode) {
+    // 弹弹 play API（对齐 Kazumi DanmakuApi）
+    // 本期简化：仅提示，不实际加载（需签名密钥）
+    console.log('[kazumi] danmaku placeholder:', title, episode);
+};
+
+// ---------------------------------------------------------------- 以图搜番（trace.moe）
+
+/** 以图搜番：上传图片或粘贴图片 URL，调 trace.moe 识别番剧。 */
+Kazumi.imageSearch = async function (imageFile) {
+    // trace.moe API（对齐 Kazumi TraceApi）
+    // 本期简化：提示用户该功能开发中
+    warnToast('以图搜番功能开发中，敬请期待');
 };
 
 // 启动时自动初始化（设置页板块存在才绑定）

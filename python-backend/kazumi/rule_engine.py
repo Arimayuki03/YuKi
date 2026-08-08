@@ -105,6 +105,20 @@ class RuleEngine:
             self._log_failure(config, 'chapter response parsing', e)
             raise ChapterErrorException(config.plugin_name, cause=e)
 
+    # ---------------------------------------------------------------- 验证码处理
+
+    def search_with_captcha_retry(self, config, keyword, cancel_token=None):
+        """搜索，遇到验证码时返回需要验证的状态（由前端决定是否打开验证窗口）。"""
+        try:
+            return self.search(config, keyword, cancel_token)
+        except CaptchaRequiredException as e:
+            # 返回需要验证的状态与验证页 URL
+            return {
+                'captcha_required': True,
+                'plugin_name': e.plugin_name,
+                'captcha_url': config.search_url.replace('@keyword', keyword),
+            }
+
     # ---------------------------------------------------------------- HTTP 执行
 
     def _execute_request(self, request, config, phase, wrap_error, cancel_token=None):

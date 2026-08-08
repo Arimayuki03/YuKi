@@ -468,6 +468,9 @@ def dispatch_kazumi_action(form):
             for plugin in kazumi_mgr.enabled_plugins():
                 try:
                     trace = kazumi_engine.search(plugin.execution_config(), keyword)
+                    if isinstance(trace, dict) and trace.get('captcha_required'):
+                        results.append({'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')})
+                        continue
                     results.append({'pluginName': plugin.name, 'data': [vars(it) for it in trace.response.data]})
                     logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(trace.response.data))
                 except Exception as e:
