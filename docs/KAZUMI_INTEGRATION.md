@@ -1,9 +1,10 @@
 # Kazumi 规则引擎整合开发文档
 
-> 版本：v1.0（2026-08-09）  
+> 版本：v1.1（2026-08-09）  
 > 目标：将 Kazumi 的 XPath/API 规则引擎以插件形式整合进 video-pc，不破坏现有 CatVod 配置链路。  
 > 阅读对象：glm5.2（主要代码实现）、前端 UI 由本助手完成。  
-> 前置文档：先读 `PROGRESS.md` 第 4 节架构决策、第 5 节 Spider 契约，再读本文件。
+> 前置文档：先读 `PROGRESS.md` 第 4 节架构决策、第 5 节 Spider 契约，再读本文件。  
+> Git 基线：tag `pre-kazumi`（commit 4269bc4），回滚方案见 §11.10。
 
 ---
 
