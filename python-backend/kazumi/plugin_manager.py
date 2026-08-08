@@ -24,6 +24,12 @@ BANGUMI_API = 'https://api.bgm.tv'
 BANGUMI_API_NEXT = 'https://next.bgm.tv'
 BANGUMI_MIRROR = 'https://api.kazumi.fyi'
 
+# 弹弹 play API（对齐 Kazumi danmaku_api.dart）
+DANDAN_API = 'https://api.dandanplay.net'
+# 签名密钥（环境变量注入，对齐 Kazumi --dart-define）
+DANDAN_APPID = os.environ.get('DANDANAPI_APPID', '')
+DANDAN_KEY = os.environ.get('DANDANAPI_KEY', '')
+
 
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
@@ -311,6 +317,106 @@ class PluginManager:
             return rsp.json()
         except Exception as e:
             logger.warning('[kazumi] bangumi relations failed: %s', e)
+            return []
+
+    # ---------------------------------------------------------------- 弹弹 play 弹幕
+
+    def _dandan_signature(self, path, timestamp):
+        """弹弹 play API 签名（HMAC-SHA256）。"""
+        import hashlib
+        import base64
+        if not DANDAN_APPID or not DANDAN_KEY:
+            return ''
+        data = DANDAN_APPID + str(timestamp) + path + DANDAN_KEY
+        digest = hashlib.sha256(data.encode('utf-8')).digest()
+        return base64.b64encode(digest).decode('utf-8')
+
+    def danmaku_search(self, title):
+        """弹弹 play 番剧搜索（获取 DanDanBangumiID）。"""
+        import requests
+        import time
+        if not DANDAN_APPID or not DANDAN_KEY:
+            logger.warning('[kazumi] danmaku: missing DANDANAPI_APPID/DANDANAPI_KEY')
+            return []
+        try:
+            ts = int(time.time())
+            path = '/api/v2/search/anime'
+            headers = {
+                'X-AppId': DANDAN_APPID,
+                'X-Timestamp': str(ts),
+                'X-Signature': self._dandan_signature(path, ts),
+                'X-Auth': '1',
+            }
+            rsp = requests.get(
+                f'{DANDAN_API}{path}',
+                params={'keyword': title},
+                headers=headers,
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            return data.get('animes', []) or []
+        except Exception as e:
+            logger.warning('[kazumi] danmaku search failed: %s', e)
+            return []
+
+    def danmaku_get_episode_id(self, bangumi_id, episode):
+        """从 Bangumi ID 获取弹弹 play 分集弹幕 ID。"""
+        import requests
+        import time
+        if not DANDAN_APPID or not DANDAN_KEY:
+            return 0
+        try:
+            ts = int(time.time())
+            path = f'/api/v2/bangumi/bgmtv/{bangumi_id}'
+            headers = {
+                'X-AppId': DANDAN_APPID,
+                'X-Timestamp': str(ts),
+                'X-Signature': self._dandan_signature(path, ts),
+                'X-Auth': '1',
+            }
+            rsp = requests.get(
+                f'{DANDAN_API}{path}',
+                headers=headers,
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            # 弹弹 play 分集命名规则：bangumiId * 10000 + episode
+            return bangumi_id * 10000 + episode
+        except Exception as e:
+            logger.warning('[kazumi] danmaku episode id failed: %s', e)
+            return 0
+
+    def danmaku_get_comments(self, episode_id):
+        """获取弹幕评论（弹弹 play）。"""
+        import requests
+        import time
+        if not DANDAN_APPID or not DANDAN_KEY:
+            return []
+        try:
+            ts = int(time.time())
+            path = f'/api/v2/comment/{episode_id}'
+            headers = {
+                'X-AppId': DANDAN_APPID,
+                'X-Timestamp': str(ts),
+                'X-Signature': self._dandan_signature(path, ts),
+                'X-Auth': '1',
+            }
+            rsp = requests.get(
+                f'{DANDAN_API}{path}',
+                params={'withRelated': 'true'},
+                headers=headers,
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            return data.get('comments', []) or []
+        except Exception as e:
+            logger.warning('[kazumi] danmaku comments failed: %s', e)
             return []
 
     # ---------------------------------------------------------------- 在线规则商店

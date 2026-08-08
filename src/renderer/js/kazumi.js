@@ -596,18 +596,58 @@ const Kazumi = {
 
 /** 弹幕开关与加载（播放 Kazumi 源时自动调用）。 */
 Kazumi.loadDanmaku = async function (title, episode) {
-    // 弹弹 play API（对齐 Kazumi DanmakuApi）
-    // 本期简化：仅提示，不实际加载（需签名密钥）
-    console.log('[kazumi] danmaku placeholder:', title, episode);
+    try {
+        // 步骤 1：搜索 DanDanBangumiID
+        const searchRsp = await doAction('kazumiDanmakuSearch', { title }, '/kazumi/action');
+        const animes = (searchRsp && searchRsp.results) || [];
+        if (!animes.length) { console.log('[kazumi] danmaku: no match for', title); return; }
+        // 取相似度最高的结果
+        const best = animes[0];
+        const bangumiId = best.animeId || best.bangumiId || 0;
+        if (!bangumiId) return;
+        // 步骤 2：获取分集弹幕 ID
+        const epRsp = await doAction('kazumiDanmakuEpisode', { bangumiId, episode }, '/kazumi/action');
+        const episodeId = (epRsp && epRsp.episodeId) || 0;
+        if (!episodeId) return;
+        // 步骤 3：拉取弹幕
+        const commentsRsp = await doAction('kazumiDanmakuComments', { episodeId }, '/kazumi/action');
+        const comments = (commentsRsp && commentsRsp.comments) || [];
+        console.log('[kazumi] danmaku loaded:', comments.length, 'comments for', title, 'ep', episode);
+        // TODO：渲染弹幕（需弹幕渲染引擎，当前 mpv 独立窗口无法直接渲染）
+        return comments;
+    } catch (e) {
+        console.warn('[kazumi] danmaku load failed:', e);
+        return [];
+    }
 };
 
 // ---------------------------------------------------------------- 以图搜番（trace.moe）
 
 /** 以图搜番：上传图片或粘贴图片 URL，调 trace.moe 识别番剧。 */
 Kazumi.imageSearch = async function (imageFile) {
-    // trace.moe API（对齐 Kazumi TraceApi）
-    // 本期简化：提示用户该功能开发中
-    warnToast('以图搜番功能开发中，敬请期待');
+    try {
+        if (typeof imageFile === 'string' && /^https?:\/\//i.test(imageFile)) {
+            // URL 直接搜索
+            const rsp = await doAction('kazumiImageSearch', { url: imageFile }, '/kazumi/action');
+            return (rsp && rsp.results) || [];
+        }
+        // 文件上传（File 对象转 base64）
+        if (imageFile instanceof File) {
+            const b64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result).split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(imageFile);
+            });
+            const rsp = await doAction('kazumiImageSearch', { base64: b64 }, '/kazumi/action');
+            return (rsp && rsp.results) || [];
+        }
+        warnToast('请提供图片 URL 或选择图片文件');
+        return [];
+    } catch (e) {
+        warnToast('以图搜番失败');
+        return [];
+    }
 };
 
 // 启动时自动初始化（设置页板块存在才绑定）

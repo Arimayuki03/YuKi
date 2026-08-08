@@ -566,6 +566,41 @@ def dispatch_kazumi_action(form):
             data = kazumi_mgr.bangumi_relations(subject_id)
             return 200, json.dumps({'code': 200, 'relations': data}, ensure_ascii=False)
 
+        # ---- 弹弹 play 弹幕 ----
+        if do == 'kazumiDanmakuSearch':
+            title = form.get('title', '')
+            results = kazumi_mgr.danmaku_search(title)
+            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+
+        if do == 'kazumiDanmakuEpisode':
+            bangumi_id = int(form.get('bangumiId', '0'))
+            episode = int(form.get('episode', '1'))
+            episode_id = kazumi_mgr.danmaku_get_episode_id(bangumi_id, episode)
+            return 200, json.dumps({'code': 200, 'episodeId': episode_id}, ensure_ascii=False)
+
+        if do == 'kazumiDanmakuComments':
+            episode_id = int(form.get('episodeId', '0'))
+            comments = kazumi_mgr.danmaku_get_comments(episode_id)
+            return 200, json.dumps({'code': 200, 'comments': comments}, ensure_ascii=False)
+
+        # ---- 以图搜番（trace.moe） ----
+        if do == 'kazumiImageSearch':
+            # 前端上传图片 base64 或 URL
+            image_url = form.get('url', '')
+            image_b64 = form.get('base64', '')
+            results = []
+            try:
+                import requests as req
+                if image_url:
+                    rsp = req.get(f'https://api.trace.moe/search?url={image_url}', timeout=15, verify=False)
+                    results = rsp.json().get('result', []) or []
+                elif image_b64:
+                    rsp = req.post('https://api.trace.moe/search', json={'image': image_b64}, timeout=15, verify=False)
+                    results = rsp.json().get('result', []) or []
+            except Exception as e:
+                logger.warning('[kazumi] image search failed: %s', e)
+            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)
