@@ -26,6 +26,7 @@ const MpvPlayer = require('./mpv-player');
 const FileManager = require('./file-manager');
 const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
+const DlRecordStore = require('./dl-record');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
@@ -141,6 +142,7 @@ const bridge = new PythonBridge(ROOT, RESOURCES_ROOT);
 const mpv = new MpvPlayer();
 const dl = new Downloader();
 const hls = new HlsDownloader();
+const dlRecords = new DlRecordStore();
 const pushServer = new PushServer();
 const syncplay = new SyncplayClient();
 const dlna = new DlnaCaster();
@@ -435,7 +437,7 @@ app.whenReady().then(() => {
         pause: 'SPACE', seekBack: 'LEFT', seekFwd: 'RIGHT',
         volUp: 'UP', volDown: 'DOWN',
         speedDown: '[', speedUp: ']', speedReset: 'BS',
-        frameBack: ',', frameFwd: '.', fullscreen: 'f',
+        frameBack: ',', frameFwd: '.', fullscreen: 'f', screenshot: 's',
     };
 
     function writeMpvAssets() {
@@ -463,6 +465,7 @@ app.whenReady().then(() => {
                 `${keys.pause} 暂停/继续`, `${keys.seekBack}/${keys.seekFwd} 快退/快进 ${seek}秒`,
                 `${keys.volUp}/${keys.volDown} 音量±${vol}`, `${keys.speedDown} ${keys.speedUp} 倍速∓${speed}`,
                 `${keys.speedReset} 恢复原速`, `${keys.frameBack} ${keys.frameFwd} 逐帧`, `${keys.fullscreen} 全屏`,
+                `${keys.screenshot} 截图`,
             ];
             const lua = [
                 'mp.register_event("file-loaded", function()',
@@ -490,6 +493,7 @@ app.whenReady().then(() => {
                 [keys.frameBack, 'frame-back-step', '上一帧'],
                 [keys.frameFwd, 'frame-step', '下一帧'],
                 [keys.fullscreen, 'cycle fullscreen', ''],
+                [keys.screenshot, 'screenshot', '已截图'],
             ];
             const used = new Set();
             const defaults = [];
@@ -525,8 +529,38 @@ app.whenReady().then(() => {
         mpv.audioLang = String(settings.get('playerAlang') || '');
         mpv.subLang = String(settings.get('playerSlang') || '');
         mpv.anime4kShaders = anime4kChainFromSettings();
+        mpv.screenshotDir = path.join(app.getPath('pictures'), 'video-pc');
         writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示
         return { ok: true };
+    });
+
+    // 截图：把 mpv 当前帧存为 PNG（快捷键走 input.conf 的 screenshot 命令；此端点供程序化触发）
+    ipcMain.handle('vpc:mpv-screenshot', async () => {
+        try {
+            if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
+            if (!mpv.playing) return { ok: false, reason: 'not-playing' };
+            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'video-pc');
+            fs.mkdirSync(dir, { recursive: true });
+            const file = path.join(dir, `video-pc-${Date.now()}.png`);
+            await mpv.screenshot(file);
+            if (Notification.isSupported()) {
+                const n = new Notification({ title: '已截图', body: path.basename(file) });
+                n.on('click', () => { if (win) { win.show(); win.focus(); } });
+                n.show();
+            }
+            return { ok: true, path: file };
+        } catch (err) { return { ok: false, reason: err.message }; }
+    });
+
+    // 打开截图目录（资源管理器）
+    ipcMain.handle('vpc:mpv-screenshot-dir', async () => {
+        try {
+            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'video-pc');
+            fs.mkdirSync(dir, { recursive: true });
+            const err = await shell.openPath(dir);
+            if (err) return { ok: false, reason: err };
+            return { ok: true, dir };
+        } catch (err) { return { ok: false, reason: err.message }; }
     });
 
     // 播放入口：mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
@@ -876,12 +910,29 @@ app.whenReady().then(() => {
 
     // 恢复默认设置：清偏好类键（保留收藏/历史/源等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches']);
         app.relaunch();
         isQuitting = true;
         app.exit(0);
         return { ok: true };
     });
+    /** 合并 aria2 实时任务 + HLS 任务 + 持久化记录（T46）：
+     *  持久化记录仅补「本会话不存在的 gid」（应用重启后 aria2c 丢失 stopped 记录，
+     *  更换下载目录重启引擎同理），避免与实时任务重复。 */
+    function buildDlList(items, hlsItems) {
+        const live = [...items, ...hlsItems];
+        const liveGids = new Set(live.map((t) => t.gid));
+        const restored = dlRecords.all()
+            .filter((r) => !liveGids.has(r.gid))
+            .map((r) => ({
+                gid: r.gid, status: r.status === 'error' ? 'error' : 'complete',
+                kind: r.kind, name: r.name, files: r.files || [],
+                total: r.size || 0, done: r.size || 0, percent: 100, speed: 0,
+                connections: '', errorMessage: r.status === 'error' ? (r.errorMessage || '') : '',
+            }));
+        return [...live, ...restored];
+    }
+
     function startDlPoll() {
         if (dlTimer) return;
         // 启动即推一次：空闲自停机制下，进入下载页仍能立刻看到历史任务列表
@@ -889,7 +940,7 @@ app.whenReady().then(() => {
             try {
                 let items = [];
                 try { items = await dl.listAll(); } catch (e) { /* aria2 未就绪 */ }
-                send('vpc:dl-list', [...items, ...hls.list()]);
+                send('vpc:dl-list', buildDlList(items, hls.list()));
             } catch (e) { /* ignore */ }
         })();
         dlTimer = setInterval(async () => {
@@ -898,7 +949,7 @@ app.whenReady().then(() => {
                 let items = [];
                 try { items = await dl.listAll(); } catch (e) { /* 下一轮会重新拉起 aria2c */ }
                 const hlsItems = hls.list();
-                send('vpc:dl-list', [...items, ...hlsItems]);
+                send('vpc:dl-list', buildDlList(items, hlsItems));
                 // 空闲自停（T10 泄漏/功耗审计）：无进行中任务时停掉 1s 轮询，下次 add 时重新拉起
                 const busy = items.some((t) => ['active', 'waiting', 'paused'].includes(t.status))
                     || hlsItems.some((t) => t.status === 'active');
@@ -967,7 +1018,11 @@ app.whenReady().then(() => {
                     syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                     let gid;
                     try {
-                        gid = hls.add({ url: uri, out: payload.out, header: payload.header });
+                        gid = hls.add({
+                            url: uri, out: payload.out, header: payload.header,
+                            // 广告过滤开关（设置项 hlsAdFilter，默认关；开启时过滤 CUE-OUT/CUE-IN 广告分段）
+                            adFilter: payload.adFilter !== undefined ? !!payload.adFilter : settings.get('hlsAdFilter'),
+                        });
                     } catch (e) {
                         // ffmpeg 首次启动正后台自动下载（约 90MB）：区别于「未安装」，渲染层提示稍后重试
                         if (e && e.message === 'ffmpeg-missing' && ffmpegEnsuring()) return { ok: false, reason: 'ffmpeg-downloading' };
@@ -1006,6 +1061,8 @@ app.whenReady().then(() => {
                     if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'not-supported' };
                     await dl.unpause(payload.gid); return { ok: true };
                 case 'remove':
+                    // 同步删除持久化记录（T46），防止重启后「删除的任务又复活」
+                    dlRecords.remove(payload.gid);
                     if (String(payload.gid).startsWith('hls-')) { hls.remove(payload.gid); return { ok: true }; }
                     await dl.remove(payload.gid); return { ok: true };
                 case 'clearFailed': {
@@ -1021,6 +1078,7 @@ app.whenReady().then(() => {
                         }
                     }
                     n += hls.clearFailed();
+                    dlRecords.clearErrors(); // 同步清掉失败记录
                     return { ok: true, n };
                 }
                 case 'clear': {
@@ -1033,6 +1091,7 @@ app.whenReady().then(() => {
                         }
                     }
                     hls.clearStopped();
+                    dlRecords.clear(); // 同步清掉持久化记录（T46）
                     return { ok: true };
                 }
                 default: return { ok: false, reason: `unknown action ${action}` };
@@ -1072,9 +1131,15 @@ app.whenReady().then(() => {
             n.on('click', () => { if (win) { win.show(); win.focus(); send('vpc:dl-goto', {}); } });
             n.show();
         }
+        dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
+            size: task.total || 0, status: 'complete', completedAt: Date.now() });
         send('vpc:dl-event', { type: 'completed', task });
     });
-    dl.on('error', (task) => send('vpc:dl-event', { type: 'error', task }));
+    dl.on('error', (task) => {
+        dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
+            size: task.total || 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
+        send('vpc:dl-event', { type: 'error', task });
+    });
     // m3u8 合成任务完成/失败：与 aria2 同一套通知链路
     hls.on('completed', (task) => {
         if (Notification.isSupported()) {
@@ -1082,9 +1147,15 @@ app.whenReady().then(() => {
             n.on('click', () => { if (win) { win.show(); win.focus(); send('vpc:dl-goto', {}); } });
             n.show();
         }
+        dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
+            size: 0, status: 'complete', completedAt: Date.now() });
         send('vpc:dl-event', { type: 'completed', task });
     });
-    hls.on('error', (task) => send('vpc:dl-event', { type: 'error', task }));
+    hls.on('error', (task) => {
+        dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
+            size: 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
+        send('vpc:dl-event', { type: 'error', task });
+    });
 
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
     mpv.on('ended', (info) => send('vpc:player-ended', info));

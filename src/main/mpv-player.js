@@ -88,6 +88,7 @@ class MpvPlayer extends EventEmitter {
         this.anime4kShaders = '';  // Anime4K 着色器链（分号分隔路径；非空时注入 --glsl-shaders）
         this.cacheMode = 'memory'; // 视频缓冲位置：'memory' 内存（mpv 默认）| 'disk' 硬盘（--cache-on-disk）
         this.cacheDir = '';        // 硬盘缓存目录（cacheMode==='disk' 且非空时注入 --demuxer-cache-dir）
+        this.screenshotDir = '';   // 截图保存目录（非空时注入 --screenshot-directory，mpv 原生 s 键也存这里）
         this._queueLen = 0;        // 当前播放队列长度（ended 事件附带，供渲染层判定队列末尾）
         this._sessionId = 0;       // 起播会话号（每次 play 自增；exit 事件附带，供渲染层匹配新旧进程）
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
@@ -164,6 +165,11 @@ class MpvPlayer extends EventEmitter {
         if (this.cacheMode === 'disk' && this.cacheDir) {
             try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
             args.push('--cache=yes', '--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
+        }
+        // 截图目录：mpv 原生 s 键（screenshot 命令）与 IPC 截图都存到这里
+        if (this.screenshotDir) {
+            try { fs.mkdirSync(this.screenshotDir, { recursive: true }); } catch (e) { /* ignore */ }
+            args.push(`--screenshot-directory=${this.screenshotDir}`, '--screenshot-template=video-pc-%w-%03n');
         }
         args.push('--', episodes[0].url);
         for (let i = 1; i < episodes.length; i++) args.push(episodes[i].url);
@@ -289,6 +295,14 @@ class MpvPlayer extends EventEmitter {
     setVolume(v) { return this.command('set_property', 'volume', Math.max(0, Math.min(200, v))); }
     setSpeed(v) { return this.command('set_property', 'speed', Math.max(0.25, Math.min(4, v))); }
     getProperty(name) { return this.command('get_property', name); }
+
+    /**
+     * 截图：把当前视频帧存为 PNG（subtitles 模式含字幕/OSD，所见即所得）。
+     * filePath 必须以 .png 结尾（mpv 按扩展名推断格式）。
+     */
+    screenshot(filePath) {
+        return this.command('screenshot-to-file', filePath, 'subtitles');
+    }
 
     // ------------------------------------------------------------ ASS 弹幕
 

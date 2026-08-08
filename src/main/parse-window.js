@@ -8,17 +8,77 @@
  *   resourceType=media），顺带抓 Referer 头交给 mpv
  * - parses 列表来自后端 /sites（config 系统已存），也可注入（测试用）
  * - 每个解析接口 20s 超时，按序尝试，首个成功即返回
+ *
+ * 增强（T46）：
+ * - 视频源解析池：固定 3 个独立 partition（parse-0/1/2），并发解析互不冲突
+ *   （session.webRequest 每 session 仅一份，共用一个 partition 时后注册的
+ *    onBeforeRequest 会覆盖前一个 → 并发丢失媒体请求；分槽隔离后各自独立）
+ * - Cookie 持久化：解析/验证会话产生的 Cookie 读回推给后端 CookieJar，
+ *   规则引擎发请求自动带上，重启后无需重新验证
  */
 const { BrowserWindow } = require('electron');
 
 const MEDIA_EXT = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 const IFRAME_TIMEOUT = 20000;
+const POOL_SIZE = 3; // 解析池并发窗口数
 
 class ParseWindow {
     /** @param getInfo 返回 { base, token } 的后端信息提供函数 */
     constructor(getInfo) {
         this.getInfo = getInfo;
+        this._slots = [];   // 空闲槽位（分区名 parse-0..POOL_SIZE-1）
+        this._waiters = [];
+        for (let i = 0; i < POOL_SIZE; i++) this._slots.push(i);
     }
+
+    // ------------------------------------------------------------ 解析池
+
+    _acquire() {
+        return new Promise((resolve) => {
+            const take = () => {
+                const s = this._slots.shift();
+                if (s !== undefined) resolve(s);
+                else this._waiters.push(take);
+            };
+            take();
+        });
+    }
+
+    _release(slot) {
+        const w = this._waiters.shift();
+        if (w) w();
+        else this._slots.push(slot);
+    }
+
+    // ------------------------------------------------------------ Cookie 推送
+
+    /** 把解析会话产生的 Cookie 按域名推给后端 CookieJar 持久化（fire-and-forget）。 */
+    _pushCookies(cookies) {
+        if (!cookies || !cookies.length) return;
+        try {
+            const info = this.getInfo && this.getInfo();
+            if (!info || !info.base) return;
+            const byDomain = {};
+            for (const c of cookies) {
+                if (!c || !c.name) continue;
+                const host = String(c.domain || '').replace(/^\./, '').toLowerCase().replace(/:\d+$/, '');
+                if (!host) continue;
+                (byDomain[host] = byDomain[host] || []).push({ name: c.name, value: c.value });
+            }
+            for (const [domain, list] of Object.entries(byDomain)) {
+                const body = new URLSearchParams({
+                    do: 'kazumiCookieSet', domain, cookies: JSON.stringify(list),
+                });
+                fetch(`${info.base}/kazumi/action?token=${encodeURIComponent(info.token || '')}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body,
+                }).catch(() => { /* 推送失败不影响解析 */ });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // ------------------------------------------------------------ 解析
 
     /** 取 config 里的 parses（后端 /sites）。 */
     async _fetchParses() {
@@ -91,31 +151,40 @@ class ParseWindow {
         return this._capture({ url, via: 'page', timeout });
     }
 
-    /** 隐藏窗口加载 url，webRequest 捕获媒体直链（_tryIframe/captureDirect 共用）。 */
+    /** 隐藏窗口加载 url，webRequest 捕获媒体直链（_tryIframe/captureDirect 共用）。
+     *  从解析池取一个独立 partition 槽位，并发捕获互不干扰。 */
     _capture({ url, via, timeout }) {
-        return new Promise((resolve) => {
+        return this._acquire().then((slot) => new Promise((resolve) => {
             let win;
             try {
                 win = new BrowserWindow({
                     show: false, width: 800, height: 600,
                     webPreferences: {
-                        partition: 'parse',       // 独立 session，不污染主窗口
+                        partition: `parse-${slot}`, // 独立槽位会话：并发解析不冲突
                         contextIsolation: true,
                         nodeIntegration: false,
                         sandbox: true,
                     },
                 });
-            } catch (e) { return resolve(null); }
+            } catch (e) { this._release(slot); return resolve(null); }
 
             const ses = win.webContents.session;
             let settled = false;
+            const done = (r) => {
+                try { win.destroy(); } catch (e) { /* ignore */ }
+                this._release(slot);
+                resolve(r);
+            };
             const finish = (r) => {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);
                 try { ses.webRequest.onBeforeRequest(null); } catch (e) { /* ignore */ }
-                try { win.destroy(); } catch (e) { /* ignore */ }
-                resolve(r);
+                // 先读会话 Cookie 再销毁窗口（session 随最后窗口关闭销毁）；推给后端持久化
+                ses.cookies.get({}).then((cookies) => {
+                    this._pushCookies(cookies);
+                    done(r);
+                }).catch(() => done(r));
             };
             const timer = setTimeout(() => finish(null), timeout);
 
@@ -140,7 +209,7 @@ class ParseWindow {
             });
 
             win.loadURL(url).catch(() => { /* 加载失败等超时 */ });
-        });
+        }));
     }
 }
 

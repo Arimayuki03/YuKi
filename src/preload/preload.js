@@ -104,6 +104,10 @@ contextBridge.exposeInMainWorld('vpc', {
     updateHotkeys: () => ipcRenderer.invoke('vpc:update-hotkeys'),
     /** 播放偏好（默认倍速 / 记忆位置）变更后通知主进程，下次起播生效 */
     updatePlayerPrefs: () => ipcRenderer.invoke('vpc:update-player-prefs'),
+    /** mpv 截图：当前帧存 PNG（{ok, path} | {ok:false, reason}） */
+    mpvScreenshot: () => ipcRenderer.invoke('vpc:mpv-screenshot'),
+    /** 打开截图目录：{ok, dir} | {ok:false, reason} */
+    mpvScreenshotDir: () => ipcRenderer.invoke('vpc:mpv-screenshot-dir'),
     /** 启动自动重载 lastConfigUrl 完成 */
     onConfigReloaded: (cb) => ipcRenderer.on('vpc:config-reloaded', (_e, info) => cb(info)),
     /** 鼠标侧键前进/后退事件 { dir: 'back'|'forward' }（渲染层维护视图历史栈） */
