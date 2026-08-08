@@ -233,6 +233,56 @@ const Kazumi = {
         }
     },
 
+    /** Bangumi 番剧分集信息。 */
+    async bangumiEpisodes(subjectId) {
+        try {
+            const rsp = await doAction('kazumiBangumiEpisodes', { id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.episodes) || null;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    /** Bangumi 番剧角色信息。 */
+    async bangumiCharacters(subjectId) {
+        try {
+            const rsp = await doAction('kazumiBangumiCharacters', { id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.characters) || [];
+        } catch (e) {
+            return [];
+        }
+    },
+
+    /** Bangumi 番剧制作人员。 */
+    async bangumiStaff(subjectId) {
+        try {
+            const rsp = await doAction('kazumiBangumiStaff', { id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.staff) || [];
+        } catch (e) {
+            return [];
+        }
+    },
+
+    /** Bangumi 番剧评论。 */
+    async bangumiComments(subjectId, limit, offset) {
+        try {
+            const rsp = await doAction('kazumiBangumiComments', { id: subjectId, limit: limit || 20, offset: offset || 0 }, '/kazumi/action');
+            return (rsp && rsp.comments) || [];
+        } catch (e) {
+            return [];
+        }
+    },
+
+    /** Bangumi 番剧关联（前传/续作链）。 */
+    async bangumiRelations(subjectId) {
+        try {
+            const rsp = await doAction('kazumiBangumiRelations', { id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.relations) || [];
+        } catch (e) {
+            return [];
+        }
+    },
+
     // ---------------------------------------------------------------- 详情页 Kazumi 源弹窗
 
     /**
@@ -342,16 +392,144 @@ const Kazumi = {
             const summary = (info.summary || '').slice(0, 200);
             const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
             const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
-            const banner = `<div class="kazumi-bangumi-banner">
+            const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${info.id}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
                 ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
                 <div class="kazumi-bangumi-info">
                     <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
                     <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
                     ${summary ? `<div class="kazumi-bangumi-summary">${escHtml(summary)}…</div>` : ''}
+                    <div class="kazumi-bangumi-actions">
+                        <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-detail" data-id="${info.id}">查看详情</button>
+                    </div>
                 </div>
             </div>`;
             box.prepend(banner);
+            // 绑定详情按钮：打开 Bangumi 完整详情弹窗
+            box.find('.kazumi-bangumi-detail').on('click', (e) => {
+                const id = parseInt($(e.currentTarget).data('id'), 10);
+                if (id) this.openBangumiDetail(id);
+            });
         } catch (e) { /* 元数据失败不影响源选择 */ }
+    },
+
+    // ---------------------------------------------------------------- Bangumi 完整详情弹窗
+
+    /** 打开 Bangumi 番剧完整详情弹窗（概览/分集/角色/评论/关联/制作人员）。 */
+    async openBangumiDetail(subjectId) {
+        const token = ++this._dlgToken;
+        $('#kazumi-dialog-title').text('番剧详情');
+        $('#kazumi-dialog-body').html('<div class="tip-line">正在载入详情…</div>');
+        openDialog('kazumiSourceDialog');
+        try {
+            const info = await this.bangumiInfo(subjectId);
+            if (token !== this._dlgToken || !info) {
+                $('#kazumi-dialog-body').html('<div class="tip-line">详情载入失败</div>');
+                return;
+            }
+            await this._renderBangumiDetail(info, token);
+        } catch (e) {
+            if (token !== this._dlgToken) return;
+            $('#kazumi-dialog-body').html('<div class="tip-line">详情载入失败</div>');
+        }
+    },
+
+    async _renderBangumiDetail(info, token) {
+        const box = $('#kazumi-dialog-body');
+        const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
+        const score = info.rating && info.rating.score ? info.rating.score : '';
+        const votes = info.rating && info.rating.total ? `${info.rating.total} 人评分` : '';
+        const meta = [info.date, score, votes, info.platform].filter(Boolean).join(' · ');
+        // 顶部横幅
+        let html = `<div class="kazumi-bangumi-banner" style="margin-bottom:16px;">
+            ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+            <div class="kazumi-bangumi-info">
+                <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || '')}</div>
+                <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
+                ${info.summary ? `<div class="kazumi-bangumi-summary">${escHtml(info.summary)}</div>` : ''}
+            </div>
+        </div>`;
+        // 页签导航
+        html += `<div class="class-tabs" id="bangumi-detail-tabs" style="margin-bottom:12px;">
+            <span class="class-tab active" data-tab="episodes">分集</span>
+            <span class="class-tab" data-tab="characters">角色</span>
+            <span class="class-tab" data-tab="staff">制作</span>
+            <span class="class-tab" data-tab="comments">评论</span>
+            <span class="class-tab" data-tab="relations">关联</span>
+        </div>`;
+        html += '<div id="bangumi-detail-content" style="max-height:40vh;overflow-y:auto;"></div>';
+        box.html(html);
+        // 默认载入分集
+        await this._loadBangumiTab(info.id, 'episodes', token);
+        // 页签切换
+        $('#bangumi-detail-tabs').on('click', '.class-tab', async (e) => {
+            if (token !== this._dlgToken) return;
+            const tab = String($(e.currentTarget).data('tab') || '');
+            $('#bangumi-detail-tabs .class-tab').removeClass('active');
+            $(e.currentTarget).addClass('active');
+            await this._loadBangumiTab(info.id, tab, token);
+        });
+    },
+
+    async _loadBangumiTab(subjectId, tab, token) {
+        const box = $('#bangumi-detail-content');
+        box.html('<div class="tip-line">载入中…</div>');
+        try {
+            if (tab === 'episodes') {
+                const data = await this.bangumiEpisodes(subjectId);
+                if (token !== this._dlgToken) return;
+                const list = (data && data.data) || [];
+                box.html(list.length
+                    ? list.map((ep) => `<div class="kazumi-detail-ep">
+                        <span class="kazumi-detail-ep-no">${ep.sort || ep.ep || ''}</span>
+                        <span class="kazumi-detail-ep-name">${escHtml(ep.name_cn || ep.name || '')}</span>
+                        <span class="kazumi-detail-ep-type">${escHtml(ep.type === 1 ? 'SP' : ep.type === 2 ? 'OP' : ep.type === 3 ? 'ED' : '')}</span>
+                    </div>`).join('')
+                    : '<div class="tip-line">暂无分集信息</div>');
+            } else if (tab === 'characters') {
+                const list = await this.bangumiCharacters(subjectId);
+                if (token !== this._dlgToken) return;
+                box.html(list.length
+                    ? list.map((c) => `<div class="kazumi-detail-char">
+                        <img class="kazumi-detail-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
+                        <div class="kazumi-detail-char-info">
+                            <div class="kazumi-detail-char-name">${escHtml(c.name || '')}</div>
+                            <div class="kazumi-detail-char-role">${escHtml(c.role_name || '')}</div>
+                        </div>
+                    </div>`).join('')
+                    : '<div class="tip-line">暂无角色信息</div>');
+            } else if (tab === 'staff') {
+                const list = await this.bangumiStaff(subjectId);
+                if (token !== this._dlgToken) return;
+                box.html(list.length
+                    ? list.map((s) => `<div class="kazumi-detail-staff">
+                        <span class="kazumi-detail-staff-name">${escHtml(s.name || '')}</span>
+                        <span class="kazumi-detail-staff-job">${escHtml((s.jobs || []).join(' / '))}</span>
+                    </div>`).join('')
+                    : '<div class="tip-line">暂无制作人员信息</div>');
+            } else if (tab === 'comments') {
+                const list = await this.bangumiComments(subjectId, 20, 0);
+                if (token !== this._dlgToken) return;
+                box.html(list.length
+                    ? list.map((c) => `<div class="kazumi-detail-comment">
+                        <div class="kazumi-detail-comment-user">${escHtml((c.user && c.user.nickname) || c.username || '')}</div>
+                        <div class="kazumi-detail-comment-text">${escHtml(c.comment || '')}</div>
+                        <div class="kazumi-detail-comment-time">${escHtml(c.updated_at || '')}</div>
+                    </div>`).join('')
+                    : '<div class="tip-line">暂无评论</div>');
+            } else if (tab === 'relations') {
+                const list = await this.bangumiRelations(subjectId);
+                if (token !== this._dlgToken) return;
+                box.html(list.length
+                    ? list.map((r) => `<div class="kazumi-detail-rel">
+                        <span class="kazumi-detail-rel-type">${escHtml(r.relation || '')}</span>
+                        <span class="kazumi-detail-rel-name">${escHtml(r.name_cn || r.name || '')}</span>
+                    </div>`).join('')
+                    : '<div class="tip-line">暂无关联番剧</div>');
+            }
+        } catch (e) {
+            if (token !== this._dlgToken) return;
+            box.html('<div class="tip-line">载入失败</div>');
+        }
     },
 
     /** 解析剧集线路（kazumiChapters）。 */

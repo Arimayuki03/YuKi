@@ -836,6 +836,31 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-bangumi-meta { font-size:12px; color:var(--md-on-surface-variant); margin-bottom:6px; }
 .kazumi-bangumi-summary { font-size:12px; color:var(--md-on-surface-variant); line-height:1.6;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.kazumi-bangumi-actions { margin-top:8px; display:flex; gap:8px; }
+
+/* Bangumi 详情页签内容 */
+.kazumi-detail-ep { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant);
+    font-size:13px; }
+.kazumi-detail-ep-no { flex:none; width:40px; color:var(--md-primary); font-weight:600; }
+.kazumi-detail-ep-name { flex:1; min-width:0; color:var(--md-on-surface); }
+.kazumi-detail-ep-type { flex:none; font-size:11px; color:var(--md-on-surface-variant); }
+.kazumi-detail-char { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant); }
+.kazumi-detail-avatar { width:48px; height:64px; object-fit:cover; border-radius:6px; flex:none; }
+.kazumi-detail-char-info { flex:1; min-width:0; }
+.kazumi-detail-char-name { font-size:13px; font-weight:600; color:var(--md-on-surface); }
+.kazumi-detail-char-role { font-size:12px; color:var(--md-on-surface-variant); }
+.kazumi-detail-staff { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant);
+    font-size:13px; }
+.kazumi-detail-staff-name { flex:1; color:var(--md-on-surface); }
+.kazumi-detail-staff-job { flex:none; color:var(--md-on-surface-variant); }
+.kazumi-detail-comment { padding:10px 12px; border-bottom:1px solid var(--md-outline-variant); }
+.kazumi-detail-comment-user { font-size:12px; font-weight:600; color:var(--md-primary); margin-bottom:4px; }
+.kazumi-detail-comment-text { font-size:13px; color:var(--md-on-surface); line-height:1.6; margin-bottom:4px; }
+.kazumi-detail-comment-time { font-size:11px; color:var(--md-on-surface-variant); }
+.kazumi-detail-rel { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant);
+    font-size:13px; }
+.kazumi-detail-rel-type { flex:none; color:var(--md-primary); font-weight:600; }
+.kazumi-detail-rel-name { flex:1; color:var(--md-on-surface); }
 
 /* 播放对话框（宽）+ URL 展示 */
 .md-dialog-wide { max-width:560px; }
