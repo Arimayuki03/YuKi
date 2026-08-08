@@ -20,6 +20,7 @@
     <script src="js/downloads.js" defer></script>
     <script src="js/live.js" defer></script>
     <script src="js/my.js" defer></script>
+    <script src="js/about.js" defer></script>
     <script src="js/app.js" defer></script>
 </head>
 
@@ -67,6 +68,10 @@
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>
                 <span>设置</span>
             </div>
+            <div class="main-nav-item" data-view="about">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                <span>关于</span>
+            </div>
             <div class="main-nav-item" data-view="timeline">
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
                 <span>时间表</span>
@@ -110,6 +115,42 @@
                 <div id="timeline-weekdays" class="class-tabs"></div>
                 <div id="timeline-grid" class="vod-grid"></div>
                 <div id="timeline-pager" class="pager"></div>
+            </section>
+
+            <!-- 关于 -->
+            <section id="view-about" class="view">
+                <div class="about-card">
+                    <svg class="about-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 8.64L15.27 12 10 15.36V8.64zM12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>
+                    <div class="about-name">影视 PC</div>
+                    <div class="about-version">版本 <span id="about-version">-</span></div>
+                    <div class="about-desc">基于 CatVod 架构重构的 PC 桌面端影视聚合应用，整合 Kazumi 规则引擎与 Bangumi 元数据。</div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-title">技术栈</div>
+                    <div class="about-stack">
+                        <span class="about-chip">Electron</span><span class="about-chip">Python · FastAPI</span>
+                        <span class="about-chip">mpv</span><span class="about-chip">aria2c</span>
+                        <span class="about-chip">ffmpeg</span><span class="about-chip">quickjs-ng</span>
+                    </div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-title">致谢</div>
+                    <div class="about-credits">
+                        <div class="about-credit"><b>mpv</b> — 播放器内核（独立窗口）</div>
+                        <div class="about-credit"><b>aria2c</b> — 多协议下载引擎</div>
+                        <div class="about-credit"><b>ffmpeg</b> — m3u8 合成与缩略图抓帧</div>
+                        <div class="about-credit"><b>Anime4K</b> — 动漫实时超分着色器</div>
+                        <div class="about-credit"><b>MiSans</b> — 内置 UI 字体</div>
+                        <div class="about-credit"><b>Bangumi</b> — 番剧元数据 / 时间表 / 榜单</div>
+                        <div class="about-credit"><b>弹弹 play</b> — 弹幕数据源</div>
+                        <div class="about-credit"><b>trace.moe</b> — 以图搜番</div>
+                        <div class="about-credit"><b>Kazumi</b> — XPath/API 规则引擎与规则商店</div>
+                    </div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-title">系统信息</div>
+                    <div class="about-sysinfo" id="about-sysinfo"></div>
+                </div>
             </section>
 
             <!-- 直播（config lives + 设置里的自定义源；源在“设置”页签维护） -->

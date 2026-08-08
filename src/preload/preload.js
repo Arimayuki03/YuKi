@@ -87,6 +87,8 @@ contextBridge.exposeInMainWorld('vpc', {
     pickWallpaper: () => ipcRenderer.invoke('vpc:pick-wallpaper'),
     /** 应用版本号（设置页展示） */
     appVersion: () => ipcRenderer.invoke('vpc:app-version'),
+    /** 关于页系统信息：{version, platform, arch, electron, chromium, node, v8} */
+    appInfo: () => ipcRenderer.invoke('vpc:app-info'),
     /** 设置持久化（userData/settings.json） */
     settingsGet: () => ipcRenderer.invoke('vpc:settings-get'),
     settingsSet: (key, value) => ipcRenderer.invoke('vpc:settings-set', key, value),

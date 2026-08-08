@@ -998,6 +998,27 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     background:rgba(0,0,0,.65); color:#fff; font-size:11px; padding:1px 6px;
     border-radius:999px; pointer-events:none; }
 
+/* ===== 「关于」页面 ===== */
+.about-card { text-align:center; padding:28px 16px; border-radius:14px;
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant); margin-bottom:16px; }
+.about-logo { width:64px; height:64px; fill:var(--md-primary); margin:0 auto 10px; }
+.about-name { font-size:22px; font-weight:700; color:var(--md-on-surface); }
+.about-version { font-size:12px; color:var(--md-on-surface-variant); margin-top:4px; }
+.about-desc { max-width:520px; margin:12px auto 0; font-size:13px; color:var(--md-on-surface-variant);
+    line-height:1.7; }
+.about-stack { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.about-chip { font-size:12px; padding:4px 12px; border-radius:999px;
+    background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
+.about-credits { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+.about-credit { font-size:13px; color:var(--md-on-surface-variant); line-height:1.5; }
+.about-credit b { color:var(--md-on-surface); font-weight:600; }
+.about-sysinfo { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+.about-row { display:flex; justify-content:space-between; font-size:13px;
+    padding:6px 0; border-bottom:1px solid var(--md-outline-variant); }
+.about-row:last-child { border-bottom:none; }
+.about-row span:first-child { color:var(--md-on-surface-variant); }
+.about-row span:last-child { color:var(--md-on-surface); font-variant-numeric:tabular-nums; }
+
 
 /* ===== 封面点击放大：原图保留在原位，另开全屏浮层（滚轮缩放，点击关闭） ===== */
 .detail-cover img { cursor:zoom-in; }

@@ -357,6 +357,17 @@ app.whenReady().then(() => {
     ipcMain.handle('backend-info', () => bridge.getInfo());
     ipcMain.handle('vpc:config-state', () => ({ ...configReload }));
     ipcMain.handle('vpc:app-version', () => app.getVersion());
+
+    // 关于页系统信息：应用版本 + 运行环境版本
+    ipcMain.handle('vpc:app-info', () => ({
+        version: app.getVersion(),
+        platform: process.platform,
+        arch: process.arch,
+        electron: process.versions.electron,
+        chromium: process.versions.chrome,
+        node: process.versions.node,
+        v8: process.versions.v8,
+    }));
     // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
     ipcMain.handle('vpc:asset-status', () => {
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
