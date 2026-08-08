@@ -28,7 +28,8 @@ class DlnaCaster extends EventEmitter {
     constructor() {
         super();
         this.devices = new Map(); // location -> { name, controlUrl }
-        this._onError = () => {};
+        // 兜底 error 监听，防 EventEmitter 抛 ERR_UNHANDLED_ERROR 致进程崩溃
+        this.on('error', () => {});
     }
 
     /** 搜索局域网内 DLNA 设备（3s 超时）。 */

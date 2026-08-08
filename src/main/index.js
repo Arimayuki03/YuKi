@@ -1392,11 +1392,12 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
     // 托盘驻留模式（win.hide 不触发；destroy 后才到这里）：保活不停 mpv
+    // 只有 isQuitting=true 时才真正退出，否则保留托盘驻留
     if (!isQuitting) return;
     mpv.stop();
     dl.stop();
     pushServer.stop();
-    syncplay.disconnect();
+    try { syncplay.disconnect(); } catch (e) { /* ignore */ }
     bridge.stop();
     if (process.platform !== 'darwin') app.quit();
 });
@@ -1406,5 +1407,14 @@ app.on('before-quit', () => {
     mpv.stop();
     dl.stop();
     pushServer.stop();
+    try { syncplay.disconnect(); } catch (e) { /* ignore */ }
     bridge.stop();
+});
+
+// 全局未捕获异常兜底：防进程崩溃导致窗口消失
+process.on('uncaughtException', (err) => {
+    console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[unhandledRejection]', reason);
 });

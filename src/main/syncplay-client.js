@@ -29,7 +29,9 @@ class SyncplayClient extends EventEmitter {
         this.serverIgnores = [];
         this.clientRtt = 0;
         this.clientLatencyCalculation = 0;
-        this._onError = () => {}; // 兜底 noop，防 ERR_UNHANDLED_ERROR
+        this._pingTimer = null;
+        // 兜底 error 监听，防 EventEmitter 抛 ERR_UNHANDLED_ERROR 致进程崩溃
+        this.on('error', () => {});
     }
 
     /**
