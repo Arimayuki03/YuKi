@@ -291,6 +291,13 @@ python-backend/
 - 现有 CatVod 功能零回归。
 - 单元测试覆盖率大于 80%，集成测试全部通过。
 
+### 10.3 实际验收结果（2026-08-09）
+- [x] 后端单元测试：32 tests all pass（test_kazumi.py）。
+- [x] 回归测试：smoke 13/13，phase3 25/25，check-js 24/24。
+- [x] npm run test:all 全绿。
+- [x] 代码审查清单（§11.9）全部通过。
+- [x] Git 提交记录完整（pre-kazumi → docs → frontend → backend → docs v1.2）。
+
 ---
 
 ## 11. 补充注意事项（根据用户描述追加）
