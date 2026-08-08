@@ -54,6 +54,7 @@ import app as spider_app
 from kazumi.plugin_manager import PluginManager
 from kazumi.plugin import Plugin
 from kazumi.rule_engine import RuleEngine
+from kazumi.cookie_jar import CookieJar
 
 logger = logging.getLogger('vpc.server')
 
@@ -66,6 +67,7 @@ cache_store = None  # create_app() 时初始化（依赖 hoststate 目录）
 # Kazumi 规则引擎实例（create_app 时初始化）
 kazumi_mgr = None
 kazumi_engine = None
+kazumi_cookies = None
 
 # Phase 4 弹幕队列：面板 do=danmaku 入队；主进程播放器轮询 /danmaku?do=poll 取走
 _danmaku_queue = []
@@ -333,10 +335,11 @@ def build_proxy_response(result):
 # ---------------------------------------------------------------- 应用装配
 
 def create_app():
-    global cache_store, kazumi_mgr, kazumi_engine
+    global cache_store, kazumi_mgr, kazumi_engine, kazumi_cookies
     cache_store = CacheStore(os.path.join(hoststate.get_cache_dir(), 'kv'))
     kazumi_mgr = PluginManager()
-    kazumi_engine = RuleEngine()
+    kazumi_cookies = CookieJar()
+    kazumi_engine = RuleEngine(cookie_jar=kazumi_cookies)
     fastapi_app = FastAPI(title='video-pc backend')
 
     @fastapi_app.middleware('http')
@@ -532,6 +535,47 @@ def dispatch_kazumi_action(form):
                 return 404, json.dumps({'code': 404, 'msg': 'rule not found or download failed'}, ensure_ascii=False)
             ok, msg = kazumi_mgr.add(plugin)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        # ---- 规则有效性检测 / 批量更新 ----
+        if do == 'kazumiCheckValidity':
+            keyword = form.get('keyword', '') or '海贼王'
+            names = [n for n in form.get('names', '').split(',') if n] or None
+            started = kazumi_mgr.start_validity_check(kazumi_engine, keyword=keyword, names=names)
+            return (200 if started else 409), json.dumps(
+                {'code': 200 if started else 409, 'started': started}, ensure_ascii=False)
+
+        if do == 'kazumiValidityStatus':
+            return 200, json.dumps({'code': 200, **kazumi_mgr.validity_status()}, ensure_ascii=False)
+
+        if do == 'kazumiBatchUpdate':
+            names = [n for n in form.get('names', '').split(',') if n] or None
+            started = kazumi_mgr.start_batch_update(names=names)
+            return (200 if started else 409), json.dumps(
+                {'code': 200 if started else 409, 'started': started}, ensure_ascii=False)
+
+        if do == 'kazumiUpdateStatus':
+            return 200, json.dumps({'code': 200, **kazumi_mgr.update_status()}, ensure_ascii=False)
+
+        # ---- Cookie 持久化（PluginCookieManager） ----
+        if do == 'kazumiCookieSet':
+            domain = form.get('domain', '').strip()
+            raw = form.get('cookies', '')
+            try:
+                cookies = json.loads(raw) if raw else []
+            except Exception:
+                cookies = []
+            if not domain:
+                return 400, json.dumps({'code': 400, 'msg': 'domain required'}, ensure_ascii=False)
+            kazumi_cookies.set_domain_cookies(domain, cookies)
+            return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
+
+        if do == 'kazumiCookieList':
+            return 200, json.dumps({'code': 200, 'cookies': kazumi_cookies.list_all(),
+                                    'count': sum(len(v) for v in kazumi_cookies.list_all().values())}, ensure_ascii=False)
+
+        if do == 'kazumiCookieClear':
+            kazumi_cookies.clear()
+            return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
 
         # ---- Bangumi 元数据 ----
         if do == 'kazumiBangumiSearch':

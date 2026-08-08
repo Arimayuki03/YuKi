@@ -7,12 +7,16 @@
 import json
 import logging
 import os
+import re
 import shutil
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import hoststate
 
 from .plugin import Plugin
+from .utils import NoResultException, CaptchaRequiredException
 
 logger = logging.getLogger('vpc.kazumi.manager')
 
@@ -41,8 +45,18 @@ class PluginManager:
         self._lock = threading.Lock()
         self._plugins = []  # list[Plugin]
         self._file = os.path.join(hoststate.get_data_dir(), 'kazumi', 'plugins.json')
+        self._task_lock = threading.Lock()   # 保护有效性检测/批量更新的运行状态
+        self._validity_running = False
+        self._validity_results = []          # list[{'name','validity','msg'}]
+        self._update_running = False
+        self._update_results = []            # list[{'name','ok','msg','oldVersion','newVersion','updated'}]
         self._load()
         self._import_builtin_rules()
+
+    @staticmethod
+    def _now():
+        """当前时间字符串（ISO-8601 本地时间）。"""
+        return time.strftime('%Y-%m-%d %H:%M:%S')
 
     # ---------------------------------------------------------------- 内置规则
 
@@ -64,6 +78,9 @@ class PluginManager:
                 if err:
                     logger.warning('[kazumi] builtin rule %s invalid: %s', fn, err)
                     continue
+                now = self._now()
+                plugin.installed_at = now
+                plugin.updated_at = now
                 self._plugins.append(plugin)
                 imported += 1
             except Exception as e:
@@ -120,6 +137,10 @@ class PluginManager:
                 'enabled': p.enabled,
                 'useWebview': p.use_webview,
                 'api': p.api,
+                'installed_at': p.installed_at,
+                'updated_at': p.updated_at,
+                'validity': p.validity,
+                'validity_checked_at': p.validity_checked_at,
             } for p in self._plugins]
 
     def get(self, name):
@@ -135,13 +156,19 @@ class PluginManager:
         if err:
             return False, err
         replaced = False
+        now = self._now()
         with self._lock:
             for i, p in enumerate(self._plugins):
                 if p.name.lower() == plugin.name.lower():
+                    # 更新：保留首次安装时间，记录更新时间
+                    plugin.installed_at = p.installed_at or now
+                    plugin.updated_at = now
                     self._plugins[i] = plugin
                     replaced = True
                     break
             if not replaced:
+                plugin.installed_at = now
+                plugin.updated_at = now
                 self._plugins.append(plugin)
         self._save()
         logger.info('[kazumi] %s rule: %s', 'updated' if replaced else 'added', plugin.name)
@@ -180,6 +207,150 @@ class PluginManager:
     def has_enabled(self):
         with self._lock:
             return any(p.enabled for p in self._plugins)
+
+    # ---------------------------------------------------------------- 有效性检测
+
+    def check_validity(self, engine, keyword='海贼王', names=None, max_workers=4):
+        """对启用规则执行有效性检测（搜索测试关键词），同步执行，返回结果列表。
+
+        engine: RuleEngine 实例；names: 指定规则名（不传则检测全部启用规则）。
+        每个规则用 ThreadPoolExecutor 并发搜索，写回 validity 与 validity_checked_at。
+        """
+        with self._lock:
+            targets = [p for p in self._plugins if p.enabled]
+        if names:
+            name_set = {n.lower() for n in names}
+            targets = [p for p in targets if p.name.lower() in name_set]
+        if not targets:
+            return []
+        now = self._now()
+        results = []
+
+        def _check_one(plugin):
+            try:
+                trace = engine.search(plugin.execution_config(), keyword)
+                n = len(trace.response.data) if trace.response else 0
+                if n > 0:
+                    return (plugin.name, 'valid', f'搜索到 {n} 条结果')
+                return (plugin.name, 'invalid', '搜索无结果')
+            except CaptchaRequiredException:
+                return (plugin.name, 'captcha', '需要验证码验证')
+            except NoResultException:
+                return (plugin.name, 'invalid', '搜索无结果')
+            except Exception as e:
+                return (plugin.name, 'invalid', str(e)[:80])
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for name, status, msg in pool.map(_check_one, targets):
+                results.append({'name': name, 'validity': status, 'msg': msg})
+                with self._lock:
+                    for p in self._plugins:
+                        if p.name.lower() == name.lower():
+                            p.validity = status
+                            p.validity_checked_at = now
+                            break
+        self._save()
+        logger.info('[kazumi] validity check done: %d rules', len(results))
+        return results
+
+    def start_validity_check(self, engine, keyword='海贼王', names=None):
+        """后台启动有效性检测；返回 True 表示已启动，False 表示已有检测在跑。"""
+        with self._task_lock:
+            if self._validity_running:
+                return False
+            self._validity_running = True
+            self._validity_results = []
+
+        def _worker():
+            try:
+                self._validity_results = self.check_validity(engine, keyword=keyword, names=names)
+            except Exception as e:
+                logger.warning('[kazumi] validity check error: %s', e)
+            finally:
+                with self._task_lock:
+                    self._validity_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
+    def validity_status(self):
+        with self._task_lock:
+            return {'running': self._validity_running, 'results': list(self._validity_results)}
+
+    # ---------------------------------------------------------------- 批量更新
+
+    @staticmethod
+    def _version_key(version):
+        """版本号转可比较元组（忽略非数字段，如 '2.0.1' -> (2,0,1)）。"""
+        parts = re.findall(r'\d+', str(version or ''))
+        return tuple(int(x) for x in parts)
+
+    def _should_update(self, current, latest):
+        """最新版 > 当前版 才更新；版本无法解析时视为不更新。"""
+        ck, lk = self._version_key(current), self._version_key(latest)
+        if not ck or not lk:
+            return False
+        return lk > ck
+
+    def batch_update(self, names=None, max_workers=4):
+        """批量更新规则（从商店拉取最新版，4 并发），同步执行，返回结果列表。
+
+        对每个已安装规则：拉取商店最新版 → 版本较新则 add() 覆盖（保留安装时间）。
+        """
+        with self._lock:
+            targets = list(self._plugins)
+        if names:
+            name_set = {n.lower() for n in names}
+            targets = [p for p in targets if p.name.lower() in name_set]
+        if not targets:
+            return []
+        results = []
+
+        def _update_one(plugin):
+            try:
+                latest = self.fetch_shop_rule(plugin.name)
+            except Exception as e:
+                return {'name': plugin.name, 'ok': False, 'msg': f'商店下载失败: {str(e)[:60]}'}
+            if latest is None:
+                return {'name': plugin.name, 'ok': False, 'msg': '商店中未找到该规则'}
+            old = plugin.version
+            new = latest.version
+            if not self._should_update(old, new):
+                return {'name': plugin.name, 'ok': True, 'msg': '已是最新版本',
+                        'oldVersion': old, 'newVersion': new, 'updated': False}
+            latest.installed_at = plugin.installed_at  # 保留首次安装时间
+            ok, _ = self.add(latest)
+            return {'name': plugin.name, 'ok': ok, 'msg': '更新成功' if ok else '更新失败',
+                    'oldVersion': old, 'newVersion': new, 'updated': ok}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_update_one, targets))
+        logger.info('[kazumi] batch update done: %d rules', len(results))
+        return results
+
+    def start_batch_update(self, names=None):
+        """后台启动批量更新；返回 True 表示已启动，False 表示已有更新在跑。"""
+        with self._task_lock:
+            if self._update_running:
+                return False
+            self._update_running = True
+            self._update_results = []
+
+        def _worker():
+            try:
+                self._update_results = self.batch_update(names=names)
+            except Exception as e:
+                logger.warning('[kazumi] batch update error: %s', e)
+            finally:
+                with self._task_lock:
+                    self._update_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
+    def update_status(self):
+        with self._task_lock:
+            return {'running': self._update_running, 'results': list(self._update_results)}
 
     # ---------------------------------------------------------------- Bangumi 元数据
 

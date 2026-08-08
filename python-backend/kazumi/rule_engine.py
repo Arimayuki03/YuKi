@@ -20,10 +20,11 @@ logger = logging.getLogger('vpc.kazumi.engine')
 class RuleEngine:
     """Kazumi 规则执行引擎。"""
 
-    def __init__(self, log_failures=True):
+    def __init__(self, log_failures=True, cookie_jar=None):
         self._xpath_strategy = XPathRuleStrategy()
         self._api_strategy = ApiRuleStrategy()
         self._log_failures = log_failures
+        self.cookie_jar = cookie_jar  # CookieJar 实例（解析/验证会话持久化的 Cookie，见 cookie_jar.py）
 
     # ---------------------------------------------------------------- 搜索
 
@@ -136,7 +137,11 @@ class RuleEngine:
         # 规则自定义 headers 覆盖（小写键名冲突时规则优先）
         for k, v in (request.headers or {}).items():
             headers[k.lower()] = v
-        # cookie 本期不实现（无 PluginCookieManager）
+        # 持久化 Cookie（PluginCookieManager）：解析/验证会话获取的 Cookie 自动带上
+        if self.cookie_jar:
+            ck = self.cookie_jar.cookie_header(request.url)
+            if ck:
+                headers.setdefault('cookie', ck)
 
         if cancel_token and cancel_token.is_set():
             raise requests.exceptions.RequestException('cancelled')

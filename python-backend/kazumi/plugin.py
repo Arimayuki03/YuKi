@@ -53,6 +53,12 @@ class Plugin:
         self.chapter_api_config = kwargs.get('chapterApiConfig') or {}
         self.anti_crawler_config = kwargs.get('antiCrawlerConfig') or {}
         self.enabled = bool(kwargs.get('enabled', True))
+        # 安装/更新时间追踪（ISO-8601 字符串）
+        self.installed_at = kwargs.get('installed_at', '')
+        self.updated_at = kwargs.get('updated_at', '')
+        # 有效性追踪（valid / invalid / unknown）
+        self.validity = kwargs.get('validity', 'unknown')
+        self.validity_checked_at = kwargs.get('validity_checked_at', '')
 
     @classmethod
     def from_json(cls, data):
@@ -87,6 +93,10 @@ class Plugin:
             'chapterApiConfig': self.chapter_api_config,
             'antiCrawlerConfig': self.anti_crawler_config,
             'enabled': self.enabled,
+            'installed_at': self.installed_at,
+            'updated_at': self.updated_at,
+            'validity': self.validity,
+            'validity_checked_at': self.validity_checked_at,
         }
 
     @property

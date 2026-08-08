@@ -20,6 +20,7 @@ hoststate.configure(data_dir=os.environ['VPC_DATA_DIR'])
 from kazumi.plugin import Plugin, RuleMode
 from kazumi.plugin_manager import PluginManager
 from kazumi.rule_engine import RuleEngine
+from kazumi.cookie_jar import CookieJar
 from kazumi.xpath_strategy import XPathRuleStrategy
 from kazumi.api_strategy import ApiRuleStrategy, RestrictedJsonPath
 from kazumi.utils import normalize_episode_url, get_random_ua
@@ -241,6 +242,123 @@ class TestPluginManager(unittest.TestCase):
         self.assertTrue(self.mgr.toggle('test', True))
         self.assertTrue(self.mgr.has_enabled())
 
+    # ---------------------------------------------------------------- 安装时间追踪
+
+    def test_install_time_tracked(self):
+        p = Plugin.from_json({'api': '5', 'name': 'test', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.add(p)
+        item = self.mgr.list_all()[0]
+        self.assertTrue(item['installed_at'])
+        self.assertTrue(item['updated_at'])
+        self.assertEqual(item['validity'], 'unknown')
+
+    def test_update_time_changes_but_install_preserved(self):
+        p = Plugin.from_json({'api': '5', 'name': 'test', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.add(p)
+        installed = self.mgr.list_all()[0]['installed_at']
+        # 更新同名校验：installed_at 保留，updated_at 变化
+        p2 = Plugin.from_json({'api': '6', 'name': 'test', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.add(p2)
+        item = self.mgr.list_all()[0]
+        self.assertEqual(item['installed_at'], installed)
+        self.assertTrue(item['updated_at'])
+
+    # ---------------------------------------------------------------- 有效性检测
+
+    class _FakeEngine:
+        """模拟 RuleEngine：按插件名返回固定结果。"""
+        def __init__(self, valid=(), invalid=(), captcha=()):
+            self.valid = set(valid)
+            self.invalid = set(invalid)
+            self.captcha = set(captcha)
+
+        def search(self, config, keyword):
+            from kazumi.models import PluginSearchResponse
+            from kazumi.utils import NoResultException, CaptchaRequiredException
+            name = config.plugin_name
+            if name in self.captcha:
+                raise CaptchaRequiredException(name)
+            if name in self.invalid:
+                raise NoResultException(name)
+            return type('T', (), {'response': PluginSearchResponse(plugin_name=name, data=[1, 2, 3])})()
+
+    def test_check_validity(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'good', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'bad', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        engine = self._FakeEngine(valid=('good',), invalid=('bad',))
+        results = self.mgr.check_validity(engine, keyword='测试')
+        by_name = {r['name']: r for r in results}
+        self.assertEqual(by_name['good']['validity'], 'valid')
+        self.assertEqual(by_name['bad']['validity'], 'invalid')
+        # 状态已写回
+        self.assertEqual(self.mgr.get('good').validity, 'valid')
+        self.assertTrue(self.mgr.get('good').validity_checked_at)
+
+    def test_check_validity_captcha_and_disabled_skipped(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'cap', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'disabled', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        self.mgr.toggle('disabled', False)
+        engine = self._FakeEngine(captcha=('cap',), invalid=('disabled',))
+        results = self.mgr.check_validity(engine)
+        by_name = {r['name']: r for r in results}
+        self.assertEqual(by_name['cap']['validity'], 'captcha')
+        self.assertNotIn('disabled', by_name)  # 禁用规则不检测
+
+    def test_start_validity_check_background(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'good', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        engine = self._FakeEngine(valid=('good',))
+        self.assertTrue(self.mgr.start_validity_check(engine))
+        self.assertFalse(self.mgr.start_validity_check(engine))  # 已在运行，拒绝重复
+        # 等待后台完成
+        for _ in range(50):
+            if not self.mgr.validity_status()['running']:
+                break
+            import time
+            time.sleep(0.1)
+        status = self.mgr.validity_status()
+        self.assertFalse(status['running'])
+        self.assertEqual(status['results'][0]['validity'], 'valid')
+
+    # ---------------------------------------------------------------- 批量更新
+
+    def test_batch_update(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'oldrule', 'version': '1.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        # 商店返回 v2.0
+        latest = Plugin.from_json({'api': '5', 'name': 'oldrule', 'version': '2.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.fetch_shop_rule = lambda name: latest
+        results = self.mgr.batch_update()
+        self.assertEqual(results[0]['updated'], True)
+        self.assertEqual(self.mgr.get('oldrule').version, '2.0')
+
+    def test_batch_update_skip_when_latest(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'same', 'version': '2.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        latest = Plugin.from_json({'api': '5', 'name': 'same', 'version': '2.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.fetch_shop_rule = lambda name: latest
+        results = self.mgr.batch_update()
+        self.assertEqual(results[0]['updated'], False)
+        self.assertEqual(results[0]['msg'], '已是最新版本')
+
+    def test_batch_update_shop_missing(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'ghost', 'version': '1.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        self.mgr.fetch_shop_rule = lambda name: None
+        results = self.mgr.batch_update()
+        self.assertEqual(results[0]['ok'], False)
+        self.assertIn('未找到', results[0]['msg'])
+
+    def test_start_batch_update_background(self):
+        self.mgr.add(Plugin.from_json({'api': '5', 'name': 'oldrule', 'version': '1.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        latest = Plugin.from_json({'api': '5', 'name': 'oldrule', 'version': '3.0', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+        self.mgr.fetch_shop_rule = lambda name: latest
+        self.assertTrue(self.mgr.start_batch_update())
+        for _ in range(50):
+            if not self.mgr.update_status()['running']:
+                break
+            import time
+            time.sleep(0.1)
+        status = self.mgr.update_status()
+        self.assertFalse(status['running'])
+        self.assertTrue(status['results'][0]['updated'])
+
 
 class TestRuleEngine(unittest.TestCase):
     def setUp(self):
@@ -255,6 +373,77 @@ class TestRuleEngine(unittest.TestCase):
         p = Plugin.from_json({'api': '5', 'name': 'test', 'searchURL': 'https://example.com/s?wd=@keyword', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': 'invalid xpath //', 'chapterResult': '//li/a'})
         with self.assertRaises(Exception):
             self.engine.query_chapters(p.execution_config(), 'https://example.com/vod/1')
+
+
+class TestCookieJar(unittest.TestCase):
+    """Cookie 持久化（PluginCookieManager 对齐）。"""
+
+    def setUp(self):
+        self.jar = CookieJar(file_path=os.path.join(tempfile.mkdtemp(), 'cookies.json'))
+
+    def test_set_and_header(self):
+        self.jar.set_domain_cookies('example.com', [
+            {'name': 'sid', 'value': 'abc'}, {'name': 'theme', 'value': 'dark'},
+        ])
+        h = self.jar.cookie_header('https://example.com/path')
+        self.assertIn('sid=abc', h)
+        self.assertIn('theme=dark', h)
+
+    def test_parent_domain_match(self):
+        self.jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'abc'}])
+        self.assertIn('sid=abc', self.jar.cookie_header('https://sub.example.com/x'))
+
+    def test_other_domain_not_attached(self):
+        self.jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'abc'}])
+        self.assertEqual(self.jar.cookie_header('https://other.org/'), '')
+
+    def test_persist_reload(self):
+        self.jar.set_domain_cookies('a.com', [{'name': 'k', 'value': 'v'}])
+        jar2 = CookieJar(file_path=self.jar._file)
+        self.assertIn('k=v', jar2.cookie_header('https://a.com/'))
+
+    def test_clear(self):
+        self.jar.set_domain_cookies('a.com', [{'name': 'k', 'value': 'v'}])
+        self.jar.clear()
+        self.assertEqual(self.jar.cookie_header('https://a.com/'), '')
+
+
+class TestRuleEngineCookie(unittest.TestCase):
+    """RuleEngine 发请求时自动带持久化 Cookie。"""
+
+    def test_cookie_attached_to_request(self):
+        import types
+        from kazumi.cookie_jar import CookieJar
+        from kazumi.models import PreparedRuleRequest
+        import kazumi.rule_engine as re_mod
+
+        jar = CookieJar(file_path=os.path.join(tempfile.mkdtemp(), 'cookies.json'))
+        jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'xyz'}])
+        engine = RuleEngine(cookie_jar=jar)
+
+        captured = {}
+
+        class FakeRsp:
+            encoding = 'utf-8'
+            text = '<html></html>'
+
+            def raise_for_status(self):
+                pass
+
+        orig = re_mod.requests.get
+
+        def fake_get(url, **kw):
+            captured['cookie'] = kw.get('headers', {}).get('cookie', '')
+            return FakeRsp()
+
+        re_mod.requests.get = fake_get
+        try:
+            cfg = types.SimpleNamespace(base_url='https://example.com', user_agent='')
+            req = PreparedRuleRequest(method='GET', url='https://example.com/s', headers={})
+            engine._do_request(req, cfg)
+        finally:
+            re_mod.requests.get = orig
+        self.assertIn('sid=xyz', captured['cookie'])
 
 
 if __name__ == '__main__':
