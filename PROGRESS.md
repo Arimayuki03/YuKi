@@ -2,7 +2,7 @@
 
 > 续作开发只需读本文件。本文档已整合原 `重构方案.md`、`PHASE0_依赖矩阵.md`、`BUILD.md`、`FEATURES.md`、`PROGRESS.md` 五份文档，其余 md 已删除。
 > 约定：改动架构/链路前先更新「§4 架构决策」；新增功能后在「§7 功能清单」补一行；收尾跑 `npm run test:all` 全绿。
-> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L131 · §6 构建打包 L146 · §7 前端注意与功能 L166（注意事项 L168 / 功能概览 L178）· §8 已知坑位 L198 · §8.7 待完成 L220 · §8.8 进行中任务 L227
+> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L132 · §6 构建打包 L147 · §7 前端注意与功能 L167（注意事项 L169 / 功能概览 L179）· §8 已知坑位 L199 · §8.7 待完成 L222 · §8.8 进行中任务 L229
 
 ---
 
@@ -127,6 +127,7 @@ npm run build:py
 58. **二进制存放与路径适配**（决策 84）：vendor/{mpv,aria2,ffmpeg,anime4k}（.gitignore 忽略）；开发模式 ROOT=`path.join(__dirname,'..','..')`，打包模式 `process.resourcesPath`；`index.js` 统一 `RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT`；python-bridge 打包后启动 PyInstaller exe。
 59. **mpv 二进制来源**：shinchiro/mpv-winbuild-cmake latest release 动态取 tag（官方 mpv 无 Windows 发行）；.7z 用 Windows 内置 tar 解（勿用 unzip）。
 60. **mpv 视频缓冲缓存**（决策 85）：设置 `playerCacheMode`（memory/disk，默认 memory）+ `playerCacheDir`（默认 `<userData>/mpv-cache`）；disk 模式起播注入 `--cache=yes --cache-on-disk=yes --demuxer-cache-dir=<dir>`（**mpv v0.41 目录选项是 `--demuxer-cache-dir`，`--cache-dir` 非法**）。mpv 平铺写 `mpv-cache-<hex>.dat`，默认 `--demuxer-cache-unlink-files=immediate` 播完即删，仅被杀/崩溃时残留；清理只删该文件名模式（防误删自选目录里的无关文件）、逐文件 try/catch 跳过正被占用者。IPC：`vpc:pick-folder`（通用选目录）→ `vpc:set-player-cache(mode, dir)`（切内存/换路径自动清旧目录残留，返回 `cleanedBytes`；未传目录沿用已记忆目录=还原）+ `vpc:clear-player-cache`（只清不换）。两键均入 settings.reset 保留清单。
+61. **封面补拉优先级体系**（决策 86）：优先级 = 点开详情 > 搜索拉页 > 封面补拉。实现四件套（common.js）：① 世代制 `_coverFillGen` + `abortCoverFill()`（Detail.open/源切换时中止）；② IntersectionObserver 只入队可见卡（rootMargin 300px，120s 超时自退）；③ worker 池并发 10（T45 从 5 提档）；④ 补拉经 `detailContent` 取详情封面，`data-cover-missing` 标记 + 防抖不重复入队。屏蔽确认弹窗后补拉恢复入口：首页 load done/refresh、search done、detail render 后。
 
 ## 5. Spider 引擎契约（Phase 0 固化结论，勿重做）
 
@@ -216,6 +217,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - Chromium 启动 `WSALookupServiceBegin failed with: 10108` 为良性日志。
 - session webRequest 每 session 仅一份且全局生效 → 解析窗口用独立 partition，结束 onBeforeRequest(null) 清理。
 - mpv 不能直接播 HTML 页面，推送非直链走 captureDirect 抓媒体请求，抓不到返 resolve-failed。
+- 多仓条目托管于 raw.githubusercontent / jsdelivr，网络抖动频繁（偶发超时/404）：T44 已用「偏好条目失败重试一次 + 跨条目合并」兼顾，新增多仓功能勿假设单条目必达；Windows 控制台 GBK 无法打印条目名 emoji（🈲），脚本输出前 `.encode('ascii','replace')`。
 
 ## 8.7 待完成
 
