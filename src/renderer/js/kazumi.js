@@ -211,6 +211,28 @@ const Kazumi = {
         }
     },
 
+    // ---------------------------------------------------------------- Bangumi 元数据
+
+    /** Bangumi 番剧搜索（用于详情页元数据补全）。 */
+    async bangumiSearch(keyword) {
+        try {
+            const rsp = await doAction('kazumiBangumiSearch', { keyword, limit: 5 }, '/kazumi/action');
+            return (rsp && rsp.results) || [];
+        } catch (e) {
+            return [];
+        }
+    },
+
+    /** Bangumi 番剧详情。 */
+    async bangumiInfo(subjectId) {
+        try {
+            const rsp = await doAction('kazumiBangumiInfo', { id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.info) || null;
+        } catch (e) {
+            return null;
+        }
+    },
+
     // ---------------------------------------------------------------- 详情页 Kazumi 源弹窗
 
     /**
@@ -248,7 +270,7 @@ const Kazumi = {
         }
     },
 
-    /** 渲染搜索结果（按规则分组）。 */
+    /** 渲染搜索结果（按规则分组），并异步补全 Bangumi 元数据（封面/简介）。 */
     _renderSearchResults(results, title, token) {
         const box = $('#kazumi-dialog-body');
         let html = '';
@@ -273,6 +295,31 @@ const Kazumi = {
             const name = String(el.data('name') || '');
             this._loadChapters(pluginName, src, name, token);
         });
+        // 异步补全 Bangumi 元数据（不阻塞交互）
+        this._enrichBangumiMetadata(title, box, token);
+    },
+
+    /** Bangumi 元数据补全：搜索首个结果取详情，插入弹窗顶部。 */
+    async _enrichBangumiMetadata(title, box, token) {
+        try {
+            const results = await this.bangumiSearch(title);
+            if (token !== this._dlgToken || !results.length) return;
+            const info = await this.bangumiInfo(results[0].id);
+            if (token !== this._dlgToken || !info) return;
+            const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
+            const summary = (info.summary || '').slice(0, 200);
+            const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
+            const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
+            const banner = `<div class="kazumi-bangumi-banner">
+                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+                <div class="kazumi-bangumi-info">
+                    <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
+                    <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
+                    ${summary ? `<div class="kazumi-bangumi-summary">${escHtml(summary)}…</div>` : ''}
+                </div>
+            </div>`;
+            box.prepend(banner);
+        } catch (e) { /* 元数据失败不影响源选择 */ }
     },
 
     /** 解析剧集线路（kazumiChapters）。 */

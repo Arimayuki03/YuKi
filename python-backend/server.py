@@ -516,6 +516,18 @@ def dispatch_kazumi_action(form):
             ok, msg = kazumi_mgr.add(plugin)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
 
+        # ---- Bangumi 元数据 ----
+        if do == 'kazumiBangumiSearch':
+            keyword = form.get('keyword', '')
+            limit = int(form.get('limit', '10'))
+            results = kazumi_mgr.bangumi_search(keyword, limit)
+            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiInfo':
+            subject_id = form.get('id', '')
+            info = kazumi_mgr.bangumi_info(subject_id)
+            return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
+
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)

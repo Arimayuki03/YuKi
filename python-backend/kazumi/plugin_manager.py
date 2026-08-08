@@ -19,6 +19,11 @@ logger = logging.getLogger('vpc.kazumi.manager')
 # 内置默认规则目录（随应用打包，首次启动自动导入）
 _BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 
+# Bangumi API 端点（对齐 Kazumi api_endpoints.dart）
+BANGUMI_API = 'https://api.bgm.tv'
+BANGUMI_API_NEXT = 'https://next.bgm.tv'
+BANGUMI_MIRROR = 'https://api.kazumi.fyi'
+
 
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
@@ -166,6 +171,55 @@ class PluginManager:
     def has_enabled(self):
         with self._lock:
             return any(p.enabled for p in self._plugins)
+
+    # ---------------------------------------------------------------- Bangumi 元数据
+
+    def bangumi_search(self, keyword, limit=10):
+        """Bangumi 番剧搜索（next.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API_NEXT}/p1/search/subjects',
+                params={'limit': limit, 'offset': 0, 'keyword': keyword},
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            return data.get('data', []) or []
+        except Exception as e:
+            logger.warning('[kazumi] bangumi search failed: %s', e)
+            return []
+
+    def bangumi_info(self, subject_id):
+        """Bangumi 番剧详情（api.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API}/v0/subjects/{subject_id}',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi info failed: %s', e)
+            return None
+
+    def bangumi_calendar(self):
+        """Bangumi 每日放送（next.bgm.tv）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{BANGUMI_API_NEXT}/p1/calendar',
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi calendar failed: %s', e)
+            return []
 
     # ---------------------------------------------------------------- 在线规则商店
 

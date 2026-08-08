@@ -822,6 +822,17 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-shop-install { flex:none; }
 .kazumi-shop-install:disabled { opacity:.5; pointer-events:none; }
 
+/* Bangumi 元数据横幅（Kazumi 源弹窗顶部） */
+.kazumi-bangumi-banner { display:flex; gap:12px; padding:12px; margin-bottom:16px;
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
+    border-radius:12px; }
+.kazumi-bangumi-cover { width:80px; height:110px; object-fit:cover; border-radius:8px; flex:none; }
+.kazumi-bangumi-info { flex:1; min-width:0; }
+.kazumi-bangumi-title { font-size:15px; font-weight:700; color:var(--md-on-surface); margin-bottom:4px; }
+.kazumi-bangumi-meta { font-size:12px; color:var(--md-on-surface-variant); margin-bottom:6px; }
+.kazumi-bangumi-summary { font-size:12px; color:var(--md-on-surface-variant); line-height:1.6;
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+
 /* 播放对话框（宽）+ URL 展示 */
 .md-dialog-wide { max-width:560px; }
 .player-url { margin-top:8px; font-size:12px; color:var(--md-on-surface-variant); word-break:break-all; }
