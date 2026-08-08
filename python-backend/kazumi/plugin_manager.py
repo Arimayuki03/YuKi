@@ -24,9 +24,11 @@ logger = logging.getLogger('vpc.kazumi.manager')
 _BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 
 # Bangumi API 端点（对齐 Kazumi api_endpoints.dart）
-BANGUMI_API = 'https://api.bgm.tv'
-BANGUMI_API_NEXT = 'https://next.bgm.tv'
-BANGUMI_MIRROR = 'https://api.kazumi.fyi'
+# 2026-06 起 bgm.tv/bangumi.tv/chii.in 在国内被屏蔽，统一切到 bangumi.lol 镜像
+# （api.bangumi.lol / next.bangumi.lol），api.kazumi.fyi 留作签名镜像兜底
+BANGUMI_API = 'https://api.bangumi.lol'
+BANGUMI_API_NEXT = 'https://next.bangumi.lol'
+BANGUMI_MIRROR = 'https://api.bangumi.lol'
 
 # 弹弹 play API（对齐 Kazumi danmaku_api.dart）
 DANDAN_API = 'https://api.dandanplay.net'
@@ -355,7 +357,7 @@ class PluginManager:
     # ---------------------------------------------------------------- Bangumi 元数据
 
     def bangumi_search(self, keyword, limit=10):
-        """Bangumi 番剧搜索（next.bgm.tv）。"""
+        """Bangumi 番剧搜索（next.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -372,7 +374,7 @@ class PluginManager:
             return []
 
     def bangumi_info(self, subject_id):
-        """Bangumi 番剧详情（api.bgm.tv）。"""
+        """Bangumi 番剧详情（api.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -387,7 +389,7 @@ class PluginManager:
             return None
 
     def bangumi_calendar(self):
-        """Bangumi 每日放送（next.bgm.tv），带重试。"""
+        """Bangumi 每日放送（next.bangumi.lol），带重试。"""
         import requests
         for attempt in range(3):
             try:
@@ -406,7 +408,7 @@ class PluginManager:
         return []
 
     def bangumi_trends(self):
-        """Bangumi 番剧趋势榜单（next.bgm.tv）。"""
+        """Bangumi 番剧趋势榜单（next.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -421,7 +423,7 @@ class PluginManager:
             return []
 
     def bangumi_episodes(self, subject_id):
-        """Bangumi 番剧分集信息（api.bgm.tv）。"""
+        """Bangumi 番剧分集信息（api.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -437,7 +439,7 @@ class PluginManager:
             return None
 
     def bangumi_characters(self, subject_id):
-        """Bangumi 番剧角色信息（api.bgm.tv）。"""
+        """Bangumi 番剧角色信息（api.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -452,7 +454,7 @@ class PluginManager:
             return []
 
     def bangumi_staff(self, subject_id):
-        """Bangumi 番剧制作人员（api.bgm.tv）。"""
+        """Bangumi 番剧制作人员（api.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -467,7 +469,7 @@ class PluginManager:
             return []
 
     def bangumi_comments(self, subject_id, limit=20, offset=0):
-        """Bangumi 番剧评论（next.bgm.tv）。"""
+        """Bangumi 番剧评论（next.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -483,7 +485,7 @@ class PluginManager:
             return []
 
     def bangumi_relations(self, subject_id):
-        """Bangumi 番剧关联（前传/续作链，api.bgm.tv）。"""
+        """Bangumi 番剧关联（前传/续作链，api.bangumi.lol）。"""
         import requests
         try:
             rsp = requests.get(
@@ -496,6 +498,99 @@ class PluginManager:
         except Exception as e:
             logger.warning('[kazumi] bangumi relations failed: %s', e)
             return []
+
+    # ---------------------------------------------------------------- Bangumi 用户收藏同步
+
+    # 收藏类型：0 想看 / 1 看过 / 2 在看 / 3 搁置 / 4 抛弃
+    BANGUMI_COLLECTION_TYPES = {0: '想看', 1: '看过', 2: '在看', 3: '搁置', 4: '抛弃'}
+
+    @staticmethod
+    def _bangumi_auth_headers(token):
+        """带 token 的鉴权头（Bangumi API 要求 User-Agent + Bearer）。"""
+        return {
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'video-pc/0.1.0 (https://github.com/); kazumi',
+        }
+
+    def bangumi_me(self, token):
+        """当前用户信息（需 token；返回 None 表示 token 无效或网络失败）。"""
+        import requests
+        if not token:
+            return None
+        try:
+            rsp = requests.get(f'{BANGUMI_API}/v0/me',
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi me failed: %s', e)
+            return None
+
+    def bangumi_user_collections(self, token, subject_type=2, limit=100, offset=0):
+        """当前用户收藏列表（subject_type=2 动画），条目含 subject_id/type/name。"""
+        import requests
+        if not token:
+            return []
+        try:
+            rsp = requests.get(f'{BANGUMI_API}/v0/users/-/collections',
+                               params={'subject_type': subject_type, 'limit': limit, 'offset': offset},
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 10), verify=False)
+            rsp.raise_for_status()
+            data = rsp.json()
+            return data.get('data', []) or []
+        except Exception as e:
+            logger.warning('[kazumi] bangumi collections failed: %s', e)
+            return []
+
+    def bangumi_collection(self, token, subject_id):
+        """单个 subject 的收藏状态；未收藏返回 None。"""
+        import requests
+        if not token:
+            return None
+        try:
+            rsp = requests.get(f'{BANGUMI_API}/v0/users/-/collections/{subject_id}',
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
+            if rsp.status_code == 404:
+                return None
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi collection get failed: %s', e)
+            return None
+
+    def bangumi_update_collection(self, token, subject_id, collection_type):
+        """设置/更新收藏类型（对齐 updateBangumiById）；type: 0想看 1看过 2在看 3搁置 4抛弃。
+        PUT 创建或更新均适用；失败回退 POST（个别实现二者接口语义不同）。返回 (ok, msg)。"""
+        import requests
+        if not token:
+            return False, '缺少 Bangumi token'
+        body = {'type': int(collection_type)}
+        headers = self._bangumi_auth_headers(token)
+        last = None
+        for method in ('PUT', 'POST'):
+            try:
+                rsp = requests.request(method, f'{BANGUMI_API}/v0/users/-/collections/{subject_id}',
+                                       json=body, headers=headers, timeout=(5, 8), verify=False)
+                rsp.raise_for_status()
+                return True, 'ok'
+            except Exception as e:
+                last = e
+        logger.warning('[kazumi] bangumi collection update failed: %s', last)
+        return False, str(last)[:80]
+
+    def bangumi_delete_collection(self, token, subject_id):
+        """删除收藏。返回 (ok, msg)。"""
+        import requests
+        if not token:
+            return False, '缺少 Bangumi token'
+        try:
+            rsp = requests.delete(f'{BANGUMI_API}/v0/users/-/collections/{subject_id}',
+                                  headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
+            rsp.raise_for_status()
+            return True, 'ok'
+        except Exception as e:
+            logger.warning('[kazumi] bangumi collection delete failed: %s', e)
+            return False, str(e)[:80]
 
     # ---------------------------------------------------------------- 弹弹 play 弹幕
 

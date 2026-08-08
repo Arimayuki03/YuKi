@@ -626,6 +626,37 @@ def dispatch_kazumi_action(form):
             data = kazumi_mgr.bangumi_relations(subject_id)
             return 200, json.dumps({'code': 200, 'relations': data}, ensure_ascii=False)
 
+        # ---- Bangumi 用户收藏同步（需 token） ----
+        if do == 'kazumiBangumiMe':
+            token = form.get('token', '')
+            me = kazumi_mgr.bangumi_me(token)
+            return 200, json.dumps({'code': 200, 'me': me, 'valid': bool(me)}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCollections':
+            token = form.get('token', '')
+            limit = int(form.get('limit', '100'))
+            items = kazumi_mgr.bangumi_user_collections(token, limit=min(limit, 200))
+            return 200, json.dumps({'code': 200, 'items': items}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCollectionGet':
+            token = form.get('token', '')
+            subject_id = form.get('id', '')
+            info = kazumi_mgr.bangumi_collection(token, subject_id)
+            return 200, json.dumps({'code': 200, 'collection': info}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCollectionSet':
+            token = form.get('token', '')
+            subject_id = form.get('id', '')
+            ctype = int(form.get('type', '0'))
+            ok, msg = kazumi_mgr.bangumi_update_collection(token, subject_id, ctype)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCollectionDel':
+            token = form.get('token', '')
+            subject_id = form.get('id', '')
+            ok, msg = kazumi_mgr.bangumi_delete_collection(token, subject_id)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
         # ---- 弹弹 play 弹幕 ----
         if do == 'kazumiDanmakuSearch':
             title = form.get('title', '')

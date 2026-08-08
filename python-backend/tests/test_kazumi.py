@@ -446,5 +446,113 @@ class TestRuleEngineCookie(unittest.TestCase):
         self.assertIn('sid=xyz', captured['cookie'])
 
 
+class TestBangumiSync(unittest.TestCase):
+    """Bangumi 用户收藏同步（mock requests，不触网）。"""
+
+    def setUp(self):
+        self.mgr = PluginManager()
+        self.mgr._plugins = []
+
+    def test_domain_is_bangumi_lol_mirror(self):
+        # 2026-06 起 bgm.tv 被屏蔽，必须走 bangumi.lol 镜像
+        from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT
+        self.assertIn('bangumi.lol', BANGUMI_API)
+        self.assertIn('bangumi.lol', BANGUMI_API_NEXT)
+        self.assertNotIn('bgm.tv', BANGUMI_API)
+        self.assertNotIn('bgm.tv', BANGUMI_API_NEXT)
+
+    def test_me_with_token(self):
+        import requests
+        from unittest import mock
+        me = {'id': 1, 'username': 'alice', 'nickname': '爱丽丝'}
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return me
+
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            result = self.mgr.bangumi_me('tok')
+        self.assertEqual(result, me)
+        url = m.call_args[0][0]
+        self.assertIn('api.bangumi.lol/v0/me', url)
+        self.assertEqual(m.call_args[1]['headers']['Authorization'], 'Bearer tok')
+
+    def test_me_empty_token(self):
+        self.assertIsNone(self.mgr.bangumi_me(''))
+
+    def test_user_collections(self):
+        from unittest import mock
+        data = {'data': [{'subject_id': 1, 'type': 2, 'subject': {'name_cn': '番剧A'}}]}
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return data
+
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            items = self.mgr.bangumi_user_collections('tok', limit=50)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['type'], 2)
+        self.assertIn('/v0/users/-/collections', m.call_args[0][0])
+
+    def test_update_collection_put_ok(self):
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}
+
+        with mock.patch('requests.request', return_value=FakeRsp()) as m:
+            ok, msg = self.mgr.bangumi_update_collection('tok', '42', 2)
+        self.assertTrue(ok)
+        self.assertEqual(m.call_args[0][0], 'PUT')
+        self.assertEqual(m.call_args[1]['json'], {'type': 2})
+
+    def test_update_collection_put_fallback_post(self):
+        import requests
+        from unittest import mock
+        calls = {'n': 0}
+
+        def fake_request(method, url, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise requests.exceptions.HTTPError('bad')
+
+            class R:
+                def raise_for_status(self):
+                    pass
+            return R()
+
+        with mock.patch('requests.request', side_effect=fake_request):
+            ok, _ = self.mgr.bangumi_update_collection('tok', '42', 1)
+        self.assertTrue(ok)
+        self.assertEqual(calls['n'], 2)  # PUT 失败后回退 POST
+
+    def test_delete_collection(self):
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+        with mock.patch('requests.delete', return_value=FakeRsp()) as m:
+            ok, msg = self.mgr.bangumi_delete_collection('tok', '42')
+        self.assertTrue(ok)
+        self.assertIn('/v0/users/-/collections/42', m.call_args[0][0])
+
+    def test_missing_token(self):
+        ok, msg = self.mgr.bangumi_update_collection('', '42', 2)
+        self.assertFalse(ok)
+        self.assertIn('token', msg.lower())
+
+
 if __name__ == '__main__':
     unittest.main()
