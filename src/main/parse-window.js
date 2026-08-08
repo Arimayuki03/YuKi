@@ -17,6 +17,7 @@
  *   规则引擎发请求自动带上，重启后无需重新验证
  */
 const { BrowserWindow } = require('electron');
+const { AsyncSingleFlight } = require('./async-session');
 
 const MEDIA_EXT = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 const IFRAME_TIMEOUT = 20000;
@@ -79,6 +80,7 @@ class ParseWindow {
         this._slots = [];   // 空闲槽位（分区名 parse-0..POOL_SIZE-1）
         this._waiters = [];
         for (let i = 0; i < POOL_SIZE; i++) this._slots.push(i);
+        this._captureFlight = new AsyncSingleFlight(); // 同 URL 并发捕获去重合并
     }
 
     // ------------------------------------------------------------ 解析池
@@ -197,9 +199,11 @@ class ParseWindow {
      * 直开页面抓媒体直链（推送的 share/播放页等非直链 URL）：
      * 隐藏窗口直接加载目标页，捕获其播放器发起的媒体请求。
      * legacy=true 时走旧解析器（useLegacyParser）：监听 iframe src 并跟随，直到命中媒体直链。
+     * 同 key（legacy|url）并发调用经 AsyncSingleFlight 去重，只开一个窗口、共享结果。
      */
     captureDirect(url, timeout = IFRAME_TIMEOUT, legacy) {
-        return this._capture({ url, via: 'page', timeout, legacy });
+        const key = `${legacy ? 'L' : 'N'}|${url}`;
+        return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout, legacy }));
     }
 
     /** 隐藏窗口加载 url，webRequest 捕获媒体直链（_tryIframe/captureDirect 共用）。
