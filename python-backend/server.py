@@ -43,6 +43,11 @@ from site_manager import SiteManager
 from config import ConfigManager
 import app as spider_app
 
+# Kazumi 规则引擎（与 CatVod 隔离，独立模块）
+from kazumi.plugin_manager import PluginManager
+from kazumi.plugin import Plugin
+from kazumi.rule_engine import RuleEngine
+
 logger = logging.getLogger('vpc.server')
 
 TOKEN_EXEMPT = ('/health', '/cache', '/proxy')
@@ -50,6 +55,10 @@ TOKEN_EXEMPT = ('/health', '/cache', '/proxy')
 sites = SiteManager()
 config_mgr = ConfigManager(sites)
 cache_store = None  # create_app() 时初始化（依赖 hoststate 目录）
+
+# Kazumi 规则引擎实例（create_app 时初始化）
+kazumi_mgr = None
+kazumi_engine = None
 
 # Phase 4 弹幕队列：面板 do=danmaku 入队；主进程播放器轮询 /danmaku?do=poll 取走
 _danmaku_queue = []
@@ -317,8 +326,10 @@ def build_proxy_response(result):
 # ---------------------------------------------------------------- 应用装配
 
 def create_app():
-    global cache_store
+    global cache_store, kazumi_mgr, kazumi_engine
     cache_store = CacheStore(os.path.join(hoststate.get_cache_dir(), 'kv'))
+    kazumi_mgr = PluginManager()
+    kazumi_engine = RuleEngine()
     fastapi_app = FastAPI(title='video-pc backend')
 
     @fastapi_app.middleware('http')
@@ -332,7 +343,8 @@ def create_app():
 
     @fastapi_app.get('/health')
     def health():
-        return {'status': 'ok', 'sites': [s.key for s in sites.sites]}
+        return {'status': 'ok', 'sites': [s.key for s in sites.sites],
+                'kazumiRules': kazumi_mgr.list_all() if kazumi_mgr else []}
 
     @fastapi_app.get('/sites')
     def sites_state():
@@ -412,7 +424,87 @@ def create_app():
         return PlainTextResponse(body, status_code=status,
                                  media_type='application/json; charset=utf-8')
 
+    # ------------------------------------------------------------ Kazumi 规则引擎端点
+
+    @fastapi_app.api_route('/kazumi/action', methods=['POST'])
+    async def kazumi_action_endpoint(request: Request):
+        form = {k: v for k, v in (await request.form()).items()}
+        status, body = await run_in_threadpool(dispatch_kazumi_action, form)
+        return PlainTextResponse(body, status_code=status,
+                                 media_type='application/json; charset=utf-8')
+
     return fastapi_app
+
+
+def dispatch_kazumi_action(form):
+    """Kazumi 规则引擎端点分发（与 CatVod /action 物理隔离）。"""
+    do = form.get('do', '')
+    try:
+        if do == 'kazumiList':
+            return 200, json.dumps({'code': 200, 'list': kazumi_mgr.list_all()}, ensure_ascii=False)
+
+        if do == 'kazumiAdd':
+            raw = form.get('json', '')
+            plugin = Plugin.from_json(raw)
+            ok, msg = kazumi_mgr.add(plugin)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        if do == 'kazumiRemove':
+            name = form.get('name', '')
+            ok = kazumi_mgr.remove(name)
+            return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
+
+        if do == 'kazumiToggle':
+            name = form.get('name', '')
+            enabled = form.get('enabled', '1').lower() in ('1', 'true', 'yes')
+            ok = kazumi_mgr.toggle(name, enabled)
+            return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
+
+        if do == 'kazumiSearch':
+            keyword = form.get('keyword', '')
+            if not keyword:
+                return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
+            results = []
+            for plugin in kazumi_mgr.enabled_plugins():
+                try:
+                    trace = kazumi_engine.search(plugin.execution_config(), keyword)
+                    results.append({'pluginName': plugin.name, 'data': [vars(it) for it in trace.response.data]})
+                    logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(trace.response.data))
+                except Exception as e:
+                    logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
+            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+
+        if do == 'kazumiChapters':
+            plugin_name = form.get('pluginName', '')
+            src = form.get('src', '')
+            plugin = kazumi_mgr.get(plugin_name)
+            if not plugin:
+                return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
+            trace = kazumi_engine.query_chapters(plugin.execution_config(), src)
+            return 200, json.dumps({'code': 200, 'roads': [
+                {'name': r.name, 'data': r.data, 'identifier': r.identifier}
+                for r in trace.roads
+            ]}, ensure_ascii=False)
+
+        if do == 'kazumiResolve':
+            plugin_name = form.get('pluginName', '')
+            url = form.get('url', '')
+            plugin = kazumi_mgr.get(plugin_name)
+            if not plugin:
+                return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
+            # 返回播放页 URL 与规则 headers，由前端 Player 走 captureDirect
+            headers = plugin.build_http_headers()
+            return 200, json.dumps({
+                'code': 200,
+                'pageUrl': plugin.build_full_url(url),
+                'userAgent': headers.get('user-agent', ''),
+                'referer': headers.get('referer', ''),
+            }, ensure_ascii=False)
+
+        return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
+    except Exception as e:
+        logger.exception('[kazumi] dispatch error do=%s', do)
+        return 500, json.dumps({'code': 500, 'msg': str(e).replace('"', "'")}, ensure_ascii=False)
 
 
 def load_default_sites():

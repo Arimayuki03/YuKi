@@ -11,3 +11,5 @@ pycryptodome>=3.20
 cachetools>=5.3
 # JS spider 宿主（quickjs-ng：import 名为 quickjs，cp310-abi3 轮子兼容 py3.14）
 quickjs-ng>=0.16
+# Kazumi 规则引擎 API 模式 JSONPath 解析（受限实现）
+jsonpath-ng>=1.8,<2.0
