@@ -519,6 +519,8 @@ def dispatch_kazumi_action(form):
                 'pageUrl': plugin.build_full_url(url),
                 'userAgent': headers.get('user-agent', ''),
                 'referer': headers.get('referer', ''),
+                # 旧解析器标记：useLegacyParser=true 时前端走 iframe src 监听而非媒体请求拦截
+                'useLegacyParser': bool(plugin.use_legacy_parser),
             }, ensure_ascii=False)
 
         # ---- 在线规则商店 ----

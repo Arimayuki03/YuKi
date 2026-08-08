@@ -44,10 +44,11 @@ python-backend\.venv\Scripts\python.exe python-backend\tests\test_phase3.py
 python-backend\.venv\Scripts\python.exe python-backend\server.py
 # 启动完整应用
 npm start
-# 手动下载二进制（mpv/aria2 通常由脚本覆盖；ffmpeg 约 90MB）
+# 手动下载二进制（mpv/aria2 通常由脚本覆盖；ffmpeg 约 90MB；misans 为内置 UI 字体）
 node scripts\download-binaries.js mpv
 node scripts\download-binaries.js aria2
 node scripts\download-binaries.js ffmpeg
+node scripts\download-binaries.js misans
 # 一键回归（smoke + phase3 + py 编译 + src js 语法检查）
 npm run test:all
 # 打包 Python 后端 + Windows 安装包（见 §6）
@@ -199,6 +200,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **T47 批次**：下载与播放增强——下载记录持久化（dl-records.json 跨重启恢复，删除/清空同步）、mpv 截图（快捷键 s 截图存图片/video-pc，原生 s 键与 IPC 双通道，设置页打开截图目录）。（细节见 §8.8 表）
 - **T48 批次**：「我的」页面——观看统计（累计时长/次数/部数 + 近 7 天条形图）与最近观看（卡片点击回详情），埋点在 mpv 退出时累计。（细节见 §8.8 表）
 - **T49 批次**：爬虫健壮性——Cookie 持久化（解析会话 Cookie 落盘，规则引擎自动带上）、视频源解析池（3 槽位独立 partition 并发解析）、HLS 广告过滤（m3u8 下载前剔除广告分段，设置开关）。（细节见 §8.8 表）
+- **T50 批次**：视频流提取三机制 + 组件测试 + 旧解析器 + MiSans 字体——webRequest 拦截 + JS 轮询 video 元素 + legacy iframe 监听；node --test 27 个 JS 单测；useLegacyParser 贯通；MiSans 内置子集化字体（download-binaries misans，未就绪回退系统字体）。（细节见 §8.8 表）
 
 ## 8. 已知坑位（踩过的，别再踩）
 
@@ -230,7 +232,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
 - [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
 
-## 8.8 进行中任务批次（T1~T49，2026-08）
+## 8.8 进行中任务批次（T1~T50，2026-08）
 
 | 批次 | 任务 | 状态 |
 |---|---|---|
@@ -283,3 +285,4 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T47 | 下载与播放增强：①下载记录持久化（新 dl-record.js 存 userData/dl-records.json 上限 200，完成/失败落盘，buildDlList 合并推送时按 gid 补回跨会话记录避免与实时任务重复，删除/清空/清失败同步删记录防复活，HLS 与 aria2 同一链路）②mpv 截图（mpv-player 增 screenshot() screenshot-to-file subtitles 模式 + 起播注入 --screenshot-directory/--screenshot-template 使原生 s 键也存图，HK 新增 screenshot 动作默认 s 键+lua 提示+绑定，设置页快捷键卡加「打开截图目录」按钮，vpc:mpv-screenshot/vpc:mpv-screenshot-dir IPC 截图到图片/video-pc 并弹通知） | 已完成 |
 | T48 | 「我的」页面（观看统计 + 最近观看）：①埋点 player.js 新增 _curMeta + _recordWatch，mpv 退出时（pos≥15s 计有效观看）累计 totalSeconds/sessionCount/titles 去重/daily 近 30 天分布，并 upsert recentWatches（site\|vodId 去重，无 id 按标题）上限 50 ②新增视图 my.js + 侧栏「我的」导航（历史后）+ #view-my 区块：三统计卡（累计时长/观看次数/观看部数）+ 近 7 天条形图（my-bar-chart）+ 最近观看网格（自定义卡片带时长角标与进度条，分页 24/页，有 site\|vodId 点击进详情，无则 toast）③ui.css 增 my-stats/my-bar/my-watch-dur 样式，index.html 增 script 引入 | 已完成 |
 | T49 | 爬虫健壮性：①Cookie 持久化（新 kazumi/cookie_jar.py 落盘 kazumi/cookies.json，CookieJar.set_domain_cookies/cookie_header 域名+父域匹配；RuleEngine 增 cookie_jar 参数 _do_request 自动带 Cookie 头；server.py kazumiCookieSet/List/Clear 端点；parse-window.js 捕获结束后读会话 Cookie 按域名回传后端；设置页 Kazumi 区加 Cookie 管理卡查看/清除；test_kazumi.py 增 CookieJar 5 例 + RuleEngine 带 Cookie 1 例）②视频源解析池（parse-window.js 改 3 独立 partition parse-0/1/2 槽位池 _acquire/_release，并发解析互不冲突——原共用 partition 的 session.webRequest 单例会被后注册者覆盖致并发丢请求）③HLS 广告过滤（hls-downloader.js 增 adFilter 参数 + filterAdSegments 重写播放列表：CUE-OUT/CUE-IN 之间分段 + DATERANGE ad 行 + /ad/、/ads/、/adbreak/、adsegment 路径特征分段剔除，相对地址解析绝对化，写临时 .m3u8 交 ffmpeg 后清理；设置项 hlsAdFilter 开关，addHls 读取） | 已完成 |
+| T50 | 真实视频流提取三机制 + 组件测试 + 旧解析器 + MiSans 字体：①parse-window.js 视频流提取补齐三机制（webRequest 拦截媒体请求 + JS 注入轮询 <video>/<audio> 元素拿 currentSrc/src + legacy 旧解析器 iframe src 监听：注入 MutationObserver 记 window.__vpc_iframe_src，媒体直链即命中、非媒体页跟随加载限深 2 防环；captureDirect/_tryIframe/resolve 增 legacy 参数，vpc:capture-direct 兼容 {url,legacy}，kazumiResolve 返回 useLegacyParser 前端透传）②组件测试（新 tests/js/ 4 个 node --test 单测 27 例：downloader.flatten / mpv-player 静态助手 parseDanmaku·_assColor·_ts / hls-downloader filterAdSegments·isAdUri（新增导出）/ dl-record（构造器改可注入路径）；npm 增 test:jsunit 并入 test:all）③旧解析器（同上 legacy 分支，Plugin.use_legacy_parser 贯通）④MiSans 内置字体（download-binaries.js 增 misans 目标：拉 misans@4.1.0 lib/Normal 的 Regular+Bold .min.css + 按 url() 解析分片 woff2 并发 8 下载幂等；新 src/main/misans.js ensureMisans 后台跑脚本 + fontCssUrls 返回 file:// URL；index.js 启动 ensure 就绪发 vpc:font-ready + vpc:font-css IPC；preload fontCss/onFontReady；app.js 启动注入 <link> 并在就绪后重注入；ui.css font-family 置 MiSans 于系统字体前，缺字回退） | 已完成 |

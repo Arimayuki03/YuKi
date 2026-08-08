@@ -27,6 +27,7 @@ const FileManager = require('./file-manager');
 const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
+const misans = require('./misans');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
@@ -741,15 +742,21 @@ app.whenReady().then(() => {
     });
 
     // 无解析接口（或解析失败）时的兜底：隐藏窗口直开链接抓媒体请求（share 分享页自带播放器）
-    ipcMain.handle('vpc:capture-direct', async (_e, url) => {
+    ipcMain.handle('vpc:capture-direct', async (_e, payload) => {
         try {
-            const r = await parseWin.captureDirect(String(url || ''));
+            // 兼容两种调用：字符串 url（旧）或 {url, legacy}（Kazumi 旧解析器）
+            const url = (payload && typeof payload === 'object') ? String(payload.url || '') : String(payload || '');
+            const legacy = !!(payload && typeof payload === 'object' && payload.legacy);
+            const r = await parseWin.captureDirect(url, undefined, legacy);
             return (r && r.ok) ? r : { ok: false, reason: 'capture-failed' };
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
     ipcMain.handle('vpc:settings-get', () => settings.all());
     ipcMain.handle('vpc:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
+
+    // MiSans 内置字体：渲染层查询已就绪的 CSS file:// URL（未就绪返回空数组，回退系统字体）
+    ipcMain.handle('vpc:font-css', () => ({ urls: misans.fontCssUrls() }));
 
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
@@ -1293,6 +1300,8 @@ app.whenReady().then(() => {
         if (settings.get('anime4k') === undefined && buildAnime4kChain()) settings.set('anime4k', true);
         if (settings.get('anime4k')) mpv.anime4kShaders = buildAnime4kChain();
     });
+    // MiSans 内置字体：启动后台补齐，就绪后通知渲染层注入（未就绪时回退系统字体，不影响使用）
+    misans.ensureMisans().then((ok) => { if (ok) send('vpc:font-ready', {}); });
     bridge.start();
     parseWin = new ParseWindow(() => bridge.info);
     pushServer.on('push', ({ url }) => playPushedUrl(url, '局域网'));

@@ -118,7 +118,28 @@ const App = {
     },
 };
 
+/** 注入 MiSans 内置字体 CSS（去重；未就绪时为空数组，回退系统字体）。 */
+function injectFontLinks(urls) {
+    if (!Array.isArray(urls) || !urls.length) return;
+    for (const url of urls) {
+        if (document.querySelector(`link[href="${url}"]`)) continue;
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = url;
+        document.head.appendChild(link);
+    }
+}
+
 $(async function bootstrap() {
+    // MiSans 内置字体：尽早注入已就绪的 CSS；后台补齐完成后再次注入（首次启动字体稍后出现）
+    if (window.vpc && window.vpc.fontCss) {
+        window.vpc.fontCss().then((r) => injectFontLinks(r && r.urls)).catch(() => { });
+        if (window.vpc.onFontReady) {
+            window.vpc.onFontReady(() => {
+                window.vpc.fontCss().then((r) => injectFontLinks(r && r.urls)).catch(() => { });
+            });
+        }
+    }
     // 尽早恢复主题/壁纸/明暗/缩放/字体（只依赖本地 settings，无需等后端）
     try {
         const s = (await window.vpc.settingsGet()) || {};

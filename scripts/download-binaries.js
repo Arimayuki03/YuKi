@@ -1,10 +1,11 @@
 /**
  * download-binaries.js — 下载第三方二进制（Phase 4：mpv；aria2c 槽位 Phase 6 复用）
  *
- * 用法：node scripts/download-binaries.js [mpv|aria2|anime4k|ffmpeg|all]
+ * 用法：node scripts/download-binaries.js [mpv|aria2|anime4k|ffmpeg|misans|all]
  * 目标目录：<repo>/vendor/mpv/mpv.exe（.gitignore 已忽略 vendor/）
  * anime4k：Anime4K v4.1 超分着色器 → vendor/anime4k/*.glsl（设置里开启后 mpv 注入）
  * ffmpeg：m3u8 切片合成 + 本地视频预览图抓帧 → vendor/ffmpeg/ffmpeg.exe（应用启动也会自动下载）
+ * misans：MiSans 子集化 UI 字体 → vendor/misans/*.css + 分片 woff2（应用启动也会自动补齐）
  * Windows 额外支持：node scripts/download-binaries.js mpv --winget
  */
 const fs = require('fs');
@@ -208,6 +209,48 @@ async function downloadFfmpeg() {
     log(`ffmpeg 安装完成：${target}`);
 }
 
+// MiSans 子集化字体（npm misans@4.1.0，dsrkafuu 基于 Noto Sans SC 代码范围子集化）：
+// 按 unicode-range 分片成 ~100 个 woff2/字重，浏览器只加载用到的分片，总 ~2MB/字重。
+// 字重：Regular(330) 覆盖正文，Bold(630) 覆盖标题/强调；不引入 Medium，避免 400 正文
+// 命中 380 Medium 而非 330 Regular（浏览器按最近字重匹配）。目录：vendor/misans/
+const MISANS_BASE = 'https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/';
+const MISANS_WEIGHTS = ['Regular', 'Bold'];
+
+async function downloadMisans() {
+    const dir = path.join(VENDOR, 'misans');
+    ensureDir(dir);
+    // 1) 拉三个字重的 CSS（内含各分片 url 与 unicode-range）
+    const cssFiles = [];
+    for (const w of MISANS_WEIGHTS) {
+        const dest = path.join(dir, `MiSans-${w}.min.css`);
+        if (!(fs.existsSync(dest) && fs.statSync(dest).size > 1024)) {
+            try { await download(`${MISANS_BASE}MiSans-${w}.min.css`, dest); }
+            catch (e) { log(`MiSans-${w} CSS 下载失败：${e.message}`); continue; }
+        }
+        cssFiles.push(dest);
+    }
+    if (!cssFiles.length) { log('MiSans CSS 全部下载失败'); return; }
+    // 2) 解析所有 CSS 引用的分片，逐个下载（并发 8，跳过已存在 → 幂等）
+    const wanted = new Set();
+    for (const css of cssFiles) {
+        const text = fs.readFileSync(css, 'utf8');
+        for (const m of text.matchAll(/url\('([^']+)'\)/g)) wanted.add(m[1]);
+    }
+    const list = [...wanted];
+    let ok = 0;
+    const pool = [];
+    for (const name of list) {
+        const dest = path.join(dir, name);
+        if (fs.existsSync(dest) && fs.statSync(dest).size > 500) { ok++; continue; }
+        pool.push(download(`${MISANS_BASE}${name}`, dest)
+            .then(() => ok++)
+            .catch((e) => log(`分片 ${name} 下载失败：${e.message}`)));
+        if (pool.length >= 8) { await Promise.all(pool); pool.length = 0; }
+    }
+    await Promise.all(pool);
+    log(`MiSans 字体就绪（${ok}/${list.length} 分片）：${dir}`);
+}
+
 async function main() {
     const what = process.argv[2] || 'mpv';
     if (process.argv.includes('--winget') && WIN) {
@@ -219,6 +262,7 @@ async function main() {
     if (what === 'aria2' || what === 'all') await downloadAria2();
     if (what === 'anime4k' || what === 'all') await downloadAnime4k();
     if (what === 'ffmpeg' || what === 'all') await downloadFfmpeg();
+    if (what === 'misans' || what === 'all') await downloadMisans();
 }
 
 main().catch((e) => { console.error(`[download-binaries] FAILED: ${e.message}`); process.exit(1); });

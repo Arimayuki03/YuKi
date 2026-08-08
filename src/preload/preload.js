@@ -80,8 +80,9 @@ contextBridge.exposeInMainWorld('vpc', {
     onPushReceived: (cb) => ipcRenderer.on('vpc:push-received', (_e, info) => cb(info)),
     /** VIP 解析：目标地址 → 直链 {ok, url, header, via} | {ok:false, reason} */
     resolveParse: (url) => ipcRenderer.invoke('vpc:parse', url),
-    /** 无解析接口时的兜底：隐藏窗口直开链接抓播放器发出的媒体请求（share 分享页） */
-    captureDirect: (url) => ipcRenderer.invoke('vpc:capture-direct', url),
+    /** 无解析接口时的兜底：隐藏窗口直开链接抓播放器发出的媒体请求（share 分享页）。
+     *  legacy=true 走旧解析器（useLegacyParser）：监听 iframe src 并跟随。 */
+    captureDirect: (url, legacy) => ipcRenderer.invoke('vpc:capture-direct', { url, legacy: !!legacy }),
     /** 换肤：选择本地图片作壁纸（系统文件对话框，返回路径） */
     pickWallpaper: () => ipcRenderer.invoke('vpc:pick-wallpaper'),
     /** 应用版本号（设置页展示） */
@@ -110,6 +111,10 @@ contextBridge.exposeInMainWorld('vpc', {
     mpvScreenshotDir: () => ipcRenderer.invoke('vpc:mpv-screenshot-dir'),
     /** 启动自动重载 lastConfigUrl 完成 */
     onConfigReloaded: (cb) => ipcRenderer.on('vpc:config-reloaded', (_e, info) => cb(info)),
+    /** MiSans 内置字体：已就绪的 CSS file:// URL 列表（未就绪为空，回退系统字体） */
+    fontCss: () => ipcRenderer.invoke('vpc:font-css'),
+    /** 后台补齐 MiSans 完成后通知（渲染层注入 <link>） */
+    onFontReady: (cb) => ipcRenderer.on('vpc:font-ready', () => cb()),
     /** 鼠标侧键前进/后退事件 { dir: 'back'|'forward' }（渲染层维护视图历史栈） */
     onMouseNav: (cb) => ipcRenderer.on('vpc:mouse-nav', (_e, info) => cb(info)),
     /** 直播频道探活：批量检测 HTTP/HTTPS 流地址可达性，返回布尔数组 */

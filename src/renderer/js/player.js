@@ -308,9 +308,10 @@ const Player = {
             const header = {};
             if (data.userAgent) header['User-Agent'] = data.userAgent;
             if (data.referer) header['Referer'] = data.referer;
-            // 步骤 2：captureDirect 抓真实流（主进程隐藏窗口）
+            const legacy = !!data.useLegacyParser;
+            // 步骤 2：captureDirect 抓真实流（主进程隐藏窗口；旧解析器规则走 iframe src 监听）
             try {
-                const cap = await window.vpc.captureDirect(pageUrl);
+                const cap = await window.vpc.captureDirect(pageUrl, legacy);
                 if (cap && cap.ok) resolved = { url: cap.url, header: { ...header, ...(cap.header || {}) } };
             } catch (e) { /* 抓取异常 */ }
         } catch (e) { /* 解析异常 */ }

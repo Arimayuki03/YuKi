@@ -283,3 +283,6 @@ class HlsDownloader extends EventEmitter {
 }
 
 module.exports = HlsDownloader;
+// 导出纯函数供单测（组件测试：tests/js/hls-filter.test.js）
+module.exports.filterAdSegments = filterAdSegments;
+module.exports.isAdUri = isAdUri;

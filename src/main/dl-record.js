@@ -15,8 +15,9 @@ const { app } = require('electron');
 const MAX_RECORDS = 200; // 上限防无限增长，超出丢最旧
 
 class DlRecordStore {
-    constructor() {
-        this._file = null; // 惰性解析（app.getPath 需在 ready 后调用，延迟到首次读写）
+    /** @param filePath 可选：显式存储路径（单测注入临时路径）；缺省用 userData/dl-records.json。 */
+    constructor(filePath) {
+        this._file = filePath || null; // 惰性解析（app.getPath 需在 ready 后调用，延迟到首次读写）
         this._records = [];
         this._loaded = false;
     }

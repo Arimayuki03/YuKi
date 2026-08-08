@@ -79,7 +79,8 @@ html.dark {
 
 html, body {
     height: 100%;
-    font-family: Roboto, -apple-system, system-ui, sans-serif;
+    /* MiSans 内置 UI 字体（未就绪时回退系统字体）；数字/英文 Roboto 优先保证西文观感 */
+    font-family: Roboto, 'MiSans', -apple-system, system-ui, sans-serif;
     /* 正文基准字号 14px（T4 统一：正文 13~14px，tip-line 12px） */
     font-size: 14px;
     background: var(--md-surface);
