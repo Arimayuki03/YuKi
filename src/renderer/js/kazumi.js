@@ -28,6 +28,16 @@ const Kazumi = {
         $('#kazumi_rule_update').on('click', () => this.batchUpdate());
         $('#kazumi_cookie_view').on('click', () => this.viewCookies());
         $('#kazumi_cookie_clear').on('click', () => this.clearCookies());
+        // Bangumi 同步（需 token）
+        $('#bangumi_token_save').on('click', () => this.saveBangumiToken());
+        $('#bangumi_test').on('click', () => this.testBangumi());
+        $('#bangumi_collections_load').on('click', () => this.loadBangumiCollections());
+        $('#bangumi_collections').on('click', '.bangumi-col-del', (e) => {
+            const id = String($(e.currentTarget).data('id') || '');
+            const name = String($(e.currentTarget).data('name') || '');
+            if (id) this.removeBangumiCollection(id, name);
+        });
+        this._prefillBangumiToken();
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
@@ -394,6 +404,109 @@ const Kazumi = {
         } catch (e) { warnToast('清除失败'); }
     },
 
+    // ---------------------------------------------------------------- Bangumi 同步
+
+    /** 读取设置里的 Bangumi token。 */
+    async _getBangumiToken() {
+        try { const s = (await window.vpc.settingsGet()) || {}; return s.bangumiToken || ''; } catch (e) { return ''; }
+    },
+
+    /** 回填 token 输入框（设置已保存过时展示）。 */
+    async _prefillBangumiToken() {
+        const t = await this._getBangumiToken();
+        if (t) $('#bangumi_token').val(t);
+    },
+
+    /** 保存 token 到 settings（仅本机）。 */
+    async saveBangumiToken() {
+        const token = $('#bangumi_token').val().trim();
+        if (!token) { warnToast('请输入 Bangumi Access Token'); return; }
+        await window.vpc.settingsSet('bangumiToken', token);
+        warnToast('Token 已保存');
+        this.testBangumi();
+    },
+
+    /** 测试连接：GET /v0/me 显示用户名。 */
+    async testBangumi() {
+        const token = $('#bangumi_token').val().trim() || await this._getBangumiToken();
+        if (!token) { warnToast('请先保存 Bangumi Token'); return; }
+        try {
+            const rsp = await doAction('kazumiBangumiMe', { token }, '/kazumi/action');
+            const me = (rsp && rsp.me) || null;
+            const status = $('#bangumi_status');
+            if (me && me.username) {
+                status.text(`连接成功：${me.nickname || me.username}（ID ${me.id}）`).show();
+            } else {
+                status.text('连接失败：Token 无效或网络不可达').show();
+            }
+        } catch (e) { warnToast('测试连接失败'); }
+    },
+
+    /** 拉取并展示我的 Bangumi 收藏。 */
+    async loadBangumiCollections() {
+        const token = $('#bangumi_token').val().trim() || await this._getBangumiToken();
+        if (!token) { warnToast('请先保存 Bangumi Token'); return; }
+        try {
+            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100 }, '/kazumi/action');
+            const items = (rsp && rsp.items) || [];
+            const box = $('#bangumi_collections');
+            if (!items.length) { box.html('<div class="tip-line">收藏为空，或 Token 无效</div>'); return; }
+            const typeName = { 0: '想看', 1: '看过', 2: '在看', 3: '搁置', 4: '抛弃' };
+            box.html(items.map((it) => {
+                const s = (it.subject && it.subject) || {};
+                const name = s.name_cn || s.name || `subject ${it.subject_id}`;
+                const t = typeName[it.type] || it.type;
+                return `<div class="history-item">
+                    <span class="history-url" title="${escHtml(name)}">${escHtml(name)}</span>
+                    <span style="color:var(--md-on-surface-variant);font-size:11px;flex:none">${escHtml(t)}</span>
+                    <button class="history-btn bangumi-col-del" data-id="${escHtml(it.subject_id)}" data-name="${escHtml(name)}" title="删除收藏">✕</button>
+                </div>`;
+            }).join(''));
+        } catch (e) { warnToast('加载收藏失败'); }
+    },
+
+    /** 删除某条 Bangumi 收藏；返回是否成功（详情弹窗据此刷新状态）。 */
+    async removeBangumiCollection(subjectId, name) {
+        if (!await confirmDialog(`从 Bangumi 收藏中删除「${name}」？`, { okText: '删除' })) return false;
+        const token = await this._getBangumiToken();
+        try {
+            const rsp = await doAction('kazumiBangumiCollectionDel', { token, id: subjectId }, '/kazumi/action');
+            if (rsp && rsp.code === 200) { warnToast('已删除收藏'); this.loadBangumiCollections(); return true; }
+            warnToast('删除失败：' + ((rsp && rsp.msg) || '未知错误'));
+            return false;
+        } catch (e) { warnToast('删除失败'); return false; }
+    },
+
+    /** 设置某 subject 的收藏类型（详情弹窗追番按钮用）。 */
+    async setBangumiCollection(subjectId, type) {
+        const token = await this._getBangumiToken();
+        if (!token) { warnToast('请先在设置 → Kazumi 规则 → Bangumi 同步中保存 Token'); return false; }
+        try {
+            const rsp = await doAction('kazumiBangumiCollectionSet', { token, id: subjectId, type }, '/kazumi/action');
+            if (rsp && rsp.code === 200) { warnToast('已同步到 Bangumi'); return true; }
+            warnToast('同步失败：' + ((rsp && rsp.msg) || '未知错误'));
+            return false;
+        } catch (e) { warnToast('同步失败'); return false; }
+    },
+
+    /** 查询某 subject 的收藏状态（返回 {type} 或 null）。 */
+    async getBangumiCollection(subjectId) {
+        const token = await this._getBangumiToken();
+        if (!token) return null;
+        try {
+            const rsp = await doAction('kazumiBangumiCollectionGet', { token, id: subjectId }, '/kazumi/action');
+            return (rsp && rsp.collection) || null;
+        } catch (e) { return null; }
+    },
+
+    /** 查询并回填详情弹窗里某 subject 的 Bangumi 收藏下拉状态。 */
+    async _applyBangumiColState(subjectId) {
+        const col = await this.getBangumiCollection(subjectId);
+        const sel = $(`.kazumi-bangumi-col[data-id="${subjectId}"]`);
+        if (!sel.length) return;
+        sel.val((col && typeof col.type === 'number') ? col.type : -1);
+    },
+
     /** 检测规则有效性：后台并发搜索测试关键词，标记 valid/invalid。 */
     async checkValidity() {
         try {
@@ -711,6 +824,19 @@ const Kazumi = {
                 ${info.summary ? `<div class="kazumi-bangumi-summary">${escHtml(info.summary)}</div>` : ''}
             </div>
         </div>`;
+        // Bangumi 追番同步行（需 token；未配置时按钮提示去设置）
+        html += `<div class="kazumi-bangumi-colrow">
+            <span class="tip-line pad0">Bangumi 收藏</span>
+            <select class="md-select kazumi-bangumi-col" data-id="${info.id}">
+                <option value="-1">未收藏</option>
+                <option value="0">想看</option>
+                <option value="2">在看</option>
+                <option value="1">看过</option>
+                <option value="3">搁置</option>
+                <option value="4">抛弃</option>
+            </select>
+            <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-col-set">同步到 Bangumi</button>
+        </div>`;
         // 页签导航
         html += `<div class="class-tabs" id="bangumi-detail-tabs" style="margin-bottom:12px;">
             <span class="class-tab active" data-tab="episodes">分集</span>
@@ -721,6 +847,22 @@ const Kazumi = {
         </div>`;
         html += '<div id="bangumi-detail-content" style="max-height:40vh;overflow-y:auto;"></div>';
         box.html(html);
+        // 回填当前收藏状态（异步，不阻塞）
+        this._applyBangumiColState(info.id);
+        // 同步按钮：设置收藏类型后刷新状态；「未收藏」删除收藏
+        box.on('click', '.kazumi-bangumi-col-set', async (e) => {
+            if (token !== this._dlgToken) return;
+            const row = $(e.currentTarget).closest('.kazumi-bangumi-colrow');
+            const id = String(row.find('.kazumi-bangumi-col').data('id') || '');
+            const val = parseInt(row.find('.kazumi-bangumi-col').val(), 10);
+            const name = info.name_cn || info.name || '';
+            if (!id) return;
+            if (val < 0) {
+                if (await this.removeBangumiCollection(id, name)) this._applyBangumiColState(id);
+            } else if (await this.setBangumiCollection(id, val)) {
+                this._applyBangumiColState(id);
+            }
+        });
         // 默认载入分集
         await this._loadBangumiTab(info.id, 'episodes', token);
         // 页签切换

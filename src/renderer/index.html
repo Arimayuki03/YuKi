@@ -673,6 +673,24 @@
                             <button id="kazumi_cookie_clear" class="md-btn md-btn-tonal">清除 Cookie</button>
                         </div>
                     </div>
+                    <!-- Bangumi 同步（需 token，T46） -->
+                    <div class="tool-card" data-setcat="kazumi">
+                        <div class="tool-card-title">Bangumi 同步</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">获取 token</span>
+                                <div class="info-detail">前往 Bangumi「设置 → 开发」页创建 Access Token，粘贴后点保存；用于把详情页的番剧收藏/追番同步到你的 Bangumi 账号。token 仅保存在本机设置中。</div>
+                            </div>
+                        </div>
+                        <div class="md-field" style="margin-top:8px;"><input id="bangumi_token" class="md-input" type="password" placeholder="Bangumi Access Token（sk/ey 开头）" /></div>
+                        <div class="wall-row">
+                            <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
+                            <button id="bangumi_test" class="md-btn md-btn-tonal">测试连接</button>
+                            <button id="bangumi_collections_load" class="md-btn md-btn-tonal">我的收藏</button>
+                        </div>
+                        <div class="tip-line pad0" id="bangumi_status" style="margin-top:8px;display:none;"></div>
+                        <div id="bangumi_collections" class="history-list" style="margin-top:8px;"></div>
+                    </div>
                     <div class="tool-card" data-setcat="system">
                         <div class="tool-card-title">系统</div>
                         <div class="tip-line pad0">关闭主窗口时</div>

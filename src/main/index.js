@@ -926,9 +926,9 @@ app.whenReady().then(() => {
         return { ok: true, cleanedBytes };
     });
 
-    // 恢复默认设置：清偏好类键（保留收藏/历史/源等数据），重启应用确保全量生效
+    // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken']);
         app.relaunch();
         isQuitting = true;
         app.exit(0);
