@@ -11,6 +11,8 @@
  *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
+/* global $, doAction, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi */
+
 // 媒体直链后缀：已是直链则无需解析（share/播放页等才需解析）
 const DIRECT_MEDIA_RE = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 
@@ -126,6 +128,11 @@ const Player = {
             ? { site, flag, title, episodes, index: epIndex || 0 }
             : null;
 
+        // Kazumi 源分支（kimi UI）：site 为 kazumi:规则名 时走规则引擎解析
+        if (String(site).startsWith('kazumi:')) {
+            return await this._playKazumi(site, flag, id, title, subtitle, episodes, epIndex, carrySpeed, carryFullscreen);
+        }
+
         showLoading();
         let rsp;
         try {
@@ -204,6 +211,49 @@ const Player = {
         if (r && r.anime4k) extra.push('Anime4K 超分已生效');
         if (r && r.simulDl) extra.push('已同步加入后台下载');
         warnToast(extra.length ? `${msg}（${extra.join('，')}）` : msg);
+    },
+
+    /**
+     * Kazumi 源播放（kimi UI 设计，glm5.2 实现逻辑）：
+     * 1. 调 /kazumi/action do=kazumiResolve 取播放页 URL 与规则 headers
+     * 2. 调 window.vpc.captureDirect 抓真实视频流（隐藏 BrowserWindow 拦截 m3u8/mp4）
+     * 3. 抓到直链后与规则 headers 合并交 mpv 播放
+     * 4. 连播上下文与 CatVod 源共用同一套渲染层驱动机制
+     */
+    async _playKazumi(site, flag, id, title, subtitle, episodes, epIndex, carrySpeed, carryFullscreen) {
+        const pluginName = String(site).slice(7); // 去掉 kazumi: 前缀
+        if (!pluginName) { this._seq = null; return { ok: false, reason: '规则名为空' }; }
+        showLoading();
+        warnToast('正在解析 Kazumi 源播放地址…');
+        let resolved = null;
+        try {
+            // 步骤 1：取播放页与规则 headers（glm5.2 后端端点）
+            const rsp = await doAction('kazumiResolve', { pluginName, url: id }, '/kazumi/action');
+            const data = (rsp && typeof rsp === 'object') ? rsp : {};
+            const pageUrl = data.pageUrl || id;
+            const header = {};
+            if (data.userAgent) header['User-Agent'] = data.userAgent;
+            if (data.referer) header['Referer'] = data.referer;
+            // 步骤 2：captureDirect 抓真实流（主进程隐藏窗口）
+            try {
+                const cap = await window.vpc.captureDirect(pageUrl);
+                if (cap && cap.ok) resolved = { url: cap.url, header: { ...header, ...(cap.header || {}) } };
+            } catch (e) { /* 抓取异常 */ }
+        } catch (e) { /* 解析异常 */ }
+        hideLoading();
+        if (resolved && resolved.ok !== false && resolved.url) {
+            try {
+                const r = await window.vpc.playUrl(resolved.url, {
+                    title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
+                });
+                if (r && r.ok) { this._session = r.sessionId || 0; this._lastUrl = resolved.url; this._mpvToast(r, `Kazumi 源「${pluginName}」已在 mpv 播放`); return { ok: true }; }
+                if (r && r.reason === 'mpv-missing') { warnToast('解析成功但未安装 mpv，无法播放直链'); return { ok: false, reason: 'mpv-missing' }; }
+            } catch (e) { /* 播放异常走兜底 */ }
+        }
+        this._seq = null; // 本集未起播，连播链终止
+        const note = resolved && resolved.reason ? `Kazumi 源解析失败：${resolved.reason}` : 'Kazumi 源未解析到可播放地址';
+        this._showDialog(title, subtitle, '', id, note);
+        return { ok: false, reason: note };
     },
 
     /** 直链直接交 mpv（parse=1 但地址已是媒体直链时的快路径）。 */

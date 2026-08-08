@@ -5,7 +5,7 @@
  * 解析 vod_play_from / vod_play_url（$$$ 分源、# 分集、$ 名址分隔），
  * 线路切换 + 选集，集数点击交给 Player.play()。
  */
-/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, fillMissingCovers */
+/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, fillMissingCovers, Kazumi */
 
 const Detail = {
     site: '',
@@ -61,7 +61,13 @@ const Detail = {
             .on('click', '#detail-fav', () => this.toggleFav())
             // 想看/已看：未收藏先收藏再置标签；已高亮的按钮再点一次取消标记
             .on('click', '#detail-tag-want', () => this.setTag('want'))
-            .on('click', '#detail-tag-seen', () => this.setTag('seen'));
+            .on('click', '#detail-tag-seen', () => this.setTag('seen'))
+            // Kazumi 源弹窗（kimi UI）
+            .on('click', '#detail-kazumi-src', () => {
+                if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
+                    Kazumi.openSourceDialog(this.vodName || '', this.site, this.vodId);
+                }
+            });
         // Esc 返回（全局派发，详情激活时消费）
         registerEsc(() => {
             if (App.currentView === 'detail') { this.back(); return true; }
@@ -210,11 +216,25 @@ const Detail = {
 
         if (!this.sources.length) {
             html += '<div class="tip-line">该视频暂无播放源</div>';
+            // Kazumi 源入口：无 CatVod 源时也显示（kimi UI）
+            if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
+                html += `<div class="kazumi-entry tip-line" style="margin-top:12px;">
+                    <span>没有想看的源？</span>
+                    <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
+                </div>`;
+            }
             $('#detail-body').html(html);
             return;
         }
         html += `<div class="play-srcs">${this.sources.map((s, i) =>
             `<span class="play-src ${i === this.activeSource ? 'active' : ''}" data-idx="${i}">${escHtml(s.from)} (${s.episodes.length})</span>`).join('')}</div>`;
+        // Kazumi 源入口：仅当存在已启用规则时显示（kimi UI）
+        if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
+            html += `<div class="kazumi-entry tip-line" style="margin-bottom:12px;">
+                <span>没有想看的源？</span>
+                <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
+            </div>`;
+        }
         // 全选/勾选操作栏紧跟视频源按钮（T19）；倒序按钮置播放勾选集左侧、同款样式（T21）
         html += `<div class="ep-dl-bar">
             <label class="ep-dl-check-all"><input type="checkbox" id="ep-check-all">全选</label>

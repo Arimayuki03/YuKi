@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, initAuxPanels, ensureLocalPanel */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, initAuxPanels, ensureLocalPanel, Kazumi */
 
 const App = {
     currentView: 'home',
@@ -163,6 +163,8 @@ $(async function bootstrap() {
     Detail.init();
     Search.init();
     Live.init();
+    // Kazumi 规则引擎前端模块（kimi UI，glm5.2 后端端点）
+    if (typeof Kazumi !== 'undefined' && Kazumi.init) Kazumi.init();
     // 有上次配置时：先等主进程自动重载完成，再首次渲染首页（避免显示示例源）
     await App.waitConfigDone();
     await Home.init();

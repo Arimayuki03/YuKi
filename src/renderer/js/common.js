@@ -34,9 +34,10 @@ async function waitBackend() {
     return false;
 }
 
-/** POST /action（表单编码），自动 JSON 解析返回；30s 超时防永久挂起。 */
-async function doAction(action, kv) {
-    const rsp = await fetch(apiUrl('/action'), {
+/** POST /action（表单编码），自动 JSON 解析返回；30s 超时防永久挂起。
+ *  path 默认 '/action'，Kazumi 引擎调用传 '/kazumi/action'。 */
+async function doAction(action, kv, path) {
+    const rsp = await fetch(apiUrl(path || '/action'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ ...kv, do: action }).toString(),

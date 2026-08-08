@@ -13,6 +13,7 @@
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
     <script src="js/detail.js" defer></script>
+    <script src="js/kazumi.js" defer></script>
     <script src="js/player.js" defer></script>
     <script src="js/records.js" defer></script>
     <script src="js/downloads.js" defer></script>
@@ -226,6 +227,7 @@
                         <span class="settings-nav-item" data-cat="cache">缓存</span>
                         <span class="settings-nav-item" data-cat="asset">扩展</span>
                         <span class="settings-nav-item" data-cat="source">源设置</span>
+                        <span class="settings-nav-item" data-cat="kazumi">Kazumi 规则</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
                     </div>
                     <div class="settings-grid">
@@ -530,6 +532,29 @@
                             <button id="blocked_restore" class="md-btn md-btn-tonal">恢复被屏蔽的源并重新探测</button>
                         </div>
                     </div>
+                    <!-- Kazumi 规则管理（kimi UI，glm5.2 后端端点） -->
+                    <div class="tool-card" data-setcat="kazumi">
+                        <div class="tool-card-title">导入 Kazumi 规则</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">规则格式</span>
+                                <div class="info-detail">粘贴 Kazumi 规则 JSON（api 小于等于 8）或 kazumi:// 分享链接；规则用于补充 CatVod 源不足时的番剧搜索与播放。</div>
+                            </div>
+                        </div>
+                        <div class="md-field">
+                            <textarea id="kazumi_rule_json" class="md-input" rows="5" placeholder='{"api":"5","name":"enlie","baseURL":"https://...","searchURL":"...","searchList":"//div",...}'></textarea>
+                        </div>
+                        <div class="wall-row">
+                            <button id="kazumi_rule_add" class="md-btn md-btn-filled">导入规则</button>
+                            <button id="kazumi_rule_paste" class="md-btn md-btn-tonal">从剪贴板导入</button>
+                            <button id="kazumi_rule_clear" class="md-btn md-btn-tonal">清空</button>
+                        </div>
+                    </div>
+                    <div class="tool-card" data-setcat="kazumi">
+                        <div class="tool-card-title">已安装规则（<span id="kazumi_rule_count">0</span>）</div>
+                        <div class="tip-line pad0">启用后可在详情页「Kazumi 规则源」与聚合搜索中使用；禁用后不再出现。</div>
+                        <div id="kazumi_rule_list" class="history-list"></div>
+                    </div>
                     <div class="tool-card" data-setcat="system">
                         <div class="tool-card-title">系统</div>
                         <div class="tip-line pad0">关闭主窗口时</div>
@@ -662,6 +687,19 @@
             <div class="md-dialog-body" id="blocked_list" style="max-height:50vh;overflow-y:auto;"></div>
             <div class="md-dialog-actions">
                 <button onclick="closeDialog('blockedDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Kazumi 规则源选择（kimi UI 设计，glm5.2 数据逻辑） -->
+    <div id="kazumiSourceDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title" id="kazumi-dialog-title">Kazumi 规则源</div>
+            <div class="md-dialog-body" id="kazumi-dialog-body" style="max-height:60vh;overflow-y:auto;">
+                <div class="tip-line">载入中…</div>
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('kazumiSourceDialog')" class="md-dialog-btn">关闭</button>
             </div>
         </div>
     </div>

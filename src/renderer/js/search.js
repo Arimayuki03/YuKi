@@ -9,7 +9,7 @@
  * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, pageSizeOf, fillMissingCovers */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, renderPagerBox, pageSizeOf, fillMissingCovers, doAction, Kazumi */
 
 const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
@@ -30,7 +30,13 @@ const Search = {
         });
         $('#search-results').on('click', '.vod-card', (e) => {
             const el = $(e.currentTarget);
-            Detail.open(el.data('source'), el.data('id'), el.data('name'));
+            const src = String(el.data('source') || '');
+            // Kazumi 结果点击进 Kazumi 详情弹窗（无 vod_id，用 src 标识）
+            if (src.startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
+                Kazumi.openSourceDialog(el.data('name') || '', src, el.data('id') || '');
+                return;
+            }
+            Detail.open(src, el.data('id'), el.data('name'));
         });
         // 来源筛选标签：全部（限显前 20 条）/ 单源（分页看全部）
         $('#search-filters').on('click', '.class-tab', (e) => {
@@ -75,6 +81,7 @@ const Search = {
         this.es = es;
         let sources = 0;
         let items = 0;
+        let kazumiDone = false;
 
         es.onmessage = (ev) => {
             let payload;
@@ -89,6 +96,7 @@ const Search = {
         es.addEventListener('done', () => {
             es.close();
             this.es = null;
+            kazumiDone = true;
             $('#search-status').text(items ? `完成：${sources} 个源 · ${items} 条结果` : '无结果');
             if (!items) $('#search-results').html('<div class="tip-line">无结果</div>');
             this._fillAllCovers();
@@ -99,12 +107,28 @@ const Search = {
             if (this.es === null) return;
             es.close();
             this.es = null;
+            kazumiDone = true;
             if (!sources) { $('#search-status').text('搜寻失败'); warnToast('搜寻失败'); }
             else {
                 $('#search-status').text(`完成：${sources} 个源 · ${items} 条结果`);
                 this._fillAllCovers();
             }
         };
+
+        // Kazumi 聚合搜索（与 CatVod SSE 并行；kimi UI 设计，glm5.2 后端端点）
+        if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
+            Kazumi.aggregateSearch(word).then((results) => {
+                if (!results || !results.length) return;
+                if (this._curSrc) return; // 已切到单源筛选，不追加 Kazumi 结果
+                results.forEach((r) => {
+                    const payload = { source: 'kazumi:' + r.pluginName, name: r.pluginName };
+                    this.renderGroup(payload, r.data || []);
+                    sources += 1;
+                    items += (r.data || []).length;
+                });
+                if (!kazumiDone) $('#search-status').text(`已接收 ${sources} 个源 · ${items} 条结果…`);
+            }).catch(() => { /* Kazumi 搜索失败不影响 CatVod 结果 */ });
+        }
     },
 
     /** 搜索结束后统一补拉各组封面（T43：流式期间暂缓，避免与源拉页争引擎锁）。 */
@@ -144,6 +168,14 @@ const Search = {
         const pagecount = focused ? Math.ceil(grp.list.length / size) : 1;
         const slice = grp.list.slice((page - 1) * size, page * size);
         const cards = slice.map((v) => {
+            // Kazumi 结果无 vod_id/vod_pic，用 src 作为标识，加 kazumi 徽章（kimi UI）
+            if (String(grp.src).startsWith('kazumi:')) {
+                return `<div class="vod-card kazumi-card" data-id="${escHtml(v.src)}" data-name="${escHtml(v.name)}" data-source="${escHtml(grp.src)}" tabindex="0">
+                    <div class="vod-cover"><div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div><img src="assets/cover-fallback.svg" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="coverFadeIn(this)"></div>
+                    <div class="vod-name" title="${escHtml(v.name)}">${escHtml(v.name)}</div>
+                    <div class="vod-remarks">Kazumi 规则源</div>
+                </div>`;
+            }
             const html = vodCard(v);
             return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
         }).join('');
