@@ -454,6 +454,13 @@ def dispatch_kazumi_action(form):
             ok = kazumi_mgr.remove(name)
             return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
 
+        if do == 'kazumiGet':
+            name = form.get('name', '')
+            plugin = kazumi_mgr.get(name)
+            if not plugin:
+                return 404, json.dumps({'code': 404, 'msg': 'not found'}, ensure_ascii=False)
+            return 200, json.dumps({'code': 200, 'rule': plugin.to_json()}, ensure_ascii=False)
+
         if do == 'kazumiToggle':
             name = form.get('name', '')
             enabled = form.get('enabled', '1').lower() in ('1', 'true', 'yes')

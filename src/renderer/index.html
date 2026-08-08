@@ -565,6 +565,7 @@
                             <button id="kazumi_rule_paste" class="md-btn md-btn-tonal">从剪贴板导入</button>
                             <button id="kazumi_rule_clear" class="md-btn md-btn-tonal">清空</button>
                             <button id="kazumi_rule_shop" class="md-btn md-btn-tonal">规则商店</button>
+                            <button id="kazumi_rule_editor" class="md-btn md-btn-tonal">新建规则</button>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="kazumi">
@@ -704,6 +705,42 @@
             <div class="md-dialog-body" id="blocked_list" style="max-height:50vh;overflow-y:auto;"></div>
             <div class="md-dialog-actions">
                 <button onclick="closeDialog('blockedDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Kazumi 规则编辑器（kimi UI 设计） -->
+    <div id="kazumiEditorDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide" style="max-width:720px;">
+            <div class="md-dialog-title" id="kazumi-editor-title">规则编辑器</div>
+            <div class="md-dialog-body" id="kazumi-editor-body" style="max-height:70vh;overflow-y:auto;">
+                <div class="tip-line pad0" style="margin-bottom:12px;">可视化编辑 Kazumi 规则（XPath 模式）；保存前可先测试。</div>
+                <div class="md-field"><input id="editor_name" class="md-input" placeholder="规则名称（唯一标识）" /></div>
+                <div class="md-field"><input id="editor_version" class="md-input" placeholder="版本（如 1.0）" /></div>
+                <div class="md-field"><input id="editor_baseURL" class="md-input" placeholder="基础地址（baseURL）" /></div>
+                <div class="md-field"><input id="editor_searchURL" class="md-input" placeholder="搜索地址（含 @keyword 占位）" /></div>
+                <div class="md-field"><input id="editor_searchList" class="md-input" placeholder="搜索结果列表（XPath）" /></div>
+                <div class="md-field"><input id="editor_searchName" class="md-input" placeholder="条目名称（XPath）" /></div>
+                <div class="md-field"><input id="editor_searchResult" class="md-input" placeholder="条目链接（XPath）" /></div>
+                <div class="md-field"><input id="editor_chapterRoads" class="md-input" placeholder="播放线路列表（XPath）" /></div>
+                <div class="md-field"><input id="editor_chapterResult" class="md-input" placeholder="剧集列表（XPath）" /></div>
+                <div class="md-field"><input id="editor_referer" class="md-input" placeholder="播放 Referer（可选）" /></div>
+                <div class="md-field"><input id="editor_userAgent" class="md-input" placeholder="User-Agent（可选）" /></div>
+                <div class="hotkey-grid" style="margin-top:8px;">
+                    <div><div class="tip-line pad0">搜索模式</div><select id="editor_searchMode" class="md-select"><option value="xpath">XPath</option><option value="api">API</option></select></div>
+                    <div><div class="tip-line pad0">选集模式</div><select id="editor_chapterMode" class="md-select"><option value="xpath">XPath</option><option value="api">API</option></select></div>
+                </div>
+                <div style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;">
+                    <label class="md-switch"><input type="checkbox" id="editor_usePost"><span class="md-switch-track"></span><span class="md-switch-label">POST 搜索</span></label>
+                    <label class="md-switch"><input type="checkbox" id="editor_useLegacyParser"><span class="md-switch-track"></span><span class="md-switch-label">简易解析</span></label>
+                    <label class="md-switch"><input type="checkbox" id="editor_adBlocker"><span class="md-switch-track"></span><span class="md-switch-label">广告过滤</span></label>
+                </div>
+                <div class="md-field" style="margin-top:12px;"><input id="editor_test_keyword" class="md-input" placeholder="测试关键字（默认：测试）" /></div>
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('kazumiEditorDialog')" class="md-dialog-btn">取消</button>
+                <button id="kazumi-editor-test" class="md-dialog-btn">测试规则</button>
+                <button id="kazumi-editor-save" class="md-dialog-btn" style="background:var(--md-primary);color:var(--md-on-primary);">保存</button>
             </div>
         </div>
     </div>

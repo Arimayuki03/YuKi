@@ -23,9 +23,14 @@ const Kazumi = {
         $('#kazumi_rule_paste').on('click', () => this.importFromClipboard());
         $('#kazumi_rule_clear').on('click', () => $('#kazumi_rule_json').val(''));
         $('#kazumi_rule_shop').on('click', () => this.openShopDialog());
+        $('#kazumi_rule_editor').on('click', () => this.openEditorDialog());
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
+        });
+        $('#kazumi_rule_list').on('click', '.kazumi-rule-edit', (e) => {
+            const name = String($(e.currentTarget).data('name') || '');
+            if (name) this.openEditorDialog(name);
         });
         $('#kazumi_rule_list').on('change', '.kazumi-rule-toggle', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
@@ -58,6 +63,7 @@ const Kazumi = {
         box.html(this._rules.map((r) => `
             <div class="history-item">
                 <span class="history-url" title="${escHtml(r.name)} v${escHtml(r.version || '')}">${escHtml(r.name)} <span style="color:var(--md-on-surface-variant);font-size:11px">v${escHtml(r.version || '')}</span></span>
+                <button class="history-btn kazumi-rule-edit" data-name="${escHtml(r.name)}" title="编辑规则">✎</button>
                 <label class="md-switch" style="margin:0;flex:none">
                     <input type="checkbox" class="kazumi-rule-toggle" data-name="${escHtml(r.name)}" ${r.enabled !== false ? 'checked' : ''}>
                     <span class="md-switch-track"></span>
@@ -105,6 +111,139 @@ const Kazumi = {
             if (text) $('#kazumi_rule_json').val(text);
             this.importRule();
         } catch (e) { warnToast('读取剪贴板失败'); }
+    },
+
+    // ---------------------------------------------------------------- 规则编辑器
+
+    /** 打开规则编辑器弹窗（新建或编辑现有规则）。 */
+    async openEditorDialog(ruleName) {
+        let rule = null;
+        if (ruleName) {
+            // 编辑现有规则
+            const rsp = await doAction('kazumiList', {}, '/kazumi/action');
+            const list = (rsp && rsp.list) || [];
+            const item = list.find((r) => r.name === ruleName);
+            if (item) {
+                // 拉取完整规则 JSON
+                try {
+                    const full = await doAction('kazumiGet', { name: ruleName }, '/kazumi/action');
+                    rule = (full && full.rule) || null;
+                } catch (e) { /* 取详情失败用基础信息 */ }
+            }
+        }
+        this._renderEditor(rule);
+        openDialog('kazumiEditorDialog');
+    },
+
+    _renderEditor(rule) {
+        const isNew = !rule;
+        rule = rule || {
+            api: '8', type: 'anime', name: '', version: '1.0',
+            muliSources: true, useWebview: true, useNativePlayer: true,
+            usePost: false, useLegacyParser: false, adBlocker: false,
+            userAgent: '', baseURL: '', searchURL: '',
+            searchList: '', searchName: '', searchResult: '',
+            chapterRoads: '', chapterResult: '', referer: '',
+            searchMode: 'xpath', chapterMode: 'xpath',
+            searchApiConfig: {}, chapterApiConfig: {},
+            antiCrawlerConfig: {}, enabled: true,
+        };
+        $('#kazumi-editor-title').text(isNew ? '新建规则' : `编辑规则 · ${rule.name}`);
+        // 填充表单
+        $('#editor_name').val(rule.name);
+        $('#editor_version').val(rule.version);
+        $('#editor_baseURL').val(rule.baseURL);
+        $('#editor_searchURL').val(rule.searchURL);
+        $('#editor_searchList').val(rule.searchList);
+        $('#editor_searchName').val(rule.searchName);
+        $('#editor_searchResult').val(rule.searchResult);
+        $('#editor_chapterRoads').val(rule.chapterRoads);
+        $('#editor_chapterResult').val(rule.chapterResult);
+        $('#editor_referer').val(rule.referer);
+        $('#editor_userAgent').val(rule.userAgent);
+        $('#editor_searchMode').val(rule.searchMode || 'xpath');
+        $('#editor_chapterMode').val(rule.chapterMode || 'xpath');
+        $('#editor_usePost').prop('checked', !!rule.usePost);
+        $('#editor_useLegacyParser').prop('checked', !!rule.useLegacyParser);
+        $('#editor_adBlocker').prop('checked', !!rule.adBlocker);
+        // 绑定保存/测试
+        $('#kazumi-editor-save').off('click').on('click', () => this.saveEditorRule(isNew));
+        $('#kazumi-editor-test').off('click').on('click', () => this.testEditorRule());
+    },
+
+    _collectEditorRule() {
+        return {
+            api: '8',
+            type: 'anime',
+            name: $('#editor_name').val().trim(),
+            version: $('#editor_version').val().trim() || '1.0',
+            muliSources: true,
+            useWebview: true,
+            useNativePlayer: true,
+            usePost: $('#editor_usePost').prop('checked'),
+            useLegacyParser: $('#editor_useLegacyParser').prop('checked'),
+            adBlocker: $('#editor_adBlocker').prop('checked'),
+            userAgent: $('#editor_userAgent').val().trim(),
+            baseURL: $('#editor_baseURL').val().trim(),
+            searchURL: $('#editor_searchURL').val().trim(),
+            searchList: $('#editor_searchList').val().trim(),
+            searchName: $('#editor_searchName').val().trim(),
+            searchResult: $('#editor_searchResult').val().trim(),
+            chapterRoads: $('#editor_chapterRoads').val().trim(),
+            chapterResult: $('#editor_chapterResult').val().trim(),
+            referer: $('#editor_referer').val().trim(),
+            searchMode: $('#editor_searchMode').val(),
+            chapterMode: $('#editor_chapterMode').val(),
+            searchApiConfig: {},
+            chapterApiConfig: {},
+            antiCrawlerConfig: {},
+            enabled: true,
+        };
+    },
+
+    async saveEditorRule(isNew) {
+        const rule = this._collectEditorRule();
+        if (!rule.name) { warnToast('规则名称不能为空'); return; }
+        showLoading();
+        try {
+            const rsp = await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+            hideLoading();
+            if (rsp && rsp.code === 200) {
+                warnToast(`规则「${rule.name}」${isNew ? '创建' : '保存'}成功`);
+                closeDialog('kazumiEditorDialog');
+                this.refreshRuleList();
+            } else {
+                warnToast('保存失败：' + ((rsp && rsp.msg) || '未知错误'));
+            }
+        } catch (e) {
+            hideLoading();
+            warnToast('保存失败');
+        }
+    },
+
+    async testEditorRule() {
+        const rule = this._collectEditorRule();
+        if (!rule.name) { warnToast('规则名称不能为空'); return; }
+        const keyword = $('#editor_test_keyword').val().trim() || '测试';
+        showLoading();
+        try {
+            // 先临时保存再测试
+            await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+            const rsp = await doAction('kazumiSearch', { keyword }, '/kazumi/action');
+            hideLoading();
+            const results = (rsp && rsp.results) || [];
+            const myResult = results.find((r) => r.pluginName === rule.name);
+            if (myResult && myResult.data && myResult.data.length) {
+                warnToast(`测试成功：找到 ${myResult.data.length} 条结果`);
+            } else if (myResult && myResult.captcha) {
+                warnToast('测试：该源需要验证码验证');
+            } else {
+                warnToast('测试：未找到结果（请检查规则或关键字）');
+            }
+        } catch (e) {
+            hideLoading();
+            warnToast('测试失败');
+        }
     },
 
     // ---------------------------------------------------------------- 在线规则商店

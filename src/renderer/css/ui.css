@@ -862,6 +862,13 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-detail-rel-type { flex:none; color:var(--md-primary); font-weight:600; }
 .kazumi-detail-rel-name { flex:1; color:var(--md-on-surface); }
 
+/* 规则编辑器 */
+#kazumiEditorDialog .md-dialog-body { padding:16px; }
+#kazumiEditorDialog .md-field { margin-bottom:10px; }
+#kazumiEditorDialog .md-input { height:40px; font-size:13px; }
+#kazumiEditorDialog .md-select { height:40px; font-size:13px; }
+#kazumiEditorDialog .hotkey-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
 /* 播放对话框（宽）+ URL 展示 */
 .md-dialog-wide { max-width:560px; }
 .player-url { margin-top:8px; font-size:12px; color:var(--md-on-surface-variant); word-break:break-all; }
