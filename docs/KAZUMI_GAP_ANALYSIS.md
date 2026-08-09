@@ -179,7 +179,7 @@
 
 | 功能 | Kazumi 原版 | video-pc 现状 | 差距 |
 |------|------------|--------------|------|
-| 单元测试 | ✅ 16 个测试文件 | ✅ 已实现（32 个 Kazumi 测试 + smoke 13 + phase3 25） | 无 |
+| 单元测试 | ✅ 16 个测试文件 | ✅ 已实现（55 个 Kazumi 测试 + smoke 13 + phase3 25） | 无 |
 | 组件测试 | ✅ widget 测试 | ✅ 已实现（node --test 27 个 JS 单测：downloader/mpv-player/hls-filter/dl-record） | 无 |
 | CI | ✅ pr.yaml / release.yaml | ❌ 未实现 | 可后续补充 |
 
