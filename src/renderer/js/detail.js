@@ -3,13 +3,13 @@
  *
  * 布局：
  *  - 头部：封面 + 标题/元信息 + 收藏/标记按钮
- *  - 页签：概览 | 吐槽 | 角色 | 关联 | 制作人员
+ *  - 页签：概览 | 分集 | 角色 | 制作 | 评论 | 关联
  *  - 概览：可收起简介 + 播放源/选集
  *  - 其他页签：Bangumi 数据（仅当匹配到 Bangumi 时显示）
  */
 /* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, Kazumi */
 
-const DETAIL_TABS = ['概览', '吐槽', '角色', '关联', '制作人员'];
+const DETAIL_TABS = ['概览', '分集', '角色', '制作', '评论', '关联'];
 
 /** 详情内容缓存（T74）：site|vodId → {ts, vod}，10 分钟 TTL，重复打开详情免重新拉取。 */
 const DETAIL_CACHE_TTL = 10 * 60 * 1000;
@@ -33,6 +33,7 @@ const Detail = {
     _characters: [],
     _staff: [],
     _relations: [],
+    _bgmExtraLoaded: false,
 
     init() {
         if (this._escBound) return;
@@ -136,6 +137,7 @@ const Detail = {
         this._characters = [];
         this._staff = [];
         this._relations = [];
+        this._bgmExtraLoaded = false;
         this._activeTab = '概览';
         App.showView('detail');
         this.load();
@@ -161,6 +163,7 @@ const Detail = {
         this._characters = [];
         this._staff = [];
         this._relations = [];
+        this._bgmExtraLoaded = false;
         this._activeTab = '概览';
         App.showView('detail');
         showLoading();
@@ -287,7 +290,7 @@ const Detail = {
 
     metaLine(vod) {
         const bits = [vod.type_name, vod.vod_year, vod.vod_area, vod.vod_remarks].filter(Boolean);
-        return bits.map(escHtml).join(' · ');
+        return bits.join(' · ');
     },
 
     render() {
@@ -295,34 +298,44 @@ const Detail = {
         const vod = this._vod;
         const bgm = this._bgmInfo;
         const hasBgm = !!this._bgmId;
-        // 详情封面渲染 180px（宽屏 300px），属中等尺寸 → 用 card 变体（common/medium）而非 large，
-        // 避免 1080p 大图降采样锯齿（T75）；bgm 无封面时回落源封面 vod_pic。
-        const cover = (bgm && bgm.images && bangumiCover(bgm.images, 'card'))
+        // 详情封面使用 detail 变体；bgm 无封面时回落源封面 vod_pic。
+        const cover = (bgm && bgm.images && bangumiCover(bgm.images, 'detail'))
             || (vod && vod.vod_pic) || '';
         const name = bgm ? (bgm.name_cn || bgm.name || (vod && vod.vod_name) || this.vodName) : ((vod && vod.vod_name) || this.vodName);
         const meta = bgm
-            ? [bgm.date, bgm.rating && bgm.rating.score ? `评分 ${bgm.rating.score}` : ''].filter(Boolean).join(' · ')
+            ? [bgm.date || bgm.air_date ? `放送 ${bgm.date || bgm.air_date}` : '', bgm.platform, bgm.type_name].filter(Boolean).join(' · ')
             : this.metaLine(vod || {});
+        const people = [
+            vod && vod.vod_director ? `导演：${escHtml(vod.vod_director)}` : '',
+            vod && vod.vod_actor ? `演员：${escHtml(vod.vod_actor)}` : '',
+        ].filter(Boolean).join('<span class="detail-people-sep">·</span>');
+        const localActions = vod ? `<div class="detail-actions">
+                <button id="detail-fav" class="md-btn md-btn-tonal md-btn-sm">☆ 收藏</button>
+                <button id="detail-tag-want" class="md-btn md-btn-tonal md-btn-sm">想看</button>
+                <button id="detail-tag-seen" class="md-btn md-btn-tonal md-btn-sm">已看</button>
+            </div>` : '';
         let html = `
-        <div class="detail-head">
-            <div class="detail-cover">${vodCoverImg(cover)}</div>
-            <div class="detail-info">
-                <div class="detail-title">${escHtml(name)}</div>
-                <div class="detail-meta">${escHtml(meta)}</div>
-                ${vod && vod.vod_director ? `<div class="detail-sub">导演：${escHtml(vod.vod_director)}</div>` : ''}
-                ${vod && vod.vod_actor ? `<div class="detail-sub">演员：${escHtml(vod.vod_actor)}</div>` : ''}
-                <div class="detail-actions">
-                    ${vod ? `<button id="detail-fav" class="md-btn md-btn-tonal md-btn-sm">☆ 收藏</button>
-                    <button id="detail-tag-want" class="md-btn md-btn-tonal md-btn-sm">想看</button>
-                    <button id="detail-tag-seen" class="md-btn md-btn-tonal md-btn-sm">已看</button>` : ''}
+        <div class="detail-head detail-hero ${hasBgm ? 'detail-hero-bangumi' : 'detail-hero-catvod'}">
+            <div class="detail-cover detail-hero-cover">${vodCoverImg(cover, true)}</div>
+            <div class="detail-info detail-hero-info">
+                <div class="detail-kicker">${hasBgm ? 'BANGUMI 详情' : '影片详情'}</div>
+                <h1 class="detail-title">${escHtml(name)}</h1>
+                <div class="detail-meta">${escHtml(meta || '暂无更多信息')}</div>
+                ${people ? `<div class="detail-people">${people}</div>` : ''}
+                ${hasBgm ? this._bangumiStatsHtml(bgm) : `<div class="detail-catvod-facts">
+                    <span class="detail-fact-label">播放信息</span>
+                    <span class="detail-fact-value">${this.sources.length ? `${this.sources.length} 条线路 · 共 ${this.sources[0].episodes.length} 集` : '暂无播放线路'}</span>
+                </div>`}
+                <div class="detail-hero-actions">
+                    ${localActions}
                     ${hasBgm ? this._bangumiColHtml(bgm) : ''}
                 </div>
             </div>
         </div>`;
         // 页签栏
-        const tabs = DETAIL_TABS.map((t) => `<span class="detail-tab ${t === this._activeTab ? 'active' : ''}" data-tab="${t}">${t}</span>`).join('');
-        html += `<div class="detail-tabs class-tabs">${tabs}</div>`;
-        html += `<div id="detail-tab-content"></div>`;
+        const tabs = DETAIL_TABS.map((t) => `<span class="detail-tab ${t === this._activeTab ? 'active' : ''}" data-tab="${t}" role="tab" aria-selected="${t === this._activeTab ? 'true' : 'false'}">${t}</span>`).join('');
+        html += `<div class="detail-tabs class-tabs" role="tablist" aria-label="详情内容">${tabs}</div>`;
+        html += `<div id="detail-tab-content" class="detail-content" role="tabpanel"></div>`;
         $('#detail-body').html(html);
         this._refreshFavBtn();
         this._refreshTagBtns();
@@ -336,44 +349,76 @@ const Detail = {
         }
     },
 
+    /** Bangumi 评分摘要：评分、星级、排名与 1-10 分人数分布共用一组 hero 指标。 */
+    _bangumiStatsHtml(bgm) {
+        const rating = (bgm && bgm.rating) || {};
+        const score = Number(rating.score) || 0;
+        const votes = Number(rating.total) || 0;
+        const rank = Number(rating.rank) || 0;
+        const stars = score
+            ? `<span class="bi-stars" aria-label="${escHtml(String(score))} 分（满分 10 分）"><span class="bi-stars-bg">★★★★★</span><span class="bi-stars-fill" style="width:${Math.round(Math.max(0, Math.min(10, score)) * 10)}%">★★★★★</span></span>`
+            : '<span class="detail-score-empty">暂无评分</span>';
+        const count = rating.count;
+        let histogram = '';
+        if (count && typeof count === 'object') {
+            const values = [];
+            for (let i = 1; i <= 10; i++) values.push(Number(count[i] || count[String(i)] || 0));
+            if (values.some((v) => v > 0)) {
+                const max = Math.max(1, ...values);
+                histogram = `<div class="bi-hist" title="评分分布（1-10 分人数）" aria-label="评分分布">${values.map((value, i) =>
+                    `<div class="bi-hist-col"><div class="bi-hist-bar" style="height:${Math.max(4, Math.round(value / max * 100))}%" title="${i + 1} 分：${value} 人"></div><span class="bi-hist-lb">${i + 1}</span></div>`
+                ).join('')}</div>`;
+            }
+        }
+        return `<div class="detail-bgm-stats">
+            <div class="detail-stat-score">
+                <span class="detail-stat-label">评分</span>
+                <div class="detail-stat-score-line"><strong>${score ? escHtml(String(score)) : '—'}</strong>${stars}</div>
+                <span class="detail-stat-note">${votes ? `${escHtml(votes.toLocaleString('zh-CN'))} 人评分` : '暂无评分人数'}</span>
+            </div>
+            <div class="detail-stat-rank"><span class="detail-stat-label">Bangumi 排名</span><strong>${rank ? `#${escHtml(String(rank))}` : '—'}</strong><span class="detail-stat-note">${rank ? '综合排名' : '暂无排名'}</span></div>
+            ${histogram}
+        </div>`;
+    },
+
     /** Bangumi 收藏按钮组 + 「开始观看」（统一详情页，T74）。 */
     _bangumiColHtml(bgm) {
         if (!bgm || !bgm.id) return '';
         const hasRules = typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules();
         let h = `<div class="kazumi-bangumi-colrow">
-            <span class="tip-line pad0">Bangumi 收藏（点击即同步）</span>
+            <div class="detail-action-copy"><span class="detail-action-label">Bangumi 收藏</span><span class="tip-line pad0">点击状态即可同步到账号</span></div>
             <div class="kazumi-col-btns" data-id="${escHtml(bgm.id)}">
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="2">看过</button>
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="4">搁置</button>
-                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="5">抛弃</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="2">看过</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="4">搁置</button>
+                <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="5">抛弃</button>
             </div>
         </div>`;
         if (hasRules) {
-            h += `<div class="kazumi-watch-row" style="margin-top:10px;">
-                <button id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm">▶ 开始观看（Kazumi 源）</button>
-                <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选源播放</span>
+            h += `<div class="kazumi-watch-row detail-watch-row">
+                <button type="button" id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm"><span class="detail-button-mark">▶</span>开始观看</button>
+                <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选择线路</span>
             </div>`;
         }
         return h;
     },
 
     _renderTabContent() {
-        const box = $('#detail-tab-content');
         if (this._activeTab === '概览') this._renderOverview();
-        else if (this._activeTab === '吐槽') this._renderComments();
+        else if (this._activeTab === '分集') this._renderEpisodes();
         else if (this._activeTab === '角色') this._renderCharacters();
+        else if (this._activeTab === '制作') this._renderStaff();
+        else if (this._activeTab === '评论') this._renderComments();
         else if (this._activeTab === '关联') this._renderRelations();
-        else if (this._activeTab === '制作人员') this._renderStaff();
     },
 
     _switchTab(tab) {
         if (tab === this._activeTab) return;
         this._activeTab = tab;
-        $('#detail-body .detail-tab').removeClass('active');
-        $(`#detail-body .detail-tab[data-tab="${tab}"]`).addClass('active');
+        $('#detail-body .detail-tab').removeClass('active').attr('aria-selected', 'false');
+        $(`#detail-body .detail-tab[data-tab="${tab}"]`).addClass('active').attr('aria-selected', 'true');
         this._renderTabContent();
     },
 
@@ -382,15 +427,15 @@ const Detail = {
         const bgm = this._bgmInfo;
         let html = '';
         // 简介（可收起）
-        const descText = bgm ? (bgm.summary || '') : stripHtml((vod && vod.vod_content) || '');
+        const descText = bgm ? stripHtml(bgm.summary || '') : stripHtml((vod && vod.vod_content) || '');
         if (descText) {
             const collapsed = this._descCollapsed && descText.length > 120;
             const shortText = collapsed ? escHtml(descText.slice(0, 120)) + '…' : escHtml(descText);
-            html += `<div class="detail-desc-wrap">
-                <div class="detail-desc-label">简介</div>
+            html += `<section class="detail-overview-card detail-desc-wrap">
+                <div class="detail-section-heading">简介</div>
                 <div class="detail-desc ${collapsed ? 'collapsed' : ''}">${shortText}</div>
-                ${descText.length > 120 ? `<button id="detail-desc-toggle" class="md-btn md-btn-sm md-btn-tonal" style="margin-top:4px;font-size:12px;">${collapsed ? '展开全部' : '收起'}</button>` : ''}
-            </div>`;
+                ${descText.length > 120 ? `<button type="button" id="detail-desc-toggle" class="md-btn md-btn-sm md-btn-tonal detail-desc-toggle">${collapsed ? '展开全部' : '收起'}</button>` : ''}
+            </section>`;
         }
         // Bangumi 标签
         if (bgm && Array.isArray(bgm.tags) && bgm.tags.length) {
@@ -398,50 +443,58 @@ const Detail = {
                 const tn = (t && typeof t === 'object') ? (t.name || '') : t;
                 return tn ? `<span class="kazumi-tag" data-tag="${escHtml(tn)}">${escHtml(tn)}</span>` : '';
             }).filter(Boolean).join('');
-            if (chips) html += `<div class="bangumi-info-tags"><div class="kazumi-tags-wrap">${chips}</div></div>`;
+            if (chips) html += `<section class="detail-overview-card bangumi-info-tags"><div class="detail-section-heading">标签</div><div class="kazumi-tags-wrap">${chips}</div></section>`;
         }
+        if (this.sources.length) {
+            const active = this.sources[this.activeSource] || this.sources[0];
+            html += `<section class="detail-overview-card detail-source-summary">
+                <div class="detail-source-summary-icon">▶</div>
+                <div class="detail-source-summary-copy"><div class="detail-section-heading">播放入口</div><div class="detail-source-summary-text">${escHtml(active.from)} · ${active.episodes.length} 集可播放</div></div>
+                <span class="detail-source-summary-hint">前往「分集」选择线路</span>
+            </section>`;
+        }
+        if (!html) html = '<div class="detail-empty-state">暂无概览信息</div>';
+        $('#detail-tab-content').html(`<div class="detail-overview-grid">${html}</div>`);
+    },
+
+    /** CatVod 线路/选集与 Bangumi-only 分集统一放在「分集」页签，避免概览区堆满播放控件。 */
+    _renderEpisodes() {
+        let html = '';
         if (!this.sources.length) {
-            // Bangumi-only（无 CatVod 源）：开始观看 + Bangumi 分集
-            if (bgm && this._bgmId) {
-                html += `<div class="kazumi-watch-row" style="margin-top:12px;">
-                    <button id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm">▶ 开始观看（Kazumi 源）</button>
-                    <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选源播放</span>
-                </div>`;
-                html += '<div class="tip-line pad0" style="margin:14px 0 8px;">分集（点击从 Kazumi 规则源选源播放）</div>';
-                html += '<div id="bgm-ep-list" class="ep-grid"></div>';
+            if (this._bgmId && this._bgmInfo) {
+                html += `<section class="detail-episodes-panel detail-bgm-episodes-panel">
+                    <div class="detail-section-head"><div><div class="detail-section-kicker">Bangumi 分集</div><h2 class="detail-section-title">选择集数</h2></div><span class="detail-section-note">点击后选择 Kazumi 线路</span></div>
+                    <div id="bgm-ep-list" class="ep-grid kazumi-episode-grid"></div>
+                </section>`;
                 $('#detail-tab-content').html(html);
                 this._renderBgmEpisodes();
                 return;
             }
-            html += '<div class="tip-line" style="margin-top:12px;">该视频暂无播放源</div>';
+            html = '<div class="detail-empty-state">该视频暂无播放源</div>';
             if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
-                html += `<div class="kazumi-entry tip-line" style="margin-top:12px;">
-                    <span>没有想看的源？</span>
-                    <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
-                </div>`;
+                html += `<div class="kazumi-entry"><span>没有想看的源？</span><button type="button" id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button></div>`;
             }
             $('#detail-tab-content').html(html);
             return;
         }
-        // 播放源
-        html += `<div class="play-srcs" style="margin-top:12px;">${this.sources.map((s, i) =>
-            `<span class="play-src ${i === this.activeSource ? 'active' : ''}" data-idx="${i}">${escHtml(s.from)} (${s.episodes.length})</span>`).join('')}</div>`;
-        if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
-            html += `<div class="kazumi-entry tip-line" style="margin-bottom:12px;">
-                <span>没有想看的源？</span>
-                <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
-            </div>`;
-        }
-        html += `<div class="ep-dl-bar">
-            <label class="ep-dl-check-all"><input type="checkbox" id="ep-check-all">全选</label>
-            <span class="dl-spacer"></span>
-            <span class="ep-dl-count" id="ep-dl-count"></span>
-            <button id="ep-order" class="md-btn md-btn-tonal md-btn-sm"></button>
-            <button id="ep-play-selected" class="md-btn md-btn-tonal md-btn-sm">▶ 播放勾选集</button>
-            <button id="ep-dl-selected" class="md-btn md-btn-tonal md-btn-sm">⬇ 下载勾选集</button>
-        </div>`;
-        html += `<div class="ep-toolbar"><span class="ep-count" id="ep-count"></span></div>`;
-        html += '<div id="ep-list" class="ep-grid"></div>';
+
+        html += `<section class="detail-episodes-panel">
+            <div class="detail-section-head"><div><div class="detail-section-kicker">CatVod 播放源</div><h2 class="detail-section-title">线路与选集</h2></div><span class="detail-section-note">${this.sources.length} 条线路</span></div>
+            <div class="detail-source-label">线路</div>
+            <div class="play-srcs">${this.sources.map((s, i) =>
+                `<button type="button" class="play-src ${i === this.activeSource ? 'active' : ''}" data-idx="${i}">${escHtml(s.from)} <span class="play-src-count">${s.episodes.length}</span></button>`).join('')}</div>
+            ${typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules() ? `<div class="kazumi-entry"><span>没有想看的源？</span><button type="button" id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button></div>` : ''}
+            <div class="ep-dl-bar">
+                <label class="ep-dl-check-all"><input type="checkbox" id="ep-check-all">全选</label>
+                <span class="dl-spacer"></span>
+                <span class="ep-dl-count" id="ep-dl-count"></span>
+                <button type="button" id="ep-order" class="md-btn md-btn-tonal md-btn-sm"></button>
+                <button type="button" id="ep-play-selected" class="md-btn md-btn-tonal md-btn-sm">▶ 播放勾选集</button>
+                <button type="button" id="ep-dl-selected" class="md-btn md-btn-tonal md-btn-sm">⬇ 下载勾选集</button>
+            </div>
+            <div class="ep-toolbar"><span class="ep-count" id="ep-count"></span></div>
+            <div id="ep-list" class="ep-grid"></div>
+        </section>`;
         $('#detail-tab-content').html(html);
         this.renderEpisodes();
     },
@@ -458,7 +511,7 @@ const Detail = {
                 ? list.map((ep) => `<div class="kazumi-detail-ep" tabindex="0">
                     <span class="kazumi-detail-ep-no">${escHtml(ep.sort || ep.ep || '')}</span>
                     <span class="kazumi-detail-ep-name">${escHtml(ep.name_cn || ep.name || '')}</span>
-                    <span class="kazumi-detail-ep-type">${escHtml(ep.type === 1 ? 'SP' : ep.type === 2 ? 'OP' : ep.type === 3 ? 'ED' : '')}</span>
+                    <span class="kazumi-detail-ep-type">${escHtml(Number(ep.type) === 1 ? 'SP' : Number(ep.type) === 2 ? 'OP' : Number(ep.type) === 3 ? 'ED' : '')}</span>
                 </div>`).join('')
                 : '<div class="tip-line">暂无分集信息</div>');
             box.find('.kazumi-detail-ep').on('click', () => {
@@ -475,23 +528,23 @@ const Detail = {
     _renderComments() {
         const box = $('#detail-tab-content');
         if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
-        if (!this._comments.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        if (!this._bgmExtraLoaded) { box.html('<div class="tip-line">加载中…</div>'); return; }
         box.html(this._comments.map((c) => `<div class="detail-comment">
             <div class="detail-comment-user">${escHtml((c.user && c.user.nickname) || c.username || '')}</div>
             <div class="detail-comment-text">${escHtml(c.comment || '')}</div>
             <div class="detail-comment-time">${escHtml(c.updated_at || '')}</div>
-        </div>`).join('') || '<div class="tip-line">暂无吐槽</div>');
+        </div>`).join('') || '<div class="tip-line">暂无评论</div>');
     },
 
     _renderCharacters() {
         const box = $('#detail-tab-content');
         if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
-        if (!this._characters.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        if (!this._bgmExtraLoaded) { box.html('<div class="tip-line">加载中…</div>'); return; }
         box.html(this._characters.map((c) => `<div class="detail-char">
             <img class="detail-char-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
             <div class="detail-char-info">
                 <div class="detail-char-name">${escHtml(c.name || '')}</div>
-                <div class="detail-char-role">${escHtml(c.relation || '')}</div>
+                <div class="detail-char-role">${escHtml(c.relation || c.role_name || '')}</div>
             </div>
         </div>`).join('') || '<div class="tip-line">暂无角色信息</div>');
     },
@@ -499,7 +552,7 @@ const Detail = {
     _renderStaff() {
         const box = $('#detail-tab-content');
         if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
-        if (!this._staff.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        if (!this._bgmExtraLoaded) { box.html('<div class="tip-line">加载中…</div>'); return; }
         box.html(this._staff.map((s) => `<div class="detail-staff">
             <span class="detail-staff-name">${escHtml(s.name || '')}</span>
             <span class="detail-staff-jobs">${escHtml((s.jobs || []).join(' / '))}</span>
@@ -509,7 +562,7 @@ const Detail = {
     _renderRelations() {
         const box = $('#detail-tab-content');
         if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
-        if (!this._relations.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        if (!this._bgmExtraLoaded) { box.html('<div class="tip-line">加载中…</div>'); return; }
         box.html(this._relations.map((r) => `<div class="detail-relation">
             <span class="detail-relation-type">${escHtml(r.relation || '')}</span>
             <span class="detail-relation-name">${escHtml(r.name_cn || r.name || '')}</span>
@@ -529,10 +582,11 @@ const Detail = {
             this._characters = chars || [];
             this._staff = staff || [];
             this._relations = relations || [];
-            if (this._activeTab === '吐槽') this._renderComments();
+            this._bgmExtraLoaded = true;
+            if (this._activeTab === '评论') this._renderComments();
             else if (this._activeTab === '角色') this._renderCharacters();
             else if (this._activeTab === '关联') this._renderRelations();
-            else if (this._activeTab === '制作人员') this._renderStaff();
+            else if (this._activeTab === '制作') this._renderStaff();
         } catch (e) { /* Bangumi 数据加载失败 */ }
     },
 
