@@ -395,7 +395,7 @@ function pushFile(yes) {
     window.vpc.filePush(currentFile).then((r) => {
         if (r && r.ok) warnToast('已在 mpv 窗口播放');
         else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
-        else if (r && r.reason === 'mpv-missing') warnToast('未检测到 mpv：执行 node scripts/download-binaries.js 安装');
+        else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
         else warnToast('播放失败');
     }).catch(() => warnToast('播放失败'));
 }
@@ -1178,6 +1178,35 @@ function initSettingsPanel() {
             refreshAssetStatus();
         }
     });
+    // 一键补装内置播放器（mpv）：未检测到播放器时按钮才显示（见 refreshAssetStatus）
+    $('#download_mpv').on('click', async () => {
+        const btn = $('#download_mpv');
+        if (btn.prop('disabled')) return;
+        btn.prop('disabled', true).text('下载中…');
+        warnToast('正在下载内置播放器（mpv），首次约需数十兆流量，请稍候…');
+        try {
+            const r = await window.vpc.downloadMpv();
+            if (r && r.ok) {
+                warnToast(r.already ? '内置播放器已就绪' : '内置播放器安装完成，现在可以播放视频了');
+                refreshMpvPathLine();
+                refreshAssetStatus();
+            } else if (r && r.reason === 'downloading') {
+                warnToast('下载已在进行中，请稍候…');
+            } else {
+                warnToast('下载失败：' + ((r && r.reason) || '未知错误') + '（可改用「指定播放器路径」选择本机 mpv.exe）');
+            }
+        } catch (e) {
+            warnToast('下载失败：' + (e.message || '未知错误'));
+        } finally {
+            btn.prop('disabled', false).text('下载内置播放器');
+        }
+    });
+    // mpv 异步启动失败（安装时取消内置播放器后文件缺失、损坏、无权限）：友好提示而非静默
+    window.vpc.onPlayerSpawnError(() => {
+        warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或点「下载内置播放器」');
+        refreshAssetStatus();
+        refreshMpvPathLine();
+    });
     // 局域网推送到达 → 提示（mpv 已由主进程直接接管播放）
     window.vpc.onPushReceived((info) => {
         warnToast(`收到推送，已开始播放：${(info.url || '').slice(0, 60)}`);
@@ -1404,6 +1433,10 @@ async function refreshAssetStatus() {
         </div>`;
     }).join('');
     box.html(rows);
+    // 播放器缺失时高亮「下载内置播放器」按钮，就绪则隐藏（避免误导用户重复下载）
+    const dlBtn = $('#download_mpv');
+    if (status.mpv && status.mpv.ready) dlBtn.hide();
+    else dlBtn.show();
 }
 
 /** 自定义 mpv 路径显示行：自动发现 vs 手动指定。 */

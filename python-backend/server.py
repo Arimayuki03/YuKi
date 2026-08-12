@@ -509,7 +509,7 @@ def create_app():
 
             def _search_one(plugin):
                 try:
-                    trace = kazumi_engine.search(plugin.execution_config(), word)
+                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), word)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
                         return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
                     data = [vars(it) for it in trace.response.data]
@@ -634,7 +634,7 @@ def dispatch_kazumi_action(form):
             results = [None] * len(plugins)
             def _search_one(idx, plugin):
                 try:
-                    trace = kazumi_engine.search(plugin.execution_config(), keyword)
+                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), keyword)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
                         results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
                     else:

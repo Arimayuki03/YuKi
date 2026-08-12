@@ -56,7 +56,7 @@ const My = {
             const mapped = items.map((it) => {
                 const subj = it.subject || {};
                 const name = subj.name_cn || subj.name || it.name || ('subject ' + it.subject_id);
-                const cover = (subj.images && (subj.images.large || subj.images.common || subj.images.medium)) || '';
+                const cover = bangumiCover(subj.images, 'card');   // 收藏网格卡封面（T75）
                 return {
                     site: 'bangumi',
                     siteName: 'Bangumi',

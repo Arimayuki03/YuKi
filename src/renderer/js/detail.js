@@ -295,9 +295,10 @@ const Detail = {
         const vod = this._vod;
         const bgm = this._bgmInfo;
         const hasBgm = !!this._bgmId;
-        const cover = bgm && bgm.images && (bgm.images.large || bgm.images.common || bgm.images.medium)
-            ? (bgm.images.large || bgm.images.common || bgm.images.medium)
-            : (vod && vod.vod_pic) || '';
+        // 详情封面渲染 180px（宽屏 300px），属中等尺寸 → 用 card 变体（common/medium）而非 large，
+        // 避免 1080p 大图降采样锯齿（T75）；bgm 无封面时回落源封面 vod_pic。
+        const cover = (bgm && bgm.images && bangumiCover(bgm.images, 'card'))
+            || (vod && vod.vod_pic) || '';
         const name = bgm ? (bgm.name_cn || bgm.name || (vod && vod.vod_name) || this.vodName) : ((vod && vod.vod_name) || this.vodName);
         const meta = bgm
             ? [bgm.date, bgm.rating && bgm.rating.score ? `评分 ${bgm.rating.score}` : ''].filter(Boolean).join(' · ')
@@ -565,7 +566,7 @@ const Detail = {
         await Records.setFavTag({
             site: this.site, vodId: this.vodId,
             name: this._bgmInfo ? (this._bgmInfo.name_cn || this._bgmInfo.name || vod.vod_name || this.vodName) : (vod.vod_name || this.vodName),
-            pic: this._bgmInfo && this._bgmInfo.images ? (this._bgmInfo.images.large || this._bgmInfo.images.common || this._bgmInfo.images.medium || vod.vod_pic) : (vod.vod_pic || ''),
+            pic: (this._bgmInfo && this._bgmInfo.images && bangumiCover(this._bgmInfo.images, 'card')) || vod.vod_pic || '',
             remarks: vod.vod_remarks || '',
             siteName: this._siteName(this.site),
         }, next);
@@ -581,7 +582,7 @@ const Detail = {
         const added = await Records.toggleFavorite({
             site: this.site, vodId: this.vodId,
             name: this._bgmInfo ? (this._bgmInfo.name_cn || this._bgmInfo.name || vod.vod_name || this.vodName) : (vod.vod_name || this.vodName),
-            pic: this._bgmInfo && this._bgmInfo.images ? (this._bgmInfo.images.large || this._bgmInfo.images.common || this._bgmInfo.images.medium || vod.vod_pic) : (vod.vod_pic || ''),
+            pic: (this._bgmInfo && this._bgmInfo.images && bangumiCover(this._bgmInfo.images, 'card')) || vod.vod_pic || '',
             remarks: vod.vod_remarks || '',
             siteName: this._siteName(this.site),
         });

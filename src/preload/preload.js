@@ -125,6 +125,12 @@ contextBridge.exposeInMainWorld('vpc', {
     pickMpv: () => ipcRenderer.invoke('vpc:pick-mpv'),
     clearMpvPath: () => ipcRenderer.invoke('vpc:clear-mpv-path'),
     mpvPath: () => ipcRenderer.invoke('vpc:mpv-path'),
+    /** 一键补装内置播放器（mpv）：下载到 userData/vendor 并自动生效 {ok, path} | {ok:false, reason} */
+    downloadMpv: () => ipcRenderer.invoke('vpc:download-mpv'),
+    /** mpv 下载进行中状态推送 { downloading } */
+    onMpvDownloadState: (cb) => ipcRenderer.on('vpc:mpv-download-state', (_e, info) => cb(info)),
+    /** mpv 进程异步启动失败（文件被删/损坏/无权限）：渲染层给友好提示 { code, reason } */
+    onPlayerSpawnError: (cb) => ipcRenderer.on('vpc:player-spawn-error', (_e, info) => cb(info)),
     /** 资产就绪状态：ffmpeg / mpv / aria2 / Anime4K 是否就绪 */
     assetStatus: () => ipcRenderer.invoke('vpc:asset-status'),
     /** SyncPlay 一起看：连接/断开/状态/文件/聊天 */

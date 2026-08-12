@@ -204,10 +204,52 @@ function vodCoverChain(pics, eager) {
     return `<img src="${first}" alt="" loading="${load}" decoding="async" referrerpolicy="no-referrer"${rest ? ` data-fb="${rest}"` : ''} onload="coverFadeIn(this)" onerror="coverChainNext(this)">`;
 }
 
+/**
+ * Bangumi 封面按渲染尺寸选源（T75 1080p 锯齿根因）：
+ * Bangumi /v0 images 对象含 {large, common, medium, small, grid}，large 约 ~600px+。
+ * 网格卡实际渲染仅 140-220px，用 large 让浏览器大幅降采样 → 1080p 屏出现锯齿
+ * （4K 像素足够掩盖）。改按渲染尺寸取更接近的变体（card/grid → common/medium），
+ * 详情大图 → large，让降采样比例更温和、锯齿消失。切勿用 image-rendering:crisp-edges（更糟）。
+ *
+ * 参数 imagesOrUrl 可为 images 对象，或旧缓存里的裸封面 URL 字符串
+ * （历史上存的是 large URL）——字符串走 lain.bgm.tv 路径段替换降级，优雅迁移旧缓存。
+ * size：'detail'（大图，取 large）| 'card' | 'grid'（网格卡，取 common/medium）。
+ */
+const _BGM_SIZE_SEG = { large: 'l', common: 'c', medium: 'm', small: 's', grid: 'g' };
+
+/** 把 lain.bgm.tv 封面 URL 的尺寸路径段（/pic/cover/{l,c,m,g,s}/）替换为目标变体；非该格式原样返回。 */
+function bangumiResizeUrl(url, variant) {
+    const seg = _BGM_SIZE_SEG[variant];
+    const u = String(url || '');
+    if (!seg || !u) return u;
+    return u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`);
+}
+
+function bangumiCover(imagesOrUrl, size) {
+    // 旧缓存：裸 URL 字符串（历史存 large）。detail 保留大图；card/grid 降级到 common 减锯齿。
+    if (typeof imagesOrUrl === 'string') {
+        const url = imagesOrUrl;
+        if (!url) return '';
+        return (size === 'detail') ? url : bangumiResizeUrl(url, 'common');
+    }
+    const images = imagesOrUrl;
+    if (!images || typeof images !== 'object') return '';
+    const chains = {
+        detail: ['large', 'common', 'medium', 'small', 'grid'],
+        card: ['common', 'medium', 'large', 'small', 'grid'],
+        grid: ['common', 'medium', 'small', 'large', 'grid'],
+    };
+    const chain = chains[size] || chains.card;
+    for (const k of chain) {
+        if (images[k]) return images[k];
+    }
+    return '';
+}
+
 /** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。 */
 function bangumiCard(item) {
     const name = item.name_cn || item.name || '';
-    const cover = (item.images && (item.images.large || item.images.common || item.images.medium)) || '';
+    const cover = bangumiCover(item.images, 'card');
     const rating = item.rating || {};
     const score = rating.score ? `⭐${rating.score}` : '';
     const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${rating.rank}">#${rating.rank}</span>` : '';

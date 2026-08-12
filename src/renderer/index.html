@@ -883,14 +883,15 @@
                         </div>
                         <button id="asset-refresh" class="md-btn md-btn-tonal" style="margin-top:10px;">刷新状态</button>
                         <div class="tip-line pad0" style="margin-top:8px;" id="mpv_path_line">mpv 路径：自动发现</div>
-                        <div style="margin-top:4px;display:flex;gap:8px;">
+                        <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;">
                             <button id="pick_mpv_path" class="md-btn md-btn-tonal">指定播放器路径</button>
                             <button id="clear_mpv_path" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
+                            <button id="download_mpv" class="md-btn md-btn-filled" style="display:none;">下载内置播放器</button>
                         </div>
                         <div class="tip-line pad0 info-tip" style="margin-top:6px;">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">扩展安装方式</span>
-                                <div class="info-detail">mpv / ffmpeg / aria2 缺失时可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
+                                <div class="info-detail">缺失播放器时可点上方「下载内置播放器」一键补装 mpv，或「指定播放器路径」选择本机已装的 mpv.exe；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
                             </div>
                         </div>
                     </div>

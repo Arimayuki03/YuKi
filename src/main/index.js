@@ -609,7 +609,7 @@ app.whenReady().then(() => {
     // 播放入口：mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
     ipcMain.handle('vpc:play', async (_e, payload) => {
         if (!mpv.isAvailable()) {
-            return { ok: false, reason: 'mpv-missing', hint: 'node scripts/download-binaries.js' };
+            return { ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器' };
         }
         const meta = payload.meta || {};
         const title = [meta.title, meta.subtitle].filter(Boolean).join(' · ');
@@ -891,6 +891,37 @@ app.whenReady().then(() => {
 
     ipcMain.handle('vpc:mpv-path', () => {
         return { customPath: settings.get('mpvPath') || '', available: mpv.isAvailable() };
+    });
+
+    // 一键补装内置播放器：用户在安装时取消勾选 mpv、或未内置时，从设置页触发下载。
+    // 下载到 userData/vendor（安装目录 resources/ 常在 Program Files 无写权限），完成后
+    // 复用自定义路径机制（setCustomPath + 持久化 mpvPath），下次起播即可用。
+    let _mpvDownloading = false;
+    ipcMain.handle('vpc:download-mpv', async () => {
+        if (process.platform !== 'win32') {
+            return { ok: false, reason: '非 Windows 平台请用系统包管理器安装 mpv（brew/apt install mpv）' };
+        }
+        if (mpv.isAvailable()) return { ok: true, path: mpv.binary, already: true };
+        if (_mpvDownloading) return { ok: false, reason: 'downloading' };
+        _mpvDownloading = true;
+        send('vpc:mpv-download-state', { downloading: true });
+        try {
+            const { downloadMpv } = require('../../scripts/download-binaries');
+            const vendorDir = path.join(app.getPath('userData'), 'vendor');
+            const target = await downloadMpv(vendorDir);
+            if (!target || !fs.existsSync(target)) return { ok: false, reason: 'download-failed' };
+            if (!mpv.setCustomPath(target)) return { ok: false, reason: '下载完成但校验失败（文件可能损坏）' };
+            settings.set('mpvPath', target);
+            if (Notification.isSupported()) {
+                new Notification({ title: '内置播放器已就绪', body: 'mpv 安装完成，现在可以播放视频了' }).show();
+            }
+            return { ok: true, path: target };
+        } catch (err) {
+            return { ok: false, reason: err.message || 'download-failed' };
+        } finally {
+            _mpvDownloading = false;
+            send('vpc:mpv-download-state', { downloading: false });
+        }
     });
 
     // 换肤：选择本地图片作壁纸（返回路径，渲染层转 file:// 引用）
@@ -1259,6 +1290,13 @@ app.whenReady().then(() => {
 
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
     mpv.on('ended', (info) => send('vpc:player-ended', info));
+    // mpv 进程异步启动失败（ENOENT/EACCES：文件被删/损坏/无权限）：友好告知渲染层，不崩溃、不静默
+    mpv.on('spawn-error', (info) => {
+        send('vpc:player-spawn-error', {
+            code: (info && info.code) || 'unknown',
+            reason: 'mpv-missing',
+        });
+    });
     mpv.on('exit', (info) => {
         const userStopped = !!(info && info.userStopped);
         send('vpc:player-exit', {

@@ -127,7 +127,7 @@ const Records = {
                     if (bgmResults && bgmResults.length && bgmResults[0].id) {
                         const info = await Kazumi.bangumiInfo(bgmResults[0].id);
                         if (info) {
-                            const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
+                            const cover = bangumiCover(info.images, 'card');   // 收藏网格卡封面（T75）
                             entry.pic = cover || entry.pic;
                             entry.name = info.name_cn || info.name || entry.name;
                             entry.bangumiId = String(info.id || '');

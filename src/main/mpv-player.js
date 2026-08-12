@@ -119,7 +119,14 @@ class MpvPlayer extends EventEmitter {
     /** 播放首项并装载播放列表。episodes: [{url, title}]；opts.header 注入 HTTP 头（解析直链常需 Referer） */
     play(episodes, opts = {}) {
         this.stop();
-        if (!this.binary) return { ok: false, reason: 'mpv not found' };
+        if (!this.binary) return { ok: false, reason: 'mpv-missing' };
+        // 起播前二次校验二进制真实存在：findMpv() 发现后文件被删（如安装时取消内置播放器、
+        // 或卸载补装目录被清）会让 spawn 抛异步 ENOENT。此处提前拦截，返回可用错误而非崩溃。
+        if (!fs.existsSync(this.binary)) {
+            console.warn(`[mpv] 二进制已不存在，标记为不可用：${this.binary}`);
+            this.binary = null;
+            return { ok: false, reason: 'mpv-missing' };
+        }
         if (!episodes || !episodes.length) return { ok: false, reason: 'empty playlist' };
         this._danmakuLines = [];
         this._writeAss();
@@ -191,6 +198,15 @@ class MpvPlayer extends EventEmitter {
         };
         this.proc = proc;
         this._activeSession = session;
+        // spawn 异步错误兜底：文件在 existsSync 之后被删/损坏/无执行权限时，Node 会异步
+        // 触发 'error'（ENOENT/EACCES）而非抛同步异常；不监听则进程崩溃。捕获后清理并
+        // 广播 mpv-missing，让渲染层给出友好提示而非静默失败。
+        proc.on('error', (err) => {
+            console.error(`[mpv] 启动失败（${err && err.code || 'unknown'}）：${err && err.message}`);
+            if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) this.binary = null;
+            this._teardown(sessionId);
+            this.emit('spawn-error', { sessionId, code: err && err.code, message: err && err.message });
+        });
         proc.on('exit', (code) => {
             // ChildProcess 的 exit 触发时 mpv IPC 通常已经断开；直接使用播放期间持续观察的缓存。
             const info = {

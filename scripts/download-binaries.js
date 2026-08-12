@@ -93,16 +93,17 @@ function extract(archivePath, destDir) {
     }
 }
 
-async function downloadMpv() {
-    const target = path.join(VENDOR, 'mpv', WIN ? 'mpv.exe' : 'mpv');
-    if (fs.existsSync(target)) { log(`mpv 已存在：${target}`); return; }
+async function downloadMpv(vendorDir) {
+    const vendor = vendorDir || VENDOR;
+    const target = path.join(vendor, 'mpv', WIN ? 'mpv.exe' : 'mpv');
+    if (fs.existsSync(target)) { log(`mpv 已存在：${target}`); return target; }
     if (!WIN) {
         log('非 Windows 平台请通过系统包管理器安装 mpv（brew install mpv / apt install mpv）');
-        return;
+        return null;
     }
-    ensureDir(path.join(VENDOR, 'mpv'));
-    // 暂存放在工作区 vendor/.tmp（避开系统临时目录权限差异）
-    const stage = path.join(VENDOR, '.tmp');
+    ensureDir(path.join(vendor, 'mpv'));
+    // 暂存放在 vendor/.tmp（避开系统临时目录权限差异）
+    const stage = path.join(vendor, '.tmp');
     ensureDir(stage);
 
     // 1) 取 latest release tag，选 mpv-x86_64-<tag>-git-*.7z（非 dev / 非 v3）
@@ -122,6 +123,7 @@ async function downloadMpv() {
     fs.copyFileSync(found, target);
     try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
     log(`mpv 安装完成：${target}`);
+    return target;
 }
 
 function findFile(dir, name) {
@@ -265,4 +267,9 @@ async function main() {
     if (what === 'misans' || what === 'all') await downloadMisans();
 }
 
-main().catch((e) => { console.error(`[download-binaries] FAILED: ${e.message}`); process.exit(1); });
+// 作为脚本直接运行时才执行 CLI 主流程；被 require（主进程一键补装）时仅导出函数。
+if (require.main === module) {
+    main().catch((e) => { console.error(`[download-binaries] FAILED: ${e.message}`); process.exit(1); });
+}
+
+module.exports = { downloadMpv, downloadAria2, downloadFfmpeg, downloadAnime4k, downloadMisans };

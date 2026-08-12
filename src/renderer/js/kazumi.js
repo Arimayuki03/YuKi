@@ -850,13 +850,20 @@ const Kazumi = {
                 if (!Array.isArray(kv) || !kv[0]) return;
                 const v = kv[1];
                 if (typeof v === 'string') {
-                    // 旧版仅封面格式 [name, url] 迁移：无 id，点击时仍会补搜一次并回填
-                    if (v) this._bgmMatchCache.set(kv[0], { id: 0, cover: v });
+                    // 旧版仅封面格式 [name, url] 迁移：无 id，点击时仍会补搜一次并回填。
+                    // 旧缓存存的是 large URL，网格卡用会在 1080p 降采样锯齿（T75）→ 迁移到 card 变体。
+                    if (v) this._bgmMatchCache.set(kv[0], { id: 0, cover: this._migrateCover(v) });
                 } else if (v && (v.id || v.cover)) {
-                    this._bgmMatchCache.set(kv[0], { id: Number(v.id) || 0, cover: v.cover || '' });
+                    this._bgmMatchCache.set(kv[0], { id: Number(v.id) || 0, cover: this._migrateCover(v.cover || '') });
                 }
             });
         } catch (e) { /* 损坏则忽略 */ }
+    },
+
+    /** 旧缓存封面迁移（T75）：历史存的是 large 尺寸 lain.bgm.tv URL，网格卡用会在 1080p
+     *  降采样锯齿。用共享 bangumiCover(string) 走路径段替换降级到 common；非该格式原样返回。 */
+    _migrateCover(url) {
+        return (typeof bangumiCover === 'function') ? bangumiCover(String(url || ''), 'card') : String(url || '');
     },
 
     /** 持久化匹配缓存（无 id 且无封面的空结果不落盘：下次会话可重试；只留最近 500 条防无限增长）。 */
@@ -915,8 +922,10 @@ const Kazumi = {
                     && (r.images.large || r.images.common || r.images.medium));
                 if (first) {
                     match = {
+                        // 缓存供卡片补封面用（records/search/补拉均为网格卡）→ 存 card 尺寸变体，
+                        // 避免 1080p 用 large 大幅降采样出现锯齿（T75）。
                         id: Number(first.id) || 0,
-                        cover: first.images.large || first.images.common || first.images.medium || '',
+                        cover: bangumiCover(first.images, 'card'),
                     };
                 }
             } catch (e) { /* 搜索失败按空匹配 */ }
@@ -1351,7 +1360,7 @@ const Kazumi = {
             if (token !== this._dlgToken || !results.length) return;
             const info = await this.bangumiInfo(results[0].id);
             if (token !== this._dlgToken || !info) return;
-            const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
+            const cover = bangumiCover(info.images, 'card');   // 弹窗横幅封面 80px（T75）
             const summary = (info.summary || '').slice(0, 200);
             const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
             const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
@@ -1409,7 +1418,7 @@ const Kazumi = {
     async _renderBangumiDetail(info, token, $box) {
         const box = $box || $('#kazumi-dialog-body');
         const name = info.name_cn || info.name || '';
-        const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
+        const cover = bangumiCover(info.images, 'card');   // 信息卡封面渲染 150px（T75）
         const rating = info.rating || {};
         const score = rating.score || 0;
         const votes = rating.total || 0;
@@ -1620,7 +1629,7 @@ const Kazumi = {
             const info = await this.bangumiCharacter(characterId);
             if (token !== this._dlgToken) return;
             if (!info) { box.html('<div class="tip-line">角色详情载入失败</div>'); return; }
-            const img = (info.images && (info.images.large || info.images.medium || info.images.small)) || '';
+            const img = bangumiCover(info.images, 'card');   // 角色详情图（T75）
             const metaBits = [
                 info.blood_type ? '血型 ' + info.blood_type : '',
                 info.birth_month ? `${info.birth_month}月${info.birth_day || ''}日` : '',

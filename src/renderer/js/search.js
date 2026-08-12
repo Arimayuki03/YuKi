@@ -71,7 +71,7 @@ const Search = {
                             // 回填缓存（补 id 后下次免搜）
                             if (typeof Kazumi.cacheBangumiMatch === 'function') {
                                 const r0 = bgmResults[0];
-                                const cv = (r0.images && (r0.images.large || r0.images.common || r0.images.medium)) || '';
+                                const cv = bangumiCover(r0.images, 'card');   // 网格卡封面缓存（T75）
                                 Kazumi.cacheBangumiMatch(name, r0.id, cv);
                             }
                             const id = bgmResults[0].id;

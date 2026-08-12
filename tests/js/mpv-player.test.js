@@ -140,3 +140,40 @@ test('stop() 标记当前会话 userStopped（退出时不得断流重连）', (
     p.stop();
     assert.equal(session.userStopped, true);
 });
+
+// ---------------------------------------------------------------- 无内置播放器（mpv 缺失）健壮性
+
+test('play(): binary=null 时返回 mpv-missing，不 spawn、不抛异常', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.binary = null;
+    p.stop = () => {}; // 隔离：避免触发 teardown 依赖的字段
+    const r = p.play([{ url: 'http://x/a.mp4', title: 'a' }]);
+    assert.deepEqual(r, { ok: false, reason: 'mpv-missing' });
+});
+
+test('play(): binary 指向不存在的文件时提前拦截为 mpv-missing 并清空 binary', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    const ghost = require('path').join(require('os').tmpdir(), 'vpc-no-such-mpv-xyz.exe');
+    try { require('fs').rmSync(ghost, { force: true }); } catch (e) { /* ignore */ }
+    p.binary = ghost;
+    p.stop = () => {};
+    const r = p.play([{ url: 'http://x/a.mp4', title: 'a' }]);
+    assert.deepEqual(r, { ok: false, reason: 'mpv-missing' });
+    assert.equal(p.binary, null); // 拦截后标记为不可用，isAvailable() 后续返回 false
+});
+
+test('isAvailable(): binary 缺失时为 false（渲染层据此走友好提示/降级）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.binary = null;
+    assert.equal(p.isAvailable(), false);
+    p.binary = 'C:/mpv/mpv.exe';
+    assert.equal(p.isAvailable(), true);
+});
+
+test('setCustomPath(): 不存在的路径返回 false，不改变现有 binary', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.binary = null;
+    const ok = p.setCustomPath(require('path').join(require('os').tmpdir(), 'vpc-nope-mpv.exe'));
+    assert.equal(ok, false);
+    assert.equal(p.binary, null);
+});
