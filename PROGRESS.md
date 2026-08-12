@@ -263,6 +263,19 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 - [x] 修正 T74 全矩阵实现导致的 3 个陈旧收藏测试（`test_update_collection_put_ok` 等 mock 用旧 `raise_for_status` 语义，实现已改 `status_code` 检查）——测试对齐实现，test_kazumi 78/78。
 - 验证：`npm run test:all` 全绿——Python smoke 13 + phase3 25 + compile 29 文件 0 错、JS 单元 131/131、JS 语法 34 文件 0 错。真实界面 QA 待用户在打包/运行环境实测。
 
+### 2026-08-12 用户问题批次（8 项，并行子代理分批修复）
+
+先只读侦查（4 个 explore agent）定位根因，再按 ui.css/detail.js 冲突约束分批委派修复，每批验证后提交。
+
+- [x] **#5 MiSans 字体点击后回退系统字体**：真实 Chromium 探针确认非字重问题（330/630 单值经 CSS 匹配算法能命中 400/500/600/700）；根因是原生 `button/select/input/textarea` 在 Chromium 不继承 `font-family`（UA 样式表给 Arial），无 `.md-*` 类的原生控件回退系统字体。修复：全局 `button,select,input,textarea,optgroup,option{font-family:inherit}`。附：Windows 原生 `<option>` 展开列表由 OS 绘制无法用 web 字体（平台限制，已注释）。
+- [x] **#2 收藏按钮 + 时间表筛选失效**：timeline `_buildColSets` 统一 `subject_id||subject.id||id` 取键 + `Number(type)` 归一（字符串 type 致集合恒空、过滤失效是根因）；`kazumi._applyBangumiColState` 同样 `Number(col.type)` 归一（否则设置成功后按钮不高亮，被误判失败）。+4 timeline 单测。
+- [x] **#1 Bangumi 封面 1080p 锯齿**：根因是各处统一取 `images.large`(~600px+)，而卡片仅渲染 140-220px，1080p 降采样产生锯齿。新增 `bangumiCover(images,size)` 助手——网格/卡片用 `common`(~300-400px)、detail 用 card 尺寸；旧缓存 large URL 按 `lain.bgm.tv` 路径段迁移(`/l/→/c/`)。替换 6 文件 12 处取图 + 缓存迁移。+10 单测。
+- [x] **#4 Kazumi 源验证码弹窗**：发现真实断链——`server.py` 直调 `kazumi_engine.search()`(把 `CaptchaRequiredException` 吞成普通 error)，而非 `search_with_captcha_retry()`(转成 `captcha_required` dict)；渲染层 `status==='captcha'` 的验证按钮永不出现，可见窗口流程虽完整却不可达。改两处 search 路径为 retry 包装，6 段链路(渲染→preload→ParseWindow→cookie_jar→rule_engine)打通。
+- [x] **#8 安装包可选播放器 + 无播放器错误**：`oneClick:false` + `build/installer.nsh` 自定义 nsDialogs 复选框页「安装内置播放器(mpv)」(默认勾选)，取消则 `customInstall` 删 `resources/vendor/mpv`；应用内「设置→扩展」一键补装(下载到 userData + `setCustomPath`)兜底。无播放器崩溃兜底：`mpv-player.play()` spawn 前 `fs.existsSync` 二次校验 + `proc.on('error')` 捕获 ENOENT/EACCES(此前未监听会崩主进程)，广播 `spawn-error`→友好中文提示。+4 单测。
+- [x] **#6 详情页重设计**：hero 横幅(封面+标题+放送/评分星级/Bangumi 排名/评分柱状分布+收藏/开始观看) + 概览/分集/角色/制作/评论/关联 tab 条现代化；CatVod 线路/选集与 Bangumi-only 分流渲染；保留全部 JS 依赖的 id/class 与收藏态归一修复。
+- [x] **#3 下拉选择器统一美化**：`.md-select` 统一 `appearance:none` + 自定义 SVG chevron(`--md-select-chevron` 明暗两套令牌) + padding 避让，清晰 focus/hover/disabled 态；保留 timeline/toolbar 依赖的 min-width/height 几何与全局 `select{font-family:inherit}`。
+- 验证：`npm run test:all` 全绿——Python smoke 13 + phase3 25 + compile 29/0、JS 单元 149/149、JS 语法 34/0。真实界面 QA(打包/运行、封面清晰度、验证码实解、安装器勾选)待用户在实机环境实测。
+
 ### 进行中
 
 - 无（本轮两项已完成代码验证与真实界面验收；后续项见 §4「需要继续完成」与「未完成」清单）。
