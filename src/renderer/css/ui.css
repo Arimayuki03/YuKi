@@ -77,6 +77,23 @@ html.dark {
 /* ── Reset ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* 表单控件字体继承（MiSans 字体 bug 修复）
+ * 根因（运行时实测，非推测）：Chromium 的 UA 样式表给 button/select/input/
+ * textarea 显式设了 font-family（在 Windows 上解析为 Arial/系统字体），
+ * 因此它们【不会】从 html/body 继承 MiSans。带 .md-btn/.md-select/.md-input
+ * 类的控件因各自声明了 font-family:inherit 才拿到 MiSans；而模板里大量的
+ * 原生 <button>/<select>/<input>（如 .ep-btn、.class-tab、原生下拉等）没有这些
+ * 类，就回退成系统字体——这正是「点击按钮及选项恢复系统字体」的现象。
+ * 注：@font-face 声明的非标准字重 330/630 经实测可正常匹配 400/500/600/700，
+ * 并非字重匹配问题，故无需改动 vendor 分片或加字重映射。
+ * 修复：统一让所有表单控件继承字体栈（关闭时同样继承系统栈，不影响回退）。
+ * 平台限制：Windows 上原生 <option> 弹出列表由系统绘制，无法用 Web 字体；
+ * 此规则保证按钮文字、下拉「收起态」显示值、输入框等全部应用 MiSans，
+ * 展开后的 option 列表字体由系统控制，属 Chromium 平台限制，非本应用可控。 */
+button, select, input, textarea, optgroup, option {
+    font-family: inherit;
+}
+
 html, body {
     height: 100%;
     /* 统一使用系统字体，避免动态字体加载造成首屏字形跳变。 */

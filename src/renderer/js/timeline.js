@@ -128,16 +128,7 @@ const Timeline = {
             if (!token) { this._setColAvailable(false); return; }
             const rsp = await doAction('kazumiBangumiCollections', { token, limit: 200 }, '/kazumi/action');
             const items = (rsp && rsp.items) || [];
-            const sets = { dropped: new Set(), watched: new Set(), watching: new Set() };
-            items.forEach((it) => {
-                const id = String(it.subject_id || '');
-                if (!id) return;
-                // Bangumi 收藏 type：1想看 2看过 3在看 4搁置 5抛弃
-                if (it.type === 5) sets.dropped.add(id);
-                else if (it.type === 2) sets.watched.add(id);
-                else if (it.type === 3) sets.watching.add(id);
-            });
-            this._colSets = sets;
+            this._colSets = this._buildColSets(items);
             this._setColAvailable(true);
         } catch (e) {
             this._setColAvailable(false);
@@ -156,6 +147,26 @@ const Timeline = {
             chips.addClass('disabled').attr('title', '需在「设置 → Kazumi 规则」配置 Bangumi Token 后使用');
         }
         $('#timeline-filters').show(); // 始终展示；未可用时置灰并提示如何启用
+    },
+
+    /** 由 Bangumi 收藏条目构建过滤集合（抛弃/看过/在看）。
+     *  兼容 subject id 与 type 的多种形态：官方 v0 条目为顶层 subject_id + type，
+     *  镜像/部分响应只在嵌套 subject.id 暴露 id，且 type 可能为字符串——
+     *  统一取 subject_id||subject.id||id 并把 type 转 Number 比较，否则集合恒空、过滤失效。 */
+    _buildColSets(items) {
+        const sets = { dropped: new Set(), watched: new Set(), watching: new Set() };
+        (items || []).forEach((it) => {
+            if (!it) return;
+            const subj = it.subject || {};
+            const id = String(it.subject_id || subj.id || it.id || '');
+            if (!id) return;
+            const type = Number(it.type);
+            // Bangumi 收藏 type：1想看 2看过 3在看 4搁置 5抛弃
+            if (type === 5) sets.dropped.add(id);
+            else if (type === 2) sets.watched.add(id);
+            else if (type === 3) sets.watching.add(id);
+        });
+        return sets;
     },
 
     /** 按启用的收藏过滤裁剪列表（_colAvailable=false 时原样返回）。 */

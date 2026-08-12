@@ -726,7 +726,10 @@ const Kazumi = {
         const wrap = $(`.kazumi-col-btns[data-id="${subjectId}"]`);
         if (!wrap.length) return;
         wrap.find('.kazumi-col-btn').removeClass('active');
-        const cur = (col && typeof col.type === 'number') ? col.type : -1;
+        // type 可能为数字或字符串（不同 API/镜像响应形态）；统一 Number 归一，
+        // 否则字符串 type 会走 -1 分支导致设置成功后按钮不高亮，用户误判为「失败」。
+        const t = col ? Number(col.type) : NaN;
+        const cur = Number.isFinite(t) ? t : -1;
         wrap.find(`.kazumi-col-btn[data-type="${cur}"]`).addClass('active');
     },
 
