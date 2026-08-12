@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('vpc', {
     playerControl: (cmd, value) => ipcRenderer.invoke('vpc:player', cmd, value),
     /** 播放器状态 { available, playing } */
     playerState: () => ipcRenderer.invoke('vpc:player-state'),
-    /** 单集播完事件 {playlistPos, queueLen}（渲染层记录「看完」时间戳，供退出判定兜底） */
+    /** 单集播完事件 {sessionId, playlistPos, queueLen}（渲染层按会话记录「看完」时间戳，供退出判定兜底） */
     onPlayerEnded: (cb) => {
         ipcRenderer.on('vpc:player-ended', (_e, info) => cb(info));
     },
@@ -83,12 +83,16 @@ contextBridge.exposeInMainWorld('vpc', {
     /** 无解析接口时的兜底：隐藏窗口直开链接抓播放器发出的媒体请求（share 分享页）。
      *  legacy=true 走旧解析器（useLegacyParser）：监听 iframe src 并跟随。 */
     captureDirect: (url, legacy) => ipcRenderer.invoke('vpc:capture-direct', { url, legacy: !!legacy }),
+    /** 验证码源验证（T73）：可见窗口供用户交互，关闭后收割 Cookie 交由后端持久化 */
+    captchaVerify: (url) => ipcRenderer.invoke('vpc:captcha-verify', { url }),
     /** 换肤：选择本地图片作壁纸（系统文件对话框，返回路径） */
     pickWallpaper: () => ipcRenderer.invoke('vpc:pick-wallpaper'),
-    /** 应用版本号（设置页展示） */
+    /** 应用版本号（关于分类展示） */
     appVersion: () => ipcRenderer.invoke('vpc:app-version'),
     /** 关于页系统信息：{version, platform, arch, electron, chromium, node, v8} */
     appInfo: () => ipcRenderer.invoke('vpc:app-info'),
+    /** 内置 MiSans 字体 CSS 的 file:// URL 列表（渲染层注入 <link>；空数组回退系统字体，T61） */
+    fontCss: () => ipcRenderer.invoke('vpc:font-css'),
     /** 设置持久化（userData/settings.json） */
     settingsGet: () => ipcRenderer.invoke('vpc:settings-get'),
     settingsSet: (key, value) => ipcRenderer.invoke('vpc:settings-set', key, value),
@@ -113,10 +117,6 @@ contextBridge.exposeInMainWorld('vpc', {
     mpvScreenshotDir: () => ipcRenderer.invoke('vpc:mpv-screenshot-dir'),
     /** 启动自动重载 lastConfigUrl 完成 */
     onConfigReloaded: (cb) => ipcRenderer.on('vpc:config-reloaded', (_e, info) => cb(info)),
-    /** MiSans 内置字体：已就绪的 CSS file:// URL 列表（未就绪为空，回退系统字体） */
-    fontCss: () => ipcRenderer.invoke('vpc:font-css'),
-    /** 后台补齐 MiSans 完成后通知（渲染层注入 <link>） */
-    onFontReady: (cb) => ipcRenderer.on('vpc:font-ready', () => cb()),
     /** 鼠标侧键前进/后退事件 { dir: 'back'|'forward' }（渲染层维护视图历史栈） */
     onMouseNav: (cb) => ipcRenderer.on('vpc:mouse-nav', (_e, info) => cb(info)),
     /** 直播频道探活：批量检测 HTTP/HTTPS 流地址可达性，返回布尔数组 */
@@ -152,13 +152,16 @@ contextBridge.exposeInMainWorld('vpc', {
     /** 外部播放器：用 VLC/PotPlayer 等外部播放器播放 */
     externalPlayer: (url, opts) => ipcRenderer.invoke('vpc:external-player', url, opts || {}),
     pickExternalPlayer: () => ipcRenderer.invoke('vpc:pick-external-player'),
-    /** 画中画：开启/关闭 mini 置顶窗 */
-    pipOpen: () => ipcRenderer.invoke('vpc:pip-open', {}),
-    pipClose: () => ipcRenderer.invoke('vpc:pip-close'),
     /** 定时关机：设定 N 分钟后关机（0 = 取消） */
     shutdownTimer: (minutes) => ipcRenderer.invoke('vpc:shutdown-timer', minutes),
-    /** 日志查看器：分页获取应用日志 */
-    getLogs: (page, pageSize) => ipcRenderer.invoke('vpc:get-logs', page, pageSize),
+    /** 代理设置：{url, enable}；应用后重启后端使 Python requests 生效 */
+    setProxy: (opts) => ipcRenderer.invoke('vpc:set-proxy', opts),
+    /** 日志查看器：分页获取应用日志（source 可选，按日志文件筛选） */
+    getLogs: (page, pageSize, source) => ipcRenderer.invoke('vpc:get-logs', page, pageSize, source),
+    /** 渲染端错误上报：window.onerror / unhandledrejection 转发到主进程日志 */
+    logRenderer: (level, message) => ipcRenderer.invoke('vpc:log-renderer', level, message),
+    /** 日志查看器：清空应用日志 */
+    clearLogs: () => ipcRenderer.invoke('vpc:clear-logs'),
     /** 首次引导：标记已完成 */
     onboardingDone: () => ipcRenderer.invoke('vpc:onboarding-done'),
 });

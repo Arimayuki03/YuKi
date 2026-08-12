@@ -165,8 +165,10 @@ def main():
 
     code, body = req('GET', '/search/stream?word=' + urllib.parse.quote('测试'))
     data_events = [l[6:] for l in body.split('\n') if l.startswith('data: ')]
-    check('SSE event count (3 sources + done)', len(data_events) == 4, body[:200])
-    sources = {json.loads(e)['source'] for e in data_events if e.strip() != '{}'}
+    # T74：先发 event: meta（data: {"total": N}），再每源一条 data，最后 event: done（data: {}）
+    src_events = [e for e in data_events if e.strip() not in ('{}',) and '"source"' in e]
+    check('SSE event count (meta + 3 sources + done)', len(data_events) == 5, body[:200])
+    sources = {json.loads(e)['source'] for e in src_events}
     check('SSE all sources streamed', sources == {'ipy', 'ijs', 'ijsd'}, str(sources))
     check('SSE done event', 'event: done' in body, body[-100:])
 

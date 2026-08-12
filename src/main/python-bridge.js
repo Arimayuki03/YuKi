@@ -18,7 +18,7 @@ const HEALTH_INTERVAL = 15000;
 const MAX_BACKOFF = 60000;
 
 class PythonBridge extends EventEmitter {
-    constructor(rootDir, resourcesRoot) {
+    constructor(rootDir, resourcesRoot, opts = {}) {
         super();
         this.rootDir = rootDir;
         this.resourcesRoot = resourcesRoot || rootDir;
@@ -39,6 +39,7 @@ class PythonBridge extends EventEmitter {
         this.healthTimer = null;
         this.readyWaiters = [];
         this.extraEnv = {};        // 附加环境变量（如自定义缓存目录 VPC_CACHE_DIR）
+        this.logWriter = opts.logWriter || null;
     }
 
     _pythonExe() {
@@ -64,7 +65,9 @@ class PythonBridge extends EventEmitter {
 
         let buf = '';
         proc.stdout.on('data', (chunk) => {
-            buf += chunk.toString('utf8');
+            const text = chunk.toString('utf8');
+            buf += text;
+            if (this.logWriter) this.logWriter.write('STDOUT', text.trimEnd());
             const m = buf.match(READY_RE);
             if (m && !this.info) {
                 const port = parseInt(m[1], 10);
@@ -77,6 +80,7 @@ class PythonBridge extends EventEmitter {
             }
         });
         proc.stderr.on('data', (chunk) => {
+            if (this.logWriter) this.logWriter.write('STDERR', chunk.toString('utf8').trimEnd());
             process.stderr.write(`[python] ${chunk}`);
         });
         proc.on('exit', (code) => {

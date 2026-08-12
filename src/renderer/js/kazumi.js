@@ -8,17 +8,24 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
     _rulesLoaded: false,
     _dlgToken: 0,      // 弹窗操作令牌：防过期回调（关闭后旧回调作废）
+    _dlgStream: null,  // 选源弹窗 SSE 流（关闭时清理）
+    _dlgState: null,   // 选源弹窗状态 {title, token, keyword, plugins, expanded}
+    _inited: false,    // 事件只绑定一次；唯一入口由 app.js 在后端就绪后调用
 
     // ---------------------------------------------------------------- 规则管理（设置页）
 
     /** 初始化设置页 Kazumi 板块（app.js bootstrap 时调用一次）。 */
     init() {
+        if (this._inited) return;
+        this._inited = true;
+        this._loadBgmMatchCache(); // 搜索页 Kazumi 结果封面缓存（name → Bangumi 匹配）
+        $('#kazumi_bgm_cover_clear').on('click', () => this.clearBangumiCoverCache());
         $('#kazumi_rule_add').on('click', () => this.importRule());
         $('#kazumi_rule_paste').on('click', () => this.importFromClipboard());
         $('#kazumi_rule_clear').on('click', () => $('#kazumi_rule_json').val(''));
@@ -31,13 +38,33 @@ const Kazumi = {
         // Bangumi 同步（需 token）
         $('#bangumi_token_save').on('click', () => this.saveBangumiToken());
         $('#bangumi_test').on('click', () => this.testBangumi());
-        $('#bangumi_collections_load').on('click', () => this.loadBangumiCollections());
-        $('#bangumi_collections').on('click', '.bangumi-col-del', (e) => {
-            const id = String($(e.currentTarget).data('id') || '');
-            const name = String($(e.currentTarget).data('name') || '');
-            if (id) this.removeBangumiCollection(id, name);
+        $('#bangumi_sync_now').on('click', () => this.syncBangumiNow());
+        $('#bangumi_sync_priority').on('change', function () { window.vpc.settingsSet('bangumiSyncPriority', this.value); });
+        $('#bangumi_immediate_toast').on('change', function () { window.vpc.settingsSet('bangumiImmediateSyncToastEnable', this.checked); });
+        // 选源弹窗关闭时清理 SSE 流与状态（T74：避免关闭后连接挂到 done）
+        $('#kazumiSourceDialog').on('click', '.md-dialog-btn', () => {
+            this._closeDlgStream();
+            this._dlgState = null;
+        });
+        // T71：详情页图片点击放大（复用 detail.js cover-float 全屏浮层，滚轮缩放）
+        $('#detail-body').on('click', 'img', (e) => {
+            const src = $(e.currentTarget).attr('src');
+            if (src && typeof Detail !== 'undefined' && Detail._openCoverFloat) Detail._openCoverFloat(src);
         });
         this._prefillBangumiToken();
+        this._prefillWebdav();
+        this._prefillMirror();
+        // 镜像开关（4.1）：变更即应用并持久化
+        $('#set_bangumi_mirror').on('change', function () {
+            const on = this.checked;
+            window.vpc.settingsSet('enableBangumiProxy', on);
+            doAction('kazumiSetMirror', { bangumi: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
+        });
+        $('#set_git_mirror').on('change', function () {
+            const on = this.checked;
+            window.vpc.settingsSet('enableGitProxy', on);
+            doAction('kazumiSetMirror', { git: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
+        });
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
@@ -51,9 +78,40 @@ const Kazumi = {
             const enabled = !!e.currentTarget.checked;
             if (name) this.toggleRule(name, enabled);
         });
-        // WebDAV 同步
+        // 手动排序（2.5，仿 Kazumi ReorderableListView）：上移/下移按钮 + 拖拽
+        $('#kazumi_rule_list').on('click', '.kazumi-rule-move', (e) => {
+            const name = String($(e.currentTarget).data('name') || '');
+            const dir = parseInt($(e.currentTarget).data('dir'), 10) || 0;
+            if (name && dir) this.moveRule(name, dir);
+        });
+        $('#kazumi_rule_list')
+            .on('dragstart', '.kazumi-rule-row', (e) => {
+                this._dragName = String($(e.currentTarget).data('name') || '');
+                try { e.originalEvent.dataTransfer.effectAllowed = 'move'; } catch (err) { /* ignore */ }
+            })
+            .on('dragover', '.kazumi-rule-row', (e) => { e.preventDefault(); })
+            .on('drop', '.kazumi-rule-row', (e) => {
+                e.preventDefault();
+                const targetName = String($(e.currentTarget).data('name') || '');
+                this.dragRuleTo(this._dragName, targetName);
+                this._dragName = null;
+            });
+        // WebDAV 同步（3.2 对齐 Kazumi：主开关 + 子开关 + 保存/同步/恢复）
         $('#webdav_sync').on('click', () => this.webdavSyncUI());
         $('#webdav_restore').on('click', () => this.webdavRestoreUI());
+        $('#webdav_save').on('click', () => this.webdavSaveUI());
+        $('#webdav_enable').on('change', function () {
+            const on = this.checked;
+            window.vpc.settingsSet('webDavEnable', on);
+            if (!on) {
+                $('#webdav_enable_history').prop('checked', false);
+                $('#webdav_enable_collect').prop('checked', false);
+                window.vpc.settingsSet('webDavEnableHistory', false);
+                window.vpc.settingsSet('webDavEnableCollect', false);
+            }
+        });
+        $('#webdav_enable_history').on('change', function () { window.vpc.settingsSet('webDavEnableHistory', this.checked); });
+        $('#webdav_enable_collect').on('change', function () { window.vpc.settingsSet('webDavEnableCollect', this.checked); });
         this.refreshRuleList();
     },
 
@@ -83,11 +141,16 @@ const Kazumi = {
                            r.updated_at && r.updated_at !== r.installed_at ? '更新 ' + r.updated_at : '']
                 .filter(Boolean).join(' · ');
             return `
-            <div class="history-item">
-                <span class="history-url" title="${escHtml(r.name)} v${escHtml(r.version || '')}${times ? '\n' + escHtml(times) : ''}">${escHtml(r.name)} <span style="color:var(--md-on-surface-variant);font-size:11px">v${escHtml(r.version || '')}</span></span>
+            <div class="history-item kazumi-rule-row" draggable="true" data-name="${escHtml(r.name)}">
+                <button class="history-btn kazumi-rule-move" data-name="${escHtml(r.name)}" data-dir="-1" title="上移">↑</button>
+                <button class="history-btn kazumi-rule-move" data-name="${escHtml(r.name)}" data-dir="1" title="下移">↓</button>
+                <div class="kazumi-rule-main">
+                    <span class="kazumi-rule-name" title="${escHtml(r.name)} v${escHtml(r.version || '')}">${escHtml(r.name)} <span class="kazumi-subver">v${escHtml(r.version || '')}</span></span>
+                    ${times ? `<span class="kazumi-rule-times">${escHtml(times)}</span>` : ''}
+                </div>
                 ${validInfo ? `<span class="kazumi-validity ${validInfo.cls}" title="${escHtml(validInfo.label)}">${escHtml(validInfo.label)}</span>` : ''}
                 <button class="history-btn kazumi-rule-edit" data-name="${escHtml(r.name)}" title="编辑规则">✎</button>
-                <label class="md-switch" style="margin:0;flex:none">
+                <label class="md-switch">
                     <input type="checkbox" class="kazumi-rule-toggle" data-name="${escHtml(r.name)}" ${r.enabled !== false ? 'checked' : ''}>
                     <span class="md-switch-track"></span>
                 </label>
@@ -380,6 +443,40 @@ const Kazumi = {
         }
     },
 
+    /** 上移/下移一条规则（改顺序并持久化，2.5）。 */
+    async moveRule(name, dir) {
+        const idx = this._rules.findIndex((r) => r.name === name);
+        const target = idx + dir;
+        if (idx < 0 || target < 0 || target >= this._rules.length) return;
+        const arr = this._rules.slice();
+        const [it] = arr.splice(idx, 1);
+        arr.splice(target, 0, it);
+        await this._applyRuleOrder(arr);
+    },
+
+    /** 拖拽落位：把拖动规则移到目标规则位置（持久化）。 */
+    async dragRuleTo(dragName, targetName) {
+        if (!dragName || dragName === targetName) return;
+        const from = this._rules.findIndex((r) => r.name === dragName);
+        const to = this._rules.findIndex((r) => r.name === targetName);
+        if (from < 0 || to < 0) return;
+        const arr = this._rules.slice();
+        const [it] = arr.splice(from, 1);
+        arr.splice(to, 0, it);
+        await this._applyRuleOrder(arr);
+    },
+
+    /** 按新顺序应用并持久化：乐观更新 + 失败回滚。 */
+    async _applyRuleOrder(arr) {
+        const prev = this._rules.slice();
+        this._rules = arr;
+        this._renderRuleList();
+        try {
+            const rsp = await doAction('kazumiReorder', { names: JSON.stringify(arr.map((r) => r.name)) }, '/kazumi/action');
+            if (!rsp || rsp.code !== 200) { warnToast('排序保存失败'); this._rules = prev; this._renderRuleList(); }
+        } catch (e) { warnToast('排序保存失败'); this._rules = prev; this._renderRuleList(); }
+    },
+
     // ---------------------------------------------------------------- 有效性检测 / 批量更新
 
     /** 查看已持久化的 Cookie（按域名分组统计）。 */
@@ -388,9 +485,17 @@ const Kazumi = {
             const rsp = await doAction('kazumiCookieList', {}, '/kazumi/action');
             const cookies = (rsp && rsp.cookies) || {};
             const count = (rsp && rsp.count) || 0;
-            if (!count) { warnToast('当前没有已保存的 Cookie'); return; }
-            const lines = Object.keys(cookies).map((d) => `${d}（${(cookies[d] || []).length} 个）`).join('；');
-            warnToast(`已保存 ${count} 个 Cookie：${lines}`);
+            const box = $('#kazumi-cookie-list');
+            if (!count) {
+                box.html('<div class="tip-line pad0">当前没有已保存的 Cookie。</div>');
+            } else {
+                const rows = Object.keys(cookies).map((domain) => {
+                    const list = Array.isArray(cookies[domain]) ? cookies[domain] : [];
+                    return `<div class="history-item"><span class="history-url">${escHtml(domain)}（${list.length} 个）</span></div>`;
+                }).join('');
+                box.html(`<div class="tip-line pad0">共保存 ${count} 个 Cookie，按域名分组如下：</div>${rows}`);
+            }
+            openDialog('kazumiCookieDialog');
         } catch (e) { warnToast('查询 Cookie 失败'); }
     },
 
@@ -411,10 +516,43 @@ const Kazumi = {
         try { const s = (await window.vpc.settingsGet()) || {}; return s.bangumiToken || ''; } catch (e) { return ''; }
     },
 
-    /** 回填 token 输入框（设置已保存过时展示）。 */
+    /** 回填 token 输入框（设置已保存过时展示）与同步选项。 */
     async _prefillBangumiToken() {
         const t = await this._getBangumiToken();
         if (t) $('#bangumi_token').val(t);
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            if (s.bangumiSyncPriority !== undefined && s.bangumiSyncPriority !== null) $('#bangumi_sync_priority').val(String(s.bangumiSyncPriority));
+            $('#bangumi_immediate_toast').prop('checked', s.bangumiImmediateSyncToastEnable !== false);
+        } catch (e) { /* 读取失败不阻塞 */ }
+    },
+
+    /** 回填 WebDAV 配置（地址/账号/密码 + 主/子开关）到设置页。 */
+    async _prefillWebdav() {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            if (s.webDavUrl) $('#webdav_url').val(s.webDavUrl);
+            if (s.webDavUsername) $('#webdav_username').val(s.webDavUsername);
+            if (s.webDavPassword) $('#webdav_password').val(s.webDavPassword);
+            $('#webdav_enable').prop('checked', !!s.webDavEnable);
+            $('#webdav_enable_history').prop('checked', s.webDavEnableHistory !== false);
+            $('#webdav_enable_collect').prop('checked', s.webDavEnableCollect !== false);
+        } catch (e) { /* 读取失败不阻塞 */ }
+    },
+
+    /** 回填镜像开关，并把已保存的镜像状态应用到后端。 */
+    async _prefillMirror() {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            $('#set_bangumi_mirror').prop('checked', !!s.enableBangumiProxy);
+            $('#set_git_mirror').prop('checked', !!s.enableGitProxy);
+            if (s.enableBangumiProxy || s.enableGitProxy) {
+                doAction('kazumiSetMirror', {
+                    bangumi: s.enableBangumiProxy ? '1' : '0',
+                    git: s.enableGitProxy ? '1' : '0',
+                }, '/kazumi/action').catch(() => { });
+            }
+        } catch (e) { /* 读取失败不阻塞 */ }
     },
 
     /** 保存 token 到 settings（仅本机）。 */
@@ -442,51 +580,134 @@ const Kazumi = {
         } catch (e) { warnToast('测试连接失败'); }
     },
 
-    /** 拉取并展示我的 Bangumi 收藏。 */
-    async loadBangumiCollections() {
-        const token = $('#bangumi_token').val().trim() || await this._getBangumiToken();
-        if (!token) { warnToast('请先保存 Bangumi Token'); return; }
-        try {
-            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100 }, '/kazumi/action');
-            const items = (rsp && rsp.items) || [];
-            const box = $('#bangumi_collections');
-            if (!items.length) { box.html('<div class="tip-line">收藏为空，或 Token 无效</div>'); return; }
-            const typeName = { 0: '想看', 1: '看过', 2: '在看', 3: '搁置', 4: '抛弃' };
-            box.html(items.map((it) => {
-                const s = (it.subject && it.subject) || {};
-                const name = s.name_cn || s.name || `subject ${it.subject_id}`;
-                const t = typeName[it.type] || it.type;
-                return `<div class="history-item">
-                    <span class="history-url" title="${escHtml(name)}">${escHtml(name)}</span>
-                    <span style="color:var(--md-on-surface-variant);font-size:11px;flex:none">${escHtml(t)}</span>
-                    <button class="history-btn bangumi-col-del" data-id="${escHtml(it.subject_id)}" data-name="${escHtml(name)}" title="删除收藏">✕</button>
-                </div>`;
-            }).join(''));
-        } catch (e) { warnToast('加载收藏失败'); }
-    },
-
     /** 删除某条 Bangumi 收藏；返回是否成功（详情弹窗据此刷新状态）。 */
     async removeBangumiCollection(subjectId, name) {
         if (!await confirmDialog(`从 Bangumi 收藏中删除「${name}」？`, { okText: '删除' })) return false;
         const token = await this._getBangumiToken();
         try {
             const rsp = await doAction('kazumiBangumiCollectionDel', { token, id: subjectId }, '/kazumi/action');
-            if (rsp && rsp.code === 200) { warnToast('已删除收藏'); this.loadBangumiCollections(); return true; }
+            if (rsp && rsp.code === 200) { warnToast('已删除收藏'); return true; }
             warnToast('删除失败：' + ((rsp && rsp.msg) || '未知错误'));
             return false;
         } catch (e) { warnToast('删除失败'); return false; }
     },
 
+    /** 批量上传期间抑制 setBangumiCollection 的单条 toast（成功/失败均静默，由批量函数汇总提示）。 */
+    _bgmBatchActive: false,
+
+    /** 收藏标签 → Bangumi 收藏类型（1想看 2看过 3在看 4搁置 5抛弃）。
+     *  注意：后端 plugin_manager.py:858 docstring 写的是 0-4，实际透传 int 且应传 1-5，注释有误。 */
+    _favTagToBangumiType: { want: 1, seen: 2, watching: 3, hold: 4, dropped: 5 },
+
     /** 设置某 subject 的收藏类型（详情弹窗追番按钮用）。 */
     async setBangumiCollection(subjectId, type) {
         const token = await this._getBangumiToken();
-        if (!token) { warnToast('请先在设置 → Kazumi 规则 → Bangumi 同步中保存 Token'); return false; }
+        if (!token) { if (!this._bgmBatchActive) warnToast('请先在设置 → Kazumi 规则 → Bangumi 同步中保存 Token'); return false; }
         try {
             const rsp = await doAction('kazumiBangumiCollectionSet', { token, id: subjectId, type }, '/kazumi/action');
-            if (rsp && rsp.code === 200) { warnToast('已同步到 Bangumi'); return true; }
-            warnToast('同步失败：' + ((rsp && rsp.msg) || '未知错误'));
+            if (rsp && rsp.code === 200) {
+                // 即时同步提示开关（bangumiImmediateSyncToastEnable，默认开）；批量上传内抑制单条提示
+                if (!this._bgmBatchActive) {
+                    try {
+                        const st = (await window.vpc.settingsGet()) || {};
+                        if (st.bangumiImmediateSyncToastEnable !== false) warnToast('已同步到 Bangumi');
+                    } catch (e) { warnToast('已同步到 Bangumi'); }
+                }
+                return true;
+            }
+            if (!this._bgmBatchActive) warnToast('同步失败：' + ((rsp && rsp.msg) || '未知错误'));
             return false;
-        } catch (e) { warnToast('同步失败'); return false; }
+        } catch (e) { if (!this._bgmBatchActive) warnToast('同步失败'); return false; }
+    },
+
+    /**
+     * 批量把聚合源/本地收藏单向上传到 Bangumi 账号（仅新增/更新，绝不删除）。
+     *
+     * 取 favorites 中 site !== 'bangumi' 的项，逐条串行上传：
+     *   1. subject id 优先取已回写的 bangumiId，否则按片名取首个 Bangumi 匹配（getBangumiMatch）；
+     *   2. tag 经 _favTagToBangumiType 映射为 Bangumi 收藏类型（1-5），无 tag 视同「想看」；
+     *   3. 调 setBangumiCollection 幂等 set（不读远端集合——远端硬上限 100 无分页，>100 会截断，
+     *      按本地 tag 直接 set 更稳；也天然避免误判「已存在」）；
+     *   4. 解析到的 id 回写该收藏项 bangumiId，重复同步不再重算匹配。
+     *
+     * 串行原因：后端每条 update 都会重置用户名缓存并最多尝试 8 种组合（plugin_manager.py:863-884），
+     * 无法在渲染端缓存用户名，故只能串行并接受延迟；大批量收藏会较慢，属预期。
+     * 单条失败（匹配不到 / set 失败 / 抛错）不中断整批。
+     *
+     * @param onProgress 可选 (done, total) => void，用于 UI 进度展示。
+     * @returns {Promise<{uploaded:number, skipped:number, failed:number, total:number}|null>} 无 Token 返回 null。
+     */
+    async uploadFavoritesToBangumi(onProgress) {
+        const token = await this._getBangumiToken();
+        if (!token) { warnToast('请先在 设置 → Kazumi 规则 → Bangumi 同步 保存 Token'); return null; }
+        let favorites = [];
+        try { favorites = await recGet('favorites'); } catch (e) { favorites = []; }
+        const targets = (favorites || []).filter((f) => f && f.site !== 'bangumi' && f.name);
+        const total = targets.length;
+        let uploaded = 0, skipped = 0, failed = 0;
+        const idWriteback = new Map(); // uid → bangumiId：结束后统一回写，避免逐条读写整表
+        this._bgmBatchActive = true;
+        try {
+            for (let i = 0; i < targets.length; i++) {
+                const f = targets[i];
+                try {
+                    const type = this._favTagToBangumiType[f.tag || 'want'] || 1;
+                    let subjectId = Number(f.bangumiId) || 0;
+                    if (!subjectId) {
+                        const m = await this.getBangumiMatch(f.name);
+                        subjectId = (m && Number(m.id)) || 0;
+                    }
+                    if (!subjectId) {
+                        skipped++; // 匹配不到 Bangumi subject，跳过
+                    } else if (await this.setBangumiCollection(subjectId, type)) {
+                        uploaded++;
+                        if (f.uid && String(f.bangumiId || '') !== String(subjectId)) idWriteback.set(f.uid, String(subjectId));
+                    } else {
+                        failed++;
+                    }
+                } catch (e) {
+                    failed++; // 单条异常不中断整批
+                }
+                if (typeof onProgress === 'function') { try { onProgress(i + 1, total); } catch (e) { /* 进度回调错误忽略 */ } }
+            }
+        } finally {
+            this._bgmBatchActive = false;
+        }
+        // 统一回写 bangumiId：重读最新收藏按 uid 匹配，避免覆盖同步期间的其他改动
+        if (idWriteback.size) {
+            try {
+                const list = await recGet('favorites');
+                let changed = false;
+                (list || []).forEach((it) => {
+                    if (it && it.uid && idWriteback.has(it.uid) && String(it.bangumiId || '') !== idWriteback.get(it.uid)) {
+                        it.bangumiId = idWriteback.get(it.uid);
+                        changed = true;
+                    }
+                });
+                if (changed) await recSet('favorites', list);
+            } catch (e) { /* 回写失败不影响上传结果 */ }
+        }
+        return { uploaded, skipped, failed, total };
+    },
+
+    /** 立即同步：拉取 Bangumi 收藏并刷新「我的收藏」合并网格（复用 My 的缓存刷新）。 */
+    async syncBangumiNow() {
+        const token = await this._getBangumiToken();
+        if (!token) { warnToast('请先保存 Bangumi Token'); return; }
+        showLoading();
+        try {
+            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100 }, '/kazumi/action');
+            const n = ((rsp && rsp.items) || []).length;
+            hideLoading();
+            if (typeof My !== 'undefined' && My) {
+                My._bgmCache = null;
+                if (My._favorites) await My._favorites.render();
+            }
+            warnToast(`已同步 Bangumi 收藏（${n} 条）`);
+        } catch (e) {
+            hideLoading();
+            warnToast('同步失败');
+        }
     },
 
     /** 查询某 subject 的收藏状态（返回 {type} 或 null）。 */
@@ -499,12 +720,14 @@ const Kazumi = {
         } catch (e) { return null; }
     },
 
-    /** 查询并回填详情弹窗里某 subject 的 Bangumi 收藏下拉状态。 */
+    /** 查询并回填详情页/弹窗里某 subject 的 Bangumi 收藏状态（高亮对应按钮）。 */
     async _applyBangumiColState(subjectId) {
         const col = await this.getBangumiCollection(subjectId);
-        const sel = $(`.kazumi-bangumi-col[data-id="${subjectId}"]`);
-        if (!sel.length) return;
-        sel.val((col && typeof col.type === 'number') ? col.type : -1);
+        const wrap = $(`.kazumi-col-btns[data-id="${subjectId}"]`);
+        if (!wrap.length) return;
+        wrap.find('.kazumi-col-btn').removeClass('active');
+        const cur = (col && typeof col.type === 'number') ? col.type : -1;
+        wrap.find(`.kazumi-col-btn[data-type="${cur}"]`).addClass('active');
     },
 
     /** 检测规则有效性：后台并发搜索测试关键词，标记 valid/invalid。 */
@@ -520,7 +743,7 @@ const Kazumi = {
                 const captcha = results.filter((r) => r.validity === 'captcha').length;
                 warnToast(`检测完成：有效 ${valid} · 失效 ${invalid}${captcha ? ` · 需验证 ${captcha}` : ''}`);
                 this.refreshRuleList();
-            });
+            }, '检测有效性');
         } catch (e) {
             warnToast('检测启动失败');
         }
@@ -540,27 +763,33 @@ const Kazumi = {
                 const failed = results.filter((r) => !r.ok).length;
                 warnToast(`更新完成：更新 ${updated} · 已最新 ${upToDate}${failed ? ` · 失败 ${failed}` : ''}`);
                 this.refreshRuleList();
-            });
+            }, '批量更新');
         } catch (e) {
             warnToast('批量更新启动失败');
         }
     },
 
-    /** 轮询后台任务状态直至结束（running=false），回调收到最终状态。 */
-    _pollTask(statusDo, onDone) {
+    /** 轮询后台任务状态直至结束（running=false），回调收到最终状态。
+     *  运行期间用 renderStatusBar 驱动进度条（后端返回 done/total 时显示 N/M，否则退化为不确定态）；
+     *  完成后短暂显示完成态再隐藏。label 用作进度条文字（如「检测有效性」「批量更新」）。 */
+    _pollTask(statusDo, onDone, label) {
         const el = $('#kazumi_rule_task');
-        const show = (t) => { if (el.length) { el.text(t).show(); } };
+        const text = label || '任务进行中';
+        const bar = (opts) => { if (el.length) { renderStatusBar(el, opts); el.show(); } };
         const hide = () => { if (el.length) el.hide(); };
         const iv = setInterval(async () => {
             try {
                 const rsp = await doAction(statusDo, {}, '/kazumi/action');
                 if (!rsp) return;
                 if (rsp.running) {
-                    show('任务进行中…');
+                    // done/total 由后端逐条累加暴露；缺失时 total=0 → 不确定态进度条
+                    bar({ text, recv: rsp.done || 0, total: rsp.total || 0 });
                     return;
                 }
                 clearInterval(iv);
-                hide();
+                // 完成态：满条显示片刻再隐藏（与首页探测条一致的收尾体验）
+                bar({ text: `${text}完成`, done: true, total: rsp.total || 0 });
+                setTimeout(hide, 1500);
                 if (onDone) onDone(rsp);
             } catch (e) {
                 clearInterval(iv);
@@ -599,11 +828,133 @@ const Kazumi = {
         }
     },
 
-    /** Bangumi 番剧详情。 */
+    // ---------------------------------------------------------------- Bangumi 封面缓存（搜索页 Kazumi 结果）
+
+    /** name → Bangumi 首个匹配 {id, cover} 缓存（内存 Map + localStorage 持久化）。 */
+    _bgmMatchCache: new Map(),
+    /** name → Promise：同片名并发搜索去重，只发一次 API。 */
+    _bgmMatchInflight: new Map(),
+
+    /** 从 localStorage 加载匹配缓存（Kazumi.init 时调用一次；数据损坏按空缓存处理）。 */
+    _loadBgmMatchCache() {
+        this._bgmMatchCache = new Map();
+        try {
+            const raw = localStorage.getItem('kazumi_bgm_cover');
+            if (!raw) return;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return;
+            arr.forEach((kv) => {
+                if (!Array.isArray(kv) || !kv[0]) return;
+                const v = kv[1];
+                if (typeof v === 'string') {
+                    // 旧版仅封面格式 [name, url] 迁移：无 id，点击时仍会补搜一次并回填
+                    if (v) this._bgmMatchCache.set(kv[0], { id: 0, cover: v });
+                } else if (v && (v.id || v.cover)) {
+                    this._bgmMatchCache.set(kv[0], { id: Number(v.id) || 0, cover: v.cover || '' });
+                }
+            });
+        } catch (e) { /* 损坏则忽略 */ }
+    },
+
+    /** 持久化匹配缓存（无 id 且无封面的空结果不落盘：下次会话可重试；只留最近 500 条防无限增长）。 */
+    _saveBgmMatchCache() {
+        try {
+            const entries = [];
+            for (const [k, v] of this._bgmMatchCache) {
+                if (v && (v.id || v.cover)) entries.push([k, v]);
+            }
+            localStorage.setItem('kazumi_bgm_cover', JSON.stringify(entries.slice(-500)));
+        } catch (e) { /* quota 溢出忽略 */ }
+    },
+
+    /** 清空 Bangumi 匹配缓存（内存 + localStorage；设置页按钮，封面匹配错误时手动重置）。 */
+    clearBangumiCoverCache() {
+        this._bgmMatchCache = new Map();
+        this._bgmMatchInflight.clear();
+        try { localStorage.removeItem('kazumi_bgm_cover'); } catch (e) { /* ignore */ }
+    },
+
+    /** 同步取已缓存 Bangumi 匹配（渲染/点击复用，避免重复搜索）；未命中或空匹配返回 null。 */
+    getCachedBangumiMatch(name) {
+        const key = String(name || '').trim();
+        if (!key) return null;
+        const m = this._bgmMatchCache.get(key);
+        return (m && (m.id || m.cover)) ? m : null;
+    },
+
+    /** 同步取已缓存封面（渲染时直接复用，避免占位→补拉闪烁）；未命中返回 ''。 */
+    getCachedBangumiCover(name) {
+        const m = this.getCachedBangumiMatch(name);
+        return (m && m.cover) || '';
+    },
+
+    /** 兼容 common.js 补拉池：只取封面 URL。 */
+    async getBangumiCover(name) {
+        const m = await this.getBangumiMatch(name);
+        return (m && m.cover) || '';
+    },
+
+    /**
+     * 按片名从 Bangumi 拉取首个匹配 {id, cover} 并缓存（搜索页 Kazumi 结果补封面用）。
+     * 命中缓存直接返回；同片名在途搜索只发一次请求；无匹配缓存空对象，
+     * 会话内重绘/切源/点击不再反复打 API。
+     */
+    async getBangumiMatch(name) {
+        const key = String(name || '').trim();
+        if (!key) return null;
+        if (this._bgmMatchCache.has(key)) return this._bgmMatchCache.get(key);
+        if (this._bgmMatchInflight.has(key)) return this._bgmMatchInflight.get(key);
+        const p = (async () => {
+            let match = { id: 0, cover: '' };
+            try {
+                const results = await this.bangumiSearch(key, 5);
+                const first = (results || []).find((r) => r && r.images
+                    && (r.images.large || r.images.common || r.images.medium));
+                if (first) {
+                    match = {
+                        id: Number(first.id) || 0,
+                        cover: first.images.large || first.images.common || first.images.medium || '',
+                    };
+                }
+            } catch (e) { /* 搜索失败按空匹配 */ }
+            this._bgmMatchCache.set(key, match);
+            this._saveBgmMatchCache();
+            this._bgmMatchInflight.delete(key);
+            return match;
+        })();
+        this._bgmMatchInflight.set(key, p);
+        return p;
+    },
+
+    /** 记录一次 Bangumi 匹配（点击搜索结果回填缓存，补 id 或封面后下次免搜；幂等）。 */
+    cacheBangumiMatch(name, id, cover) {
+        const key = String(name || '').trim();
+        if (!key || !id) return;
+        const cur = this.getCachedBangumiMatch(key) || {};
+        const m = { id: Number(id) || cur.id || 0, cover: cover || cur.cover || '' };
+        this._bgmMatchCache.set(key, m);
+        this._saveBgmMatchCache();
+    },
+
+    /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。 */
+    _bgmInfoCache: new Map(),
     async bangumiInfo(subjectId) {
+        const key = String(subjectId);
+        if (key) {
+            const hit = this._bgmInfoCache.get(key);
+            if (hit && Date.now() - hit.ts < 30 * 60 * 1000) return hit.info;
+        }
         try {
             const rsp = await doAction('kazumiBangumiInfo', { id: subjectId }, '/kazumi/action');
-            return (rsp && rsp.info) || null;
+            const info = (rsp && rsp.info) || null;
+            if (info && key) {
+                this._bgmInfoCache.set(key, { ts: Date.now(), info });
+                if (this._bgmInfoCache.size > 100) { // 防无限增长，淘汰最旧
+                    const oldest = this._bgmInfoCache.keys().next().value;
+                    this._bgmInfoCache.delete(oldest);
+                }
+            }
+            return info;
         } catch (e) {
             return null;
         }
@@ -626,6 +977,16 @@ const Kazumi = {
             return (rsp && rsp.characters) || [];
         } catch (e) {
             return [];
+        }
+    },
+
+    /** Bangumi 单个角色详情。 */
+    async bangumiCharacter(characterId) {
+        try {
+            const rsp = await doAction('kazumiBangumiCharacter', { id: characterId }, '/kazumi/action');
+            return (rsp && rsp.info) || null;
+        } catch (e) {
+            return null;
         }
     },
 
@@ -663,98 +1024,321 @@ const Kazumi = {
 
     /**
      * 打开 Kazumi 源弹窗（detail.js / search.js 调用）。
+     * 对齐 Kazumi SourceSheet（T74）：并发流式搜索全部启用源（复用 /search/kazumi-stream SSE），
+     * 每源一张卡片带状态徽标（检索中/N 条/需验证/失败/无结果），首个有结果源自动展开；
+     * 点结果行解析选集播放；空/失败/验证码源卡内补救操作（重试/别名/手动检索/浏览器打开）。
      * @param title 影片名
      * @param site  来源标识（kazumi:规则名 或 CatVod site key）
-     * @param src    Kazumi 搜索结果链接（kazumi: 前缀时作为默认选中）
+     * @param src    Kazumi 搜索结果链接（kazumi: 前缀时作为默认选中，直接解析该源）
      */
     async openSourceDialog(title, site, src) {
         if (!this.hasEnabledRules()) { warnToast('尚未启用任何 Kazumi 规则'); return; }
         const token = ++this._dlgToken;
-        $('#kazumi-dialog-title').text(`Kazumi 规则源 · 《${title}》`);
-        $('#kazumi-dialog-body').html('<div class="tip-line">正在查询规则源…</div>');
+        $('#kazumi-dialog-title').text('选择播放源');
         openDialog('kazumiSourceDialog');
 
-        // 若来自搜索结果（kazumi: 前缀），直接解析该源剧集
+        // 来自搜索结果（kazumi: 前缀）→ 直接解析该源剧集
         if (String(site).startsWith('kazumi:') && src) {
             const pluginName = String(site).slice(7);
             await this._loadChapters(pluginName, src, title, token);
             return;
         }
 
-        // 否则先聚合搜索全部规则
-        try {
-            const results = await this.aggregateSearch(title);
+        // 初始化源状态：每启用规则一张卡（pending）
+        const plugins = {};
+        this._rules.filter((r) => r.enabled !== false).forEach((r) => {
+            plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
+        });
+        this._dlgState = { title, token, keyword: title, plugins, expanded: null };
+        this._renderSourceSheet();
+
+        // 并发流式搜索全部源
+        this._closeDlgStream();
+        const es = new EventSource(apiUrl('/search/kazumi-stream?word=' + encodeURIComponent(title)));
+        this._dlgStream = es;
+        es.onmessage = (ev) => {
+            let payload;
+            try { payload = JSON.parse(ev.data); } catch (e) { return; }
             if (token !== this._dlgToken) return;
-            if (!results.length) {
-                $('#kazumi-dialog-body').html('<div class="tip-line">所有规则源均未找到该影片</div>');
-                return;
-            }
-            this._renderSearchResults(results, title, token);
-        } catch (e) {
+            this._applySourceResult(payload);
+        };
+        const finish = () => {
             if (token !== this._dlgToken) return;
-            $('#kazumi-dialog-body').html('<div class="tip-line">规则源查询失败</div>');
-        }
+            this._closeDlgStream();
+            this._updateSheetHeader();
+        };
+        es.addEventListener('done', finish);
+        es.onerror = () => { if (token === this._dlgToken) finish(); };
     },
 
-    /** 渲染搜索结果（按规则分组），并异步补全 Bangumi 元数据（封面/简介）。 */
-    _renderSearchResults(results, title, token) {
+    /** 关闭选源弹窗的 SSE 流。 */
+    _closeDlgStream() {
+        if (this._dlgStream) { try { this._dlgStream.close(); } catch (e) { /* ignore */ } this._dlgStream = null; }
+    },
+
+    /** 应用一条源搜索结果到弹窗状态并刷新对应卡片。 */
+    _applySourceResult(payload) {
+        const st = this._dlgState;
+        if (!st) return;
+        const name = String(payload.name || '');
+        if (!name || !st.plugins[name]) return;
+        const p = st.plugins[name];
+        if (payload.captcha) { p.status = 'captcha'; p.captchaUrl = payload.captchaUrl || ''; p.results = []; }
+        else if (payload.error) { p.status = 'error'; p.msg = payload.msg || ''; p.results = []; }
+        else if (payload.status === 'noresult' || !(payload.list || []).length) { p.status = 'noresult'; p.results = []; }
+        else { p.status = 'success'; p.results = payload.list || []; }
+        p.searching = false;
+        if (p.status === 'success' && !st.expanded) st.expanded = name; // 自动展开首个有结果源
+        this._renderSourceCard(name);
+        this._updateSheetHeader();
+    },
+
+    /** 单源重查（重试/别名/手动检索/验证后重试）。 */
+    async _queryPlugin(keyword, pluginName, token) {
+        const st = this._dlgState;
+        if (!st) return;
+        const p = st.plugins[pluginName];
+        if (!p) return;
+        p.searching = true;
+        p.status = 'pending';
+        this._renderSourceCard(pluginName);
+        try {
+            const rsp = await doAction('kazumiSearch', { keyword, plugin: pluginName }, '/kazumi/action');
+            if (token !== this._dlgToken) return;
+            const r = ((rsp && rsp.results) || []).find((x) => x.pluginName === pluginName) || null;
+            if (!r) { p.status = 'noresult'; p.results = []; }
+            else if (r.captcha) { p.status = 'captcha'; p.captchaUrl = r.captchaUrl || ''; p.results = []; }
+            else if (r.error) { p.status = 'error'; p.msg = r.msg || ''; p.results = []; }
+            else { p.status = (r.data && r.data.length) ? 'success' : 'noresult'; p.results = r.data || []; }
+        } catch (e) {
+            if (token !== this._dlgToken) return;
+            p.status = 'error'; p.msg = '查询失败'; p.results = [];
+        }
+        p.searching = false;
+        if (p.status === 'success' && !st.expanded) st.expanded = pluginName;
+        this._renderSourceCard(pluginName);
+        this._updateSheetHeader();
+    },
+
+    /** 渲染整个选源弹窗（头部 + 全部源卡片）。 */
+    _renderSourceSheet() {
+        const st = this._dlgState;
+        if (!st) return;
         const box = $('#kazumi-dialog-body');
-        let html = '';
-        results.forEach((r) => {
-            // 验证码源标记（kimi UI）
-            if (r.captcha) {
-                html += `<div class="kazumi-plugin-group">
-                    <div class="kazumi-plugin-head">${escHtml(r.pluginName)} <span class="src-count" style="color:var(--md-error)">需验证</span></div>
-                    <div class="kazumi-result-list">
-                        <div class="kazumi-result-item kazumi-captcha-item" data-plugin="${escHtml(r.pluginName)}" data-captcha-url="${escHtml(r.captchaUrl || '')}">
-                            <span class="kazumi-result-name">该源需要验证码验证</span>
-                            <span class="kazumi-result-src">点击打开验证页面，完成验证后自动重试</span>
-                        </div>
-                    </div>
-                </div>`;
-                return;
-            }
-            const items = (r.data || []).map((it) => `
-                <div class="kazumi-result-item" data-plugin="${escHtml(r.pluginName)}" data-src="${escHtml(it.src)}" data-name="${escHtml(it.name)}">
-                    <span class="kazumi-result-name">${escHtml(it.name)}</span>
-                    <span class="kazumi-result-src">${escHtml(it.src)}</span>
-                </div>`).join('');
-            html += `<div class="kazumi-plugin-group">
-                <div class="kazumi-plugin-head">${escHtml(r.pluginName)} <span class="src-count">${(r.data || []).length}</span></div>
-                <div class="kazumi-result-list">${items || '<div class="tip-line">无结果</div>'}</div>
-            </div>`;
-        });
+        let html = this._sheetHeaderHtml(st);
+        const names = Object.keys(st.plugins);
+        if (!names.length) html += '<div class="tip-line">尚未启用任何 Kazumi 规则</div>';
+        names.forEach((n) => { html += this._sourceCardHtml(n, st.plugins[n], st.expanded === n); });
         box.html(html);
-        // 绑定点击：进入剧集解析
-        box.find('.kazumi-result-item:not(.kazumi-captcha-item)').on('click', (e) => {
+        this._bindSheetEvents();
+    },
+
+    /** 仅重绘某张源卡片（保持其余不动）。 */
+    _renderSourceCard(name) {
+        const st = this._dlgState;
+        if (!st || !st.plugins[name]) return;
+        const $card = $('#kazumi-dialog-body .kazumi-src-card').filter(function () {
+            return $(this).data('plugin') === name;
+        });
+        if (!$card.length) return;
+        const html = this._sourceCardHtml(name, st.plugins[name], st.expanded === name);
+        $card.replaceWith(html);
+        this._bindSheetEvents();
+    },
+
+    /** 弹窗头部：标题 + 进度（检索中 X/Y 或 共 N 条）。 */
+    _sheetHeaderHtml(st) {
+        const names = Object.keys(st.plugins);
+        const done = names.filter((n) => st.plugins[n].status !== 'pending').length;
+        const found = names.reduce((s, n) => s + (st.plugins[n].results || []).length, 0);
+        const busy = done < names.length;
+        return `<div class="kazumi-sheet-head">
+            <div class="kazumi-sheet-title">「${escHtml(st.keyword)}」</div>
+            <div class="kazumi-sheet-progress">${busy ? `检索中 ${done}/${names.length}` : `共 ${found} 条结果`}</div>
+        </div>`;
+    },
+
+    /** 更新头部进度（不重建列表）。 */
+    _updateSheetHeader() {
+        const st = this._dlgState;
+        if (!st) return;
+        const box = $('#kazumi-dialog-body');
+        const $head = box.find('.kazumi-sheet-head');
+        if ($head.length) $head.replaceWith(this._sheetHeaderHtml(st));
+    },
+
+    /** 状态 → 徽标。 */
+    _statusBadge(p) {
+        const map = {
+            pending: { text: '检索中', cls: 'kazumi-status-pending' },
+            success: { text: `${p.results.length} 条`, cls: 'kazumi-status-ok' },
+            noresult: { text: '无结果', cls: 'kazumi-status-muted' },
+            captcha: { text: '需验证', cls: 'kazumi-status-captcha' },
+            error: { text: '检索失败', cls: 'kazumi-status-error' },
+        };
+        const m = map[p.status] || map.pending;
+        return `<span class="kazumi-status ${m.cls}">${m.text}</span>`;
+    },
+
+    /** 源卡补救操作按钮组。 */
+    _sourceActionsHtml(name, p) {
+        const btn = (action, label) => `<button class="md-btn md-btn-tonal md-btn-sm kazumi-src-action" data-action="${action}" data-plugin="${escHtml(name)}">${label}</button>`;
+        let actions = '';
+        if (p.status === 'captcha' && p.captchaUrl) actions += btn('captcha', '进行验证');
+        if (p.status === 'error') actions += btn('retry', '重试');
+        if (p.status === 'success') actions += btn('retry', '重新检索');
+        actions += btn('manual', '手动检索');
+        actions += btn('browser', '浏览器打开');
+        return actions;
+    },
+
+    /** 单张源卡片 HTML。 */
+    _sourceCardHtml(name, p, open) {
+        const head = `<div class="kazumi-src-card" data-plugin="${escHtml(name)}">
+            <div class="kazumi-src-row" tabindex="0" title="点击展开/收起">
+                <span class="kazumi-src-name">${escHtml(name)}</span>
+                ${this._statusBadge(p)}
+                <span class="kazumi-src-chev">${open ? '▾' : '▸'}</span>
+            </div>`;
+        let body = '';
+        if (open) {
+            if (p.searching || p.status === 'pending') {
+                body = '<div class="kazumi-src-body"><div class="tip-line">检索中…</div></div>';
+            } else if (p.status === 'success') {
+                const items = p.results.map((it) => `
+                    <div class="kazumi-result-item" data-plugin="${escHtml(name)}" data-src="${escHtml(it.src)}" data-name="${escHtml(it.name)}">
+                        <span class="kazumi-result-name">${escHtml(it.name)}</span>
+                        <span class="kazumi-result-src">${escHtml(it.src)}</span>
+                    </div>`).join('');
+                body = `<div class="kazumi-src-body"><div class="kazumi-result-list">${items}</div>
+                    <div class="kazumi-src-actions">${this._sourceActionsHtml(name, p)}</div></div>`;
+            } else {
+                const hint = p.status === 'captcha' ? '该源需要验证码验证'
+                    : p.status === 'error' ? '该源检索失败'
+                    : '该源未找到结果';
+                body = `<div class="kazumi-src-body">
+                    <div class="tip-line">${escHtml(hint)}${p.msg ? '：' + escHtml(p.msg) : ''}</div>
+                    <div class="kazumi-src-actions">${this._sourceActionsHtml(name, p)}</div>
+                </div>`;
+            }
+        }
+        return head + body + '</div>';
+    },
+
+    /** 绑定源卡交互（展开/结果行/补救操作），事件委托到弹窗容器避免重复绑定。 */
+    _bindSheetEvents() {
+        const box = $('#kazumi-dialog-body');
+        const st = this._dlgState;
+        if (!st) return;
+        const token = st.token;
+        box.off('.ks').on('click.ks', '.kazumi-src-row', (e) => {
+            if (token !== this._dlgToken) return;
+            const name = String($(e.currentTarget).closest('.kazumi-src-card').data('plugin') || '');
+            if (!name) return;
+            st.expanded = (st.expanded === name) ? null : name;
+            this._renderSourceCard(name);
+        });
+        box.on('click.ks', '.kazumi-result-item', (e) => {
             if (token !== this._dlgToken) return;
             const el = $(e.currentTarget);
             const pluginName = String(el.data('plugin') || '');
             const src = String(el.data('src') || '');
             const name = String(el.data('name') || '');
-            this._loadChapters(pluginName, src, name, token);
+            this._openSearchItem(pluginName, src, name, token);
         });
-        // 绑定验证码点击：打开验证窗口
-        box.find('.kazumi-captcha-item').on('click', (e) => {
+        box.on('click.ks', '.kazumi-src-action', (e) => {
             if (token !== this._dlgToken) return;
-            const el = $(e.currentTarget);
-            const url = String(el.data('captcha-url') || '');
-            if (url) this._openCaptchaWindow(url);
+            e.stopPropagation();
+            const pluginName = String($(e.currentTarget).data('plugin') || '');
+            const action = String($(e.currentTarget).data('action') || '');
+            this._handleSourceAction(action, pluginName, token);
         });
-        // 异步补全 Bangumi 元数据（不阻塞交互）
-        this._enrichBangumiMetadata(title, box, token);
     },
 
-    /** 打开验证码验证窗口（隐藏 BrowserWindow，用户手动过验证）。 */
-    _openCaptchaWindow(url) {
-        // 复用现有 captureDirect 窗口机制（主进程隐藏窗口）
-        // 打开后用户手动完成验证，窗口关闭后自动重试搜索
-        warnToast('正在打开验证页面，请手动完成验证…');
-        window.vpc.captureDirect(url).then(() => {
-            warnToast('验证完成，请重新搜索');
-        }).catch(() => {
+    /** 点结果行：显示「获取中」，解析剧集线路 → 选集视图；失败回选源。 */
+    async _openSearchItem(pluginName, src, name, token) {
+        $('#kazumi-dialog-body').html('<div class="tip-line">正在解析剧集线路…</div>');
+        try {
+            const rsp = await doAction('kazumiChapters', { pluginName, src }, '/kazumi/action');
+            if (token !== this._dlgToken) return;
+            const roads = (rsp && rsp.roads) || [];
+            if (!roads.length) { this._backToSources(); warnToast('未解析到剧集线路'); return; }
+            this._renderChapterRoads(pluginName, roads, name, token, src);
+        } catch (e) {
+            if (token !== this._dlgToken) return;
+            this._backToSources();
+            warnToast('剧集解析失败');
+        }
+    },
+
+    /** 从选集视图返回选源列表（保留已搜到的状态）。 */
+    _backToSources() {
+        if (this._dlgState) this._renderSourceSheet();
+    },
+
+    /** 源卡补救操作分发。 */
+    async _handleSourceAction(action, pluginName, token) {
+        const st = this._dlgState;
+        if (!st) return;
+        const keyword = st.keyword;
+        if (action === 'retry') {
+            await this._queryPlugin(keyword, pluginName, token);
+        } else if (action === 'captcha') {
+            const url = (st.plugins[pluginName] || {}).captchaUrl || '';
+            if (url) this._openCaptchaWindow(url, () => this._queryPlugin(keyword, pluginName, token));
+            else warnToast('该源暂无验证链接');
+        } else if (action === 'manual') {
+            this._showKeywordDialog(pluginName, token, '手动检索');
+        } else if (action === 'browser') {
+            this._openPluginSearchPage(pluginName, keyword);
+        }
+    },
+
+    /** 手动检索：弹关键词输入框，重查该源。 */
+    _showKeywordDialog(pluginName, token, title) {
+        const kw = this._dlgState ? this._dlgState.keyword : '';
+        const dlg = $('<div class="md-dialog-overlay" style="display:flex">'
+            + '<div class="md-dialog">'
+            + `<div class="md-dialog-title">${escHtml(title || '手动检索')} · ${escHtml(pluginName)}</div>`
+            + '<div class="md-dialog-body"><div class="md-field"><input id="kazumi-kw-input" class="md-input" type="text" value="' + escHtml(kw) + '" placeholder="输入关键词，回车确认" /></div></div>'
+            + '<div class="md-dialog-actions">'
+            + '<button class="md-dialog-btn" id="kazumi-kw-cancel">取消</button>'
+            + '<button class="md-dialog-btn md-dialog-btn-primary" id="kazumi-kw-ok">确认</button>'
+            + '</div></div></div>').appendTo(document.body);
+        const close = () => dlg.remove();
+        const submit = () => {
+            const v = String(dlg.find('#kazumi-kw-input').val() || '').trim();
+            if (!v) { warnToast('请输入关键词'); return; }
+            close();
+            this._queryPlugin(v, pluginName, token);
+        };
+        dlg.on('click', (e) => { if (e.target === dlg[0]) close(); });
+        dlg.find('#kazumi-kw-cancel').on('click', close);
+        dlg.find('#kazumi-kw-ok').on('click', submit);
+        dlg.find('#kazumi-kw-input').on('keydown', (e) => { if (e.key === 'Enter') submit(); }).trigger('focus').select();
+    },
+
+    /** 浏览器打开源的搜索页。 */
+    _openPluginSearchPage(pluginName, keyword) {
+        const rule = this._rules.find((r) => r.name === pluginName);
+        if (!rule) { warnToast('未找到该源规则'); return; }
+        const raw = String(rule.searchURL || '').replace('@keyword', encodeURIComponent(keyword || ''));
+        if (/^https?:\/\//i.test(raw)) window.open(raw, '_blank'); // 主进程 setWindowOpenHandler 转系统浏览器
+        else warnToast('该源未配置搜索地址');
+    },
+
+    /** 打开验证码验证窗口（T73）：可见窗口供用户填写验证码，关闭时主进程收割 Cookie 交给后端，
+     *  验证完成后由调用方重新搜索（下次搜索自动带上 Cookie）。 */
+    async _openCaptchaWindow(url, onDone) {
+        if (!url) return;
+        warnToast('已打开验证码验证窗口，完成后关闭窗口即可');
+        try {
+            await window.vpc.captchaVerify(url);
+            warnToast('验证码窗口已关闭，Cookie 已保存');
+            if (typeof onDone === 'function') onDone();
+        } catch (e) {
             warnToast('验证窗口打开失败');
-        });
+        }
     },
 
     /** Bangumi 元数据补全：搜索首个结果取详情，插入弹窗顶部。 */
@@ -809,74 +1393,147 @@ const Kazumi = {
         }
     },
 
-    async _renderBangumiDetail(info, token) {
-        const box = $('#kazumi-dialog-body');
+    /** 打开 Bangumi 番剧详情（T74 统一详情页）：复用 #view-detail，Bangumi-only 自适应渲染。 */
+    async openBangumiInfoPage(subjectId) {
+        const curView = (typeof App !== 'undefined' && App.currentView) ? App.currentView : 'home';
+        if (curView && curView !== 'detail') this._infoReferrer = curView;
+        if (typeof Detail !== 'undefined' && Detail.openBangumi) {
+            await Detail.openBangumi(subjectId, '');
+        }
+    },
+
+    /** 渲染 Bangumi 完整详情到弹窗容器 #kazumi-dialog-body（选源弹窗内「查看详情」预览用；正式入口为统一详情页）。 */
+    async _renderBangumiDetail(info, token, $box) {
+        const box = $box || $('#kazumi-dialog-body');
+        const name = info.name_cn || info.name || '';
         const cover = (info.images && (info.images.large || info.images.common || info.images.medium)) || '';
-        const score = info.rating && info.rating.score ? info.rating.score : '';
-        const votes = info.rating && info.rating.total ? `${info.rating.total} 人评分` : '';
-        const meta = [info.date, score, votes, info.platform].filter(Boolean).join(' · ');
-        // 顶部横幅
-        let html = `<div class="kazumi-bangumi-banner" style="margin-bottom:16px;">
-            ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
-            <div class="kazumi-bangumi-info">
-                <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || '')}</div>
-                <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
-                ${info.summary ? `<div class="kazumi-bangumi-summary">${escHtml(info.summary)}</div>` : ''}
+        const rating = info.rating || {};
+        const score = rating.score || 0;
+        const votes = rating.total || 0;
+        const rank = rating.rank || 0;
+        const airDate = info.date || info.air_date || '';
+        // 星级：score 满分 10 → 5 星填充比例
+        const starFrac = Math.max(0, Math.min(1, Number(score) / 10));
+        const starsHtml = score
+            ? `<span class="bi-stars"><span class="bi-stars-bg">★★★★★</span><span class="bi-stars-fill" style="width:${Math.round(starFrac * 100)}%">★★★★★</span></span>`
+            : '';
+        // 评分透视柱状图：rating.count 为 {1..10: 人数} 分布
+        let histHtml = '';
+        const cnt = rating.count;
+        if (cnt && typeof cnt === 'object') {
+            const vals = [];
+            for (let i = 1; i <= 10; i++) vals.push(Number(cnt[i] || cnt[String(i)] || 0));
+            if (vals.some((v) => v > 0)) {
+                const maxV = Math.max(1, ...vals);
+                histHtml = `<div class="bi-hist" title="评分透视（1-10 分人数分布）">` + vals.map((v, i) =>
+                    `<div class="bi-hist-col"><div class="bi-hist-bar" style="height:${Math.round(v / maxV * 100)}%" title="${i + 1} 分：${v} 人"></div><span class="bi-hist-lb">${i + 1}</span></div>`
+                ).join('') + `</div>`;
+            }
+        }
+        // 顶部信息卡（仿 Kazumi InfoPage：标题 + 封面/放送日期/评分星级/排名/评分透视）
+        let html = `<div class="bangumi-info-card" style="margin-bottom:16px;">
+            <div class="bangumi-info-title">${escHtml(name)}</div>
+            <div class="bangumi-info-row">
+                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'"></div>` : ''}
+                <div class="bangumi-info-meta">
+                    <div class="bi-label">放送开始</div>
+                    <div class="bi-value">${escHtml(airDate || '—')}</div>
+                    <div class="bi-label">${votes ? `${votes} 人评分` : '评分'}</div>
+                    <div class="bi-value bi-score">${score ? `${score} ${starsHtml}` : '—'}</div>
+                    <div class="bi-label">Bangumi Ranked</div>
+                    <div class="bi-value">${rank ? `#${rank}` : '—'}</div>
+                </div>
+                ${histHtml}
+            </div>
+            ${info.summary ? `<div class="bangumi-info-summary">${escHtml(typeof stripHtml === 'function' ? stripHtml(info.summary) : info.summary)}</div>` : ''}
+            ${this._renderInfoTags(info.tags)}
+        </div>`;
+        // 开始观看（修复二级页不能播放：打开 Kazumi 源弹窗选源播放）
+        html += `<div class="kazumi-watch-row">
+            <button class="md-btn md-btn-filled md-btn-sm kazumi-start-watch">▶ 开始观看</button>
+            <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选择播放</span>
+        </div>`;
+        // Bangumi 收藏状态按钮（仿 Kazumi CollectButton，点击即同步）
+        html += `<div class="kazumi-bangumi-colrow">
+            <span class="tip-line pad0">Bangumi 收藏（点击即同步）</span>
+            <div class="kazumi-col-btns" data-id="${info.id}">
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="2">看过</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="4">搁置</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="5">抛弃</button>
             </div>
         </div>`;
-        // Bangumi 追番同步行（需 token；未配置时按钮提示去设置）
-        html += `<div class="kazumi-bangumi-colrow">
-            <span class="tip-line pad0">Bangumi 收藏</span>
-            <select class="md-select kazumi-bangumi-col" data-id="${info.id}">
-                <option value="-1">未收藏</option>
-                <option value="0">想看</option>
-                <option value="2">在看</option>
-                <option value="1">看过</option>
-                <option value="3">搁置</option>
-                <option value="4">抛弃</option>
-            </select>
-            <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-col-set">同步到 Bangumi</button>
-        </div>`;
-        // 页签导航
-        html += `<div class="class-tabs" id="bangumi-detail-tabs" style="margin-bottom:12px;">
+        // 页签导航（class 化，避免弹窗/二级页双实例 id 冲突）
+        html += `<div class="class-tabs bangumi-detail-tabs" style="margin-bottom:12px;">
             <span class="class-tab active" data-tab="episodes">分集</span>
             <span class="class-tab" data-tab="characters">角色</span>
             <span class="class-tab" data-tab="staff">制作</span>
             <span class="class-tab" data-tab="comments">评论</span>
             <span class="class-tab" data-tab="relations">关联</span>
         </div>`;
-        html += '<div id="bangumi-detail-content" style="max-height:40vh;overflow-y:auto;"></div>';
+        html += '<div class="bangumi-detail-content" style="max-height:40vh;overflow-y:auto;"></div>';
         box.html(html);
+        const $content = box.find('.bangumi-detail-content');
+        this._curSubjectId = info.id;
+        this._curBangumiName = name;
         // 回填当前收藏状态（异步，不阻塞）
         this._applyBangumiColState(info.id);
-        // 同步按钮：设置收藏类型后刷新状态；「未收藏」删除收藏
-        box.on('click', '.kazumi-bangumi-col-set', async (e) => {
+        // 开始观看：打开 Kazumi 源弹窗
+        box.on('click', '.kazumi-start-watch', (e) => {
             if (token !== this._dlgToken) return;
-            const row = $(e.currentTarget).closest('.kazumi-bangumi-colrow');
-            const id = String(row.find('.kazumi-bangumi-col').data('id') || '');
-            const val = parseInt(row.find('.kazumi-bangumi-col').val(), 10);
-            const name = info.name_cn || info.name || '';
+            const title = this._curBangumiName || '';
+            if (title && typeof this.openSourceDialog === 'function') this.openSourceDialog(title, 'kazumi', '');
+        });
+        // 收藏状态按钮：点击即同步；「未收藏」删除收藏
+        box.on('click', '.kazumi-col-btn', async (e) => {
+            if (token !== this._dlgToken) return;
+            const btn = $(e.currentTarget);
+            const id = String(btn.closest('.kazumi-col-btns').data('id') || '');
+            const val = parseInt(btn.data('type'), 10);
+            const nm = this._curBangumiName || '';
             if (!id) return;
             if (val < 0) {
-                if (await this.removeBangumiCollection(id, name)) this._applyBangumiColState(id);
+                if (await this.removeBangumiCollection(id, nm)) this._applyBangumiColState(id);
             } else if (await this.setBangumiCollection(id, val)) {
                 this._applyBangumiColState(id);
             }
         });
+        // 标签点击：跳搜索页按标签搜索
+        box.on('click', '.kazumi-tag', (e) => {
+            if (token !== this._dlgToken) return;
+            const tag = String($(e.currentTarget).data('tag') || '');
+            if (!tag) return;
+            if (typeof App !== 'undefined' && App.showView) App.showView('search');
+            $('#search-keyword').val(tag);
+            if (typeof Search !== 'undefined' && Search.run) Search.run();
+        });
         // 默认载入分集
-        await this._loadBangumiTab(info.id, 'episodes', token);
+        await this._loadBangumiTab(info.id, 'episodes', token, $content);
         // 页签切换
-        $('#bangumi-detail-tabs').on('click', '.class-tab', async (e) => {
+        box.find('.bangumi-detail-tabs').on('click', '.class-tab', async (e) => {
             if (token !== this._dlgToken) return;
             const tab = String($(e.currentTarget).data('tab') || '');
-            $('#bangumi-detail-tabs .class-tab').removeClass('active');
+            box.find('.bangumi-detail-tabs .class-tab').removeClass('active');
             $(e.currentTarget).addClass('active');
-            await this._loadBangumiTab(info.id, tab, token);
+            await this._loadBangumiTab(info.id, tab, token, $content);
         });
     },
 
-    async _loadBangumiTab(subjectId, tab, token) {
-        const box = $('#bangumi-detail-content');
+    /** 渲染简介区标签（info.tags: [{name,count}]），点击跳搜索。 */
+    _renderInfoTags(tags) {
+        if (!Array.isArray(tags) || !tags.length) return '';
+        const chips = tags.slice(0, 13).map((t) => {
+            const tn = (t && typeof t === 'object') ? (t.name || '') : t;
+            return tn ? `<span class="kazumi-tag" data-tag="${escHtml(tn)}">${escHtml(tn)}</span>` : '';
+        }).filter(Boolean).join('');
+        if (!chips) return '';
+        return `<div class="bangumi-info-tags"><span class="tip-line pad0">标签</span><div class="kazumi-tags-wrap">${chips}</div></div>`;
+    },
+
+    async _loadBangumiTab(subjectId, tab, token, $content) {
+        const box = $content || $('.bangumi-detail-content').first();
         box.html('<div class="tip-line">载入中…</div>');
         try {
             if (tab === 'episodes') {
@@ -884,24 +1541,39 @@ const Kazumi = {
                 if (token !== this._dlgToken) return;
                 const list = (data && data.data) || [];
                 box.html(list.length
-                    ? list.map((ep) => `<div class="kazumi-detail-ep">
+                    ? '<div class="tip-line pad0" style="margin-bottom:8px;">点击集数 → 从 Kazumi 规则源选源播放</div>'
+                      + list.map((ep) => `<div class="kazumi-detail-ep" tabindex="0">
                         <span class="kazumi-detail-ep-no">${ep.sort || ep.ep || ''}</span>
                         <span class="kazumi-detail-ep-name">${escHtml(ep.name_cn || ep.name || '')}</span>
                         <span class="kazumi-detail-ep-type">${escHtml(ep.type === 1 ? 'SP' : ep.type === 2 ? 'OP' : ep.type === 3 ? 'ED' : '')}</span>
                     </div>`).join('')
                     : '<div class="tip-line">暂无分集信息</div>');
+                // 修复二级页不能播放：点击集数打开 Kazumi 源弹窗选源播放
+                box.find('.kazumi-detail-ep').on('click', () => {
+                    if (token !== this._dlgToken) return;
+                    const title = this._curBangumiName || '';
+                    if (title && typeof this.openSourceDialog === 'function') this.openSourceDialog(title, 'kazumi', '');
+                });
             } else if (tab === 'characters') {
                 const list = await this.bangumiCharacters(subjectId);
                 if (token !== this._dlgToken) return;
                 box.html(list.length
-                    ? list.map((c) => `<div class="kazumi-detail-char">
+                    ? '<div class="tip-line pad0" style="margin-bottom:8px;">点击角色查看详情</div>'
+                      + list.map((c) => `<div class="kazumi-detail-char" data-char-id="${escHtml(c.id)}" tabindex="0">
                         <img class="kazumi-detail-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
                         <div class="kazumi-detail-char-info">
                             <div class="kazumi-detail-char-name">${escHtml(c.name || '')}</div>
                             <div class="kazumi-detail-char-role">${escHtml(c.role_name || '')}</div>
                         </div>
+                        <span class="kazumi-detail-char-more">详情 ›</span>
                     </div>`).join('')
                     : '<div class="tip-line">暂无角色信息</div>');
+                // 角色点击进详情（资料/简介）
+                box.find('.kazumi-detail-char').on('click', async (e) => {
+                    if (token !== this._dlgToken) return;
+                    const cid = String($(e.currentTarget).data('char-id') || '');
+                    if (cid) await this._openCharacterDetail(cid, token, box);
+                });
             } else if (tab === 'staff') {
                 const list = await this.bangumiStaff(subjectId);
                 if (token !== this._dlgToken) return;
@@ -937,6 +1609,39 @@ const Kazumi = {
         }
     },
 
+    /** 角色详情：在 tab 内容区展示资料（大图/基本信息/简介），带返回角色列表（仿 Kazumi CharacterPage）。 */
+    async _openCharacterDetail(characterId, token, $content) {
+        const box = $content || $('.bangumi-detail-content').first();
+        box.html('<div class="tip-line">载入中…</div>');
+        try {
+            const info = await this.bangumiCharacter(characterId);
+            if (token !== this._dlgToken) return;
+            if (!info) { box.html('<div class="tip-line">角色详情载入失败</div>'); return; }
+            const img = (info.images && (info.images.large || info.images.medium || info.images.small)) || '';
+            const metaBits = [
+                info.blood_type ? '血型 ' + info.blood_type : '',
+                info.birth_month ? `${info.birth_month}月${info.birth_day || ''}日` : '',
+                info.gender ? '性别 ' + info.gender : '',
+                info.height ? '身高 ' + info.height + 'cm' : '',
+                info.weight ? '体重 ' + info.weight + 'kg' : '',
+            ].filter(Boolean).join(' · ');
+            box.html(`<div class="kazumi-char-detail">
+                <button class="md-btn md-btn-sm md-btn-tonal kazumi-char-back">← 返回角色列表</button>
+                ${img ? `<img class="kazumi-char-img" src="${escHtml(img)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+                <div class="kazumi-char-name">${escHtml(info.name || '')}</div>
+                <div class="kazumi-char-meta">${escHtml(metaBits)}</div>
+                ${info.summary ? `<div class="kazumi-char-summary">${escHtml(typeof stripHtml === 'function' ? stripHtml(info.summary) : info.summary)}</div>` : ''}
+            </div>`);
+            box.find('.kazumi-char-back').on('click', async () => {
+                if (token !== this._dlgToken) return;
+                await this._loadBangumiTab(this._curSubjectId, 'characters', token, box);
+            });
+        } catch (e) {
+            if (token !== this._dlgToken) return;
+            box.html('<div class="tip-line">角色详情载入失败</div>');
+        }
+    },
+
     /** 解析剧集线路（kazumiChapters）。 */
     async _loadChapters(pluginName, src, title, token) {
         $('#kazumi-dialog-body').html('<div class="tip-line">正在解析剧集线路…</div>');
@@ -948,17 +1653,20 @@ const Kazumi = {
                 $('#kazumi-dialog-body').html('<div class="tip-line">未解析到剧集线路</div>');
                 return;
             }
-            this._renderChapterRoads(pluginName, roads, title, token);
+            this._renderChapterRoads(pluginName, roads, title, token, src);
         } catch (e) {
             if (token !== this._dlgToken) return;
             $('#kazumi-dialog-body').html('<div class="tip-line">剧集解析失败</div>');
         }
     },
 
-    /** 渲染线路与剧集列表。 */
-    _renderChapterRoads(pluginName, roads, title, token) {
+    /** 渲染线路与剧集列表。src 为番剧源页 URL，写入历史记录供历史卡重新选源（T4）。 */
+    _renderChapterRoads(pluginName, roads, title, token, src) {
         const box = $('#kazumi-dialog-body');
-        let html = `<div class="kazumi-plugin-head">${escHtml(pluginName)} · ${escHtml(title)}</div>`;
+        let html = `<div class="kazumi-road-toolbar">
+            <button class="md-btn md-btn-tonal md-btn-sm kazumi-road-back">← 返回选源</button>
+            <span class="kazumi-plugin-head">${escHtml(pluginName)} · ${escHtml(title)}</span>
+        </div>`;
         roads.forEach((road, ri) => {
             const eps = (road.data || []).map((url, ei) => {
                 const name = (road.identifier || [])[ei] || `第${ei + 1}集`;
@@ -972,6 +1680,11 @@ const Kazumi = {
             </div>`;
         });
         box.html(html);
+        // 返回选源列表（保留已搜到的状态）
+        box.find('.kazumi-road-back').on('click', () => {
+            if (token !== this._dlgToken) return;
+            this._backToSources();
+        });
         // 绑定点击：播放剧集
         box.find('.kazumi-ep-btn').on('click', (e) => {
             if (token !== this._dlgToken) return;
@@ -985,7 +1698,7 @@ const Kazumi = {
             const episodes = road ? (road.data || []).map((u, i) => ({ name: (road.identifier || [])[i] || `第${i + 1}集`, url: u })) : [{ name, url }];
             const epIndex = episodes.findIndex((ep) => ep.url === url);
             closeDialog('kazumiSourceDialog');
-            Player.play('kazumi:' + pluginName, flag, url, title, name, episodes, Math.max(0, epIndex));
+            Player.play('kazumi:' + pluginName, flag, url, title, name, episodes, Math.max(0, epIndex), src || '');
         });
         // 弹幕入口（kimi UI）：播放时自动加载弹幕
         box.find('.kazumi-ep-btn').on('contextmenu', (e) => {
@@ -1028,13 +1741,13 @@ Kazumi.loadDanmaku = async function (title, episode) {
 
 // ---------------------------------------------------------------- 以图搜番（trace.moe）
 
-/** 以图搜番：上传图片或粘贴图片 URL，调 trace.moe 识别番剧。 */
+/** 以图搜番：上传图片或粘贴图片 URL，调 trace.moe 识别番剧。返回 {results, error}。 */
 Kazumi.imageSearch = async function (imageFile) {
     try {
         if (typeof imageFile === 'string' && /^https?:\/\//i.test(imageFile)) {
-            // URL 直接搜索
+            // URL：后端下载图片字节后上传识别（trace.moe URL 直传被 403 拦截，T74）
             const rsp = await doAction('kazumiImageSearch', { url: imageFile }, '/kazumi/action');
-            return (rsp && rsp.results) || [];
+            return { results: (rsp && rsp.results) || [], error: (rsp && rsp.error) || '' };
         }
         // 文件上传（File 对象转 base64）
         if (imageFile instanceof File) {
@@ -1045,27 +1758,23 @@ Kazumi.imageSearch = async function (imageFile) {
                 reader.readAsDataURL(imageFile);
             });
             const rsp = await doAction('kazumiImageSearch', { base64: b64 }, '/kazumi/action');
-            return (rsp && rsp.results) || [];
+            return { results: (rsp && rsp.results) || [], error: (rsp && rsp.error) || '' };
         }
-        warnToast('请提供图片 URL 或选择图片文件');
-        return [];
+        return { results: [], error: '请提供图片 URL 或选择图片文件' };
     } catch (e) {
-        warnToast('以图搜番失败');
-        return [];
+        return { results: [], error: '以图搜番失败' };
     }
 };
 
 // ---------------------------------------------------------------- WebDAV 同步
 
-/** WebDAV 同步：上传收藏/历史/规则到远程。 */
+/** WebDAV 同步：上传收藏/历史/规则到远程；按子开关（收藏/历史）决定包含哪些数据。 */
 Kazumi.webdavSync = async function (url, username, password) {
     try {
         const s = (await window.vpc.settingsGet()) || {};
-        const data = {
-            favorites: s.favorites || [],
-            history: s.history || [],
-            kazumiRules: this._rules || [],
-        };
+        const data = { kazumiRules: this._rules || [] };
+        if (s.webDavEnableCollect !== false) data.favorites = s.favorites || [];
+        if (s.webDavEnableHistory !== false) data.history = s.history || [];
         const rsp = await doAction('kazumiWebdavSync', {
             url, username, password, data: JSON.stringify(data),
         }, '/kazumi/action');
@@ -1076,11 +1785,15 @@ Kazumi.webdavSync = async function (url, username, password) {
     }
 };
 
-/** WebDAV 恢复：从远程下载收藏/历史/规则。 */
+/** WebDAV 恢复：从远程下载收藏/历史/规则；仅恢复子开关启用的数据。 */
 Kazumi.webdavRestore = async function (url, username, password) {
     try {
+        const s = (await window.vpc.settingsGet()) || {};
+        const names = ['kazumiRules'];
+        if (s.webDavEnableCollect !== false) names.unshift('favorites');
+        if (s.webDavEnableHistory !== false) names.unshift('history');
         const rsp = await doAction('kazumiWebdavRestore', {
-            url, username, password, names: JSON.stringify(['favorites', 'history', 'kazumiRules']),
+            url, username, password, names: JSON.stringify(names),
         }, '/kazumi/action');
         if (rsp && rsp.code === 200 && rsp.data) {
             const d = rsp.data;
@@ -1101,6 +1814,18 @@ Kazumi.webdavRestore = async function (url, username, password) {
         warnToast('WebDAV 恢复失败');
         return false;
     }
+};
+
+/** WebDAV 保存配置：持久化地址/账号/密码与开关（不联网，同步/恢复按钮做实际操作）。 */
+Kazumi.webdavSaveUI = async function () {
+    const url = $('#webdav_url').val().trim();
+    const username = $('#webdav_username').val().trim();
+    const password = $('#webdav_password').val();
+    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    window.vpc.settingsSet('webDavUrl', url);
+    window.vpc.settingsSet('webDavUsername', username);
+    window.vpc.settingsSet('webDavPassword', password);
+    warnToast('WebDAV 配置已保存');
 };
 
 /** WebDAV 同步 UI 入口。 */
@@ -1126,13 +1851,9 @@ Kazumi.webdavRestoreUI = async function () {
     const ok = await this.webdavRestore(url, username, password);
     hideLoading();
     if (ok) {
-        // 刷新收藏/历史视图
+        // 刷新收藏/历史视图（收藏入口已并入「我的」页签，同时刷新新面板）
         if (typeof Favorites !== 'undefined' && Favorites.render) Favorites.render();
         if (typeof HistoryView !== 'undefined' && HistoryView.render) HistoryView.render();
+        if (typeof My !== 'undefined' && My._inited && My._favorites && My._favorites.render) My._favorites.render();
     }
 };
-
-// 启动时自动初始化（设置页板块存在才绑定）
-$(function () {
-    if ($('#kazumi_rule_json').length) Kazumi.init();
-});

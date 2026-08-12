@@ -64,6 +64,78 @@ function escHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * 卡片标题限字（T74）：超长标题粗截断为 max 字符（完整标题保留在 title 悬浮提示）。
+ * 仅为 DOM 长度保险（避免过长串进入后续精确截断），不再承担视觉省略——
+ * 精确的两行截断 + '…' 由 fitVodTitle 在网格渲染后按实际列宽完成。
+ */
+function truncateTitle(text, max) {
+    const s = String(text || '');
+    const n = (max > 0) ? max : 60;
+    return s.length <= n ? s : s.slice(0, n);
+}
+
+/**
+ * 卡片标题「恰好两行」精确截断（T74 白块根因收尾）：
+ * CSS -webkit-line-clamp 只隐藏超行文本的显示，超出的行仍参与布局与绘制，
+ * 会触发 Chromium 把超行文本画成白色块的绘制缺陷。此函数对单个 .vod-name
+ * 精确测量——临时解除 line-clamp（max-height 恒为两行高，故 clientHeight
+ * 即两行高度）读 scrollHeight 判溢出；溢出则二分求「加入省略号后仍不超两行」
+ * 的最长前缀并改写 textContent。DOM 中不再存在任何超出两行的文字（无超行 →
+ * 无白块）；省略号由 JS 显式补 '…'，CSS clamp 因无溢出不会再画第二个。
+ */
+function fitVodTitle(el) {
+    const cs = el.style;
+    cs.webkitLineClamp = 'none';
+    const over = el.scrollHeight > el.clientHeight;
+    cs.webkitLineClamp = '2';
+    if (!over) return;
+
+    const text = el.textContent;
+    // 二分求「加省略号后仍不超两行」的最长前缀：'…' 全角比半个拉丁字符宽，
+    // 必须在测量里一起算，否则拉丁标题截完后仍会多绕一行。
+    const fits = (n) => {
+        el.textContent = text.slice(0, n) + '…';
+        cs.webkitLineClamp = 'none';
+        const ok = el.scrollHeight <= el.clientHeight;
+        cs.webkitLineClamp = '2';
+        return ok;
+    };
+    let lo = 0, hi = text.length;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (fits(mid)) lo = mid; else hi = mid - 1;
+    }
+    el.textContent = text.slice(0, lo) + '…';
+}
+
+/** 对容器内已渲染卡片的 .vod-name 逐个做恰好两行截断（各网格渲染后调用）。 */
+function fitVodTitles(container) {
+    const $box = $(container);
+    if (!$box.length) return;
+    $box.find('.vod-name').each(function () { fitVodTitle(this); });
+}
+
+/**
+ * 全量重适配卡片标题（窗口缩放/响应式断点/字号调整后调用）：
+ * .vod-name 的 title 属性恒为完整标题，先据其恢复完整文本，再按当前
+ * 实际列宽重新精确截断，保证任何宽度下 DOM 都不存在超行文字。
+ */
+function refitVodTitles() {
+    $('.vod-name').each(function () {
+        const full = this.getAttribute('title');
+        if (full != null && this.textContent !== full) this.textContent = full;
+        fitVodTitle(this);
+    });
+}
+
+// 窗口宽度变化（响应式断点 T66 / 缩放）后按新列宽重新精确截断卡片标题；防抖 300ms
+let _refitT = 0;
+$(window).on('resize', () => {
+    clearTimeout(_refitT);
+    _refitT = setTimeout(refitVodTitles, 300);
+});
+
 /* ---------------- 封面图统一渲染（T31 可维护性：三处渲染点收口于此，避免参数漂移） ---------------- */
 
 /**
@@ -93,15 +165,58 @@ function coverFadeIn(img) {
 /**
  * 统一生成封面 img 标签（T31）：
  * - loading=lazy + decoding=async：列表页首屏外封面延迟加载/异步解码，降主线程卡顿
+ *   eager=true 时改立即加载（搜索等「当前页封面需立刻显示」的场景，T59）
  * - referrerpolicy=no-referrer：大量图床带防盗链，不带 Referer 才能取到封面
  * - onload 淡入 / onerror 换兜底图（换后置空 onerror 防死循环）
  */
-function vodCoverImg(pic) {
+function vodCoverImg(pic, eager) {
     const p = normalizePic(pic);
     // T42：无封面卡标 data-cover-missing，供 fillMissingCovers 后台从详情补拉
     const miss = p ? '' : ' data-cover-missing="1"';
     const src = escHtml(p || vodPlaceholder());
-    return `<img src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"${miss} onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}'">`;
+    const load = eager ? 'eager' : 'lazy';
+    return `<img src="${src}" alt="" loading="${load}" decoding="async" referrerpolicy="no-referrer"${miss} onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}';this.classList.add('loaded')">`;
+}
+
+/** 封面加载失败时切到下一候选源（T74，配合 vodCoverChain 的 data-fb 链）；链耗尽落占位图。 */
+function coverChainNext(img) {
+    const list = (img && img.dataset && img.dataset.fb) ? String(img.dataset.fb).split('||') : [];
+    if (list.length) {
+        img.dataset.fb = list.slice(1).join('||');
+        img.src = list[0];
+        return;
+    }
+    img.onerror = null;
+    img.src = vodPlaceholder();
+    img.classList.add('loaded');
+}
+
+/**
+ * 封面多级兜底（T74）：按序尝试 pics（如 AniList 封面 → trace.moe 匹配帧），全部失败落占位图并淡入。
+ * 用于以图搜番等封面来源可能被墙/不稳定的场景——onerror 走 coverChainNext 逐级切换，不留空框。
+ */
+function vodCoverChain(pics, eager) {
+    const chain = (pics || []).map((p) => normalizePic(p)).filter(Boolean);
+    if (!chain.length) return vodCoverImg('', eager);
+    const first = escHtml(chain[0]);
+    const rest = chain.slice(1).map((s) => escHtml(s)).join('||');
+    const load = eager ? 'eager' : 'lazy';
+    return `<img src="${first}" alt="" loading="${load}" decoding="async" referrerpolicy="no-referrer"${rest ? ` data-fb="${rest}"` : ''} onload="coverFadeIn(this)" onerror="coverChainNext(this)">`;
+}
+
+/** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。 */
+function bangumiCard(item) {
+    const name = item.name_cn || item.name || '';
+    const cover = (item.images && (item.images.large || item.images.common || item.images.medium)) || '';
+    const rating = item.rating || {};
+    const score = rating.score ? `⭐${rating.score}` : '';
+    const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${rating.rank}">#${rating.rank}</span>` : '';
+    const air = item.air_date || '';
+    return `<div class="vod-card bangumi-card" data-id="${item.id}" data-name="${escHtml(name)}" tabindex="0">
+        <div class="vod-cover">${vodCoverImg(cover)}${rank}</div>
+        <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
+        <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · '))}</div>
+    </div>`;
 }
 
 /** 去除富文本简介中的 HTML 标签（源数据常带 <p>/<br> 等），保留段落换行与文字。 */
@@ -145,83 +260,151 @@ function normalizePic(pic) {
  * 卡片已不在 DOM（重渲染）则跳过写入。
  */
 let _coverFillGen = 0;         // 世代：abortCoverFill 自增使在途补拉全部失效
-const _coverFillQueue = [];    // 待补卡片队列（进入视口才入队）
-let _coverFillBusy = 0;        // 在跑 worker 数（上限 5）
-const _coverFillIOs = [];      // 活跃观察器（同容器新观察前断开旧的）
+const _coverFillPools = new Map(); // poolKey → {queue,busy,limit,seen,ios}；搜索各来源共用一个并发池
+let _coverFillGlobalBusy = 0;  // 全局最多 10 个详情补拉，避免多个页面同时压垮后端
+const COVER_FILL_GLOBAL_LIMIT = 10;
+const _coverCache = new Map(); // 'site|id' → pic：补拉成功的封面 URL 缓存，重绘/切源复用，避免重复 detailContent
+
+/** 命中已补拉过的封面 URL（无则返回 ''）。供列表重绘时直接使用，省一次详情请求与占位闪烁。 */
+function getCachedCover(site, id) {
+    return _coverCache.get(String(site) + '|' + String(id)) || '';
+}
 
 /** 中止后台封面补拉（用户点开详情等高优操作时调用，给详情请求让路）。 */
 function abortCoverFill() {
     _coverFillGen++;
-    _coverFillQueue.length = 0;
-    while (_coverFillIOs.length) {
-        try { _coverFillIOs.pop().disconnect(); } catch (e) { /* ignore */ }
+    for (const pool of _coverFillPools.values()) {
+        pool.queue.length = 0;
+        for (const io of pool.ios.values()) {
+            try { io.disconnect(); } catch (e) { /* ignore */ }
+        }
+        pool.ios.clear();
     }
+    _coverFillPools.clear();
 }
 
-function fillMissingCovers(container, isValid) {
+/**
+ * 补拉列表缺失封面。
+ * options.concurrency：该任务池并发数；options.eager=true 时当前视口优先并补完整页；
+ * options.poolKey：多个容器共享并发额度（搜索页各来源使用同一个 search 池）。
+ */
+function fillMissingCovers(container, isValid, options) {
     const box = $(container);
     if (!box.length) return;
+    const opts = options || {};
+    const poolKey = String(opts.poolKey || container);
+    let pool = _coverFillPools.get(poolKey);
+    if (!pool) {
+        pool = { queue: [], busy: 0, limit: 10, seen: new WeakSet(), ios: new Map() };
+        _coverFillPools.set(poolKey, pool);
+    }
+    pool.limit = Math.max(1, Math.min(COVER_FILL_GLOBAL_LIMIT, parseInt(opts.concurrency, 10) || 10));
     const gen = _coverFillGen;
     const alive = () => gen === _coverFillGen && (!isValid || isValid());
     const cards = box.find('.vod-cover img[data-cover-missing="1"]')
         .closest('.vod-card')
-        .filter(function () { return String($(this).data('id') || '') !== ''; });
-    if (!cards.length) return;
-    // 同容器重渲染后旧观察器失去意义，先断开（防累积）
-    for (let i = _coverFillIOs.length - 1; i >= 0; i--) {
-        if (_coverFillIOs[i]._vpcBox === container) {
-            try { _coverFillIOs[i].disconnect(); } catch (e) { /* ignore */ }
-            _coverFillIOs.splice(i, 1);
-        }
+        .filter(function () {
+            return String($(this).data('id') || '') !== '' && !pool.seen.has(this);
+        });
+    if (!cards.length) { _coverFillPump(pool); return; }
+
+    const enqueue = (el, front) => {
+        if (pool.seen.has(el)) return;
+        pool.seen.add(el);
+        const item = { el, alive };
+        if (front) pool.queue.unshift(item); else pool.queue.push(item);
+    };
+    const isViewportVisible = (el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.bottom >= 0 && rect.top <= window.innerHeight;
+    };
+
+    // 同一容器重建观察器时断开旧实例；共享池中的其他来源观察器继续有效。
+    const oldIo = pool.ios.get(container);
+    if (oldIo) {
+        try { oldIo.disconnect(); } catch (e) { /* ignore */ }
+        pool.ios.delete(container);
     }
+
+    if (opts.eager || typeof IntersectionObserver === 'undefined') {
+        const all = cards.toArray().sort((a, b) => Number(isViewportVisible(b)) - Number(isViewportVisible(a)));
+        all.forEach((el) => enqueue(el, false));
+        _coverFillPump(pool);
+        return;
+    }
+
     const io = new IntersectionObserver((entries) => {
         entries.forEach((ent) => {
             if (!ent.isIntersecting) return;
             io.unobserve(ent.target);
             if (!alive() || !document.contains(ent.target)) return;
-            _coverFillQueue.push({ el: ent.target, alive });
+            enqueue(ent.target, isViewportVisible(ent.target));
         });
-        _coverFillPump();
+        _coverFillPump(pool);
     }, { rootMargin: '300px 0px' });
-    io._vpcBox = container;
-    _coverFillIOs.push(io);
+    pool.ios.set(container, io);
     setTimeout(() => {
         // 安全释放：长时间未滚到的卡片下次渲染会重建观察器
         try { io.disconnect(); } catch (e) { /* ignore */ }
-        const i = _coverFillIOs.indexOf(io);
-        if (i >= 0) _coverFillIOs.splice(i, 1);
+        if (pool.ios.get(container) === io) pool.ios.delete(container);
     }, 120000);
     cards.each(function () { io.observe(this); });
 }
 
-/** worker 池调度：并发上限 10（T43 定 5，T45 提至 10），队列有活就拉起，跑完自退。 */
-function _coverFillPump() {
-    while (_coverFillBusy < 10 && _coverFillQueue.length) {
-        _coverFillBusy++;
-        _coverFillWorker().finally(() => {
-            _coverFillBusy--;
-            if (_coverFillQueue.length) _coverFillPump();
+/** 按任务池限制 + 全局限制调度；搜索中为 3，搜索完成后提升为 6。 */
+function _coverFillPump(pool) {
+    while (pool.busy < pool.limit && _coverFillGlobalBusy < COVER_FILL_GLOBAL_LIMIT && pool.queue.length) {
+        const item = pool.queue.shift();
+        pool.busy++;
+        _coverFillGlobalBusy++;
+        _coverFillOne(pool, item).finally(() => {
+            pool.busy--;
+            _coverFillGlobalBusy--;
+            _coverFillPump(pool);
+            for (const other of _coverFillPools.values()) {
+                if (other !== pool && other.queue.length) _coverFillPump(other);
+            }
         });
     }
 }
 
-async function _coverFillWorker() {
-    while (_coverFillQueue.length) {
-        const item = _coverFillQueue.shift();
-        const el = $(item.el);
-        if (!item.alive() || !document.contains(item.el)) continue;
-        const site = String(el.data('source') || '');
-        const id = String(el.data('id') || '');
-        if (!site || !id) continue;
-        let pic = '';
-        try {
+async function _coverFillOne(pool, item) {
+    const el = $(item.el);
+    if (!item.alive() || !document.contains(item.el)) { pool.seen.delete(item.el); return; }
+    const site = String(el.data('source') || '');
+    const id = String(el.data('id') || '');
+    if (!site || !id) { pool.seen.delete(item.el); return; }
+    let pic = '';
+    try {
+        if (String(site).startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getBangumiCover) {
+            // Kazumi 源列表无源封面：按片名从 Bangumi 拉取（内存 + localStorage 缓存去重，T73）
+            pic = normalizePic(await Kazumi.getBangumiCover(String(el.data('name') || '')));
+        } else {
             const d = await doAction('detailContent', { site, ids: JSON.stringify([id]) });
             const vod = (d && d.list && d.list[0]) || null;
             pic = normalizePic(vod && vod.vod_pic);
-        } catch (e) { continue; }
-        if (!pic || !item.alive() || !document.contains(item.el)) continue;
-        el.removeAttr('data-cover-missing');
-        el.find('.vod-cover').html(vodCoverImg(pic));
+        }
+    } catch (e) {
+        pool.seen.delete(item.el);
+        return;
+    }
+    if (!pic || !item.alive() || !document.contains(item.el)) {
+        pool.seen.delete(item.el);
+        return;
+    }
+    // 缓存补拉结果：列表重绘（如搜索切源）可直接复用，避免重复 detailContent
+    const ckey = String(site) + '|' + String(id);
+    _coverCache.set(ckey, pic);
+    if (_coverCache.size > 2000) { // 防无限增长，淘汰最旧
+        const oldest = _coverCache.keys().next().value;
+        _coverCache.delete(oldest);
+    }
+    el.removeAttr('data-cover-missing');
+    // eager：补上的封面立即加载（此前 lazy 在隐藏/折叠区不触发，切源后看着「加载不出」）
+    el.find('.vod-cover').html(vodCoverImg(pic, true));
+    // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）
+    if (String(site).startsWith('kazumi:')) {
+        el.find('.vod-cover').prepend(`<div class="kazumi-badge">${escHtml(String(site).slice(7))}</div>`);
     }
 }
 
@@ -237,11 +420,11 @@ function fmtSize(n) {
 // ---------------------------------------------------------------- 分页
 
 let _pageSizeCache = {}; // 每页条数设置缓存（key → 值；变更后由 invalidatePageSizeCache 整体作废）
-const PAGE_SIZE_OPTIONS = [20, 24, 36, 60, 120];
+const PAGE_SIZE_OPTIONS = [10, 16, 20, 24, 36, 60, 120];
 
 /**
  * 分页面每页条数设置（T39：首页/搜索/收藏/历史可单独设置）。
- * key：pageSizeHome / pageSizeSearch / pageSizeFavorites / pageSizeHistory；
+ * key：pageSizeHome / pageSizeSearch / pageSizeFavorites / pageSizeHistory / pageSizeLive / pageSizePopular；
  * 返回 20/24/36/60/120，空/非法默认 20；首页额外回退旧键 listPageSize（兼容升级前设置）。
  */
 async function pageSizeOf(key) {
@@ -257,8 +440,11 @@ async function pageSizeOf(key) {
     return _pageSizeCache[key];
 }
 
-/** 设置页变更每页条数后调用，使缓存整体作废（下次进列表页即生效）。 */
-function invalidatePageSizeCache() { _pageSizeCache = {}; }
+/** 设置页变更每页条数后调用，使缓存整体作废（下次进列表页即生效）；同时作废首页分类内容缓存。 */
+function invalidatePageSizeCache() {
+    _pageSizeCache = {};
+    if (typeof Home !== 'undefined' && Home.invalidatePageCaches) Home.invalidatePageCaches(); // T77
+}
 
 /**
  * 统一分页器：首页/上一页/页码（当前页±2 连号 + 首尾页，空隙省略号）/下一页/末页 + 跳转输入。
@@ -389,6 +575,8 @@ function confirmDialog(msg, opts) {
 let warnToastTimer = null;
 
 function warnToast(msg) {
+    // 应用内错误提示开关（2.8）：关闭时错误类提示静默（成功/信息类 toast 不受影响）
+    if (!_errorToastOn && /(失败|无法|不能|未找到|出错|错误|无效)/.test(String(msg))) return;
     $('#warnToastContent').text(msg);
     $('#warnToast').removeClass('out').show();
     if (warnToastTimer) clearTimeout(warnToastTimer);
@@ -403,6 +591,12 @@ function warnToast(msg) {
     }, dur);
 }
 
+// 应用内错误提示开关（2.8）：关闭时错误类 toast 不弹出（成功/信息 toast 不受影响）
+let _errorToastOn = true;
+function setErrorToastEnabled(on) { _errorToastOn = !!on; }
+/** 错误提示：受「应用内错误提示」设置控制，关闭时静默。 */
+function errToast(msg) { if (!_errorToastOn) return; warnToast(msg); }
+
 // T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐
 let _loadingHideT = null;
 function showLoading() {
@@ -414,6 +608,36 @@ function hideLoading() {
     if (!el.is(':visible')) return;
     el.addClass('out');
     _loadingHideT = setTimeout(() => el.hide().removeClass('out'), 160);
+}
+
+/**
+ * 统一进度条渲染（T82）：spinner 元素一次创建、后续只更新文字/进度条/计数，
+ * 避免每次 .html() 重建导致旋转动画重置卡顿。结构与 .ss-* 复用。
+ * opts: { text, recv, total, done, items, unit }；total>0 定宽，否则 indeterminate。
+ */
+function renderStatusBar($el, opts) {
+    const o = opts || {};
+    const isDone = !!o.done;
+    const hasTotal = o.total > 0;
+    const recv = Math.max(0, o.recv || 0);
+    // 首次构建结构——spinner 只创建一次，之后保持稳定
+    if (!$el.children('.ss-bar').length) {
+        $el.html('<span class="ss-spinner"></span><span class="ss-text"></span>'
+            + '<span class="ss-bar"><span class="ss-fill"></span></span><span class="ss-count"></span>');
+    }
+    $el.toggleClass('done', isDone);
+    $el.find('.ss-text').text(o.text || '');
+    const pct = isDone ? 100 : (hasTotal ? Math.round(Math.min(recv, o.total) / o.total * 100) : 0);
+    $el.find('.ss-bar').toggleClass('indeterminate', !isDone && !hasTotal);
+    $el.find('.ss-fill').css('width', (isDone || hasTotal) ? pct + '%' : '');
+    const bits = [];
+    if (!isDone) {
+        if (hasTotal) bits.push(`${Math.min(recv, o.total)}/${o.total}${o.unit || ''}`);
+        else if (recv) bits.push(`${recv}${o.unit || ''}`);
+        if (o.items !== undefined) bits.push(`${o.items} 条结果`);
+    }
+    $el.find('.ss-count').text(bits.join(' · '));
+    return $el;
 }
 
 // ---------------------------------------------------------------- 换肤
@@ -567,6 +791,8 @@ function applySkin(opts) {
         delete document.body.dataset.dim;
     }
     _applyColorMode();
+    // 字号/界面缩放变化会改变卡片列宽与文字宽度：按新布局重新精确截断标题（T74 收尾）
+    refitVodTitles();
 }
 
 /** 明暗模式落到 html.dark 类（CSS 里深浅两套变量均挂在此类上）。 */

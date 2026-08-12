@@ -29,6 +29,7 @@ const Downloads = {
         this._inited = true;
         $('#dl-add').on('click', () => this.addUri());
         $('#dl-add-file').on('click', () => this.addFile());
+        $('#dl-open-dir').on('click', () => this.openDir());
         $('#dl-clear').on('click', () => this.clearDone());
         $('#dl-clear-failed').on('click', () => this.clearFailed());
         $('#dl-uri').on('keydown', (e) => { if (e.key === 'Enter') this.addUri(); });
@@ -57,6 +58,15 @@ const Downloads = {
     },
 
     // ------------------------------------------------------------ 操作
+
+    async openDir() {
+        try {
+            const r = await window.vpc.download.openDir();
+            if (!r || !r.ok) warnToast(`打开下载目录失败${r && r.reason ? `：${r.reason}` : ''}`);
+        } catch (e) {
+            warnToast('打开下载目录失败');
+        }
+    },
 
     async addUri() {
         const uri = $('#dl-uri').val().trim();
@@ -126,10 +136,9 @@ const Downloads = {
 
     render(items) {
         this._tasks = items || [];
-        // 总网速（T15）：汇总进行中任务速度，无任务时隐藏
+        // 总网速（T15）：汇总进行中任务速度，空闲时也显示 0 B/s；必须早于下方提前返回
         const speed = this._tasks.reduce((a, t) => a + (t.status === 'active' ? (t.speed || 0) : 0), 0);
-        if (speed > 0) $('#dl-speed').text(`总速度 ${fmtSize(speed)}/s`).show();
-        else $('#dl-speed').hide();
+        $('#dl-speed').text(`总速度 ${fmtSize(speed)}/s`).show();
         const list = $('#dl-list');
         if (!this._tasks.length) {
             list.empty(); // 空列表留白，不显示引导文案（T11）
@@ -168,8 +177,10 @@ const Downloads = {
         if (t.status === 'error') {
             info = `<span style="color:var(--md-error);">${this._esc(t.errorMessage || '未知错误')}</span>`;
         } else if (isHls) {
-            // ffmpeg 合成无字节进度，按播放列表时长折算百分比；时长探测失败则不显示恒 0 的百分比
-            info = t.status === 'active' ? (t.percent ? `切片合成中 ${t.percent}%` : '切片合成中…') : (t.status === 'complete' ? '已完成' : '等待中');
+            // ffmpeg 按播放列表时长折算百分比，并用输出 size 差分显示实时速度
+            info = t.status === 'active'
+                ? `${t.percent ? `切片合成中 ${t.percent}%` : '切片合成中…'} · ${fmtSize(t.speed || 0)}/s`
+                : (t.status === 'complete' ? '已完成' : '等待中');
         } else {
             info = `${fmtSize(t.done)} / ${fmtSize(t.total)}${t.total ? ` · ${t.percent}%` : ''}` +
               (t.status === 'active' ? ` · ${fmtSize(t.speed)}/s${t.connections ? ` · 连线 ${t.connections}` : ''}` : '');

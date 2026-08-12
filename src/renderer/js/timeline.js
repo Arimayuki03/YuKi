@@ -1,23 +1,45 @@
 /**
- * timeline.js — 番剧时间表（Bangumi 每日放送）
+ * timeline.js — 番剧时间表（Bangumi 每日放送 + 历史季度检索，对齐 Kazumi TimelinePage）
  *
- * 数据链路：POST /kazumi/action do=kazumiBangumiCalendar → 按星期分组渲染。
- * 卡片点击进详情（Bangumi 详情弹窗）。
+ * 数据链路：
+ *   - 本周在播：POST /kazumi/action do=kazumiBangumiCalendar → 星期桶 [{weekday:{id}, items}]
+ *   - 历史季度：do=kazumiBangumiSeason(start,end) → 同形状星期桶（v0/search/subjects 按 air_date 过滤分桶）
+ * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
+ * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, vodCoverImg, coverFadeIn */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, Kazumi, fitVodTitles */
+
+const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
+const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
+const SEASON_YEARS = 20; // 季节索引回溯年数（对齐 Kazumi 时间机器）
 
 const Timeline = {
     _inited: false,
-    _calendar: [],      // 原始日历数据
-    _weekday: 1,        // 当前选中星期（1-7）
-    _season: '',        // 当前季度（YYYYQn）
+    _calendar: [],      // 当前载入的星期桶数据 [{weekday:{id}, items:[...]}]
+    _weekday: ((new Date().getDay() + 6) % 7) + 1, // 默认今天（1=周一..7=周日）
+    _mode: 'current',   // current=本周在播 | season=历史季度
+    _season: 'current', // 季度键（YYYYQn）或 'current'
+    _sort: 'heat',      // heat | rating | date
     _page: 1,
     _pageSize: 20,
+    // 收藏过滤（需 Bangumi token；无 token 时 _colAvailable=false 且隐藏过滤行）
+    _colAvailable: false,
+    _colSets: { dropped: new Set(), watched: new Set(), watching: new Set() },
+    _filters: { dropped: false, watched: false, onlyWatching: false },
 
     async init() {
         if (this._inited) return;
         this._inited = true;
+        this._buildSeasonOptions();
         $('#timeline-refresh').on('click', () => this.load());
+        $('#timeline-grid').on('click keydown', '.bangumi-card', (e) => {
+            if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+            if (e.type === 'keydown') e.preventDefault();
+            const id = String($(e.currentTarget).data('id') || '');
+            if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
+                Kazumi.openBangumiInfoPage(id);
+            }
+        });
         $('#timeline-weekdays').on('click', '.class-tab', (e) => {
             const wd = parseInt($(e.currentTarget).data('weekday'), 10);
             if (wd >= 1 && wd <= 7) {
@@ -28,19 +50,156 @@ const Timeline = {
             }
         });
         $('#timeline-season').on('change', () => {
-            this._season = $('#timeline-season').val();
+            this._season = $('#timeline-season').val() || 'current';
+            this._page = 1;
+            this.load();
+        });
+        $('#timeline-sort').on('change', () => {
+            this._sort = $('#timeline-sort').val() || 'heat';
             this._page = 1;
             this._renderGrid();
         });
+        $('#timeline-filters').on('click', '.timeline-filter-chip', (e) => {
+            const el = $(e.currentTarget);
+            if (!this._colAvailable) return;
+            const key = String(el.data('filter') || '');
+            if (!(key in this._filters)) return;
+            this._filters[key] = !this._filters[key];
+            el.toggleClass('active', this._filters[key]);
+            this._page = 1;
+            this._renderGrid();
+        });
+        // 保存过滤 chip 的原始 title，供禁用/启用态切换还原
+        $('#timeline-filters .timeline-filter-chip').each(function () { $(this).attr('data-tip', $(this).attr('title')); });
+        // 收藏过滤数据（异步，不阻塞首屏）
+        this._loadColSets();
         await this.load();
     },
 
+    // ---------------------------------------------------------------- 季节索引
+
+    /** 季度键 → 日期区间 {start,end}（YYYY-MM-DD，end 为下季首日，用于 air_date [start,end) 过滤）。 */
+    _seasonRange(key) {
+        const m = String(key).match(/^(\d{4})Q([1-4])$/);
+        if (!m) return null;
+        const year = parseInt(m[1], 10);
+        const q = parseInt(m[2], 10);
+        const start = `${year}-${SEASON_MONTH_START[q]}`;
+        const end = q === 4 ? `${year + 1}-01-01` : `${year}-${SEASON_MONTH_START[q + 1]}`;
+        return { start, end };
+    },
+
+    /** 季度键 → 展示标签（如「2026年夏季新番」）。 */
+    _seasonLabel(key) {
+        const m = String(key).match(/^(\d{4})Q([1-4])$/);
+        if (!m) return String(key);
+        return `${m[1]}年${SEASON_NAMES[parseInt(m[2], 10)]}新番`;
+    },
+
+    /** 生成近 SEASON_YEARS 年季节选项（最新在前），按年分组；首项「本周（在播）」。 */
+    _buildSeasonOptions() {
+        const sel = $('#timeline-season').empty();
+        sel.append('<option value="current" selected>本周（在播）</option>');
+        const now = new Date();
+        let y = now.getFullYear();
+        let q = Math.ceil((now.getMonth() + 1) / 3);
+        // 线性回溯：当前季往前 SEASON_YEARS*4 个季度
+        const byYear = new Map();
+        for (let i = 0; i < SEASON_YEARS * 4; i++) {
+            const key = `${y}Q${q}`;
+            if (!byYear.has(y)) byYear.set(y, []);
+            byYear.get(y).push(key);
+            q--; if (q < 1) { q = 4; y--; }
+        }
+        for (const year of [...byYear.keys()].sort((a, b) => b - a)) {
+            const group = $(`<optgroup label="${year}年"></optgroup>`);
+            // T65：季节选项拼串一次性写入
+            group.html(byYear.get(year).map((key) => `<option value="${key}">${this._seasonLabel(key)}</option>`).join(''));
+            sel.append(group);
+        }
+    },
+
+    // ---------------------------------------------------------------- 收藏过滤
+
+    /** 拉取 Bangumi 收藏构建过滤集合（需 token；失败/无 token 时禁用过滤）。 */
+    async _loadColSets() {
+        try {
+            const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
+            if (!token) { this._setColAvailable(false); return; }
+            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 200 }, '/kazumi/action');
+            const items = (rsp && rsp.items) || [];
+            const sets = { dropped: new Set(), watched: new Set(), watching: new Set() };
+            items.forEach((it) => {
+                const id = String(it.subject_id || '');
+                if (!id) return;
+                // Bangumi 收藏 type：1想看 2看过 3在看 4搁置 5抛弃
+                if (it.type === 5) sets.dropped.add(id);
+                else if (it.type === 2) sets.watched.add(id);
+                else if (it.type === 3) sets.watching.add(id);
+            });
+            this._colSets = sets;
+            this._setColAvailable(true);
+        } catch (e) {
+            this._setColAvailable(false);
+        }
+    },
+
+    _setColAvailable(av) {
+        this._colAvailable = av;
+        const chips = $('#timeline-filters .timeline-filter-chip');
+        if (av) {
+            chips.removeClass('disabled').each(function () {
+                const tip = $(this).attr('data-tip');
+                if (tip) $(this).attr('title', tip);
+            });
+        } else {
+            chips.addClass('disabled').attr('title', '需在「设置 → Kazumi 规则」配置 Bangumi Token 后使用');
+        }
+        $('#timeline-filters').show(); // 始终展示；未可用时置灰并提示如何启用
+    },
+
+    /** 按启用的收藏过滤裁剪列表（_colAvailable=false 时原样返回）。 */
+    _applyFilters(list) {
+        if (!this._colAvailable) return list;
+        const { dropped, watched, watching } = this._colSets;
+        let out = list;
+        if (this._filters.onlyWatching) {
+            out = out.filter((it) => watching.has(String(it.id)));
+        } else {
+            if (this._filters.dropped) out = out.filter((it) => !dropped.has(String(it.id)));
+            if (this._filters.watched) out = out.filter((it) => !watched.has(String(it.id)));
+        }
+        return out;
+    },
+
+    // ---------------------------------------------------------------- 排序
+
+    /** 按当前 _sort 排序（返回新数组）：heat=热度票数降序，rating=评分降序，date=播出时间升序。 */
+    _sortItems(list) {
+        const arr = list.slice();
+        const num = (it, path) => {
+            const r = it.rating || {};
+            return Number(r[path]) || 0;
+        };
+        if (this._sort === 'rating') arr.sort((a, b) => num(b, 'score') - num(a, 'score'));
+        else if (this._sort === 'date') arr.sort((a, b) => String(a.air_date || '').localeCompare(String(b.air_date || '')));
+        else arr.sort((a, b) => num(b, 'total') - num(a, 'total'));
+        return arr;
+    },
+
+    // ---------------------------------------------------------------- 数据加载
+
     async load() {
+        if (this._season === 'current') await this._loadCurrent();
+        else await this._loadSeason(this._season);
+    },
+
+    async _loadCurrent() {
         showLoading();
+        this._mode = 'current';
         try {
             const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action');
             this._calendar = (rsp && rsp.calendar) || [];
-            this._buildSeasons();
             this._renderWeekdays();
             this._renderGrid();
         } catch (e) {
@@ -50,53 +209,52 @@ const Timeline = {
         }
     },
 
-    /** 从日历数据提取季度列表（去重，最新在前）。 */
-    _buildSeasons() {
-        const seasons = new Set();
-        this._calendar.forEach((day) => {
-            (day.items || []).forEach((item) => {
-                if (item.air_date) {
-                    const m = String(item.air_date).match(/^(\d{4})-(\d{2})/);
-                    if (m) seasons.add(`${m[1]}Q${Math.ceil(parseInt(m[2], 10) / 3)}`);
-                }
-            });
-        });
-        const list = Array.from(seasons).sort().reverse();
-        this._season = list[0] || '';
-        const sel = $('#timeline-season').empty();
-        list.forEach((s) => sel.append(`<option value="${s}"${s === this._season ? ' selected' : ''}>${s}</option>`));
+    async _loadSeason(key) {
+        const range = this._seasonRange(key);
+        if (!range) { this._loadCurrent(); return; }
+        showLoading();
+        this._mode = 'season';
+        try {
+            const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action');
+            this._calendar = (rsp && rsp.calendar) || [];
+            this._renderWeekdays();
+            this._renderGrid();
+        } catch (e) {
+            warnToast('该季度数据载入失败');
+        } finally {
+            hideLoading();
+        }
     },
+
+    // ---------------------------------------------------------------- 渲染
 
     _renderWeekdays() {
         const names = ['一', '二', '三', '四', '五', '六', '日'];
         const box = $('#timeline-weekdays').empty();
         for (let i = 1; i <= 7; i++) {
-            box.append(`<span class="class-tab ${i === this._weekday ? 'active' : ''}" data-weekday="${i}">周${names[i - 1]}</span>`);
+            const day = this._calendar.find((d) => d.weekday && d.weekday.id === i);
+            const count = (day && day.items) ? day.items.length : 0;
+            box.append(`<span class="class-tab ${i === this._weekday ? 'active' : ''}" data-weekday="${i}">周${names[i - 1]}${count ? ` (${count})` : ''}</span>`);
         }
     },
 
     async _renderGrid() {
-        const size = await pageSizeOf('pageSizeHome'); // 复用首页每页条数
+        const size = await pageSizeOf('pageSizeHome');
         this._pageSize = size;
         const day = this._calendar.find((d) => d.weekday && d.weekday.id === this._weekday);
         let items = (day && day.items) || [];
-        // 季度筛选
-        if (this._season) {
-            items = items.filter((item) => {
-                if (!item.air_date) return false;
-                const m = String(item.air_date).match(/^(\d{4})-(\d{2})/);
-                return m && `${m[1]}Q${Math.ceil(parseInt(m[2], 10) / 3)}` === this._season;
-            });
-        }
+        items = this._applyFilters(items);
+        items = this._sortItems(items);
         const pagecount = Math.max(1, Math.ceil(items.length / size));
+        this._page = Math.min(Math.max(1, this._page), pagecount);
         const slice = items.slice((this._page - 1) * size, this._page * size);
         const grid = $('#timeline-grid').empty();
         if (!slice.length) {
             grid.html('<div class="tip-line">该日暂无番剧更新</div>');
         } else {
-            slice.forEach((item) => {
-                grid.append(this._renderCard(item));
-            });
+            grid.html(slice.map((item) => this._renderCard(item)).join(''));
+            // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
+            fitVodTitles(grid);
         }
         renderPagerBox($('#timeline-pager'), {
             page: this._page,
@@ -106,14 +264,6 @@ const Timeline = {
     },
 
     _renderCard(item) {
-        const name = item.name_cn || item.name || '';
-        const cover = (item.images && (item.images.large || item.images.common || item.images.medium)) || '';
-        const score = item.rating && item.rating.score ? `评分 ${item.rating.score}` : '';
-        const air = item.air_date || '';
-        return `<div class="vod-card bangumi-card" data-id="${item.id}" data-name="${escHtml(name)}" tabindex="0">
-            <div class="vod-cover">${vodCoverImg(cover)}</div>
-            <div class="vod-name" title="${escHtml(name)}">${escHtml(name)}</div>
-            <div class="vod-remarks">${escHtml([air, score].filter(Boolean).join(' · '))}</div>
-        </div>`;
+        return bangumiCard(item);
     },
 };

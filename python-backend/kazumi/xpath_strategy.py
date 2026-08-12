@@ -52,11 +52,14 @@ class XPathRuleStrategy:
         for index, node in enumerate(nodes):
             try:
                 name_node = self._run_selector('searchName', config.search_name,
-                                               lambda: node.xpath(config.search_name))
-                name = name_node[0].text_content().strip() if name_node else ''
+                                               lambda: node.xpath(self._node_relative(config.search_name)))
+                name = self._node_text(name_node[0]) if name_node else ''
                 src_node = self._run_selector('searchResult', config.search_result,
-                                              lambda: node.xpath(config.search_result))
-                src = src_node[0].get('href', '').strip() if src_node else ''
+                                              lambda: node.xpath(self._node_relative(config.search_result)))
+                src = ''
+                if src_node:
+                    first = src_node[0]
+                    src = first.strip() if isinstance(first, str) else (first.get('href') or '').strip()
                 if not name or not src:
                     diagnostics.append(f'搜索节点 {index} 缺少名称或来源，已跳过')
                     continue
@@ -81,7 +84,7 @@ class XPathRuleStrategy:
                 urls = []
                 names = []
                 episode_nodes = self._run_selector('chapterResult', config.chapter_result,
-                                                   lambda: road_node.xpath(config.chapter_result))
+                                                   lambda: road_node.xpath(self._node_relative(config.chapter_result)))
                 for episode_index, episode_node in enumerate(episode_nodes):
                     try:
                         source = episode_node.get('href', '').strip()
@@ -128,6 +131,27 @@ class XPathRuleStrategy:
         return False
 
     # ---------------------------------------------------------------- 工具
+
+    @staticmethod
+    def _node_relative(expr):
+        """把 Kazumi 规则里文档级 `//` 查询归一化为节点相对查询。
+
+        Kazumi 的 searchName/searchResult/chapterResult 均以 searchList/chapterRoads 节点为上下文
+        （Dart 端 node.queryXPath(...) 是节点内查询），但规则文本沿用 `//` 前缀。
+        lxml 的 node.xpath('//x') 却是**文档根查询**，导致取到整页首个匹配而非节点内匹配
+        （7sefun 搜索因此返回空）。规则里 `//a` → `.//a`、`/a` → `./a`。
+        已以 `.` 或 `./` 开头的表达式原样返回。"""
+        e = (expr or '').strip()
+        if e.startswith('/'):
+            return '.' + e
+        return e
+
+    @staticmethod
+    def _node_text(node):
+        """取节点文本：`/text()` 选出的结果是 str 直接用；元素取 text_content。"""
+        if isinstance(node, str):
+            return node.strip()
+        return node.text_content().strip()
 
     def _document_element(self, raw):
         try:

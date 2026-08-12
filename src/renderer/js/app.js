@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, My, About, initAuxPanels, ensureLocalPanel, Kazumi, Timeline */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
 
 const App = {
     currentView: 'home',
@@ -16,20 +16,23 @@ const App = {
 
     /** opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）。 */
     showView(name, opts) {
+        // 旧收藏路由并入「我的」收藏页签（左侧独立收藏入口已移除）
+        let myTab = null;
+        if (name === 'favorites') { name = 'my'; myTab = 'favorites'; }
         this.currentView = name;
         $('.main-nav-item').removeClass('active');
         $(`.main-nav-item[data-view="${name}"]`).addClass('active');
         $('.view').removeClass('active');
         $(`#view-${name}`).addClass('active');
+        if (name === 'home' && typeof Home !== 'undefined' && Home.onViewShown) Home.onViewShown(); // T80：设置里改过每页条数，回来自动按新条数重载
         if (name === 'search') Search.focus();
         if (name === 'downloads') Downloads.enter();
         if (name === 'live') Live.enter();
-        if (name === 'favorites') Favorites.enter();
         if (name === 'history') HistoryView.enter();
-        if (name === 'my') My.enter();
-        if (name === 'about') About.enter();
+        if (name === 'my') My.enter(myTab);
         if (name === 'tools') ensureLocalPanel(); // T28：本地文件独立板块，首次进入懒加载
         if (name === 'timeline') Timeline.init(); // 番剧时间表（Bangumi）
+        if (name === 'popular') Popular.enter(); // Kazumi 首页推荐（Bangumi 趋势，T62）
         if (!opts || opts.push !== false) {
             if (this._navStack[this._navStack.length - 1] !== name) {
                 this._navStack.push(name);
@@ -66,13 +69,14 @@ const App = {
 
     /**
      * 启动时若主进程正在自动重载上次配置，等它完成再渲染首页，
-     * 避免首页停留在内置示例源（最长等 180s）。
+     * 避免首页停留在内置示例源（但最多等 15s——网络慢时不能一直卡在全局 loading；
+     * 超时未完成也继续进首页，配置完成后 onConfigReloaded 会刷新站点）。
      * 重载状态以主进程 configState 为准（它掌握发起时机），
      * configTask 作为后端侧双重确认。
      */
     async waitConfigDone() {
         let loaded = 0;
-        for (let i = 0; i < 90; i++) {
+        for (let i = 0; i < 15; i++) {
             let busy = false;
             try {
                 const st = await window.vpc.configState();
@@ -84,7 +88,7 @@ const App = {
             if (t && t.status === 'done' && t.summary && t.summary.sites > 0) loaded = t.summary.sites;
             if (!busy) break;
             showLoading();
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 1000));
         }
         hideLoading();
         if (loaded > 0) warnToast(`已自动载入上次配置：${loaded} 个站点`);
@@ -119,31 +123,41 @@ const App = {
     },
 };
 
-/** 注入 MiSans 内置字体 CSS（去重；未就绪时为空数组，回退系统字体）。 */
-function injectFontLinks(urls) {
-    if (!Array.isArray(urls) || !urls.length) return;
-    for (const url of urls) {
-        if (document.querySelector(`link[href="${url}"]`)) continue;
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = url;
-        document.head.appendChild(link);
-    }
-}
-
 $(async function bootstrap() {
-    // MiSans 内置字体：尽早注入已就绪的 CSS；后台补齐完成后再次注入（首次启动字体稍后出现）
-    if (window.vpc && window.vpc.fontCss) {
-        window.vpc.fontCss().then((r) => injectFontLinks(r && r.urls)).catch(() => { });
-        if (window.vpc.onFontReady) {
-            window.vpc.onFontReady(() => {
-                window.vpc.fontCss().then((r) => injectFontLinks(r && r.urls)).catch(() => { });
+    // 渲染端未捕获错误落盘：转发到主进程 electron-main.log（脱敏由主进程 writer 负责）。
+    // 尽早注册，晚于此的启动错误也能被记录。
+    const _forwardRendererError = (level, message) => {
+        try { if (window.vpc && window.vpc.logRenderer) window.vpc.logRenderer(level, String(message || '').slice(0, 4000)); } catch (e) { /* 上报失败不影响运行 */ }
+    };
+    window.addEventListener('error', (e) => {
+        const msg = e && e.error && e.error.stack ? e.error.stack : `${e && e.message} @ ${e && e.filename}:${e && e.lineno}:${e && e.colno}`;
+        _forwardRendererError('ERROR', `window.onerror: ${msg}`);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e && e.reason;
+        const msg = r && r.stack ? r.stack : (r && r.message) || String(r);
+        _forwardRendererError('ERROR', `unhandledrejection: ${msg}`);
+    });
+
+    // 尽早读取本地设置（主题/启动页/字体开关，无需等后端）
+    let s = {};
+    try { s = (await window.vpc.settingsGet()) || {}; } catch (e) { /* 首次运行无 settings */ }
+
+    // 载入内置 MiSans 字体（打包内置、无运行时下载；开关关闭时回退系统字体，T61 / 2.11）
+    if (s.useMisansFont !== false) {
+        try {
+            const fontUrls = (window.vpc.fontCss && await window.vpc.fontCss()) || [];
+            fontUrls.forEach((u) => {
+                const l = document.createElement('link');
+                l.rel = 'stylesheet';
+                l.href = u;
+                document.head.appendChild(l);
             });
-        }
+        } catch (e) { /* 字体加载失败回退系统字体，不影响使用 */ }
     }
-    // 尽早恢复主题/壁纸/明暗/缩放/字体（只依赖本地 settings，无需等后端）
+
+    // 尽早恢复主题/壁纸/明暗/缩放/字号（只依赖本地 settings，无需等后端）
     try {
-        const s = (await window.vpc.settingsGet()) || {};
         applySkin({
             theme: s.theme || '',
             customColor: s.customTheme || '',
@@ -159,6 +173,8 @@ $(async function bootstrap() {
         if (s.navCollapsed) document.body.classList.add('nav-collapsed');
         // 隐身模式缓存（detail.js 记历史前检查）
         window._incognito = !!s.incognito;
+        // 应用内错误提示开关（2.8）
+        if (typeof setErrorToastEnabled === 'function') setErrorToastEnabled(s.errorToast !== false);
     } catch (e) { /* 首次运行无 settings */ }
 
     // 后端重启（如更换缓存目录）后更新连接信息
@@ -194,5 +210,9 @@ $(async function bootstrap() {
     await Home.init();
     // 辅助面板（工具面板）惰性初始化一次
     if (!App._auxInited) { initAuxPanels(); App._auxInited = true; }
-    App.showView('home');
+    // 启动进入页面（设置里可配置默认页；校验视图存在，否则首页）
+    const startupView = (s.startupView && document.getElementById('view-' + s.startupView)) ? s.startupView : 'home';
+    App.showView(startupView);
+    // 后台预载推荐数据（本地缓存 + 刷新），点开推荐页即时显示、无首次网络等待
+    if (typeof Popular !== 'undefined' && Popular.preload) Popular.preload();
 });

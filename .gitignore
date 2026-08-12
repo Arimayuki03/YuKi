@@ -12,3 +12,5 @@ tmp_spiders/
 /nul
 *.log
 .DS_Store
+session-logs/
+mpv-shot*.jpg

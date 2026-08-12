@@ -55,8 +55,9 @@ def homeContent(ru, filter):
     return formatJo
 
 
-def homeVideoContent(ru):
-    result = ru.homeVideoContent()
+def homeVideoContent(ru, pg='1'):
+    # T76：「全部」总览 feed 支持分页（pg 可选，默认首页语义不变）
+    result = ru.homeVideoContent(pg)
     formatJo = json.dumps(result, ensure_ascii=False)
     return formatJo
 

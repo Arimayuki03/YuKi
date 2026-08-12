@@ -125,7 +125,7 @@ class HlsDownloader extends EventEmitter {
         const dest = path.join(this.dir, name);
         const task = {
             gid, kind: 'hls', name, url, header: header || null,
-            status: 'active', percent: 0, done: 0, total: 0,
+            status: 'active', percent: 0, done: 0, total: 0, speed: 0,
             errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false,
             adFilter: !!adFilter, _adTemp: null, _input: null,
         };
@@ -194,15 +194,49 @@ class HlsDownloader extends EventEmitter {
         args.push('-i', (task._input || task.url), '-c', 'copy');
         if (withBsf) args.push('-bsf:a', 'aac_adtstoasc');
         args.push(part);
+        task.speed = 0;
+        task._lastProgressTime = null;
+        task._lastProgressBytes = null;
+        task._progressBuffer = '';
         // ffmpeg 不读系统代理：经环境变量注入（直连不可达的环境下必需）
         const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
         task._proc = proc;
         proc.stderr.on('data', (chunk) => {
-            // ffmpeg 进度行 "time=00:12:34.56" → 按播放列表总时长折算百分比
-            const m = chunk.toString().match(/time=(\d+):(\d+):([\d.]+)/);
-            if (m && task.duration > 0) {
+            // ffmpeg 进度行 "size=123kB time=00:12:34.56" → 按时间差分估算速度
+            const lines = (task._progressBuffer + chunk.toString()).split(/\r\n|\n|\r/);
+            task._progressBuffer = lines.pop() || '';
+            for (const line of lines) {
+                const m = line.match(/(?=.*time=(\d+):(\d+):([\d.]+))(?=.*size=\s*([\d.]+)\s*([kKmMgG](?:[iI])?B|B))/);
+                if (!m) {
+                    if (/time=/.test(line)) {
+                        task.speed = 0;
+                        task._lastProgressTime = null;
+                        task._lastProgressBytes = null;
+                    }
+                    continue;
+                }
                 const t = (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
-                task.percent = Math.max(task.percent, Math.min(99.9, Math.round(t / task.duration * 1000) / 10));
+                if (Number.isFinite(t) && task.duration > 0) {
+                    task.percent = Math.max(task.percent, Math.min(99.9, Math.round(t / task.duration * 1000) / 10));
+                }
+                const unit = m[5].toLowerCase().replace('i', '');
+                const multiplier = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 }[unit];
+                const sizeBytes = Number(m[4]) * multiplier;
+                if (!Number.isFinite(sizeBytes) || sizeBytes < 0 || !Number.isFinite(t)) {
+                    task.speed = 0;
+                    task._lastProgressTime = null;
+                    task._lastProgressBytes = null;
+                    continue;
+                }
+                const previousTime = task._lastProgressTime;
+                const previousBytes = task._lastProgressBytes;
+                const elapsed = t - previousTime;
+                const delta = sizeBytes - previousBytes;
+                task.speed = Number.isFinite(previousTime) && Number.isFinite(previousBytes)
+                    && Number.isFinite(elapsed) && elapsed > 0 && Number.isFinite(delta) && delta >= 0
+                    ? delta / elapsed : 0;
+                task._lastProgressTime = t;
+                task._lastProgressBytes = sizeBytes;
             }
         });
         proc.on('exit', (code) => {
@@ -271,7 +305,8 @@ class HlsDownloader extends EventEmitter {
     _flatten(t) {
         return {
             gid: t.gid, kind: 'hls', status: t.status, name: t.name,
-            total: 0, done: 0, percent: t.percent, speed: 0, connections: '',
+            total: 0, done: 0, percent: t.percent,
+            speed: t.status === 'active' && Number.isFinite(t.speed) && t.speed > 0 ? t.speed : 0, connections: '',
             errorMessage: t.errorMessage, files: t.files,
         };
     }

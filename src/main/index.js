@@ -14,7 +14,7 @@
  * vpc:config-state 提供给渲染层（修复首屏停留示例源需手动刷新）；
  * 直播支持备用线路：起播后未真正开播则自动切换下一条地址。
  */
-const { app, BrowserWindow, ipcMain, dialog, Notification, Tray, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, Tray, nativeImage, shell, session } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -27,13 +27,14 @@ const FileManager = require('./file-manager');
 const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
-const misans = require('./misans');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
 const SyncplayClient = require('./syncplay-client');
 const DlnaCaster = require('./dlna-caster');
+const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs } = require('./logger');
+const misans = require('./misans');
 
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -139,7 +140,11 @@ async function ensureAnime4k() {
 const ROOT = path.join(__dirname, '..', '..');
 // 打包后 extraResources 放在 resources/ 下，vendor 与 python-backend 均从该处读取
 const RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT;
-const bridge = new PythonBridge(ROOT, RESOURCES_ROOT);
+const LOG_DIR = path.join(os.homedir(), '.video-pc', 'logs');
+installConsoleLogger(LOG_DIR);
+const bridge = new PythonBridge(ROOT, RESOURCES_ROOT, {
+    logWriter: new RotatingLogWriter(path.join(LOG_DIR, 'python-console.log')),
+});
 const mpv = new MpvPlayer();
 const dl = new Downloader();
 const hls = new HlsDownloader();
@@ -240,7 +245,7 @@ function createWindow() {
         minWidth: 860,
         minHeight: 560,
         backgroundColor: '#121212',
-        title: '影视 PC',
+        title: 'YuKi',
         webPreferences: {
             preload: path.join(__dirname, '..', 'preload', 'preload.js'),
             contextIsolation: true,
@@ -250,6 +255,22 @@ function createWindow() {
     });
     win.setMenuBarVisibility(false);
     win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+    // 渲染端失败落盘：控制台的 warning/error 与渲染进程崩溃都写进 electron-main.log（redactSecrets 由 writer 负责）
+    win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+        // level: 0=log 1=warning 2=error 3=debug；只记 warning/error，避免刷屏
+        if (level >= 2) console.error(`[renderer] ${message} (${sourceId}:${line})`);
+        else if (level === 1) console.warn(`[renderer] ${message} (${sourceId}:${line})`);
+    });
+    win.webContents.on('render-process-gone', (_e, details) => {
+        console.error('[render-process-gone]', details && details.reason, details && details.exitCode);
+    });
+    // 外链一律交系统默认浏览器（T73）：target=_blank（如「获取 Bangumi Token」链接）不再开应用内新窗
+    win.webContents.setWindowOpenHandler(({ url }) => {
+        if (/^https?:\/\//i.test(url)) {
+            shell.openExternal(url).catch((e) => console.error('[main] openExternal failed:', url, e));
+        }
+        return { action: 'deny' };
+    });
     // 关闭行为：closeAction ∈ tray(默认缩至托盘)/exit(直接退出)/ask(每次询问)；
     // 后台播放开启时，选退出但 mpv 正在播也转托盘保播
     win.on('close', (e) => {
@@ -258,7 +279,7 @@ function createWindow() {
         let choice = action;
         if (action === 'ask') {
             const r = dialog.showMessageBoxSync(win, {
-                type: 'question', title: '关闭影视 PC',
+                type: 'question', title: '关闭 YuKi',
                 message: '关闭主窗口时：',
                 buttons: ['缩小至托盘（后台继续）', '退出程序', '取消'],
                 defaultId: 0, cancelId: 2,
@@ -271,10 +292,18 @@ function createWindow() {
         }
         if (choice === 'tray') {
             e.preventDefault();
-            win.hide();
-            if (Notification.isSupported() && mpv.playing) {
-                new Notification({ title: '影视 PC', body: '已缩小到托盘，播放继续' }).show();
+            // 后台播放关闭：缩到托盘时也停止播放，避免 mpv 进程残留后台
+            if (settings.get('bgPlay') === false && mpv.playing) {
+                mpv.stop();
+                if (Notification.isSupported()) {
+                    new Notification({ title: 'YuKi', body: '已停止播放，应用驻留托盘' }).show();
+                }
+            } else {
+                if (Notification.isSupported() && mpv.playing) {
+                    new Notification({ title: 'YuKi', body: '已缩小到托盘，播放继续' }).show();
+                }
             }
+            win.hide();
         } else {
             isQuitting = true; // 放行关闭，窗口全部关闭后随 window-all-closed 退出
         }
@@ -339,11 +368,11 @@ function makeTrayIcon() {
 
 function initTray() {
     tray = new Tray(makeTrayIcon());
-    tray.setToolTip('影视 PC');
+    tray.setToolTip('YuKi');
     const menu = require('electron').Menu.buildFromTemplate([
         { label: '显示主窗口', click: () => { if (win) { win.show(); win.focus(); } } },
         {
-            label: '退出影视 PC', click: () => {
+            label: '退出 YuKi', click: () => {
                 isQuitting = true;
                 app.quit();
             },
@@ -368,6 +397,8 @@ app.whenReady().then(() => {
         node: process.versions.node,
         v8: process.versions.v8,
     }));
+    // 内置 MiSans 字体 CSS 的 file:// URL（渲染层注入 <link>；打包内置，无运行时下载，T61）
+    ipcMain.handle('vpc:font-css', () => misans.fontCssUrls());
     // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
     ipcMain.handle('vpc:asset-status', () => {
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
@@ -748,8 +779,13 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:push-info', () => pushServer.info());
 
     ipcMain.handle('vpc:parse', async (_e, url) => {
-        try { return await parseWin.resolve(String(url || '')); }
-        catch (err) { return { ok: false, reason: err.message }; }
+        try {
+            // 25s 安全超时：解析窗口偶发挂起（槽位/cookies 卡住）时也返回，避免渲染层 loading 永不消失
+            return await Promise.race([
+                parseWin.resolve(String(url || '')),
+                new Promise((res) => setTimeout(() => res(null), 25000)),
+            ]);
+        } catch (err) { return { ok: false, reason: err.message }; }
     });
 
     // 无解析接口（或解析失败）时的兜底：隐藏窗口直开链接抓媒体请求（share 分享页自带播放器）
@@ -758,16 +794,30 @@ app.whenReady().then(() => {
             // 兼容两种调用：字符串 url（旧）或 {url, legacy}（Kazumi 旧解析器）
             const url = (payload && typeof payload === 'object') ? String(payload.url || '') : String(payload || '');
             const legacy = !!(payload && typeof payload === 'object' && payload.legacy);
-            const r = await parseWin.captureDirect(url, undefined, legacy);
+            // 25s 安全超时：隐藏窗口偶发挂起时也返回，避免渲染层 loading 永不消失
+            const r = await Promise.race([
+                parseWin.captureDirect(url, undefined, legacy),
+                new Promise((res) => setTimeout(() => res(null), 25000)),
+            ]);
             return (r && r.ok) ? r : { ok: false, reason: 'capture-failed' };
+        } catch (err) { return { ok: false, reason: err.message }; }
+    });
+
+    // 验证码源验证（T73）：可见窗口供用户交互，关闭/超时后收割 Cookie 交给后端持久化
+    ipcMain.handle('vpc:captcha-verify', async (_e, url) => {
+        try {
+            const u = String((url && typeof url === 'object') ? url.url || '' : url || '');
+            if (!/^https?:\/\//i.test(u)) return { ok: false, reason: 'bad url' };
+            // 3 分钟上限：用户完成验证后自行关闭窗口即返回
+            return await Promise.race([
+                parseWin.captchaVerify(u),
+                new Promise((res) => setTimeout(() => res({ ok: true, reason: 'timeout' }), 180000)),
+            ]);
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
     ipcMain.handle('vpc:settings-get', () => settings.all());
     ipcMain.handle('vpc:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
-
-    // MiSans 内置字体：渲染层查询已就绪的 CSS file:// URL（未就绪返回空数组，回退系统字体）
-    ipcMain.handle('vpc:font-css', () => ({ urls: misans.fontCssUrls() }));
 
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
@@ -929,9 +979,33 @@ app.whenReady().then(() => {
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
         settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken']);
+        // app.exit(0) 不触发 before-quit，须先停 mpv 避免残留后台进程
+        if (mpv.playing) mpv.stop();
         app.relaunch();
         isQuitting = true;
         app.exit(0);
+        return { ok: true };
+    });
+    // 代理设置（2.9）：写入环境变量（后端 requests 继承）+ Electron session 代理（渲染层图片/请求），并重启后端使生效
+    ipcMain.handle('vpc:set-proxy', async (_e, opts) => {
+        const url = String((opts && opts.url) || '').trim();
+        const enable = !!(opts && opts.enable);
+        settings.set('proxyUrl', url);
+        settings.set('proxyEnable', enable);
+        try {
+            if (enable && url) {
+                process.env.HTTP_PROXY = url;
+                process.env.HTTPS_PROXY = url;
+                await session.defaultSession.setProxy({ proxyRules: url });
+            } else {
+                delete process.env.HTTP_PROXY;
+                delete process.env.HTTPS_PROXY;
+                // 显式还原系统代理（T73）：proxyRules:'' 在部分 Electron 版本下不还原，渲染层网络仍走旧代理
+                await session.defaultSession.setProxy({ mode: 'system' });
+            }
+        } catch (e) { /* session 代理失败不影响主流程 */ }
+        // 后端重启使 Python requests 应用代理（播放/下载在主进程不受影响）
+        try { bridge.stop(); bridge.start(); } catch (e) { /* 重启失败下次自愈 */ }
         return { ok: true };
     });
     /** 合并 aria2 实时任务 + HLS 任务 + 持久化记录（T46）：
@@ -987,7 +1061,9 @@ app.whenReady().then(() => {
                 case 'init': {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     const dir = settings.get('dlDir') || app.getPath('downloads');
-                    await dl.start(dir, parseInt(settings.get('dlConcurrency'), 10) || undefined);
+                    await dl.start(dir,
+                        parseInt(settings.get('dlConcurrency'), 10) || undefined,
+                        parseInt(settings.get('dlSplitConcurrency'), 10) || undefined);
                     syncDlDir(dl.dir);
                     startDlPoll();
                     return { ok: true, dir: dl.dir };
@@ -1070,6 +1146,12 @@ app.whenReady().then(() => {
                     const n = Math.max(1, Math.min(10, parseInt(payload.n, 10) || 3));
                     settings.set('dlConcurrency', n);
                     if (dl.isAvailable()) await dl.setConcurrency(n);
+                    return { ok: true, n };
+                }
+                case 'setSplit': {
+                    const n = Math.max(1, Math.min(32, parseInt(payload.n, 10) || 5));
+                    settings.set('dlSplitConcurrency', n);
+                    if (dl.isAvailable()) await dl.setSplit(n);
                     return { ok: true, n };
                 }
                 case 'pause':
@@ -1178,13 +1260,17 @@ app.whenReady().then(() => {
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
     mpv.on('ended', (info) => send('vpc:player-ended', info));
     mpv.on('exit', (info) => {
+        const userStopped = !!(info && info.userStopped);
         send('vpc:player-exit', {
             pos: (info && typeof info.pos === 'number') ? info.pos : null,
             duration: (info && typeof info.duration === 'number') ? info.duration : null,
             sessionId: (info && typeof info.sessionId === 'number') ? info.sessionId : 0,
             fullscreen: (info && typeof info.fullscreen === 'boolean') ? info.fullscreen : null,
             speed: (info && typeof info.speed === 'number') ? info.speed : null,
+            quit: userStopped, // 用户主动关闭（stop() 或 mpv 窗口关闭）：渲染层据此不等待断流重连、不连播
         });
+        // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
+        if (userStopped) return;
         // 断流自动重连：mpv 在距结尾还有一段时就 EOF/断流退出（CDN 提前断连
         // 或 HLS 实际内容短于声明时长），自动重播当前集一次；每次会话只试一次。
         if (mpv._stallRetried) return;
@@ -1198,7 +1284,7 @@ app.whenReady().then(() => {
         if (!url || !MEDIA_URL.test(String(url))) return; // 仅媒体直链重试
         mpv._stallRetried = true;
         if (Notification.isSupported()) {
-            new Notification({ title: '影视 PC', body: '播放被中断，正在自动重连…' }).show();
+            new Notification({ title: 'YuKi', body: '播放被中断，正在自动重连…' }).show();
         }
         setTimeout(() => {
             if (mpv.playing) return; // 用户已另起播放
@@ -1289,6 +1375,7 @@ app.whenReady().then(() => {
     // 自定义缓存目录：后端 spawn 前注入环境变量（更换目录后重启后端生效）
     const cacheDir = settings.get('cacheDir');
     if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
+    bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
     // 续播位置（mpv watch-later）与默认倍速：读设置注入播放器（可在设置页关闭/调整）
     if (settings.get('resumePos') !== false) {
         mpv.watchLaterDir = path.join(app.getPath('userData'), 'mpv-watch-later');
@@ -1303,16 +1390,22 @@ app.whenReady().then(() => {
     mpv.subLang = String(settings.get('playerSlang') || '');
     // 视频缓冲缓存（内存/硬盘）：读设置注入播放器（起播时按模式追加 --cache-on-disk 参数）
     applyPlayerCache();
+    // 代理（2.9）：启动时按设置写入环境变量，供 Python 后端 requests 继承（重启后端即生效）
+    const proxyUrl = settings.get('proxyUrl') || '';
+    if (settings.get('proxyEnable') && proxyUrl) {
+        process.env.HTTP_PROXY = proxyUrl;
+        process.env.HTTPS_PROXY = proxyUrl;
+    }
     // ffmpeg 内置：启动后台自动补齐（m3u8 下载合成与本地预览图依赖；缺失时静默降级）
     ensureFfmpeg().catch(() => { });
+    // 内置 MiSans 字体就绪探测（打包内置，无运行时下载；渲染层经 vpc:font-css 注入，T61）
+    misans.ensureMisans().catch(() => { });
     // Anime4K 超分：启动自动补齐着色器（内置免手动下载）；用户从未设置过开关则默认开启，
     // 已手动关闭过（值 false）保持关闭；文件不全时链为空静默降级
     ensureAnime4k().catch(() => { }).finally(() => {
         if (settings.get('anime4k') === undefined && buildAnime4kChain()) settings.set('anime4k', true);
         if (settings.get('anime4k')) mpv.anime4kShaders = buildAnime4kChain();
     });
-    // MiSans 内置字体：启动后台补齐，就绪后通知渲染层注入（未就绪时回退系统字体，不影响使用）
-    misans.ensureMisans().then((ok) => { if (ok) send('vpc:font-ready', {}); });
     bridge.start();
     parseWin = new ParseWindow(() => bridge.info);
     pushServer.on('push', ({ url }) => playPushedUrl(url, '局域网'));
@@ -1410,23 +1503,6 @@ app.whenReady().then(() => {
         return { ok: true, path: p };
     });
 
-    // ---- 画中画（mini 窗） ----
-    let pipWin = null;
-    ipcMain.handle('vpc:pip-open', (_e, opts) => {
-        if (pipWin && !pipWin.isDestroyed()) { pipWindow.focus(); return { ok: true }; }
-        pipWin = new BrowserWindow({
-            width: 320, height: 180, frame: false, alwaysOnTop: true,
-            skipTaskbar: true, resizable: true, minWidth: 160, minHeight: 90,
-            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-        });
-        pipWin.loadURL(`data:text/html,<body style="margin:0;background:#000;overflow:hidden"><div style="color:#fff;font-family:sans-serif;padding:8px;font-size:13px">画中画窗口已开启<br>mpv 播放时此窗口置顶<br>拖动边缘可调整大小</div></body>`);
-        pipWin.on('closed', () => { pipWin = null; });
-        return { ok: true };
-    });
-    ipcMain.handle('vpc:pip-close', () => { if (pipWin) { pipWin.close(); pipWin = null; } return { ok: true }; });
-    // mpv 播放时画中画窗口跟随置顶（不实际嵌入视频流，仅作置顶提示窗）
-    mpv.on('exit', () => { if (pipWin && !pipWin.isDestroyed()) pipWin.close(); });
-
     // ---- 定时关机 ----
     let shutdownTimer = null;
     ipcMain.handle('vpc:shutdown-timer', (_e, minutes) => {
@@ -1438,7 +1514,7 @@ app.whenReady().then(() => {
             setTimeout(() => {
                 const { exec } = require('child_process');
                 if (process.platform === 'win32') {
-                    exec('shutdown /s /t 60 /c "影视 PC 定时关机"');
+                    exec('shutdown /s /t 60 /c "YuKi 定时关机"');
                 } else if (process.platform === 'darwin') {
                     exec('osascript -e \'tell app "System Events" to shut down\'');
                 } else {
@@ -1450,24 +1526,16 @@ app.whenReady().then(() => {
     });
 
     // ---- 日志查看器 ----
-    ipcMain.handle('vpc:get-logs', async (_e, page, pageSize) => {
-        const logDir = path.join(app.getPath('userData'), '..', '.video-pc', 'logs');
-        const logs = [];
-        try {
-            const files = fs.readdirSync(logDir).filter(f => f.endsWith('.log')).sort().reverse();
-            for (const f of files.slice(0, 5)) {
-                const content = fs.readFileSync(path.join(logDir, f), 'utf8');
-                const lines = content.split(/\r?\n/).filter(Boolean);
-                logs.push({ file: f, lines: lines.slice(-200) }); // 每文件取最后 200 行
-            }
-        } catch (e) { /* 日志目录不存在 */ }
-        // 分页（纯内存切片）
-        const allLines = logs.flatMap(l => l.lines.map(line => ({ file: l.file, line })));
-        const total = allLines.length;
-        const pg = page || 1;
-        const ps = pageSize || 50;
-        const slice = allLines.slice((pg - 1) * ps, pg * ps);
-        return { ok: true, logs: slice, total, page: pg, pageSize: ps };
+    ipcMain.handle('vpc:get-logs', async (_e, page, pageSize, source) => {
+        return readRecentLogs(LOG_DIR, page, pageSize, source);
+    });
+    // 清空日志（当前进程日志句柄继续写新文件）
+    ipcMain.handle('vpc:clear-logs', async () => clearLogs(LOG_DIR));
+    // 渲染端错误上报：window.onerror / unhandledrejection 转发进 electron-main.log（redactSecrets 由 writer 负责）
+    ipcMain.handle('vpc:log-renderer', (_e, level, message) => {
+        const lvl = String(level || 'ERROR').toUpperCase();
+        console[lvl === 'WARN' ? 'warn' : 'error'](`[renderer] ${message}`);
+        return { ok: true };
     });
 
     // ---- 首次引导状态 ----

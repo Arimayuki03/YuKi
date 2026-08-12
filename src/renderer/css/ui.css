@@ -79,8 +79,8 @@ html.dark {
 
 html, body {
     height: 100%;
-    /* MiSans 内置 UI 字体（未就绪时回退系统字体）；数字/英文 Roboto 优先保证西文观感 */
-    font-family: Roboto, 'MiSans', -apple-system, system-ui, sans-serif;
+    /* 统一使用系统字体，避免动态字体加载造成首屏字形跳变。 */
+    font-family: MiSans, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
     /* 正文基准字号 14px（T4 统一：正文 13~14px，tip-line 12px） */
     font-size: 14px;
     background: var(--md-surface);
@@ -164,6 +164,20 @@ html, body {
     background: currentColor;
     opacity: 0;
     transition: opacity 0.2s;
+}
+
+/* 图标按钮（替代纯文字工具栏按钮，更简洁）：方形、内联 SVG 填充当前色 */
+.md-btn-icon {
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 19px;
+}
+.md-btn-icon svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+    display: block;
 }
 
 .md-btn:hover::after  { opacity: 0.08; }
@@ -513,6 +527,10 @@ html, body {
 /* 隐藏全局滚动条（仍可滚动，观感更干净） */
 body, .view { scrollbar-width:none; }
 body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:none; }
+/* 内嵌滚动区同样隐藏滚动条（保留滚轮滑动）：弹窗体 / Bangumi 详情内容 / 详情简介 / 直链视图 */
+.md-dialog-body, .bangumi-detail-content, .detail-info .detail-desc, #view-direct { scrollbar-width:none; }
+.md-dialog-body::-webkit-scrollbar, .bangumi-detail-content::-webkit-scrollbar,
+.detail-info .detail-desc::-webkit-scrollbar, #view-direct::-webkit-scrollbar { width:0; height:0; display:none; }
 
 /* 设置独立视图容器（T12 二级菜单：一级分类导航 + 二级详情卡片区；居中限宽，窄窗不贴边） */
 .settings-wrap {
@@ -555,7 +573,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .settings-grid .tool-card[data-setcat="asset"],
 .settings-grid .tool-card[data-setcat="source"],
 .settings-grid .tool-card[data-setcat="download"],
-.settings-grid .tool-card[data-setcat="system"] { grid-column:1 / -1; max-width:880px; }
+.settings-grid .tool-card[data-setcat="system"],
+.settings-grid .tool-card[data-setcat="kazumi"],
+ .settings-grid .tool-card[data-setcat="cache"],
+ .settings-grid .tool-card[data-setcat="about"] { grid-column:1 / -1; max-width:880px; }
 @media (min-width:1500px) {
     /* 全宽分类在 3 列模式下仍横跨两列，保持内容宽度层级一致（T39：下载/系统同组） */
     .settings-grid .tool-card[data-setcat="appearance"],
@@ -564,7 +585,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     .settings-grid .tool-card[data-setcat="asset"],
     .settings-grid .tool-card[data-setcat="source"],
     .settings-grid .tool-card[data-setcat="download"],
-    .settings-grid .tool-card[data-setcat="system"] { grid-column:span 2; }
+    .settings-grid .tool-card[data-setcat="system"],
+    .settings-grid .tool-card[data-setcat="kazumi"],
+     .settings-grid .tool-card[data-setcat="cache"],
+     .settings-grid .tool-card[data-setcat="about"] { grid-column:span 2; }
 }
 /* 设置页标签字号层级：标题 15px 加粗（.tool-card-title），标签 13px，正文随视图 14px */
 .settings-grid .tip-line { font-size:13px; line-height:1.5; }
@@ -684,11 +708,29 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .vod-cover img.landscape { object-fit:contain; }
 /* 封面淡入（T14）：加载完成前由占位底色托底，完成后渐显，避免刷新闪烁 */
 .vod-cover img.loaded, .detail-cover img.loaded { opacity:1; }
+/* 卡片标题限行（T73）：固定 2 行（border-box 精确高度 + max-height 兜底），非全屏窄窗也不溢出卡片，网格标题区统一对齐 */
+/* T74 白块修复：word-break:break-all 与 -webkit-line-clamp 叠加会触发 Chromium 绘制缺陷（超行文本仍被画成白色块），
+   改用 overflow-wrap:anywhere——CJK 本就逐字换行视觉不变，长拉丁词仅在超行时断行，与 .kazumi-rule-name 同法。
+   T74 收尾（common.js fitVodTitle）：渲染后按实际列宽把标题 JS 截到恰好两行，DOM 不再存在超行文字，
+   clamp 在此仅作窗口尺寸变化瞬间的兜底（防抖重适配前的瞬时溢出）。 */
 .vod-name { font-size:13px; line-height:18px; padding:8px 10px 2px; color:var(--md-on-surface);
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
-    word-break:break-all; min-height:38px; }
+    overflow-wrap:anywhere; min-height:46px; max-height:46px; }
 .vod-remarks { font-size:11px; line-height:16px; min-height:16px; padding:0 10px 8px; color:var(--md-on-surface-variant);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* 响应式（T66）：卡片列宽与标题/备注字号随窗口宽度自适应——宽窗放大铺更多列，窄窗缩小 */
+@media (min-width:1800px) {
+    .vod-grid { grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:18px; }
+    .vod-name { font-size:14px; line-height:20px; min-height:50px; max-height:50px; }
+    .vod-remarks { font-size:12px; line-height:18px; min-height:18px; }
+    .rec-playinfo { font-size:12px; line-height:18px; padding:0 10px 8px; }
+}
+@media (max-width:1000px) {
+    .vod-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:12px; }
+    .vod-name { font-size:12px; line-height:16px; min-height:42px; max-height:42px; }
+    .vod-remarks { font-size:10px; line-height:14px; min-height:14px; }
+    .rec-playinfo { font-size:10px; line-height:14px; padding:0 10px 8px; }
+}
 
 /* 分页（T6 统一分页器：首页/上一页/页码/下一页/末页 + 跳转输入） */
 .pager { display:flex; align-items:center; gap:10px; justify-content:center; flex-wrap:wrap; padding:20px 0; }
@@ -705,9 +747,32 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .search-bar { display:flex; gap:12px; margin-bottom:8px; }
 .search-bar .md-input { flex:1; height:48px; border-radius:24px; }
 .search-bar .md-input:focus { padding:0 15px; }
-.src-group { margin-top:20px; }
+
+/* 搜索进度提示（T74）：spinner + 进度条 + 计数，替代纯文字 */
+.search-status { display:flex; align-items:center; gap:10px; padding:9px 14px; margin-bottom:10px;
+    border-radius:12px; background:var(--md-surface-container); border:1px solid var(--md-outline-variant); }
+.search-status .ss-spinner { flex:none; width:15px; height:15px; border-radius:50%;
+    border:2px solid var(--md-primary-container); border-top-color:var(--md-primary);
+    animation:sspin .7s linear infinite; }
+@keyframes sspin { to { transform: rotate(360deg); } }
+.search-status .ss-text { font-size:13px; color:var(--md-on-surface); flex:none; max-width:40%;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.search-status .ss-bar { flex:1; min-width:50px; height:5px; border-radius:3px;
+    background:var(--md-surface-container-high); overflow:hidden; }
+.search-status .ss-fill { display:block; height:100%; width:0; border-radius:3px;
+    background:var(--md-primary); transition:width .3s ease; }
+.search-status .ss-bar.indeterminate .ss-fill { width:38%; animation:sslide 1.1s ease-in-out infinite; }
+@keyframes sslide { 0% { margin-left:-38%; } 100% { margin-left:100%; } }
+.search-status .ss-count { flex:none; font-size:12px; color:var(--md-on-surface-variant); white-space:nowrap; }
+.search-status.done .ss-spinner { display:none; }
+.search-status.done .ss-fill { width:100% !important; background:var(--md-primary); }
+/* 首页源/分类探测进度条（T81）：复用 search-status 样式，与分类栏留间距 */
+#home-probe-bar { margin-top:8px; }
+.src-group { margin-top:26px; }
 .src-head { font-size:15px; font-weight:700; padding:8px 0; color:var(--md-primary); border-bottom:1px solid var(--md-outline-variant); }
 .src-count { font-size:12px; font-weight:400; color:var(--md-on-surface-variant); margin-left:6px; }
+/* 源名分隔线与首行卡片顶部留出间距，避免线条压在封面上（T74：原 -1px 使线与封面顶部重合） */
+.src-group > .vod-grid { margin-top:8px; }
 
 /* 详情 */
 .back-btn { margin-bottom:16px; }
@@ -732,6 +797,17 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .detail-desc { font-size:14px; line-height:22px; color:var(--md-on-surface); margin-bottom:16px; }
 .detail-desc p { margin:0 0 8px; }
 .detail-desc p:last-child { margin-bottom:0; }
+.detail-desc.collapsed { max-height:4.5em; overflow:hidden; position:relative; }
+.detail-desc-wrap { margin-bottom:12px; }
+.detail-tabs { margin-bottom:14px; }
+.detail-tab { cursor:pointer; padding:6px 14px; border-radius:16px; font-size:13px; background:var(--md-surface-container); color:var(--md-on-surface-variant); transition:all .15s; }
+.detail-tab.active { background:var(--md-primary-container); color:var(--md-on-primary-container); font-weight:600; }
+.detail-tab:hover { background:var(--md-secondary-container); }
+.detail-comment, .detail-char, .detail-staff, .detail-relation { padding:10px 12px; border-radius:10px; background:var(--md-surface-container); margin-bottom:6px; border:1px solid var(--md-outline-variant); }
+.detail-comment-user, .detail-char-name, .detail-staff-name, .detail-relation-type { font-weight:600; font-size:13px; }
+.detail-comment-time, .detail-comment-text, .detail-char-role, .detail-staff-jobs, .detail-relation-name { font-size:12px; color:var(--md-on-surface-variant); margin-top:2px; }
+.detail-char { display:flex; gap:10px; align-items:center; }
+.detail-char-avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; flex-shrink:0; }
 
 /* 播放线路 / 选集 */
 .play-srcs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
@@ -799,9 +875,40 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-captcha-item { border-color:var(--md-error); }
 .kazumi-captcha-item:hover { border-color:var(--md-error); background:var(--md-error-container); }
 .kazumi-captcha-item .kazumi-result-name { color:var(--md-error); }
+
 .kazumi-result-name { font-size:13px; color:var(--md-on-surface); display:block; }
 .kazumi-result-src { font-size:11px; color:var(--md-on-surface-variant); display:block;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
+
+/* ===== 选源弹窗（T74，对齐 Kazumi SourceSheet） ===== */
+.kazumi-sheet-head { display:flex; align-items:baseline; gap:10px; padding:2px 0 12px;
+    border-bottom:1px solid var(--md-outline-variant); margin-bottom:12px; }
+.kazumi-sheet-title { font-size:15px; font-weight:700; color:var(--md-on-surface);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kazumi-sheet-progress { font-size:12px; color:var(--md-on-surface-variant); flex:none; }
+/* 源卡片：行头可点击展开/收起 */
+.kazumi-src-card { margin-bottom:8px; border:1px solid var(--md-outline-variant);
+    border-radius:12px; background:var(--md-surface-container); overflow:hidden; }
+.kazumi-src-row { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer;
+    user-select:none; transition:background .15s; }
+.kazumi-src-row:hover { background:var(--md-surface-container-high); }
+.kazumi-src-name { flex:1; min-width:0; font-size:13.5px; font-weight:600; color:var(--md-on-surface);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kazumi-src-chev { font-size:12px; color:var(--md-on-surface-variant); }
+/* 状态徽标 */
+.kazumi-status { flex:none; font-size:11px; padding:2px 8px; border-radius:10px; font-weight:600; }
+.kazumi-status-pending { color:var(--md-on-surface-variant); background:var(--md-surface-container-high); }
+.kazumi-status-ok { color:var(--md-on-primary-container); background:var(--md-primary-container); }
+.kazumi-status-muted { color:var(--md-on-surface-variant); background:var(--md-surface-container-high); }
+.kazumi-status-captcha { color:var(--md-on-error-container); background:var(--md-error-container); }
+.kazumi-status-error { color:#fff; background:var(--md-error); }
+/* 源卡展开区 */
+.kazumi-src-body { padding:4px 14px 12px; border-top:1px solid var(--md-outline-variant); }
+.kazumi-src-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+/* 选集视图返回栏 */
+.kazumi-road-toolbar { display:flex; align-items:center; gap:12px; padding:2px 0 10px;
+    border-bottom:1px solid var(--md-outline-variant); margin-bottom:12px; }
+.kazumi-road-toolbar .kazumi-plugin-head { border:none; padding:0; }
 /* 弹窗内线路分组 */
 .kazumi-road-group { margin-bottom:16px; }
 .kazumi-road-name { font-size:13px; font-weight:600; padding:6px 0;
@@ -811,14 +918,51 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-badge { position:absolute; top:6px; left:6px; z-index:2;
     padding:2px 8px; border-radius:7px; font-size:10.5px; color:#F2F1EB;
     background:rgba(0,0,0,.55); backdrop-filter:blur(2px); }
+/* 搜索页验证码源提示分组行（T73） */
+.kazumi-captcha-line {
+    padding:10px 12px; font-size:12px; color:var(--md-error); cursor:pointer;
+    border:1px dashed var(--md-error); border-radius:8px; margin:0 2px 12px;
+    transition:background .15s; user-select:none;
+}
+.kazumi-captcha-line:hover { background:var(--md-error-container); }
+
+/* ===== 番剧时间表（季节索引 / 排序 / 收藏过滤 / 排名角标） ===== */
+/* 排名角标：封面右上角，金色描边突出 Bangumi 排名（推荐/时间表共用，T62） */
+.bangumi-rank-badge { position:absolute; top:6px; right:6px; z-index:2;
+    padding:2px 7px; border-radius:7px; font-size:10.5px; font-weight:700;
+    color:#FFD54F; background:rgba(0,0,0,.6); border:1px solid rgba(255,213,79,.5); }
+/* 收藏过滤行：chip 复用 class-tab 基础样式，选中高亮、未可用置灰 */
+.timeline-filters { margin-bottom:8px; }
+.timeline-filter-chip {
+    padding:6px 16px; border-radius:20px; font-size:13px; cursor:pointer;
+    border:1px solid var(--md-outline-variant);
+    background:var(--md-surface-container-high); color:var(--md-on-surface-variant);
+    transition:background .15s,color .15s; user-select:none;
+}
+.timeline-filter-chip:hover { background:var(--md-secondary-container); }
+.timeline-filter-chip.active { background:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
+.timeline-filter-chip.disabled { opacity:.45; cursor:not-allowed; }
+.timeline-filter-chip.disabled:hover { background:var(--md-surface-container-high); }
+#timeline-sort { width:140px; }
 /* 规则列表行内开关对齐 */
 #kazumi_rule_list .md-switch { margin:0; flex:none; }
 #kazumi_rule_list .history-item { display:flex; align-items:center; gap:10px; }
 #kazumi_rule_list .history-url { flex:1; min-width:0; }
+/* T72：Kazumi 规则源导入输入框固定高度，禁止手动拖拽调整大小 */
+#kazumi_rule_json { resize:none; height:132px; }
 .kazumi-validity { flex:none; font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600; }
 .kazumi-validity-valid { color:var(--md-primary); background:var(--md-primary-container); }
 .kazumi-validity-invalid { color:var(--md-error); background:var(--md-error-container); }
 .kazumi-validity-captcha { color:var(--md-tertiary); background:var(--md-tertiary-container); }
+/* T55：规则行主块两行（名称+版本 / 安装·更新时间），右侧控件跨行对齐；
+   覆盖 history-item 的误导 pointer 与 history-url 的 break-all 折名 */
+#kazumi_rule_list .kazumi-rule-row { cursor:default; }
+#kazumi_rule_list .kazumi-rule-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+#kazumi_rule_list .kazumi-rule-name { font-size:13px; color:var(--md-on-surface); word-break:normal; overflow-wrap:anywhere; }
+#kazumi_rule_list .kazumi-rule-times { font-size:11px; color:var(--md-on-surface-variant); }
+.kazumi-subver { color:var(--md-on-surface-variant); font-size:11px; }
+/* 编辑钮 hover 用次级容器色，与删除钮红色区分 */
+#kazumi_rule_list .kazumi-rule-edit:hover { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
 
 /* 规则商店 */
 .kazumi-shop-item { display:flex; align-items:center; gap:12px; padding:12px;
@@ -841,26 +985,75 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .kazumi-bangumi-meta { font-size:12px; color:var(--md-on-surface-variant); margin-bottom:6px; }
 .kazumi-bangumi-summary { font-size:12px; color:var(--md-on-surface-variant); line-height:1.6;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+
+/* Bangumi 二级详情信息卡（仿 Kazumi InfoPage，T63）：标题 + 封面/放送日期/评分星级/排名/评分透视 */
+.bangumi-info-card { background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
+    border-radius:16px; padding:18px 20px; }
+.bangumi-info-title { font-size:22px; font-weight:700; color:var(--md-on-surface); line-height:1.3; margin-bottom:14px; }
+.bangumi-info-row { display:flex; gap:18px; align-items:flex-start; }
+.bangumi-info-cover { flex:none; width:150px; }
+.bangumi-info-cover img { width:150px; aspect-ratio:150/210; object-fit:cover; border-radius:12px; display:block; cursor:zoom-in; }
+.bangumi-info-meta { flex:1; min-width:0; }
+.bi-label { font-size:12px; color:var(--md-on-surface-variant); margin-top:10px; }
+.bi-label:first-child { margin-top:0; }
+.bi-value { font-size:19px; font-weight:700; color:var(--md-primary); margin-top:2px; }
+.bi-score { display:flex; align-items:center; gap:8px; }
+/* 星级：底层灰星 + 顶层金星按宽度裁剪填充 */
+.bi-stars { position:relative; display:inline-block; font-size:16px; line-height:1; }
+.bi-stars-bg { color:var(--md-outline); }
+.bi-stars-fill { position:absolute; left:0; top:0; overflow:hidden; white-space:nowrap; color:#FFC107; }
+/* 评分透视柱状图（1-10 分人数分布） */
+.bi-hist { flex:none; width:200px; display:flex; align-items:flex-end; gap:3px; height:90px; padding-top:18px; }
+.bi-hist-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }
+.bi-hist-bar { width:100%; min-height:2px; background:var(--md-primary); border-radius:3px 3px 0 0; opacity:.7; }
+.bi-hist-lb { font-size:9px; color:var(--md-on-surface-variant); margin-top:3px; }
+.bangumi-info-summary { margin-top:14px; font-size:13px; line-height:1.7; color:var(--md-on-surface-variant); white-space:pre-line; }
+/* 窄窗：信息卡纵向堆叠，隐藏评分透视 */
+@media (max-width:700px) {
+    .bangumi-info-row { flex-wrap:wrap; }
+    .bi-hist { display:none; }
+}
 .kazumi-bangumi-actions { margin-top:8px; display:flex; gap:8px; }
-/* Bangumi 追番同步行 */
+/* 开始观看（4.1：二级页播放入口） */
+.kazumi-watch-row { display:flex; align-items:center; gap:10px; margin-bottom:12px; padding:8px 12px;
+    border-radius:10px; background:var(--md-primary-container); border:1px solid var(--md-outline-variant); }
+.kazumi-watch-row .tip-line { flex:none; color:var(--md-on-primary-container); }
+/* Bangumi 收藏状态按钮（仿 Kazumi CollectButton，点击即同步） */
 .kazumi-bangumi-colrow { display:flex; align-items:center; gap:10px; margin-bottom:12px;
     padding:8px 12px; border-radius:10px;
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant); }
 .kazumi-bangumi-colrow .tip-line { flex:none; }
-.kazumi-bangumi-colrow .md-select { flex:1; min-width:0; height:32px; }
-.kazumi-bangumi-colrow .md-btn { flex:none; }
+.kazumi-col-btns { display:flex; flex-wrap:wrap; gap:6px; }
+.kazumi-col-btn { border:1px solid var(--md-outline-variant); background:transparent; color:var(--md-on-surface-variant); }
+.kazumi-col-btn.active { background:var(--md-primary); color:var(--md-on-primary); border-color:var(--md-primary); }
+/* 简介区标签（点击跳搜索） */
+.bangumi-info-tags { margin-top:12px; }
+.kazumi-tags-wrap { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.kazumi-tag { padding:3px 10px; border-radius:14px; font-size:12px; cursor:pointer;
+    background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); color:var(--md-on-surface); }
+.kazumi-tag:hover { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
 
 /* Bangumi 详情页签内容 */
 .kazumi-detail-ep { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant);
-    font-size:13px; }
+    font-size:13px; cursor:pointer; }
+.kazumi-detail-ep:hover { background:var(--md-surface-container); }
 .kazumi-detail-ep-no { flex:none; width:40px; color:var(--md-primary); font-weight:600; }
 .kazumi-detail-ep-name { flex:1; min-width:0; color:var(--md-on-surface); }
 .kazumi-detail-ep-type { flex:none; font-size:11px; color:var(--md-on-surface-variant); }
-.kazumi-detail-char { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant); }
-.kazumi-detail-avatar { width:48px; height:64px; object-fit:cover; border-radius:6px; flex:none; }
+.kazumi-detail-char { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant); cursor:pointer; align-items:center; }
+.kazumi-detail-char:hover { background:var(--md-surface-container); }
+.kazumi-detail-avatar { width:48px; height:64px; object-fit:cover; border-radius:6px; flex:none; cursor:zoom-in; }
 .kazumi-detail-char-info { flex:1; min-width:0; }
 .kazumi-detail-char-name { font-size:13px; font-weight:600; color:var(--md-on-surface); }
 .kazumi-detail-char-role { font-size:12px; color:var(--md-on-surface-variant); }
+.kazumi-detail-char-more { flex:none; font-size:12px; color:var(--md-primary); }
+/* 角色详情（4.1：点击角色进详情） */
+.kazumi-char-detail { padding:8px 12px; }
+.kazumi-char-back { margin-bottom:12px; }
+.kazumi-char-img { width:120px; border-radius:12px; margin-bottom:10px; cursor:zoom-in; }
+.kazumi-char-name { font-size:18px; font-weight:700; color:var(--md-on-surface); margin-bottom:4px; }
+.kazumi-char-meta { font-size:13px; color:var(--md-on-surface-variant); margin-bottom:10px; }
+.kazumi-char-summary { font-size:13px; line-height:1.7; color:var(--md-on-surface); white-space:pre-line; }
 .kazumi-detail-staff { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid var(--md-outline-variant);
     font-size:13px; }
 .kazumi-detail-staff-name { flex:1; color:var(--md-on-surface); }
@@ -885,6 +1078,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .md-dialog-wide { max-width:560px; }
 .player-url { margin-top:8px; font-size:12px; color:var(--md-on-surface-variant); word-break:break-all; }
 
+/* Kazumi 规则源弹窗：固定宽度与内容区高度（不随内容拉伸，禁手动调整） */
+#kazumiSourceDialog .md-dialog { width:560px; max-width:calc(100vw - 48px); }
+#kazumiSourceDialog .md-dialog-body { height:60vh; max-height:60vh; overflow-y:auto; }
+
 /* 下载管理（卡片化：与直链/工具页同为 tool-card，限宽居中） */
 .downloads-wrap { max-width:980px; margin:0 auto; }
 .downloads-wrap .search-bar { margin-bottom:6px; }
@@ -896,7 +1093,7 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .dl-spacer { flex:1; }
 /* 下载页总网速指示（T15） */
 .dl-speed { font-size:13px; font-weight:600; color:var(--md-primary); }
-.dl-list { display:flex; flex-direction:column; gap:10px; }
+.dl-list { display:flex; flex-direction:column; gap:10px; margin-top:12px; }
 .dl-item { background:var(--md-surface-container); border:1px solid var(--md-outline-variant); border-radius:14px; padding:12px 16px; }
 .dl-item-top { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
 .dl-name { flex:1; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -979,16 +1176,16 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     content:''; position:absolute; left:5px; top:1.5px; width:4px; height:9px;
     border:solid var(--md-on-primary); border-width:0 2px 2px 0; transform:rotate(45deg);
 }
-/* 观看进度条（收藏卡片底部） */
-.rec-progress { position:absolute; left:0; right:0; bottom:0; height:3px;
-    background:rgba(0,0,0,.3); border-radius:0 0 14px 14px; overflow:hidden; }
+/* 观看进度条（收藏卡片内容区底部，避免被卡片圆角裁切） */
+.rec-progress { height:3px; margin:0 10px 8px;
+    background:rgba(0,0,0,.3); border-radius:3px; overflow:hidden; }
 .rec-progress-bar { height:100%; background:var(--md-primary); transition:width .3s; }
 .vod-card { position:relative; }
 .rec-checkall { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); cursor:pointer; }
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
 
 /* ===== 「我的」页面：观看统计 + 最近观看 ===== */
-.my-stats-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.my-stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; }
 .my-stat-box { text-align:center; padding:14px 8px; border-radius:12px;
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant); }
 .my-stat-value { font-size:22px; font-weight:700; color:var(--md-primary); line-height:1.2; }
@@ -1000,6 +1197,18 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
     transition:height .3s; }
 .my-bar-col:first-child .my-bar { background:var(--md-primary); }
 .my-bar-label { font-size:11px; color:var(--md-on-surface-variant); margin-top:4px; white-space:nowrap; }
+/* 分来源 / 最常观看：横向条形排行（片名/源名 + 占比条 + 数值） */
+.my-rank-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+.my-rank-row { display:flex; align-items:center; gap:10px; }
+.my-rank-name { flex:none; width:34%; max-width:180px; font-size:13px; color:var(--md-on-surface);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.my-rank-track { flex:1; min-width:40px; height:12px; border-radius:6px;
+    background:var(--md-surface-container-high); overflow:hidden; }
+.my-rank-fill { display:block; height:100%; border-radius:6px; background:var(--md-primary-container);
+    transition:width .3s ease; }
+.my-rank-row:first-child .my-rank-fill { background:var(--md-primary); }
+.my-rank-val { flex:none; font-size:12px; color:var(--md-on-surface-variant); white-space:nowrap; min-width:52px; text-align:right; }
+.my-stats-empty { font-size:13px; color:var(--md-on-surface-variant); padding:8px 0; }
 /* 最近观看卡片：封面右下角时长角标 */
 .my-watch-dur { position:absolute; right:6px; bottom:6px; z-index:2;
     background:rgba(0,0,0,.65); color:#fff; font-size:11px; padding:1px 6px;
@@ -1115,6 +1324,12 @@ html.dark[data-color="cyan"] {
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none;
 }
 
+/* 历史卡播放信息（T73：按次记录，显示 集名 · 时长 · 播放时间），位于片名/备注下方，单行省略 */
+.rec-playinfo {
+    margin-top:2px; padding:0 10px 8px; font-size:11px; line-height:1.5; color:var(--md-on-surface-variant);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;
+}
+
 /* ===== 外观：字体颜色行（窄窗可换行，select 可收缩不溢出） ===== */
 .color-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .color-row .md-select { min-width:0; flex:1 1 160px; }
@@ -1130,7 +1345,7 @@ html.dark[data-color="cyan"] {
 
 /* ===== 侧栏收缩（只显示图标） ===== */
 .nav-collapse-btn {
-    margin-top:auto; display:flex; align-items:center; justify-content:center;
+    order:99; margin-top:auto; display:flex; align-items:center; justify-content:center;
     height:40px; border:none; border-radius:20px; cursor:pointer;
     background:transparent; color:var(--md-on-surface-variant);
     transition:background .15s;
@@ -1138,6 +1353,7 @@ html.dark[data-color="cyan"] {
 .nav-collapse-btn:hover { background:var(--md-surface-container-high); }
 .nav-collapse-btn svg { width:22px; height:22px; fill:currentColor; transition:transform .2s; }
 #main-nav { transition:flex-basis .2s ease, padding .2s ease; }
+.main-nav-item[data-view="settings"] { order:98; }
 .main-nav-item span { transition:opacity .15s; }
 body.nav-collapsed #main-nav { flex-basis:64px; padding:16px 8px; }
 body.nav-collapsed .main-nav-item { justify-content:center; padding:12px 0; gap:0; }
@@ -1161,7 +1377,9 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
     animation:none; opacity:0; transform:scale(.96);
     transition:opacity .14s ease, transform .14s ease;
 }
-.view.active { animation:viewIn .25s cubic-bezier(.2,.7,.3,1); }
+/* 视图切换入场动画；排除含 backdrop-filter 的视图（本地文件 #view-tools、详情 #view-detail）——
+   T54：Chromium 下祖先 opacity/transform 动画与内部 backdrop-filter 合成会致模糊采样抖动闪烁 */
+.view.active:not(#view-tools):not(#view-detail) { animation:viewIn .25s cubic-bezier(.2,.7,.3,1); }
 .vod-card { animation:cardIn .28s cubic-bezier(.2,.7,.3,1) both; }
 /* 卡片错峰入场（T30）：前 10 张逐张出现，延迟封顶，翻页/渐进加载同样生效 */
 .vod-card:nth-child(2)  { animation-delay:.03s; }
@@ -1247,8 +1465,9 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .rec-checkall { font-size:16px; }
     /* 影片卡片网格 */
     .vod-grid { grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:22px; }
-    .vod-name { font-size:16px; line-height:22px; }
+    .vod-name { font-size:16px; line-height:22px; min-height:54px; max-height:54px; }
     .vod-remarks { font-size:14.5px; line-height:20px; min-height:20px; }
+    .rec-playinfo { font-size:14.5px; line-height:20px; padding:0 10px 8px; }
     .rec-site { font-size:13px; }
     /* 通用控件 */
     .md-input { height:64px; font-size:19px; border-radius:14px; }

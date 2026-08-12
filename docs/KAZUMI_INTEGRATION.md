@@ -1,41 +1,39 @@
-# Kazumi 规则引擎整合开发文档
+# Kazumi 规则引擎整合说明
 
-> 版本：v1.3（2026-08-09）  
-> 目标：将 Kazumi 的 XPath/API 规则引擎以插件形式整合进 video-pc，不破坏现有 CatVod 配置链路。  
-> 阅读对象：glm5.2（主要代码实现）、前端 UI 由本助手完成。  
-> 前置文档：先读 `PROGRESS.md` 第 4 节架构决策、第 5 节 Spider 契约，再读本文件。  
-> Git 基线：tag `pre-kazumi`（commit 4269bc4），回滚方案见 §11.10。  
-> 状态：**全部功能已实现并通过测试**（2026-08-09）。
+> - 版本：v1.4（2026-08-09）
+> - 目标：说明 Kazumi XPath/API 规则引擎在影视 PC 中的当前实现，不破坏现有 CatVod 配置链路。
+> - 前置文档：先读 [当前开发状态](../PROGRESS.md) 和 [系统架构](ARCHITECTURE.md)。
+> - Git 基线：tag `pre-kazumi`（commit 4269bc4）。
+> - 状态：**既定 Kazumi 接入范围已完成并通过测试**。这不表示影视 PC 已与 Kazumi Flutter 原版完全等价，差距见 [KAZUMI_GAP_ANALYSIS.md](KAZUMI_GAP_ANALYSIS.md)。
 
 ---
 
 ## 1. 整合目标与边界
 
-### 1.1 必须实现（已全部完成）
+### 1.1 已完成的接入范围
 - 支持 Kazumi 规则 JSON（Plugin schema，api 小于等于 8）的导入、保存、列表、删除、启用禁用。
 - 规则两种模式：xpath（5 条 XPath 选择器）与 api（JSONPath 模板）。
 - 聚合搜索：Kazumi 规则源与现有 CatVod 站点并行出现在搜索结果中，来源标记为 kazumi:规则名。
-- 详情页：当 CatVod 源无播放线路或用户主动点击时，提供 Kazumi 源弹窗，列出已启用规则的搜索结果，用户选源后解析剧集并播放。
+- 详情页：当 CatVod 源无播放线路或用户主动点击时，提供 Kazumi 源弹窗（T74 对齐 Kazumi SourceSheet：并发流式、每源卡片+状态徽标、首个有结果源自动展开），用户选源后解析剧集并播放。
 - 播放链路：复用现有 Player.play()，但 Kazumi 源需先经真实视频流提取（隐藏 BrowserWindow 抓 m3u8/mp4）。
 - **内置默认规则**：7sefun/DM84/enlie 三个规则首次启动自动导入，用户开箱即用。
 - **在线规则商店**：从 KazumiRules 仓库浏览/安装/更新规则（GitHub/GitCode 镜像）。
-- **Bangumi 元数据**：详情页 Kazumi 源弹窗顶部显示番剧封面/简介/评分（api.bangumi.lol / next.bangumi.lol 镜像）。
-- **验证码识别**：检测到验证码时标记源为「需验证」，点击打开验证页面（手动过验证后重试）。
-- **弹幕/以图搜番**：基础占位实现（弹弹 play API 需签名密钥，trace.moe 需图片上传）。
+- **Bangumi 元数据**：统一详情页头部显示番剧封面/简介/评分（官方 API：api.bgm.tv / next.bgm.tv，2026-08-09 从 bangumi.lol 镜像改回）。
+- **验证码识别**：检测到验证码时源卡标记「需验证」，点击打开可见验证窗口（手动过验证，关闭后收割 Cookie 并自动重查该源）。
+- **以图搜番**：支持 URL/base64 图片输入并调用 trace.moe（T74 改为后端下载字节上传，规避 URL 直传 403）。
+- **兼容基础**：保留 DanDanPlay API 与 mpv ASS 相关代码，但产品当前不启用弹幕入口或播放时弹幕加载。
 
-### 1.2 本期不做（已调整）
-- 番剧元数据（Bangumi API）：**已整合**（详情页封面/简介/评分）。
-- 时间表、追番同步、WebDAV 同步。
-- 验证码反爬（AntiCrawlerConfig）：**基础识别已实现**（检测并提示，手动过验证）。
-- 规则商店在线更新：**已实现**（浏览/安装/更新）。
-- Anime4K 超分：现有 CatVod 链路已支持，Kazumi 源直接复用。
-- 弹幕系统：**占位实现**（需弹弹 play 签名密钥，未接入）。
-- 以图搜番：**占位实现**（需 trace.moe 图片上传，未接入）。
+### 1.2 当前边界
+
+- 验证码支持检测、打开验证页面、手动过验证和 Cookie 复用；自动识别与自动提交不在当前交付范围。
+- 弹幕产品功能当前关闭。后端 API 和 ASS 基础代码属于保留兼容层，不应视为正在等待补齐的产品功能。
+- Anime4K、下载、WebDAV、SyncPlay、DLNA 等由影视 PC 公共能力提供，Kazumi 播放源直接复用，不在本模块重复实现。
+- macOS/Linux 验证、代码签名、自动更新和 CI/CD 属于项目级发布工作，不属于 Kazumi 接入范围。
 
 ### 1.3 兼容性红线
 - 现有 CatVod 配置加载、搜索、详情、播放、下载、直播零改动。
 - 所有新增代码必须放在独立模块，禁止修改 app.py、runner.py、base/spider.py（CatVod 字节码契约）。
-- 新增 Python 依赖必须锁定版本并写入 requirements.txt；禁止引入需要编译的 C 扩展（除已存在的 lxml/quickjs-ng）。
+- 新增 Python 依赖必须限制兼容版本范围并写入 `requirements.txt`；禁止引入需要编译的 C 扩展（除已存在的 lxml/quickjs-ng）。
 
 ---
 
@@ -88,9 +86,9 @@
 - Kazumi Plugin 对应 CatVod Site，但独立存储，key 为 kazumi:name。
 - Kazumi SearchItem 无 vod_id/vod_pic，仅 name/src。
 - Kazumi Road 对应播放线路，但 data 是播放页 URL，非直链。
-- Kazumi 无 detailContent，详情页仅展示标题，无简介封面。
+- Kazumi 规则响应无 `detailContent`；影视 PC 使用 Bangumi API 独立补充简介、封面和评分。
 
-关键差异：Kazumi 规则没有详情页概念，searchResult 直接得到番剧详情页 URL，chapterResult 从详情页提取剧集播放页 URL。没有 vod_id/vod_pic/vod_content，只有标题和链接。
+关键差异：Kazumi 规则本身没有 CatVod 式 `detailContent` 概念，`searchResult` 直接得到番剧详情页 URL，`chapterResult` 从详情页提取剧集播放页 URL。规则层只有标题和链接；影视 PC 另外使用 Bangumi API 补充封面、简介和评分等元数据。
 
 ---
 
@@ -109,7 +107,7 @@ python-backend/
     plugin_manager.py  PluginManager：规则 CRUD、持久化
     utils.py           normalize_episode_url、UA 池、异常
   tests/
-    test_kazumi.py     单元测试（glm5.2 编写）
+    test_kazumi.py     单元测试
 ```
 
 ### 4.2 PluginManager 规则管理
@@ -134,7 +132,7 @@ python-backend/
 
 ### 4.5 ApiRuleStrategy
 - 受限 JSONPath：仅支持 $ . [index|*|key]，禁止递归下降与过滤器。
-- 新增依赖 jsonpath-ng（锁定版本，写入 requirements.txt）。
+- 新增依赖 `jsonpath-ng`，在 `requirements.txt` 中限制兼容版本范围。
 - 模板渲染：URL/headers/query/body 支持 @variable 占位符，URL 中变量需 quote 编码。
 - 剧集解析两种格式：nested（JSON 树）与 delimited（分隔字符串，兼容 $$$/#/$）。
 - episodePage 模板：从响应变量构造播放页 URL。
@@ -142,14 +140,23 @@ python-backend/
 ### 4.6 URL 归一化
 完全对齐 Kazumi Dart 实现：去空白、相对路径 urljoin、同站协议统一、去尾斜杠、去空 query、幂等。
 
-### 4.7 新增 API 端点（/kazumi/action）
-- kazumiList：列出全部规则。
-- kazumiAdd：导入或更新规则（参数 json）。
-- kazumiRemove：删除规则（参数 name）。
-- kazumiToggle：启用禁用（参数 name, enabled）。
-- kazumiSearch：聚合搜索全部启用规则（参数 keyword），并行查询，单规则异常不影响整体。
-- kazumiChapters：解析剧集线路（参数 pluginName, src）。
-- kazumiResolve：返回 pageUrl 与播放 headers（userAgent, referer），由前端 Player 走 captureDirect。
+### 4.7 API 端点（`/kazumi/action`）
+
+核心规则端点：
+
+- `kazumiList` / `kazumiAdd` / `kazumiRemove` / `kazumiToggle`：规则 CRUD 与启用状态。
+- `kazumiSearch` / `kazumiChapters` / `kazumiResolve`：搜索、剧集解析与播放页解析参数。
+- `kazumiShopCatalog` / `kazumiShopInstall`：规则商店浏览与安装。
+- `kazumiCheckValidity` / `kazumiValidityStatus`：后台有效性检查与状态查询。
+- `kazumiBatchUpdate` / `kazumiUpdateStatus`：后台批量更新与状态查询。
+
+会话与元数据端点：
+
+- `kazumiCookieSet` / `kazumiCookieList` / `kazumiCookieClear`：解析 Cookie 持久化管理。
+- `kazumiBangumiSearch` / `Info` / `Calendar` / `Season` / `Trends` / `Episodes` / `Characters` / `Staff` / `Comments` / `Relations`：Bangumi 元数据。`Season(start,end)` 按 air_date 区间检索历史季度放送并分桶（时间表季节索引用）。
+- `kazumiBangumiMe` / `Collections` / `CollectionGet` / `CollectionSet` / `CollectionDel`：Bangumi 用户收藏同步。
+
+仓库还保留弹幕兼容端点，但产品界面当前不启用弹幕功能。
 
 ---
 
@@ -171,18 +178,17 @@ python-backend/
 - 导入规则卡片：textarea 粘贴规则 JSON 或 kazumi:// 分享链接，导入按钮，从剪贴板导入按钮，成功失败 toast。
 - 已安装规则卡片：列表展示规则名、版本、启用开关、删除按钮，删除前 confirmDialog 确认，空态提示。
 
-### 5.4 详情页 Kazumi 源弹窗
-- 触发：详情页播放线路区下方新增一行按钮「选择 Kazumi 源」，仅当存在已启用规则时显示。
-- 弹窗内容：标题、加载状态、按规则分组的结果列表（规则名、结果数、影片名列表）。
-- 用户点击影片名后，调 kazumiChapters 解析剧集，弹窗切换为线路与剧集列表。
-- 用户点击剧集后，关闭弹窗，调 Player.play(site='kazumi:规则名', flag='线路名', id='播放页 URL', ...)。
+### 5.4 详情页 Kazumi 源弹窗（选源 Sheet）
+- 触发：详情页播放线路区下方「选择 Kazumi 源」/「试试 Kazumi 规则源」，或统一详情页「开始观看」按钮（Bangumi-only），仅当存在已启用规则时显示。
+- 弹窗（T74，对齐 Kazumi SourceSheet）：打开即渲染**每启用源一张可折叠卡片**，通过 SSE `/search/kazumi-stream` **并发流式**填充，每源状态徽标（检索中/N 条/需验证/检索失败/无结果），**首个有结果源自动展开**。
+- 点结果行 → 显示「获取中」→ kazumiChapters 解析 → 选集视图（含「← 返回选源」）。
+- 点剧集 → 关闭弹窗，调 Player.play(site='kazumi:规则名', flag='线路名', id='播放页 URL', ...)。
+- 每源补救操作：重试 / 进行验证（可见窗口，完成后自动重查该源）/ 手动检索（关键词重查该源）/ 浏览器打开。
 - Player.play 检测到 site 以 kazumi: 开头时，先调 kazumiResolve 取 pageUrl 与 headers，再调 vpc:captureDirect 抓真实流，最后交 mpv。
 
 ### 5.5 搜索页聚合
-- 现有 CatVod 聚合搜索走 SSE /search/stream。
-- Kazumi 搜索走 /kazumi/action do=kazumiSearch，并行执行。
-- 前端同时发起两个请求，结果合并渲染：CatVod 结果在上，Kazumi 结果在下（或按到达顺序追加，来源标记 kazumi:规则名）。
-- Kazumi 结果卡片无封面，显示占位图与规则名徽章。
+- 现有 CatVod 聚合搜索走 SSE /search/stream；Kazumi 源页签走 SSE `/search/kazumi-stream`（每源完成即推一条，含状态字段）。
+- Kazumi 结果卡片无源封面：按片名从 Bangumi 拉取封面并缓存显示（T73，命中 `kazumi_bgm_cover` localStorage + 内存缓存直接复用，未命中走补拉池按片名查 Bangumi 首个匹配 `{id, cover}` 封面），右上角规则名徽章保留；点击卡片命中缓存 id 直接进**统一详情页**（免重复搜索、封面与详情一致），设置页可清空封面缓存。
 
 ---
 
@@ -260,7 +266,7 @@ python-backend/
 
 ---
 
-## 9. 测试验收清单（glm5.2 负责编写）
+## 9. 测试验收清单
 
 ### 9.1 后端单元测试（python-backend/tests/test_kazumi.py）
 - Plugin JSON 序列化与反序列化（含缺失字段默认值）。
@@ -297,21 +303,26 @@ python-backend/
 - 详情页可通过 Kazumi 源播放影片。
 - 聚合搜索结果包含 Kazumi 源。
 - 现有 CatVod 功能零回归。
-- 单元测试覆盖率大于 80%，集成测试全部通过。
+- 规则 CRUD、XPath/API 解析、并发隔离、Cookie、Bangumi 和播放入口等关键路径有自动化测试覆盖。
 
-### 10.3 实际验收结果（2026-08-09）
-- [x] 后端单元测试：55 tests all pass（test_kazumi.py）。
-- [x] 回归测试：smoke 13/13，phase3 25/25，check-js 24/24。
-- [x] npm run test:all 全绿。
-- [x] 代码审查清单（§11.9）全部通过。
-- [x] Git 提交记录完整（pre-kazumi → docs → frontend → backend → docs v1.2）。
+### 10.3 验收记录（2026-08-09）
+
+历史基线：Kazumi 55 项、smoke 13 项、phase3 25 项和当时的 JavaScript 检查均通过。
+
+本次文档整理时重新验证：
+
+- [x] smoke：13/13。
+- [x] phase3：25/25（将测试数据目录定向到工作区后运行）。
+- [x] JavaScript 单元测试：34/34（逐文件直接运行，规避受管环境禁止测试运行器派生子进程）。
+- [x] JavaScript 语法检查：32/32。
+- [ ] Kazumi：共运行 61 项，60 项通过；Cookie 持久化用例因受管环境拒绝向测试临时目录写文件而失败，需在普通本机环境重新执行 `npm run test:all` 确认。
 
 ---
 
 ## 11. 补充注意事项（根据用户描述追加）
 
 ### 11.1 文档先行
-本文件是 glm5.2 编码的唯一依据，任何接口或数据结构变更必须先更新本文件，再改代码。
+Kazumi 接口、schema 或解析链路变更必须先更新本文件，再修改代码；项目级状态与待办统一维护在 [../PROGRESS.md](../PROGRESS.md)。
 
 ### 11.2 最小侵入
 新增代码不得修改现有 CatVod 链路任何文件（app.py、runner.py、base/spider.py、config.py、site_manager.py 等），所有 Kazumi 逻辑放在独立模块。
@@ -331,33 +342,29 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 ### 11.7 版本兼容（apiLevel 变更）
 当前对齐 Kazumi v2.2.6（apiLevel 8），后续升级 apiLevel 时需同步更新校验逻辑与本文件；规则导入时若 api 大于 8 必须明确拒绝并提示用户。
 
-### 11.8 依赖管理（requirements 锁定）
-新增 Python 依赖 jsonpath-ng 必须锁定具体版本并写入 requirements.txt；安装前需验证与 Python 3.14 兼容性；禁止引入需要编译的 C 扩展（除已存在的 lxml/quickjs-ng）。
+### 11.8 依赖管理
+新增 Python 依赖必须在 `requirements.txt` 中限制兼容版本范围；安装前验证 Python 3.14 兼容性。除已存在的 lxml/quickjs-ng 外，不引入需要额外本机编译环境的 C 扩展。
 
 ### 11.9 代码审查清单（强制，提交前逐项核对）
 - [ ] 未修改 app.py、runner.py、base/spider.py、config.py、site_manager.py 等 CatVod 核心文件。
 - [ ] 新增 Python 代码全部位于 python-backend/kazumi/ 目录。
-- [ ] 新增前端代码全部位于 src/renderer/js/kazumi.js，修改文件仅限 index.html、panels.js、search.js、detail.js、player.js、ui.css。
-- [ ] 新增依赖已锁定版本并写入 requirements.txt。
+- [ ] Kazumi 规则核心代码集中在 `python-backend/kazumi/`；跨模块改动仅用于端点注册、IPC、公共播放能力和 UI 接入。
+- [ ] 新增依赖已限制兼容版本范围并写入 `requirements.txt`。
 - [ ] 关键步骤已输出日志（规则导入、搜索、剧集解析、播放解析）。
 - [ ] 规则持久化文件损坏时有备份与恢复逻辑。
-- [ ] 单元测试覆盖率大于 80%，集成测试全部通过。
+- [ ] 关键行为有自动化测试，相关集成与回归测试通过。
 - [ ] 现有 CatVod 功能零回归（npm run test:all 全绿）。
 
-### 11.10 回滚方案（备份/分支）
-- 开发前在 master 分支打 tag 标记 pre-kazumi，便于快速回退。
-- 每个模块完成后提交一次 commit，commit 信息前缀为 [kazumi]。
-- 如出现严重问题，可执行 `git reset --hard pre-kazumi` 回退到整合前状态。
-- 规则文件 plugins.json 每次写入前自动备份为 plugins.json.bak。
+### 11.10 变更安全与恢复
 
-### 11.11 Git 版本控制（已确认策略）
-- 直接在 master 分支开发，不新建 feature 分支。
-- 开发前先提交现有未跟踪/未提交变更（PROGRESS.md 修改、docs/ 新增）。
-- 按模块分步提交：后端 kazumi/ 包 → 后端 API 端点 → 前端 UI → 播放链路 → 测试。
-- 每步完成后运行 npm run test:all 确认无回归。
+- `pre-kazumi` tag 只作为接入前基线参考，不应在存在未提交改动时使用破坏性回退命令。
+- 修改前先检查工作区并保留用户已有改动；按可独立验证的模块拆分提交。
+- 规则持久化写入采用临时文件与原子替换，损坏文件备份为 `plugins.json.bak`。
+- 每个模块完成后运行 `npm run test:all`；出现回归时优先修复或针对具体提交回退。
 
-### 11.12 开发顺序与分工（已确认）
-- 按模块分步实施，每步可独立验收。
-- 前端代码：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与前端数据逻辑。
-- 后端代码：glm5.2 负责全部实现。
-- 测试代码：glm5.2 负责编写与执行。
+### 11.11 文档维护
+
+- 当前完成范围和待办只在 [../PROGRESS.md](../PROGRESS.md) 维护。
+- 接口、schema、目录或解析链路变化更新本文件。
+- 与 Kazumi 原版的功能差距更新 [KAZUMI_GAP_ANALYSIS.md](KAZUMI_GAP_ANALYSIS.md)。
+- 运行问题、日志证据和复测结论更新 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)。

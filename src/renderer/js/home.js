@@ -5,7 +5,10 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, renderStatusBar */
+
+// T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
+const EMPTY_CLS_TTL = 24 * 3600 * 1000;
 
 const Home = {
     sites: [],
@@ -27,8 +30,18 @@ const Home = {
     _catItems: [],
     searchWord: '',
     _pageCache: null,   // 懒初始化 Map：key site|tid → { pagecount, pages: Map<pg, list> }
+    _catWin: new Map(), // 分类源页合并窗口：key site|tid → { items, seen, sourcePg, total, perPage }（T75 多源页合并填满每页条数）
+    _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
     _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
+    _emptyCls: {},   // T60：site → Set<空分类 type_id>（探测确认无影片的分类，持久化）
+    _clsProbed: {},  // T60：site → 本会话完整探测是否已完成（同源只探一次）
+    _okCls: {},      // T60：site → Set<tid> 已确认有内容的分类（持久化；重试跳过）
+    _clsBusy: {},    // T60：site → 探测在途（防并发重复探测）
+    _clsStarted: {}, // T60：site → 已发起首次探测（或从持久化载入且数据新鲜），之后只探未知分类
+    _clsTs: {},      // T60：site → 上次完整探测完成的时间戳（EMPTY_CLS_TTL 内不重复探测）
+    _probingAll: false, // T60：全源后台探测是否在途（防并发重复扫描）
+    _probeBar: null,    // T81：首页探测进度条 { total, done, active, shown, showTimer, doneTimer }
 
     async init() {
         if (this._inited) return;
@@ -44,7 +57,7 @@ const Home = {
             this._resizeT = setTimeout(() => this._onResize(), 400);
         });
         $('#home-refresh').on('click', () => {
-            if (this.mode === 'home') this.loadHome();
+            if (this.mode === 'home') this.loadHome(this.page || 1);
             else if (this.mode === 'search') this.searchCurrent(this.page);
             else this.loadCategory(this.tid, this.page, true); // 刷新绕过缓存重拉当前页
         });
@@ -62,10 +75,13 @@ const Home = {
             const el = $(e.currentTarget);
             Detail.open(this.site, el.data('id'), el.data('name'));
         });
+        this._loadPersistedEmptyClasses(); // T60：载入持久化空分类结果，首屏即隐藏空分类（无闪现）
         await this.loadSites();
     },
 
     async loadSites() {
+        // T77：配置/源集合变更 → 作废分类内容缓存（页缓存 + 合并窗口），回到页面立即生效
+        this.invalidatePageCaches();
         let all = [];
         try {
             const st = await getJson('/sites');
@@ -77,6 +93,14 @@ const Home = {
         if (this._allSites.length && sig !== this._allSites.map((s) => s.key).join('|')) {
             this._probeToken++; // 进行中的旧探测写入前校验世代，结果丢弃
             this._probing = false; // 释放锁，允许对新集合重新发起探测
+            this._emptyCls = {}; // T60：源集合变更，分类空态缓存作废
+            this._clsProbed = {};
+            this._okCls = {};
+            this._clsBusy = {};
+            this._clsStarted = {};
+            this._clsTs = {};
+            this._probingAll = false; // 全源探测在途锁随源集合变更释放
+            this._clearPersistedEmptyClasses(); // T60：持久化空分类结果同步作废
             try {
                 await window.vpc.settingsSet('probedSites', []);
                 await window.vpc.settingsSet('blockedSites', []);
@@ -97,6 +121,8 @@ const Home = {
         await this.loadHome();
         // 首屏就绪后后台探测未探测过的源，自动屏蔽无内容源
         this._probeSites();
+        // T60：后台为所有源补齐分类空态探测（切换任意源即可直接过滤空分类）
+        this._probeAllClasses();
     },
 
     _renderSiteSelect() {
@@ -105,14 +131,77 @@ const Home = {
             sel.append('<option value="">（无站点 · 请先在设置→源设置载入）</option>');
             return;
         }
-        this.sites.forEach((s) => sel.append(`<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}</option>`));
+        // T65：站点选项拼串一次性写入
+        sel.append(this.sites.map((s) => `<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}</option>`).join(''));
     },
 
-    async _getBlocked() {
-        try {
+    async _getBlocked() {        try {
             const s = (await window.vpc.settingsGet()) || {};
             return Array.isArray(s.blockedSites) ? s.blockedSites : [];
         } catch (e) { return []; }
+    },
+
+    // ------------------------------------------------ 首页探测进度条（T81）
+
+    /** 开始一段探测并计入总进度（total<=0 不计入）。合并源级 + 分类探测为一条总进度。 */
+    _startProbe(total) {
+        if (total <= 0) return false;
+        if (!this._probeBar) {
+            this._probeBar = { total: 0, done: 0, active: 0, shown: false, showTimer: null, doneTimer: null };
+        }
+        const b = this._probeBar;
+        b.total += total;
+        b.active += 1;
+        clearTimeout(b.doneTimer); // 新一轮探测打断「已完成」倒计时
+        if (!b.showTimer) {
+            // 超过约 1 秒仍未完成才显示进度条（避免快速探测闪现）
+            b.showTimer = setTimeout(() => {
+                const bb = this._probeBar;
+                if (bb && !bb.shown && bb.done < bb.total) { bb.shown = true; this._updateProbeBar(false); }
+            }, 1000);
+        }
+        return true;
+    },
+
+    /** 一段探测完成：全部探测结束后，若进度条已显示则展示「已完成」并延迟隐藏。 */
+    _endProbe() {
+        const b = this._probeBar;
+        if (!b) return;
+        b.active -= 1;
+        if (b.active <= 0) {
+            clearTimeout(b.showTimer);
+            if (b.shown) {
+                b.done = b.total;
+                this._updateProbeBar(true);
+                b.doneTimer = setTimeout(() => {
+                    if (this._probeBar) { this._probeBar = null; this._hideProbeBar(); }
+                }, 1500);
+            } else {
+                this._probeBar = null; // 未显示过就不显示
+            }
+        }
+    },
+
+    /** 单个探测单元完成（源级按源、分类级按源）。 */
+    _probeOneDone() {
+        const b = this._probeBar;
+        if (!b) return;
+        b.done += 1;
+        if (b.shown) this._updateProbeBar(false);
+    },
+
+    /** 渲染进度条（done=true 走「已完成」态）。复用 renderStatusBar——spinner 稳定不重建。 */
+    _updateProbeBar(done) {
+        const b = this._probeBar;
+        const el = $('#home-probe-bar');
+        if (!el.length || !b) return;
+        const isDone = !!done || (b.total > 0 && b.done >= b.total);
+        renderStatusBar(el, { text: isDone ? '已完成' : '正在探测源…', recv: b.done, total: b.total, done: isDone });
+        el.show();
+    },
+
+    _hideProbeBar() {
+        $('#home-probe-bar').hide().empty();
     },
 
     /**
@@ -125,6 +214,7 @@ const Home = {
         if (this._probing || !this._allSites.length) return;
         this._probing = true;
         const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
+        let started = false; // 进度条是否计入本轮（T81）
         try {
             const s = (await window.vpc.settingsGet()) || {};
             const probed = {};
@@ -133,6 +223,7 @@ const Home = {
             const before = blocked.size; // toast 只报本轮新增屏蔽数，不含历史累计
             const pending = this._allSites.filter((x) => !probed[x.key]);
             if (!pending.length) return;
+            started = this._startProbe(pending.length);
             let idx = 0, changed = false;
             const probeOne = async (site) => {
                 probed[site.key] = 1;
@@ -156,6 +247,7 @@ const Home = {
                     }
                 } catch (e) { /* 推荐位获取失败视为无内容，继续按分类判断 */ }
                 if (!ok) { blocked.add(site.key); changed = true; }
+                this._probeOneDone(); // T81：单个源探测完成
             };
             const worker = async () => {
                 while (idx < pending.length) { await probeOne(pending[idx++]); }
@@ -181,38 +273,93 @@ const Home = {
             }
         } catch (e) { /* 探测异常不影响主流程 */ } finally {
             this._probing = false;
+            if (started) this._endProbe(); // T81：一段探测完成
         }
     },
 
-    async loadHome() {
+    /**
+     * 「全部」标签：所有页统一用源总览内容 feed（homeVideoContent，跨分类最新/全部），
+     * 合并源页填满每页条数、可一直翻页（T76/T78：第 1 页也走 feed，保证严格按设置条数显示）。
+     * 源不支持 homeVideoContent（feed 空）时，第 1 页回退自适应首页（推荐位 + 分类铺满）。
+     */
+    async loadHome(pg) {
         if (!this.site) return;
         this.mode = 'home';
         this.tid = '';
-        this.pagecount = 1;
+        this.page = pg || 1;
+        this._pageSizeDirty = false; // 完整重载后清除脏标记
         $('#home-search').val(''); // 退出搜索态
         const token = ++this._loadToken;
+        const size = await this._pageSize();
+        if (token !== this._loadToken) return;
+        $('#home-pager').empty();
         showLoading();
         try {
             const data = await doAction('homeContent', { site: this.site, filter: 'false' });
             this.classes = (data && data.class) || [];
             this.renderClass('');
-            // 推荐位通常只有 ~20 条：先展示首屏，后台再逐页补充分类内容铺满
-            this._homeList = ((data && data.list) || []).slice();
-            this._fillTid = this.classes.length
-                ? String(this.classes[0].type_id != null ? this.classes[0].type_id : '')
-                : '';
-            this._fillPg = 0;
-            this._fillSeen = {};
-            this._homeList.forEach((v) => { this._fillSeen[v.vod_id + '|' + v.vod_name] = 1; });
+            // 内容：源总览 feed（合并源页填满每页条数）
+            const feedItems = await this._fetchHomeFeed(this.page, size);
+            if (token !== this._loadToken) return;
+            if (this.page === 1 && !feedItems.length) {
+                // 源无「全部」feed：回退自适应首页（推荐位 + 分类铺满）
+                this._homeList = ((data && data.list) || []).slice();
+                this._fillTid = this.classes.length
+                    ? String(this.classes[0].type_id != null ? this.classes[0].type_id : '')
+                    : '';
+                this._fillPg = 0;
+                this._fillSeen = {};
+                this._homeList.forEach((v) => { this._fillSeen[v.vod_id + '|' + v.vod_name] = 1; });
+                this._extendHome(token);
+                this.pagecount = 1;
+            }
             this.renderGrid(this._homeList);
-            $('#home-pager').empty();
+            this.renderPager();
+            $('#view-home').scrollTop(0);
         } catch (e) {
-            warnToast('首页载入失败');
+            warnToast(this.page > 1 ? '全部载入失败' : '首页载入失败');
         } finally {
             hideLoading();
         }
-        // 渐进填充：不阻塞首屏，避免转圈时间过长
-        this._extendHome(token);
+        // T60：后台探测分类，隐藏无影片的分类（不阻塞首屏；结果不丢进度，见 _probeClasses）
+        this._probeClasses();
+    },
+
+    /**
+     * T76：「全部」总览 feed：合并多个 homeVideoContent 源页，取当前页 [ (pg-1)*size, pg*size )。
+     * 复用 _catWin 合并窗口（key `site|__all__`），翻页只补拉缺失源页；总页数 = ceil(源总量/每页条数)。
+     */
+    async _fetchHomeFeed(pg, size) {
+        const win = this._catWinGet(this.site, '__all__');
+        const need = pg * size; // 累计需覆盖到该页末尾
+        let guard = 0;
+        while (win.items.length < need && guard++ < 200) {
+            const data = await doAction('homeVideoContent', { site: this.site, pg: String(win.sourcePg + 1) });
+            const list = (data && data.list) || [];
+            if (!list.length) break;
+            if (data && data.total > 0) win.total = data.total;
+            const pc = parseInt(data && data.pagecount, 10);
+            if (pc > 0 && !win.total) win.total = pc * ((data && data.limit) || win.perPage);
+            if (data && data.limit > 0) win.perPage = data.limit;
+            let added = 0;
+            list.forEach((v) => {
+                if (v && v.vod_id != null && !win.seen.has(v.vod_id)) {
+                    win.seen.add(v.vod_id); win.items.push(v); added++;
+                }
+            });
+            win.sourcePg += 1;
+            if (!added) { /* 该页全是重复：继续下一页（guard 兜底） */ }
+        }
+        this._homeList = win.items.slice((pg - 1) * size, pg * size);
+        if (win.total > 0) {
+            this.pagecount = Math.max(1, Math.ceil(win.total / size));
+        } else if (win.items.length < need) {
+            this.pagecount = Math.max(1, Math.ceil(win.items.length / size)); // 源已拉空，按实际条数
+        } else {
+            this.pagecount = Math.max(this.pagecount || 1, pg + 1); // 未知总量：暂允试下一页
+        }
+        this._cachePut(this.site, '__all__', pg, this._homeList, this.pagecount);
+        return this._homeList;
     },
 
     /** 铺满首页的目标卡片数（T39：跟随「首页每页条数」设置，默认 20）。 */
@@ -220,12 +367,16 @@ const Home = {
         return await pageSizeOf('pageSizeHome');
     },
 
-    /** 逐页拉首个分类内容去重追加，每拉到一批立即增量渲染（上限 3 页）。 */
+    /**
+     * 铺满首页目标卡片数：逐个分类逐页拉内容去重追加，每拉到一批立即增量渲染，
+     * 直到达到每页条数目标。原只填 classes[0]——首个分类内容少/为空时首页填不满
+     * 设置条数（如 量子资源 首个分类「电影片」仅 1 条），现自动换下一个分类（T75）。
+     */
     async _extendHome(token) {
-        if (!this._fillTid) return;
-        let guard = 0;
-        while (this._homeList.length < (await this._adaptiveTarget())
-            && this._fillPg < 3 && guard++ < 3) {
+        if (!this.classes.length) return;
+        const target = await this._adaptiveTarget();
+        let guard = 0; // 总请求护栏：目标越大允许请求越多，防异常源无限循环
+        while (this._homeList.length < target && guard++ < Math.max(60, target * 2)) {
             this._fillPg += 1;
             let items = [];
             try {
@@ -233,15 +384,24 @@ const Home = {
                     site: this.site, tid: this._fillTid, pg: String(this._fillPg), filter: 'false', extend: '{}',
                 });
                 items = (data && data.list) || [];
-            } catch (e) { break; }
+            } catch (e) { items = []; }
             if (token !== this._loadToken) return; // 已切源/切分类，旧拉取作废
-            if (!items.length) break;
             const fresh = [];
             items.forEach((v) => {
                 const k = v.vod_id + '|' + v.vod_name;
                 if (!this._fillSeen[k]) { this._fillSeen[k] = 1; this._homeList.push(v); fresh.push(v); }
             });
             if (fresh.length) this._appendGrid(fresh);
+            // 该分类下一页；空页/短页（内容少无助于填满）或单分类拉满 3 页 → 换下一个分类
+            const shortPage = items.length > 0 && items.length < 10;
+            if (!items.length || shortPage || this._fillPg >= 3) {
+                const idx = this.classes.findIndex((c) => String(c.type_id != null ? c.type_id : '') === this._fillTid);
+                if (idx < 0) break; // 分类列表已变化，无从推进
+                const next = this.classes[idx + 1];
+                if (!next) break; // 全部分类耗尽
+                this._fillTid = String(next.type_id != null ? next.type_id : '');
+                this._fillPg = 0;
+            }
         }
     },
 
@@ -249,7 +409,10 @@ const Home = {
     _appendGrid(items) {
         const grid = $('#home-grid');
         if (grid.children('.tip-line').length) grid.empty();
-        items.forEach((v) => grid.append(vodCard(v, this.site)));
+        // T65：新增卡片拼串后单次 append（替代逐条 append）
+        grid.append(items.map((v) => vodCard(v, this.site)).join(''));
+        // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
+        fitVodTitles(grid);
         this._fillCovers();
     },
 
@@ -282,7 +445,10 @@ const Home = {
         const token = ++this._loadToken;
         const size = await this._pageSize();
         if (token !== this._loadToken) return;
-        if (force) this._cacheDropPage(this.site, tid, this.page);
+        if (force) {
+            this._cacheDropPage(this.site, tid, this.page);
+            this._catWinDelete(this.site, tid); // 强制刷新丢弃合并窗口，重新拉取
+        }
         const cached = force ? null : this._cacheGet(this.site, tid, this.page);
         if (cached) {
             // 命中缓存：立即上屏，后台静默刷新（内容变化才重渲染）
@@ -315,29 +481,52 @@ const Home = {
     },
 
     /**
-     * 拉取单页并更新 pagecount 与缓存。
-     * pagecount 策略：源返回有效值直接采用；无 pagecount 的源有内容时暂报
-     * 还有下一页（pg+1），拉到空页再修正（部分源 list 短于显示条数，短页不能当末页）。
+     * 拉取分类页并更新 pagecount 与缓存（T75：合并多个源页填满「每页条数」）。
+     * 源每页通常 ~20 条，设置超过源页大小时连续拉取后续源页合并，保证一页显示
+     * 足量影片。合并结果按 site|tid 累积在 _catWin 窗口（LRU，超限淘汰），
+     * 前进/后退翻页复用已拉数据不再重复请求。
      */
     async _fetchCat(tid, pg, size) {
-        const data = await doAction('categoryContent', {
-            site: this.site, tid, pg: String(pg), filter: 'false', extend: '{}',
-        });
-        const raw = (data && data.list) || [];
-        const pc = parseInt(data && data.pagecount, 10);
+        const win = this._catWinGet(this.site, tid);
+        const need = pg * size; // 累计需覆盖到的条数
+        let guard = 0;
+        while (win.items.length < need && guard++ < 200) {
+            const data = await doAction('categoryContent', {
+                site: this.site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
+            });
+            const list = (data && data.list) || [];
+            if (!list.length) break; // 源已拉空
+            if (data && data.total > 0) win.total = data.total;
+            const pc = parseInt(data && data.pagecount, 10);
+            if (pc > 0 && !win.total) win.total = pc * ((data && data.limit) || win.perPage);
+            if (data && data.limit > 0) win.perPage = data.limit;
+            let added = 0;
+            list.forEach((v) => {
+                if (v && v.vod_id != null && !win.seen.has(v.vod_id)) {
+                    win.seen.add(v.vod_id); win.items.push(v); added++;
+                }
+            });
+            win.sourcePg += 1;
+            if (!added) { /* 该页全是重复：继续拉下一页（guard 兜底防死循环） */ }
+        }
+        this._catItems = win.items.slice((pg - 1) * size, pg * size);
         let pagecount;
-        if (pc > 0) pagecount = pc;
-        else if (!raw.length) pagecount = Math.max(1, pg - 1); // 空页：上一页即末页
-        else pagecount = Math.max(this.pagecount || 1, pg + 1); // 无 pagecount：暂允试下一页
+        if (win.total > 0) {
+            pagecount = Math.max(1, Math.ceil(win.total / size)); // 应用页数 = ceil(源总量 / 每页条数)
+        } else if (win.items.length < need) {
+            pagecount = Math.max(1, Math.ceil(win.items.length / size)); // 源已拉空，按实际条数
+        } else {
+            pagecount = Math.max(this.pagecount || 1, pg + 1); // 未知总量：暂允试下一页
+        }
         this.pagecount = pagecount;
-        this._catItems = raw.slice(0, size);
         this._cachePut(this.site, tid, pg, this._catItems, pagecount);
     },
 
-    /** 缓存命中后的后台静默重拉：令牌有效且仍在该页时才可能更新画面。 */
+    /** 缓存命中后的后台静默重拉：令牌有效且仍在该页时才可能更新画面（重拉前清窗口取最新）。 */
     async _refreshCatPage(token, tid, pg, size) {
         try {
             const before = JSON.stringify(this._catItems.map((v) => v.vod_id));
+            this._catWinDelete(this.site, tid); // 丢弃合并窗口，重新拉取最新
             await this._fetchCat(tid, pg, size);
             if (token !== this._loadToken || this.mode !== 'category' || this.tid !== tid || this.page !== pg) return;
             if (JSON.stringify(this._catItems.map((v) => v.vod_id)) !== before) this.renderGrid(this._catItems);
@@ -386,6 +575,53 @@ const Home = {
         for (const k of Array.from(m.keys())) {
             if (k.indexOf(site + '|') === 0) m.delete(k);
         }
+        // 合并窗口同样按 site 清理
+        for (const k of Array.from(this._catWin.keys())) {
+            if (k.indexOf(site + '|') === 0) this._catWin.delete(k);
+        }
+    },
+
+    // ------------------------------------------------------------ 分类合并窗口（T75）
+
+    /** 取 site|tid 的源页合并窗口（懒建 + LRU：命中移到队尾，超 32 分类淘汰最旧）。 */
+    _catWinGet(site, tid) {
+        const key = site + '|' + tid;
+        let w = this._catWin.get(key);
+        if (!w) {
+            w = { items: [], seen: new Set(), sourcePg: 0, total: 0, perPage: 20 };
+            this._catWin.set(key, w);
+            if (this._catWin.size > 32) this._catWin.delete(this._catWin.keys().next().value);
+        } else {
+            this._catWin.delete(key); this._catWin.set(key, w);
+        }
+        return w;
+    },
+
+    /** 删除指定 site|tid 的合并窗口（强制刷新时丢弃重拉）。 */
+    _catWinDelete(site, tid) {
+        this._catWin.delete(site + '|' + tid);
+    },
+
+    /**
+     * T77：作废分类内容缓存（页缓存 + 合并窗口）。配置重载/源变更/改每页条数后调用，
+     * 使「回到页面立即生效」，无需手动刷新。
+     */
+    invalidatePageCaches() {
+        this._pageCache = null;
+        this._catWin = new Map();
+        this._pageSizeDirty = true; // 标记：回到首页视图时按新条数重载（T80）
+    },
+
+    /**
+     * T80：回到首页视图时调用——设置里改过每页条数则按当前模式用新条数重载，
+     * 无需手动切换页面/点刷新。
+     */
+    onViewShown() {
+        if (!this._pageSizeDirty) return;
+        this._pageSizeDirty = false;
+        if (this.mode === 'category') this.loadCategory(this.tid, this.page || 1);
+        else if (this.mode === 'search') this.searchCurrent(this.page || 1);
+        else this.loadHome(this.page || 1);
     },
 
     /** 当前源搜索：走站点自身 searchContent（CMS 源 wd 参数），仅搜当前选中源。
@@ -422,18 +658,171 @@ const Home = {
 
     renderClass(activeTid) {
         const box = $('#home-class').empty();
-        box.append(`<span class="class-tab ${activeTid === '' ? 'active' : ''}" data-tid="">全部</span>`);
+        const emptySet = this._emptyCls[this.site] || null;
+        // T65：分类标签拼串一次性写入（替代逐个 append）
+        const tabs = [`<span class="class-tab ${activeTid === '' ? 'active' : ''}" data-tid="">全部</span>`];
         this.classes.forEach((c) => {
-            box.append(`<span class="class-tab ${activeTid === c.type_id ? 'active' : ''}" data-tid="${escHtml(c.type_id)}">${escHtml(c.type_name)}</span>`);
+            const tidStr = String(c.type_id != null ? c.type_id : '');
+            // T60：探测确认为空（无影片）的分类不显示；当前激活分类除外，避免选中项消失
+            if (emptySet && emptySet.has(tidStr) && String(c.type_id) !== String(activeTid)) return;
+            tabs.push(`<span class="class-tab ${activeTid === c.type_id ? 'active' : ''}" data-tid="${escHtml(c.type_id)}">${escHtml(c.type_name)}</span>`);
         });
+        box.html(tabs.join(''));
+    },
+
+    /** 当前选中源的空分类探测入口（loadHome 触发）。 */
+    async _probeClasses() {
+        await this._probeClassesFor(this.site, this.classes.slice());
+    },
+
+    /**
+     * T60：后台探测指定源的各分类是否有影片，空分类从分类栏隐藏（并发 6，出错保留分类）。
+     * 加固：①结果不随 token/换源丢弃——按 site 键隔离记录，中断/换源不丢进度，
+     * 任一轮完整探测即全部分类；unclassified===0 才标记完成，出错留待下次载入重试
+     * ②首次全量探测（含上次持久化判空的分类，内容可能已恢复），重试只探测未知状态分类
+     * ③结果持久化 localStorage（vpc_home_empty_classes），再次载入该源首屏即过滤、无闪现
+     * ④仅在仍停留在该源时重渲分类栏，避免覆盖其他源的栏。
+     */
+    async _probeClassesFor(site, cls) {
+        if (this._clsProbed[site] || this._clsBusy[site]) return;
+        if (!cls.length) return;
+        if (!this._okCls[site]) this._okCls[site] = new Set();
+        if (!this._emptyCls[site]) this._emptyCls[site] = new Set();
+        const okSet = this._okCls[site];
+        const emptySet = this._emptyCls[site];
+        this._clsBusy[site] = true;
+        try {
+            let pending;
+            if (this._clsStarted[site]) {
+                pending = cls.filter((c) => {
+                    const t = String(c.type_id != null ? c.type_id : '');
+                    return !okSet.has(t) && !emptySet.has(t);
+                });
+                if (!pending.length) {
+                    // 数据新鲜且分类齐全：无需重复探测，直接确认完成并刷新时间戳
+                    this._clsProbed[site] = true;
+                    this._clsTs[site] = Date.now();
+                    this._persistEmptyClasses();
+                    return;
+                }
+            } else {
+                this._clsStarted[site] = true;
+                pending = cls;
+            }
+            let changed = false;
+            let unclassified = 0; // 出错未判定的分类数：有出错则本次不标记完成，下次载入重试
+            let idx = 0;
+            const probeOne = async (c) => {
+                const tid = String(c.type_id != null ? c.type_id : '');
+                try {
+                    const d = await doAction('categoryContent', { site, tid, pg: '1', filter: 'false', extend: '{}' });
+                    // 结果按 site 键隔离记录，不随 token/当前站点变化丢弃（中断不丢进度）
+                    if (((d && d.list) || []).length) {
+                        okSet.add(tid);
+                        if (emptySet.delete(tid)) changed = true; // 曾判空、现恢复内容 → 重新显示
+                    } else if (!emptySet.has(tid)) {
+                        emptySet.add(tid); changed = true;
+                    }
+                } catch (e) { unclassified++; } // 出错不判空也不判有内容，留给重试
+            };
+            const worker = async () => { while (idx < pending.length) { await probeOne(pending[idx++]); } };
+            await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker));
+            this._persistEmptyClasses(); // 落盘（含中断前的部分确认，下次启动也有收获）
+            if (unclassified === 0) {
+                this._clsProbed[site] = true; // 全部分类确认后才标记完成
+                this._clsTs[site] = Date.now(); // 刷新新鲜期
+            }
+            // 仅在仍停留该源时重渲分类栏（保持当前激活项），避免覆盖其他源的栏
+            if (this.site === site && changed) this.renderClass(this.mode === 'category' ? this.tid : '');
+        } finally {
+            this._clsBusy[site] = false;
+        }
+    },
+
+    /**
+     * T60：后台为所有未探测分类的源补齐类别空态探测（站点级并发 2，轻量慢跑），
+     * 使切换任意源时即可直接过滤空分类、无闪现；结果逐源落盘持久化。
+     * 配置重载（源集合变更）后本轮作废，由 loadSites 重新发起。
+     */
+    async _probeAllClasses() {
+        if (this._probingAll || !this._allSites.length) return;
+        this._probingAll = true;
+        const token = this._probeToken;
+        let started = false; // 进度条是否计入本轮（T81）
+        try {
+            const pending = this.sites.filter((s) => {
+                if (this._clsProbed[s.key] || this._clsBusy[s.key]) return false;
+                // 数据新鲜（TTL 内已完整探测）跳过，避免每次启动全量重探；过期/缺失才补探
+                if (this._clsTs[s.key] && (Date.now() - this._clsTs[s.key]) < EMPTY_CLS_TTL) return false;
+                return true;
+            });
+            if (!pending.length) return;
+            started = this._startProbe(pending.length);
+            let idx = 0;
+            const sweepOne = async (site) => {
+                try {
+                    const d = await doAction('homeContent', { site: site.key, filter: 'false' });
+                    if (token !== this._probeToken) return; // 配置已重载，旧结果作废
+                    const cls = (d && d.class) || [];
+                    if (cls.length && !this._clsProbed[site.key]) await this._probeClassesFor(site.key, cls);
+                } catch (e) { /* 单源探测失败跳过，切到该源时再补探 */ }
+                this._probeOneDone(); // T81：单个源分类探测完成
+            };
+            const worker = async () => { while (idx < pending.length) { await sweepOne(pending[idx++]); } };
+            await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
+        } finally {
+            this._probingAll = false;
+            if (started) this._endProbe(); // T81：一段探测完成
+        }
+    },
+
+    /** 空分类探测结果持久化：从 localStorage 载入（含时间戳与有内容分类）。
+     *  数据新鲜（EMPTY_CLS_TTL 内）则置 _clsStarted[site]，首次探测只补未知分类；
+     *  过期/缺失则重新全量探测。兼容旧格式 { site: [tids] }（视为过期）。 */
+    _loadPersistedEmptyClasses() {
+        try {
+            const raw = localStorage.getItem('vpc_home_empty_classes');
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            for (const site of Object.keys(data)) {
+                const v = data[site];
+                const isNew = v && typeof v === 'object' && !Array.isArray(v);
+                const ts = isNew ? (v.ts || 0) : 0;
+                const empty = isNew ? (v.empty || []) : v || [];
+                const ok = isNew ? (v.ok || []) : [];
+                if (Array.isArray(empty) && empty.length) this._emptyCls[site] = new Set(empty);
+                if (Array.isArray(ok) && ok.length) this._okCls[site] = new Set(ok);
+                this._clsTs[site] = ts;
+                if (Date.now() - ts < EMPTY_CLS_TTL) this._clsStarted[site] = true; // 新鲜：首次只探未知
+            }
+        } catch (e) { /* 损坏数据忽略，重新探测 */ }
+    },
+
+    /** 空分类探测结果持久化：写入 localStorage（空/有内容分类 + 探测时间戳）。 */
+    _persistEmptyClasses() {
+        try {
+            const out = {};
+            for (const site of Object.keys(this._emptyCls)) {
+                const empty = this._emptyCls[site] ? Array.from(this._emptyCls[site]) : [];
+                const ok = this._okCls[site] ? Array.from(this._okCls[site]) : [];
+                if (empty.length || ok.length) out[site] = { ts: Date.now(), empty, ok };
+            }
+            localStorage.setItem('vpc_home_empty_classes', JSON.stringify(out));
+        } catch (e) { /* 持久化失败不影响主流程 */ }
+    },
+
+    /** 空分类探测结果持久化：清空（源集合变更时调用）。 */
+    _clearPersistedEmptyClasses() {
+        try { localStorage.removeItem('vpc_home_empty_classes'); } catch (e) { /* ignore */ }
     },
 
     renderGrid(list) {
         const grid = $('#home-grid').empty();
         if (!list.length) { grid.html('<div class="tip-line">暂无内容</div>'); return; }
-        list.forEach((v) => {
-            grid.append(vodCard(v, this.site));
-        });
+        // T65：拼串一次性写入，替代逐条 append（减少 N 次 DOM 重排）
+        grid.html(list.map((v) => vodCard(v, this.site)).join(''));
+        // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
+        fitVodTitles(grid);
         this._fillCovers();
     },
 
@@ -444,6 +833,7 @@ const Home = {
             pagecount: this.pagecount,
             onJump: (pg) => {
                 if (this.mode === 'search') this.searchCurrent(pg);
+                else if (this.mode === 'home') this.loadHome(pg); // 「全部」翻页（T76）
                 else this.loadCategory(this.tid, pg);
             },
         });
@@ -451,11 +841,12 @@ const Home = {
 };
 
 // 复用于 search.js 的卡片渲染（封面标签由 common.js vodCoverImg 统一生成，T31；
-// src 参数写入 data-source 供 T42 封面补拉定位源）
-function vodCard(v, src) {
-    return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(v.vod_name)}"${src != null ? ` data-source="${escHtml(src)}"` : ''} tabindex="0">
-        <div class="vod-cover">${vodCoverImg(v.vod_pic)}</div>
-        <div class="vod-name" title="${escHtml(v.vod_name)}">${escHtml(v.vod_name)}</div>
+// src 参数写入 data-source 供 T42 封面补拉定位源；eager=true 封面立即加载，T59）
+function vodCard(v, src, eager) {
+    const name = String(v.vod_name || '');
+    return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(name)}"${src != null ? ` data-source="${escHtml(src)}"` : ''} tabindex="0">
+        <div class="vod-cover">${vodCoverImg(v.vod_pic, eager)}</div>
+        <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
         <div class="vod-remarks">${escHtml(v.vod_remarks || '')}</div>
     </div>`;
 }

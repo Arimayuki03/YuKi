@@ -13,6 +13,7 @@
 import os
 import sys
 import json
+import time
 import hashlib
 import logging
 import threading
@@ -216,7 +217,10 @@ class JsEngine:
 
     def call(self, method, *args):
         """调用 spider 方法；返回原始字符串结果（通常 JSON 串），失败返回 None。"""
-        with self.lock:
+        if not self.lock.acquire(blocking=True, timeout=35):
+            logger.warning('js call %s timeout waiting for lock', method)
+            return None
+        try:
             fn = self.ctx.get('__VPC_CALL__')
             args_json = json.dumps(list(args), ensure_ascii=False)
             ret = fn(method, args_json)
@@ -232,10 +236,15 @@ class JsEngine:
             except ValueError:
                 pass
             return ret
+        finally:
+            self.lock.release()
 
     def _drain_promise(self):
-        """泵动微任务直到异步方法兑现（上限防死循环）。"""
-        for _ in range(100000):
+        """泵动微任务直到异步方法兑现（上限防死循环，30s 超时兜底）。"""
+        deadline = time.time() + 30
+        for _ in range(5000):
+            if time.time() > deadline:
+                break
             if not self.ctx.eval('!!globalThis.__VPC_PENDING__'):
                 break
             if not self.ctx.execute_pending_job():

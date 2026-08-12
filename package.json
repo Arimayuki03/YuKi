@@ -1,7 +1,7 @@
 {
   "name": "video-pc",
   "version": "0.1.0",
-  "description": "CatVod 影视聚合应用 PC 桌面端重构（Electron + Python 后端）",
+  "description": "YuKi（原影视 PC）：CatVod 影视聚合应用桌面端（Electron + Python 后端）",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -13,14 +13,14 @@
     "test:jsunit": "node --test \"tests/js/*.test.js\"",
     "test:all": "npm run test:py && npm run test:jsunit && npm run test:js",
     "build:py": "node scripts/build-python.js",
-    "build:win": "npm run build:py && electron-builder --win",
-    "build:mac": "npm run build:py && electron-builder --mac",
-    "build:linux": "npm run build:py && electron-builder --linux",
-    "build": "npm run build:py && electron-builder"
+    "build:win": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --win",
+    "build:mac": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --mac",
+    "build:linux": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --linux",
+    "build": "npm run build:py && node scripts/download-binaries.js misans && electron-builder"
   },
   "build": {
     "appId": "com.video-pc.app",
-    "productName": "影视 PC",
+    "productName": "YuKi",
     "directories": {
       "output": "dist"
     },
@@ -66,7 +66,7 @@
         "zh_CN",
         "en_US"
       ],
-      "shortcutName": "影视 PC",
+      "shortcutName": "YuKi",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },

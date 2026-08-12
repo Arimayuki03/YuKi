@@ -14,7 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const path = require('path');
-const { spawn, execSync, spawnSync } = require('child_process');
+const { spawn, exec, execSync, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 
 // 打包后 extraResources 放在 resources/，vendor 从该处读取
@@ -93,6 +93,7 @@ class MpvPlayer extends EventEmitter {
         this._sessionId = 0;       // 起播会话号（每次 play 自增；exit 事件附带，供渲染层匹配新旧进程）
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
         this._lastSp = 1;          // 播放期间倍速（实时追踪，exit 时无需查询）
+        this._activeSession = null; // {id, proc, pos, duration, fullscreen, speed}，退出时使用缓存
     }
 
     isAvailable() { return !!this.binary; }
@@ -127,7 +128,7 @@ class MpvPlayer extends EventEmitter {
             '--idle=no', '--no-terminal',
             `--input-ipc-server=${this.ipcPath}`,
             '--sub-auto=no', '--sub-visibility=yes',
-            `--osd-playing-msg=${opts.title || '影视 PC'}`,
+            `--osd-playing-msg=${opts.title || 'YuKi'}`,
             // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
             // 注意 ${media-title} 是 mpv 属性展开，必须用普通字符串避免被 JS 模板插值。
             '--title=video-pc · ${media-title}',
@@ -174,59 +175,85 @@ class MpvPlayer extends EventEmitter {
         args.push('--', episodes[0].url);
         for (let i = 1; i < episodes.length; i++) args.push(episodes[i].url);
         this._queueLen = episodes.length;
-        this._lastFs = false;
-        this._lastSp = 1;
+        this._lastFs = !!opts.fullscreen;
+        this._lastSp = (speed && speed > 0) ? speed : 1;
         const sessionId = ++this._sessionId; // 闭包捕获：进程退出时附带，区分新旧会话
-        this.proc = spawn(this.binary, args, { stdio: 'ignore' });
-        this.proc.on('exit', (code) => {
-            // 进程退出前抢救播放进度/时长（IPC 未拆除）：供主进程区分
-            // 「播完正常退出」与「未到结尾就断流/EOF」（提前退出自动重连续播）
-            const info = { code, sessionId };
-            const done = () => { this._teardown(); this.emit('exit', info); };
-            const grab = async () => {
-                // 全屏/倍速已在播放期间通过 observe_property 实时追踪，直接使用缓存；
-                // 仅补充 time-pos / duration（IPC 断开前抢救一次）
-                info.fullscreen = this._lastFs;
-                info.speed = this._lastSp;
-                try {
-                    // 400ms 内拿不到就放弃（管道已断时 command 会拖到 5s 超时，不能阻塞退出事件）
-                    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('grab timeout')), 400));
-                    const [pos, dur] = await Promise.race([
-                        Promise.all([this.getProperty('time-pos'), this.getProperty('duration')]),
-                        timeout,
-                    ]);
-                    info.pos = typeof pos === 'number' ? pos : null;
-                    info.duration = typeof dur === 'number' ? dur : null;
-                } catch (e) { /* IPC 已断/超时：不附带进度 */ }
+        const proc = spawn(this.binary, args, { stdio: 'ignore' });
+        const session = {
+            id: sessionId,
+            proc,
+            pos: null,
+            duration: null,
+            fullscreen: this._lastFs,
+            speed: this._lastSp,
+            endReason: null,    // 最近一次 end-file reason（eof/quit/stop/error…），用于区分断流与用户关闭
+            userStopped: false, // 应用主动 stop() 置位：退出时不得断流重连
+        };
+        this.proc = proc;
+        this._activeSession = session;
+        proc.on('exit', (code) => {
+            // ChildProcess 的 exit 触发时 mpv IPC 通常已经断开；直接使用播放期间持续观察的缓存。
+            const info = {
+                code,
+                sessionId,
+                pos: typeof session.pos === 'number' ? session.pos : null,
+                duration: typeof session.duration === 'number' ? session.duration : null,
+                fullscreen: session.fullscreen,
+                speed: session.speed,
+                endReason: session.endReason || null,
+                // 用户主动关闭：应用 stop() 标记，或 mpv 自己 end-file reason=quit/stop（点窗口关闭键）
+                userStopped: session.userStopped || session.endReason === 'quit' || session.endReason === 'stop',
             };
-            grab().finally(() => setTimeout(done, 0));
+            // 只清理该会话；旧进程延迟退出时不能误清掉刚起播的新会话。
+            this._teardown(sessionId);
+            this.emit('exit', info);
         });
-        this._connectIpc();
+        this._connectIpc(0, sessionId);
         return { ok: true, sessionId };
     }
 
     stop() {
-        if (this.proc) {
-            try { this.proc.kill(); } catch (e) { /* ignore */ }
+        const sessionId = this._activeSession ? this._activeSession.id : null;
+        const proc = this.proc;
+        if (proc) {
+            // 应用主动停止：标记该会话退出时不得断流重连（否则 kill 后 exit 会误触发自动重连）
+            if (this._activeSession) this._activeSession.userStopped = true;
+            try { proc.kill(); } catch (e) { /* ignore */ }
+            // Windows：proc.kill() 仅 TerminateProcess 单进程，mpv 可能带子进程或未及时退出，
+            // 追加 taskkill 杀整棵进程树确保残留被清；非 Windows 用 SIGKILL 兜底。
+            try {
+                if (WIN) {
+                    exec(`taskkill /pid ${proc.pid} /T /F`, () => { /* 进程可能已退出，忽略 */ });
+                } else {
+                    proc.kill('SIGKILL');
+                }
+            } catch (e2) { /* 强杀失败不阻断后续 teardown */ }
         }
-        this._teardown();
+        this._teardown(sessionId);
     }
 
-    _teardown() {
+    _teardown(sessionId = null) {
+        if (sessionId != null && this._activeSession && this._activeSession.id !== sessionId) return;
         this._connected = false;
         if (this.socket) { try { this.socket.destroy(); } catch (e) { /* ignore */ } this.socket = null; }
         this.proc = null;
+        this._activeSession = null;
         for (const [, p] of this._pending) p.reject(new Error('mpv stopped'));
         this._pending.clear();
     }
 
     // ------------------------------------------------------------ IPC
 
-    _connectIpc(attempt = 0) {
-        if (!this.proc) return;
+    _connectIpc(attempt = 0, sessionId = null) {
+        const active = this._activeSession;
+        if (!this.proc || !active || (sessionId != null && active.id !== sessionId)) return;
         if (attempt > 50) return; // ~5s 仍连不上则放弃（播放本身不受影响，仅失去控制/事件）
         const sock = net.connect(this.ipcPath);
         sock.once('connect', () => {
+            if (!this._activeSession || this._activeSession.id !== active.id) {
+                try { sock.destroy(); } catch (e) { /* ignore */ }
+                return;
+            }
             this.socket = sock;
             this._connected = true;
             sock.on('data', (chunk) => this._onData(chunk));
@@ -236,9 +263,11 @@ class MpvPlayer extends EventEmitter {
             // 追踪全屏/倍速状态（退出时无需再查询，避免窗口已关闭拿到错误值）
             this.command('observe_property', 0x101, 'fullscreen').catch(() => { });
             this.command('observe_property', 0x102, 'speed').catch(() => { });
+            this.command('observe_property', 0x103, 'time-pos').catch(() => { });
+            this.command('observe_property', 0x104, 'duration').catch(() => { });
         });
         sock.once('error', () => {
-            setTimeout(() => this._connectIpc(attempt + 1), 100);
+            setTimeout(() => this._connectIpc(attempt + 1, active.id), 100);
         });
     }
 
@@ -264,14 +293,33 @@ class MpvPlayer extends EventEmitter {
             return;
         }
         if (msg.event === 'property-change') {
-            if (msg.name === 'fullscreen') this._lastFs = !!msg.data;
-            if (msg.name === 'speed' && typeof msg.data === 'number') this._lastSp = msg.data;
+            const active = this._activeSession;
+            if (msg.name === 'fullscreen') {
+                this._lastFs = !!msg.data;
+                if (active) active.fullscreen = this._lastFs;
+            }
+            if (msg.name === 'speed' && typeof msg.data === 'number') {
+                this._lastSp = msg.data;
+                if (active) active.speed = msg.data;
+            }
+            if (msg.name === 'time-pos' && typeof msg.data === 'number' && msg.data >= 0 && active) {
+                active.pos = msg.data;
+            }
+            if (msg.name === 'duration' && typeof msg.data === 'number' && msg.data > 0 && active) {
+                active.duration = msg.data;
+            }
             return;
         }
-        if (msg.event === 'end-file' && msg.reason === 'eof') {
-            const playlistPos = (typeof msg.playlist_pos === 'number') ? msg.playlist_pos : -1;
-            // 附带队列长度：渲染层据此区分「mpv 队列自动推进」与「队列末尾播完」（接力连播用）
-            this.emit('ended', { playlistPos, queueLen: this._queueLen });
+        if (msg.event === 'end-file') {
+            const active = this._activeSession;
+            // 记录退出原因：eof=播完/断流；quit/stop=用户关闭；error=出错
+            if (active) active.endReason = msg.reason;
+            if (msg.reason === 'eof') {
+                if (active && typeof active.duration === 'number') active.pos = active.duration;
+                const playlistPos = (typeof msg.playlist_pos === 'number') ? msg.playlist_pos : -1;
+                // 附带队列长度：渲染层据此区分「mpv 队列自动推进」与「队列末尾播完」（接力连播用）
+                this.emit('ended', { sessionId: active ? active.id : null, playlistPos, queueLen: this._queueLen });
+            }
         }
     }
 

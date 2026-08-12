@@ -14,8 +14,12 @@ class Runner:
     def homeContent(self, filter):
         return self.spider.homeContent(filter)
 
-    def homeVideoContent(self):
-        return self.spider.homeVideoContent()
+    def homeVideoContent(self, pg='1'):
+        # T76：「全部」总览 feed 分页；旧爬虫不接受 pg 参数则回退无参调用
+        try:
+            return self.spider.homeVideoContent(pg)
+        except TypeError:
+            return self.spider.homeVideoContent()
 
     def categoryContent(self, tid, pg, filter, extend):
         return self.spider.categoryContent(tid, pg, filter, extend)

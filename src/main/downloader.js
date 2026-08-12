@@ -54,6 +54,7 @@ class Downloader extends EventEmitter {
         this.secret = '';
         this.dir = '';
         this.concurrency = 3;      // 同时下载任务数（设置页可调，持久化）
+        this.split = 5;            // 单文件分片并发数（--split / --max-connection-per-server，设置页可调）
         this._reqId = 0;
         this._ready = null;          // start 的 Promise
         this._notified = new Set();  // 已通知完成的 gid
@@ -64,11 +65,12 @@ class Downloader extends EventEmitter {
     isAvailable() { return !!this.binary; }
 
     /** 惰性启动 aria2c 并等 RPC 就绪（重复调用复用）。 */
-    start(dir, concurrency) {
+    start(dir, concurrency, split) {
         if (this._ready) return this._ready;
         if (!this.binary) return Promise.reject(new Error('aria2-missing'));
         this.dir = dir || path.join(os.homedir(), 'Downloads');
         if (concurrency) this.concurrency = Math.max(1, Math.min(10, concurrency | 0));
+        if (split) this.split = Math.max(1, Math.min(32, split | 0));
         fs.mkdirSync(this.dir, { recursive: true });
         this.port = 10000 + Math.floor(Math.random() * 20000);
         this.secret = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -78,6 +80,7 @@ class Downloader extends EventEmitter {
             `--rpc-listen-port=${this.port}`, '--rpc-listen-all=false',
             `--dir=${this.dir}`,
             '--seed-time=0', `--max-concurrent-downloads=${this.concurrency}`,
+            `--split=${this.split}`, `--max-connection-per-server=${this.split}`,
             '--continue=true', '--file-allocation=none',
             '--bt-stop-timeout=300',
         ];
@@ -157,6 +160,14 @@ class Downloader extends EventEmitter {
             try { await this.changeGlobalOption({ maxConcurrentDownloads: this.concurrency }); } catch (e) { /* 下轮重启生效 */ }
         }
         return this.concurrency;
+    }
+    /** 调整分片并发数：运行中经 changeGlobalOption 更新每服务器连接数；--split 待下次引擎启动生效。 */
+    async setSplit(n) {
+        this.split = Math.max(1, Math.min(32, n | 0));
+        if (this.proc) {
+            try { await this.changeGlobalOption({ maxConnectionPerServer: this.split }); } catch (e) { /* 下轮重启生效 */ }
+        }
+        return this.split;
     }
     addUri(urls, opts = {}) { return this._rpc('addUri', [[].concat(urls), this._proxyOpts(opts)]); }
     addTorrent(b64, opts = {}) { return this._rpc('addTorrent', [b64, [], this._proxyOpts(opts)]); }

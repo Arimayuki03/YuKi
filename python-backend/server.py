@@ -19,6 +19,8 @@ import time
 import socket
 import secrets
 import logging
+from logging.handlers import RotatingFileHandler
+import re
 import threading
 
 # 抑制 urllib3 InsecureRequestWarning（PC 端大量 verify=False 请求）
@@ -75,6 +77,61 @@ _danmaku_clock = time.time()
 
 # 配置加载异步任务（多仓扫描可达分钟级，不能阻塞 /action 请求）
 _config_task = {'status': 'idle', 'summary': None, 'msg': ''}
+
+# playerContent 结果缓存（key=site|flag|id → {result, ts}，60s 有效期）
+# 换线路又切回原线路时避免重复解析
+_player_content_cache = {}
+_PLAYER_CACHE_TTL = 60
+
+
+class _RedactingFormatter(logging.Formatter):
+    """在最终格式化文本上遮盖令牌、Cookie、Authorization 和密码。"""
+
+    _patterns = (
+        (re.compile(r'([?&](?:token|access_token|refresh_token|api[_-]?key|secret|password)=)[^&#\s]*', re.I), r'\1[REDACTED]'),
+        (re.compile(r'((?:authorization|proxy-authorization)\s*[:=]\s*)(?:bearer\s+|basic\s+)?[^\s,;]+', re.I), r'\1[REDACTED]'),
+        (re.compile(r'((?:cookie|set-cookie)\s*[:=]\s*)[^\r\n]*', re.I), r'\1[REDACTED]'),
+        (re.compile(r'((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)[\'\"]?[^\s,\'\"}\]]+', re.I), r'\1[REDACTED]'),
+    )
+
+    def format(self, record):
+        text = super().format(record)
+        for pattern, replacement in self._patterns:
+            text = pattern.sub(replacement, text)
+        return text
+
+
+def _setup_logging():
+    """控制台 + UTF-8 轮转文件；单文件 5 MiB，保留 5 份。"""
+    log_dir = os.environ.get('VPC_LOG_DIR') or hoststate.get_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    formatter = _RedactingFormatter('%(asctime)s %(name)s %(levelname)s %(message)s')
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+    rotating = RotatingFileHandler(
+        os.path.join(log_dir, 'python-backend.log'),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding='utf-8',
+    )
+    rotating.setFormatter(formatter)
+    root.addHandler(rotating)
+
+    def log_uncaught(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        logger.critical('uncaught exception', exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = log_uncaught
+    if hasattr(threading, 'excepthook'):
+        threading.excepthook = lambda args: logger.critical(
+            'uncaught thread exception: %s', args.thread.name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    logger.info('Python backend logging started: %s', log_dir)
 
 
 def _config_load_worker(text):
@@ -226,7 +283,7 @@ def dispatch_action(form):
         if do == 'homeContent':
             return 200, spider_app.homeContent(ru, _bool(form.get('filter', 'false')))
         if do == 'homeVideoContent':
-            return 200, spider_app.homeVideoContent(ru)
+            return 200, spider_app.homeVideoContent(ru, form.get('pg', '1'))
         if do == 'categoryContent':
             return 200, spider_app.categoryContent(
                 ru, form.get('tid', ''), form.get('pg', '1'),
@@ -238,8 +295,21 @@ def dispatch_action(form):
                 ru, form.get('word', form.get('key', '')),
                 form.get('quick', '0'), form.get('pg', '1'))
         if do == 'playerContent':
-            return 200, spider_app.playerContent(
+            # 60s 缓存：换线路又切回原线路时跳过重复解析
+            cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}"
+            cached = _player_content_cache.get(cache_key)
+            if cached and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL:
+                return 200, cached['result']
+            result = spider_app.playerContent(
                 ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]'))
+            _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
+            # 防无限增长，超过 1024 项时清理过期项
+            if len(_player_content_cache) > 1024:
+                now = time.time()
+                stale = [k for k, v in _player_content_cache.items() if (now - v['ts']) > _PLAYER_CACHE_TTL]
+                for k in stale:
+                    del _player_content_cache[k]
+            return 200, result
         if do == 'liveContent':
             return 200, spider_app.liveContent(ru, form.get('url', ''))
         if do == 'action':
@@ -312,6 +382,21 @@ def do_local_proxy(param):
     return site.runner.localProxy(param)
 
 
+def _guess_image_type(raw):
+    """按文件头判断图片类型（trace.moe 上传需正确 Content-Type；Kazumi 硬编码 jpeg，PNG 会被拒）。"""
+    if not raw:
+        return 'image/jpeg'
+    if raw[:2] == b'\xff\xd8':
+        return 'image/jpeg'
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'image/png'
+    if raw[:6] in (b'GIF87a', b'GIF89a'):
+        return 'image/gif'
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return 'image/webp'
+    return 'image/jpeg'
+
+
 def build_proxy_response(result):
     if result is None:
         return Response(status_code=404)
@@ -380,12 +465,13 @@ def create_app():
 
     @fastapi_app.get('/search/stream')
     def search_stream(word: str = Query('')):
-        """SSE 流式聚合搜索：每个源完成即推一条 data，全部结束发 event: done。"""
+        """SSE 流式聚合搜索：先发 event: meta（总源数，供前端确定进度条），每源完成推一条 data，全部结束发 event: done。"""
         def gen():
             site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
             if not word or not site_list:
                 yield 'event: done\ndata: {}\n\n'
                 return
+            yield f'event: meta\ndata: {json.dumps({"total": len(site_list)})}\n\n'
             with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
                 futures = {
                     pool.submit(_search_source_pages, s.runner, word): s
@@ -405,6 +491,48 @@ def create_app():
                         yield f'data: {payload}\n\n'
                 except Exception as e:
                     logger.warning('sse search overall timeout: %s', e)
+            yield 'event: done\ndata: {}\n\n'
+        return StreamingResponse(gen(), media_type='text/event-stream')
+
+    @fastapi_app.get('/search/kazumi-stream')
+    def kazumi_search_stream(word: str = Query('')):
+        """SSE 流式 Kazumi 规则源搜索（T73）：每个规则源完成即推一条 data，全部结束发 event: done。
+        结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。"""
+        def gen():
+            if not word:
+                yield 'event: done\ndata: {}\n\n'
+                return
+            plugins = list(kazumi_mgr.enabled_plugins())
+            if not plugins:
+                yield 'event: done\ndata: {}\n\n'
+                return
+
+            def _search_one(plugin):
+                try:
+                    trace = kazumi_engine.search(plugin.execution_config(), word)
+                    if isinstance(trace, dict) and trace.get('captcha_required'):
+                        return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
+                    data = [vars(it) for it in trace.response.data]
+                    return {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
+                except Exception as e:
+                    logger.warning('[kazumi] kazumi-search-stream failed: %s: %s', plugin.name, e)
+                    return {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
+
+            with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
+                futures = {pool.submit(_search_one, p): p for p in plugins}
+                for fut in as_completed(futures, timeout=120):
+                    r = fut.result(timeout=0.1)
+                    if r is None:
+                        continue
+                    payload = json.dumps({
+                        'source': 'kazumi:' + r['pluginName'], 'name': r['pluginName'],
+                        'list': r.get('data', []),
+                        'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
+                        'captcha': r.get('captcha') or False,
+                        'captchaUrl': r.get('captchaUrl', ''),
+                        'msg': r.get('msg', ''),
+                    }, ensure_ascii=False)
+                    yield f'data: {payload}\n\n'
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
@@ -477,22 +605,48 @@ def dispatch_kazumi_action(form):
             ok = kazumi_mgr.toggle(name, enabled)
             return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
 
+        if do == 'kazumiReorder':
+            try:
+                names = json.loads(form.get('names', '[]') or '[]')
+            except Exception:
+                names = []
+            ok, msg = kazumi_mgr.reorder(names)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        if do == 'kazumiSetMirror':
+            bangumi = form.get('bangumi', '')
+            git = form.get('git', '')
+            state = kazumi_mgr.set_mirror(
+                bangumi=bangumi.lower() in ('1', 'true', 'yes') if bangumi != '' else None,
+                git=git.lower() in ('1', 'true', 'yes') if git != '' else None,
+            )
+            return 200, json.dumps({'code': 200, 'mirror': state}, ensure_ascii=False)
+
         if do == 'kazumiSearch':
             keyword = form.get('keyword', '')
+            plugin_filter = form.get('plugin', '').strip()
             if not keyword:
                 return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
-            results = []
-            for plugin in kazumi_mgr.enabled_plugins():
+            plugins = list(kazumi_mgr.enabled_plugins())
+            if plugin_filter:
+                # 单源重查（SourceSheet 别名/手动/重试/验证后重试）
+                plugins = [p for p in plugins if p.name == plugin_filter]
+            results = [None] * len(plugins)
+            def _search_one(idx, plugin):
                 try:
                     trace = kazumi_engine.search(plugin.execution_config(), keyword)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
-                        results.append({'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')})
-                        continue
-                    results.append({'pluginName': plugin.name, 'data': [vars(it) for it in trace.response.data]})
-                    logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(trace.response.data))
+                        results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
+                    else:
+                        data = [vars(it) for it in trace.response.data]
+                        results[idx] = {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
+                        logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(data))
                 except Exception as e:
                     logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
-            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+                    results[idx] = {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
+            with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
+                pool.map(lambda args: _search_one(*args), enumerate(plugins))
+            return 200, json.dumps({'code': 200, 'results': [r for r in results if r is not None]}, ensure_ascii=False)
 
         if do == 'kazumiChapters':
             plugin_name = form.get('pluginName', '')
@@ -595,9 +749,24 @@ def dispatch_kazumi_action(form):
             data = kazumi_mgr.bangumi_calendar()
             return 200, json.dumps({'code': 200, 'calendar': data}, ensure_ascii=False)
 
+        if do == 'kazumiBangumiSeason':
+            start = form.get('start', '')
+            end = form.get('end', '')
+            data = kazumi_mgr.bangumi_season_calendar(start, end)
+            return 200, json.dumps({'code': 200, 'calendar': data}, ensure_ascii=False)
+
         if do == 'kazumiBangumiTrends':
-            data = kazumi_mgr.bangumi_trends()
-            return 200, json.dumps({'code': 200, 'trends': data}, ensure_ascii=False)
+            limit = int(form.get('limit', '24'))
+            offset = int(form.get('offset', '0'))
+            data = kazumi_mgr.bangumi_trends(min(limit, 50), max(offset, 0))
+            return 200, json.dumps({'code': 200, 'trends': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiListByTag':
+            tag = form.get('tag', '')
+            limit = int(form.get('limit', '100'))
+            offset = int(form.get('offset', '0'))
+            data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 200), max(offset, 0))
+            return 200, json.dumps({'code': 200, 'items': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
 
         if do == 'kazumiBangumiEpisodes':
             subject_id = form.get('id', '')
@@ -608,6 +777,11 @@ def dispatch_kazumi_action(form):
             subject_id = form.get('id', '')
             data = kazumi_mgr.bangumi_characters(subject_id)
             return 200, json.dumps({'code': 200, 'characters': data}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiCharacter':
+            character_id = form.get('id', '')
+            info = kazumi_mgr.bangumi_character_detail(character_id)
+            return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
 
         if do == 'kazumiBangumiStaff':
             subject_id = form.get('id', '')
@@ -676,21 +850,38 @@ def dispatch_kazumi_action(form):
 
         # ---- 以图搜番（trace.moe） ----
         if do == 'kazumiImageSearch':
-            # 前端上传图片 base64 或 URL
+            # 前端上传图片 base64 或 URL（对齐 Kazumi trace_api.dart：POST + anilistInfo=2 取完整元数据）
+            # T74 修复：trace.moe URL 搜索返回 403（反爬/需它自行抓取），统一改为后端先下载字节再原始上传；
+            # Content-Type 按文件头判断（Kazumi 硬编码 jpeg，PNG 上传会被拒）。
             image_url = form.get('url', '')
             image_b64 = form.get('base64', '')
             results = []
+            error = ''
             try:
                 import requests as req
+                ua = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'}
+                raw = None
                 if image_url:
-                    rsp = req.get(f'https://api.trace.moe/search?url={image_url}', timeout=15, verify=False)
-                    results = rsp.json().get('result', []) or []
+                    ir = req.get(image_url, timeout=15, verify=False, headers=ua)
+                    ir.raise_for_status()
+                    raw = ir.content
                 elif image_b64:
-                    rsp = req.post('https://api.trace.moe/search', json={'image': image_b64}, timeout=15, verify=False)
-                    results = rsp.json().get('result', []) or []
+                    import base64
+                    raw = base64.b64decode(image_b64)
+                if raw:
+                    rsp = req.post('https://api.trace.moe/search', params={'anilistInfo': 2},
+                                   data=raw, headers={**ua, 'Content-Type': _guess_image_type(raw)},
+                                   timeout=20, verify=False)
+                    if rsp.status_code != 200:
+                        error = f'trace.moe {rsp.status_code}'
+                    else:
+                        results = (rsp.json().get('result') or []) if rsp.headers.get('content-type', '').startswith('application/json') else []
+                else:
+                    error = '未收到图片'
             except Exception as e:
                 logger.warning('[kazumi] image search failed: %s', e)
-            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+                error = str(e)[:100]
+            return 200, json.dumps({'code': 200, 'results': results, 'error': error}, ensure_ascii=False)
 
         # ---- WebDAV 同步 ----
         if do == 'kazumiWebdavSync':
@@ -741,9 +932,6 @@ def pick_free_port():
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s %(name)s %(levelname)s %(message)s')
     port = int(os.environ.get('VPC_PORT') or pick_free_port())
     token = os.environ.get('VPC_TOKEN') or secrets.token_hex(16)
     hoststate.configure(port=port, token=token)
@@ -753,6 +941,7 @@ def main():
         hoststate.configure(cache_dir=cache_dir,
                             plugins_dir=os.path.join(cache_dir, 'py'))
     hoststate.ensure_dirs()
+    _setup_logging()
     load_default_sites()
     fastapi_app = create_app()
     print(f'VPC_BACKEND_READY port={port} token={token}', flush=True)

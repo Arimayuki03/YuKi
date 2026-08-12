@@ -1,11 +1,19 @@
 /**
- * detail.js — 详情页（Phase 2）
+ * detail.js — 统一详情页（合并 CatVod 与 Bangumi 详情，仿 Kazumi InfoPage 设计）
  *
- * doAction('detailContent', {site, ids}) → list[0] 渲染视频信息；
- * 解析 vod_play_from / vod_play_url（$$$ 分源、# 分集、$ 名址分隔），
- * 线路切换 + 选集，集数点击交给 Player.play()。
+ * 布局：
+ *  - 头部：封面 + 标题/元信息 + 收藏/标记按钮
+ *  - 页签：概览 | 吐槽 | 角色 | 关联 | 制作人员
+ *  - 概览：可收起简介 + 播放源/选集
+ *  - 其他页签：Bangumi 数据（仅当匹配到 Bangumi 时显示）
  */
-/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, fillMissingCovers, Kazumi */
+/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, Kazumi */
+
+const DETAIL_TABS = ['概览', '吐槽', '角色', '关联', '制作人员'];
+
+/** 详情内容缓存（T74）：site|vodId → {ts, vod}，10 分钟 TTL，重复打开详情免重新拉取。 */
+const DETAIL_CACHE_TTL = 10 * 60 * 1000;
+const _detailCache = new Map();
 
 const Detail = {
     site: '',
@@ -13,9 +21,18 @@ const Detail = {
     backView: 'home',
     sources: [],
     activeSource: 0,
-    _epDesc: false, // 选集展示顺序（false=正序 true=倒序；会话内跨影片保持）
+    _epDesc: false,
     _escBound: false,
-    _lastVod: null, // 最近一次渲染的 vod 数据（收藏/标记/重试用）
+    _lastVod: null,
+    _vod: null,
+    _bgmInfo: null,      // Bangumi 匹配到的信息
+    _bgmId: null,         // Bangumi subject ID
+    _activeTab: '概览',
+    _descCollapsed: true, // 简介收起状态
+    _comments: [],
+    _characters: [],
+    _staff: [],
+    _relations: [],
 
     init() {
         if (this._escBound) return;
@@ -31,44 +48,75 @@ const Detail = {
                 const idx = parseInt(el.data('idx'), 10);
                 this._playEpisode(idx);
             })
-            // 封面点击放大：原图保留在原位，另开全屏浮层（滚轮缩放，点击关闭）
             .on('click', '.detail-cover img', (e) => {
                 this._openCoverFloat($(e.currentTarget).attr('src'));
             })
-            // 选集勾选（批量下载用）：阻止冒泡避免触发播放
             .on('click', '.ep-check', (e) => {
                 e.stopPropagation();
                 $(e.currentTarget).toggleClass('checked');
                 this._syncDlBar();
             })
-            // 单集快捷下载
             .on('click', '.ep-dl-one', (e) => {
                 e.stopPropagation();
                 const idx = parseInt($(e.currentTarget).data('idx'), 10);
                 this._downloadEps(this.sources[this.activeSource], [idx]);
             })
-            // 全选 / 下载勾选集
             .on('change', '#ep-check-all', (e) => {
                 $('#ep-list .ep-check').toggleClass('checked', e.currentTarget.checked);
                 this._syncDlBar();
             })
             .on('click', '#ep-dl-selected', () => this.downloadSelected())
-            // 选集正序/倒序切换
             .on('click', '#ep-order', () => this.toggleEpOrder())
-            // 播放勾选集：勾选的多集一次性加入 mpv 播放列表顺序连播
             .on('click', '#ep-play-selected', () => this.playSelected())
-            // 收藏切换
             .on('click', '#detail-fav', () => this.toggleFav())
-            // 想看/已看：未收藏先收藏再置标签；已高亮的按钮再点一次取消标记
             .on('click', '#detail-tag-want', () => this.setTag('want'))
             .on('click', '#detail-tag-seen', () => this.setTag('seen'))
-            // Kazumi 源弹窗（kimi UI）
+            // 标签切换
+            .on('click', '.detail-tab', (e) => {
+                const tab = String($(e.currentTarget).data('tab') || '');
+                if (tab) this._switchTab(tab);
+            })
+            // 简介收起/展开
+            .on('click', '#detail-desc-toggle', (e) => {
+                e.stopPropagation();
+                this._descCollapsed = !this._descCollapsed;
+                this._renderOverview();
+            })
+            // Kazumi 源弹窗
             .on('click', '#detail-kazumi-src', () => {
                 if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
                     Kazumi.openSourceDialog(this.vodName || '', this.site, this.vodId);
                 }
+            })
+            // Bangumi 收藏同步（统一详情页 T74）
+            .on('click', '.kazumi-col-btn', async (e) => {
+                const btn = $(e.currentTarget);
+                const id = String(btn.closest('.kazumi-col-btns').data('id') || '');
+                const val = parseInt(btn.data('type'), 10);
+                const nm = this.vodName || '';
+                if (!id || typeof Kazumi === 'undefined') return;
+                if (val < 0) {
+                    if (await Kazumi.removeBangumiCollection(id, nm)) Kazumi._applyBangumiColState(id);
+                } else if (await Kazumi.setBangumiCollection(id, val)) {
+                    Kazumi._applyBangumiColState(id);
+                }
+            })
+            // 开始观看（Kazumi 源，Bangumi-only 详情）
+            .on('click', '#detail-kazumi-start', () => {
+                if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
+                    Kazumi.openSourceDialog(this.vodName || '', 'kazumi', '');
+                }
+            })
+            // 标签点击：跳搜索页按标签搜索
+            .on('click', '.kazumi-tag', (e) => {
+                const tag = String($(e.currentTarget).data('tag') || '');
+                if (!tag || typeof App === 'undefined' || !App.showView) return;
+                App.showView('search');
+                if (typeof Search !== 'undefined' && Search.run) {
+                    $('#search-keyword').val(tag);
+                    Search.run();
+                }
             });
-        // Esc 返回（全局派发，详情激活时消费）
         registerEsc(() => {
             if (App.currentView === 'detail') { this.back(); return true; }
             return false;
@@ -77,22 +125,72 @@ const Detail = {
 
     open(site, vodId, fallbackName) {
         if (!site || !vodId) { warnToast('缺少站点或视频 ID'); return; }
-        // T43 优先级：用户点开详情最高优——立即中止后台封面补拉，
-        // 避免详情请求排在补拉请求后面等源引擎锁（转圈久）
         abortCoverFill();
         this.backView = App.currentView === 'detail' ? this.backView : App.currentView;
         this.site = site;
         this.vodId = vodId;
         this.vodName = fallbackName || '';
+        this._bgmInfo = null;
+        this._bgmId = null;
+        this._comments = [];
+        this._characters = [];
+        this._staff = [];
+        this._relations = [];
+        this._activeTab = '概览';
         App.showView('detail');
         this.load();
+    },
+
+    /** 打开 Bangumi-only 详情（时间表/推荐/收藏/Bangumi 搜索进入，T74 统一详情页）。
+     *  无 CatVod 源；以「开始观看」（Kazumi 规则源）为主播放入口。 */
+    async openBangumi(subjectId, fallbackName) {
+        if (!subjectId) { warnToast('缺少 Bangumi ID'); return; }
+        if (typeof Kazumi === 'undefined') { warnToast('Kazumi 引擎不可用'); return; }
+        abortCoverFill();
+        this.backView = App.currentView === 'detail' ? this.backView : App.currentView;
+        this.site = '';
+        this.vodId = String(subjectId);
+        this.vodName = fallbackName || '';
+        // 清掉上一次 CatVod 详情残留的 vod（T4）：否则 toggleFav 会写出 site:'' 的错误收藏，
+        // 且 _lastVod 残留会串入上一部影片的封面/源名。
+        this._vod = null;
+        this._lastVod = null;
+        this._bgmInfo = null;
+        this._bgmId = String(subjectId);
+        this._comments = [];
+        this._characters = [];
+        this._staff = [];
+        this._relations = [];
+        this._activeTab = '概览';
+        App.showView('detail');
+        showLoading();
+        $('#detail-body').html('<div class="tip-line">正在载入详情…</div>');
+        try {
+            this._bgmInfo = await Kazumi.bangumiInfo(subjectId); // 30 分钟缓存
+            if (!this._bgmInfo) { warnToast('Bangumi 详情载入失败'); hideLoading(); this.back(); return; }
+            if (!this.vodName) this.vodName = this._bgmInfo.name_cn || this._bgmInfo.name || '';
+            this.sources = []; // 无 CatVod 线路
+            this.render();
+        } catch (e) {
+            warnToast('Bangumi 详情载入失败');
+            this.back();
+        } finally {
+            hideLoading();
+        }
     },
 
     back() {
         App.showView(this.backView || 'home');
     },
 
-    /** 封面放大：原图不动，全屏浮层展示；滚轮放大/缩小，点击任意处关闭。 */
+    /** CatVod 详情页自动匹配 Bangumi 数据开关（T74：设置 → 源设置，默认关）。 */
+    async _catvodBgmMatchEnabled() {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            return s.catvodBgmMatch === true;
+        } catch (e) { return false; }
+    },
+
     _openCoverFloat(src) {
         if (!src) return;
         let wrap = document.getElementById('cover-float');
@@ -102,7 +200,6 @@ const Detail = {
             wrap.innerHTML = '<img referrerpolicy="no-referrer" alt="">';
             document.body.appendChild(wrap);
             wrap.addEventListener('click', () => wrap.classList.remove('show'));
-            // 滚轮缩放：按步长渐进调整宽度（160px ~ 95% 窗口宽）
             wrap.addEventListener('wheel', (ev) => {
                 ev.preventDefault();
                 const img = wrap.firstChild;
@@ -112,7 +209,7 @@ const Detail = {
             }, { passive: false });
         }
         const img = wrap.firstChild;
-        img.removeAttribute('style'); // 清掉上次滚轮缩放残留的内联宽度
+        img.removeAttribute('style');
         img.src = src;
         wrap.classList.add('show');
     },
@@ -121,12 +218,26 @@ const Detail = {
         showLoading();
         $('#detail-body').html('<div class="tip-line">载入中…</div>');
         try {
-            const data = await doAction('detailContent', { site: this.site, ids: JSON.stringify([this.vodId]) });
-            const vod = (data && data.list && data.list[0]) || null;
+            // T74：命中缓存直接复用，避免重复打开重复拉详情
+            const cacheKey = String(this.site) + '|' + String(this.vodId);
+            let vod = null;
+            const hit = _detailCache.get(cacheKey);
+            if (hit && Date.now() - hit.ts < DETAIL_CACHE_TTL) {
+                vod = hit.vod;
+            } else {
+                const data = await doAction('detailContent', { site: this.site, ids: JSON.stringify([this.vodId]) });
+                vod = (data && data.list && data.list[0]) || null;
+                if (vod) {
+                    _detailCache.set(cacheKey, { ts: Date.now(), vod });
+                    if (_detailCache.size > 200) { // 防无限增长，淘汰最旧
+                        const oldest = _detailCache.keys().next().value;
+                        _detailCache.delete(oldest);
+                    }
+                }
+            }
             if (!vod) { $('#detail-body').html('<div class="tip-line">未取得详情</div>'); return; }
             if (vod.vod_name) this.vodName = vod.vod_name;
-            // 打开详情即记入播放历史（同片去重置顶；记录源+封面供收藏/历史页展示）；
-            // 隐身模式（设置页开关）下不记录
+            this._vod = vod;
             if (typeof Records !== 'undefined' && !window._incognito) {
                 Records.addHistory({
                     site: this.site, vodId: this.vodId,
@@ -137,13 +248,23 @@ const Detail = {
             this.sources = this.parsePlay(vod);
             this.activeSource = 0;
             await this._restoreLastSource();
-            this.render(vod);
-            // T43：详情已就绪，后台恢复被中止的封面补拉（返回时占位卡能继续补上；
-            // 搜索仍在流式进行时不碰搜索区，避免再与该源拉页争锁）
-            try {
-                if (typeof Search === 'undefined' || !Search.es) fillMissingCovers('#home-grid, #search-results');
-                else fillMissingCovers('#home-grid');
-            } catch (e) { /* 补拉失败不影响详情 */ }
+            // 自动匹配 Bangumi（T74 开关：设置 → 源设置「详情页自动匹配 Bangumi 数据」，默认关）
+            if (await this._catvodBgmMatchEnabled() && typeof Kazumi !== 'undefined') {
+                try {
+                    const name = vod.vod_name || this.vodName;
+                    let match = null;
+                    if (typeof Kazumi.getBangumiMatch === 'function') match = await Kazumi.getBangumiMatch(name);
+                    else if (Kazumi.bangumiSearch) {
+                        const bgmResults = await Kazumi.bangumiSearch(name);
+                        if (bgmResults && bgmResults.length && bgmResults[0].id) match = { id: bgmResults[0].id };
+                    }
+                    if (match && match.id) {
+                        this._bgmId = match.id;
+                        this._bgmInfo = await Kazumi.bangumiInfo(this._bgmId);
+                    }
+                } catch (e) { /* Bangumi 匹配失败不影响详情 */ }
+            }
+            this.render();
         } catch (e) {
             $('#detail-body').html('<div class="tip-line">详情载入失败</div>');
             warnToast('详情载入失败');
@@ -169,73 +290,147 @@ const Detail = {
         return bits.map(escHtml).join(' · ');
     },
 
-    /** 简介文本 → 段落数组：先按换行拆；无换行的超长段按句末标点切分再
-     *  贪心合并（每段约 140 字），避免一整块粘连看不清。 */
-    _paras(text) {
-        const raw = String(text).split(/\n+/).map((t) => t.trim()).filter(Boolean);
-        const out = [];
-        for (const seg of raw) {
-            if (seg.length <= 160) { out.push(seg); continue; }
-            const sents = seg.split(/(?<=[。！？!?；;])\s*/).filter(Boolean);
-            let buf = '';
-            for (const s of sents) {
-                if (buf && buf.length + s.length > 140) { out.push(buf); buf = s; }
-                else buf += s;
-            }
-            if (buf) out.push(buf);
-        }
-        return out;
-    },
-
-    render(vod) {
-        this._lastVod = vod;
-        // 封面标签统一由 common.js vodCoverImg 生成（T31：无图时显兜底占位图）
-        // 源数据简介常带 <p>/<br> 等 HTML 标签：剥离后自动分段（含无换行超长段的按句拆分）
-        // 简介置于封面右侧信息栏（导演/演员之下），带「简介」标签
-        const descText = stripHtml(vod.vod_content);
-        let desc = '';
-        if (descText) {
-            const paras = this._paras(descText).map((t) => `<p>${escHtml(t)}</p>`).join('');
-            desc = `<div class="detail-desc-label">简介</div><div class="detail-desc">${paras}</div>`;
-        }
+    render() {
+        this._lastVod = this._vod || null;
+        const vod = this._vod;
+        const bgm = this._bgmInfo;
+        const hasBgm = !!this._bgmId;
+        const cover = bgm && bgm.images && (bgm.images.large || bgm.images.common || bgm.images.medium)
+            ? (bgm.images.large || bgm.images.common || bgm.images.medium)
+            : (vod && vod.vod_pic) || '';
+        const name = bgm ? (bgm.name_cn || bgm.name || (vod && vod.vod_name) || this.vodName) : ((vod && vod.vod_name) || this.vodName);
+        const meta = bgm
+            ? [bgm.date, bgm.rating && bgm.rating.score ? `评分 ${bgm.rating.score}` : ''].filter(Boolean).join(' · ')
+            : this.metaLine(vod || {});
         let html = `
         <div class="detail-head">
-            <div class="detail-cover">${vodCoverImg(vod.vod_pic)}</div>
+            <div class="detail-cover">${vodCoverImg(cover)}</div>
             <div class="detail-info">
-                <div class="detail-title">${escHtml(vod.vod_name || this.vodName)}</div>
-                <div class="detail-meta">${this.metaLine(vod)}</div>
-                ${vod.vod_director ? `<div class="detail-sub">导演：${escHtml(vod.vod_director)}</div>` : ''}
-                ${vod.vod_actor ? `<div class="detail-sub">演员：${escHtml(vod.vod_actor)}</div>` : ''}
-                ${desc}
-                <div class="detail-actions"><button id="detail-fav" class="md-btn md-btn-tonal md-btn-sm">☆ 收藏</button><button id="detail-tag-want" class="md-btn md-btn-tonal md-btn-sm">想看</button><button id="detail-tag-seen" class="md-btn md-btn-tonal md-btn-sm">已看</button></div>
+                <div class="detail-title">${escHtml(name)}</div>
+                <div class="detail-meta">${escHtml(meta)}</div>
+                ${vod && vod.vod_director ? `<div class="detail-sub">导演：${escHtml(vod.vod_director)}</div>` : ''}
+                ${vod && vod.vod_actor ? `<div class="detail-sub">演员：${escHtml(vod.vod_actor)}</div>` : ''}
+                <div class="detail-actions">
+                    ${vod ? `<button id="detail-fav" class="md-btn md-btn-tonal md-btn-sm">☆ 收藏</button>
+                    <button id="detail-tag-want" class="md-btn md-btn-tonal md-btn-sm">想看</button>
+                    <button id="detail-tag-seen" class="md-btn md-btn-tonal md-btn-sm">已看</button>` : ''}
+                    ${hasBgm ? this._bangumiColHtml(bgm) : ''}
+                </div>
             </div>
         </div>`;
-
+        // 页签栏
+        const tabs = DETAIL_TABS.map((t) => `<span class="detail-tab ${t === this._activeTab ? 'active' : ''}" data-tab="${t}">${t}</span>`).join('');
+        html += `<div class="detail-tabs class-tabs">${tabs}</div>`;
+        html += `<div id="detail-tab-content"></div>`;
+        $('#detail-body').html(html);
         this._refreshFavBtn();
         this._refreshTagBtns();
+        this._renderTabContent();
+        // 后台加载 Bangumi 补充数据
+        if (hasBgm) {
+            this._loadBgmExtra();
+            if (typeof Kazumi !== 'undefined' && Kazumi._applyBangumiColState) {
+                Kazumi._applyBangumiColState(this._bgmId); // 高亮当前收藏状态
+            }
+        }
+    },
 
+    /** Bangumi 收藏按钮组 + 「开始观看」（统一详情页，T74）。 */
+    _bangumiColHtml(bgm) {
+        if (!bgm || !bgm.id) return '';
+        const hasRules = typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules();
+        let h = `<div class="kazumi-bangumi-colrow">
+            <span class="tip-line pad0">Bangumi 收藏（点击即同步）</span>
+            <div class="kazumi-col-btns" data-id="${escHtml(bgm.id)}">
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="2">看过</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="4">搁置</button>
+                <button class="md-btn md-btn-sm kazumi-col-btn" data-type="5">抛弃</button>
+            </div>
+        </div>`;
+        if (hasRules) {
+            h += `<div class="kazumi-watch-row" style="margin-top:10px;">
+                <button id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm">▶ 开始观看（Kazumi 源）</button>
+                <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选源播放</span>
+            </div>`;
+        }
+        return h;
+    },
+
+    _renderTabContent() {
+        const box = $('#detail-tab-content');
+        if (this._activeTab === '概览') this._renderOverview();
+        else if (this._activeTab === '吐槽') this._renderComments();
+        else if (this._activeTab === '角色') this._renderCharacters();
+        else if (this._activeTab === '关联') this._renderRelations();
+        else if (this._activeTab === '制作人员') this._renderStaff();
+    },
+
+    _switchTab(tab) {
+        if (tab === this._activeTab) return;
+        this._activeTab = tab;
+        $('#detail-body .detail-tab').removeClass('active');
+        $(`#detail-body .detail-tab[data-tab="${tab}"]`).addClass('active');
+        this._renderTabContent();
+    },
+
+    _renderOverview() {
+        const vod = this._vod;
+        const bgm = this._bgmInfo;
+        let html = '';
+        // 简介（可收起）
+        const descText = bgm ? (bgm.summary || '') : stripHtml((vod && vod.vod_content) || '');
+        if (descText) {
+            const collapsed = this._descCollapsed && descText.length > 120;
+            const shortText = collapsed ? escHtml(descText.slice(0, 120)) + '…' : escHtml(descText);
+            html += `<div class="detail-desc-wrap">
+                <div class="detail-desc-label">简介</div>
+                <div class="detail-desc ${collapsed ? 'collapsed' : ''}">${shortText}</div>
+                ${descText.length > 120 ? `<button id="detail-desc-toggle" class="md-btn md-btn-sm md-btn-tonal" style="margin-top:4px;font-size:12px;">${collapsed ? '展开全部' : '收起'}</button>` : ''}
+            </div>`;
+        }
+        // Bangumi 标签
+        if (bgm && Array.isArray(bgm.tags) && bgm.tags.length) {
+            const chips = bgm.tags.slice(0, 13).map((t) => {
+                const tn = (t && typeof t === 'object') ? (t.name || '') : t;
+                return tn ? `<span class="kazumi-tag" data-tag="${escHtml(tn)}">${escHtml(tn)}</span>` : '';
+            }).filter(Boolean).join('');
+            if (chips) html += `<div class="bangumi-info-tags"><div class="kazumi-tags-wrap">${chips}</div></div>`;
+        }
         if (!this.sources.length) {
-            html += '<div class="tip-line">该视频暂无播放源</div>';
-            // Kazumi 源入口：无 CatVod 源时也显示（kimi UI）
+            // Bangumi-only（无 CatVod 源）：开始观看 + Bangumi 分集
+            if (bgm && this._bgmId) {
+                html += `<div class="kazumi-watch-row" style="margin-top:12px;">
+                    <button id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm">▶ 开始观看（Kazumi 源）</button>
+                    <span class="tip-line pad0">从 Kazumi 规则源搜索本片并选源播放</span>
+                </div>`;
+                html += '<div class="tip-line pad0" style="margin:14px 0 8px;">分集（点击从 Kazumi 规则源选源播放）</div>';
+                html += '<div id="bgm-ep-list" class="ep-grid"></div>';
+                $('#detail-tab-content').html(html);
+                this._renderBgmEpisodes();
+                return;
+            }
+            html += '<div class="tip-line" style="margin-top:12px;">该视频暂无播放源</div>';
             if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
                 html += `<div class="kazumi-entry tip-line" style="margin-top:12px;">
                     <span>没有想看的源？</span>
                     <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
                 </div>`;
             }
-            $('#detail-body').html(html);
+            $('#detail-tab-content').html(html);
             return;
         }
-        html += `<div class="play-srcs">${this.sources.map((s, i) =>
+        // 播放源
+        html += `<div class="play-srcs" style="margin-top:12px;">${this.sources.map((s, i) =>
             `<span class="play-src ${i === this.activeSource ? 'active' : ''}" data-idx="${i}">${escHtml(s.from)} (${s.episodes.length})</span>`).join('')}</div>`;
-        // Kazumi 源入口：仅当存在已启用规则时显示（kimi UI）
         if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
             html += `<div class="kazumi-entry tip-line" style="margin-bottom:12px;">
                 <span>没有想看的源？</span>
                 <button id="detail-kazumi-src" class="md-btn md-btn-tonal md-btn-sm">试试 Kazumi 规则源</button>
             </div>`;
         }
-        // 全选/勾选操作栏紧跟视频源按钮（T19）；倒序按钮置播放勾选集左侧、同款样式（T21）
         html += `<div class="ep-dl-bar">
             <label class="ep-dl-check-all"><input type="checkbox" id="ep-check-all">全选</label>
             <span class="dl-spacer"></span>
@@ -246,11 +441,100 @@ const Detail = {
         </div>`;
         html += `<div class="ep-toolbar"><span class="ep-count" id="ep-count"></span></div>`;
         html += '<div id="ep-list" class="ep-grid"></div>';
-        $('#detail-body').html(html);
+        $('#detail-tab-content').html(html);
         this.renderEpisodes();
     },
 
-    /** 站点 key → 可读源名（收藏/历史卡片展示用，取不到时回退 key）。 */
+    /** 渲染 Bangumi 分集（统一详情页 Bangumi-only 概览用，T74）：点击从 Kazumi 源选源播放。 */
+    async _renderBgmEpisodes() {
+        const box = $('#bgm-ep-list');
+        if (!box.length || !this._bgmId || typeof Kazumi === 'undefined') return;
+        box.html('<div class="tip-line">载入中…</div>');
+        try {
+            const data = await Kazumi.bangumiEpisodes(this._bgmId);
+            const list = (data && data.data) || [];
+            box.html(list.length
+                ? list.map((ep) => `<div class="kazumi-detail-ep" tabindex="0">
+                    <span class="kazumi-detail-ep-no">${escHtml(ep.sort || ep.ep || '')}</span>
+                    <span class="kazumi-detail-ep-name">${escHtml(ep.name_cn || ep.name || '')}</span>
+                    <span class="kazumi-detail-ep-type">${escHtml(ep.type === 1 ? 'SP' : ep.type === 2 ? 'OP' : ep.type === 3 ? 'ED' : '')}</span>
+                </div>`).join('')
+                : '<div class="tip-line">暂无分集信息</div>');
+            box.find('.kazumi-detail-ep').on('click', () => {
+                const title = this.vodName || '';
+                if (title && typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
+                    Kazumi.openSourceDialog(title, 'kazumi', '');
+                }
+            });
+        } catch (e) {
+            box.html('<div class="tip-line">分集载入失败</div>');
+        }
+    },
+
+    _renderComments() {
+        const box = $('#detail-tab-content');
+        if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
+        if (!this._comments.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        box.html(this._comments.map((c) => `<div class="detail-comment">
+            <div class="detail-comment-user">${escHtml((c.user && c.user.nickname) || c.username || '')}</div>
+            <div class="detail-comment-text">${escHtml(c.comment || '')}</div>
+            <div class="detail-comment-time">${escHtml(c.updated_at || '')}</div>
+        </div>`).join('') || '<div class="tip-line">暂无吐槽</div>');
+    },
+
+    _renderCharacters() {
+        const box = $('#detail-tab-content');
+        if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
+        if (!this._characters.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        box.html(this._characters.map((c) => `<div class="detail-char">
+            <img class="detail-char-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
+            <div class="detail-char-info">
+                <div class="detail-char-name">${escHtml(c.name || '')}</div>
+                <div class="detail-char-role">${escHtml(c.relation || '')}</div>
+            </div>
+        </div>`).join('') || '<div class="tip-line">暂无角色信息</div>');
+    },
+
+    _renderStaff() {
+        const box = $('#detail-tab-content');
+        if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
+        if (!this._staff.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        box.html(this._staff.map((s) => `<div class="detail-staff">
+            <span class="detail-staff-name">${escHtml(s.name || '')}</span>
+            <span class="detail-staff-jobs">${escHtml((s.jobs || []).join(' / '))}</span>
+        </div>`).join('') || '<div class="tip-line">暂无制作人员信息</div>');
+    },
+
+    _renderRelations() {
+        const box = $('#detail-tab-content');
+        if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
+        if (!this._relations.length) { box.html('<div class="tip-line">加载中…</div>'); return; }
+        box.html(this._relations.map((r) => `<div class="detail-relation">
+            <span class="detail-relation-type">${escHtml(r.relation || '')}</span>
+            <span class="detail-relation-name">${escHtml(r.name_cn || r.name || '')}</span>
+        </div>`).join('') || '<div class="tip-line">暂无关联番剧</div>');
+    },
+
+    async _loadBgmExtra() {
+        if (!this._bgmId || typeof Kazumi === 'undefined') return;
+        try {
+            const [comments, chars, staff, relations] = await Promise.all([
+                Kazumi.bangumiComments(this._bgmId, 20, 0).catch(() => []),
+                Kazumi.bangumiCharacters(this._bgmId).catch(() => []),
+                Kazumi.bangumiStaff(this._bgmId).catch(() => []),
+                Kazumi.bangumiRelations(this._bgmId).catch(() => []),
+            ]);
+            this._comments = comments || [];
+            this._characters = chars || [];
+            this._staff = staff || [];
+            this._relations = relations || [];
+            if (this._activeTab === '吐槽') this._renderComments();
+            else if (this._activeTab === '角色') this._renderCharacters();
+            else if (this._activeTab === '关联') this._renderRelations();
+            else if (this._activeTab === '制作人员') this._renderStaff();
+        } catch (e) { /* Bangumi 数据加载失败 */ }
+    },
+
     _siteName(key) {
         try {
             const all = (typeof Home !== 'undefined' && Home._allSites) || [];
@@ -259,14 +543,12 @@ const Detail = {
         } catch (e) { return key; }
     },
 
-    /** 收藏按钮状态同步。 */
     async _refreshFavBtn() {
         if (typeof Records === 'undefined') return;
         const fav = await Records.isFavorite(this.site, this.vodId);
         $('#detail-fav').text(fav ? '★ 已收藏（点击取消）' : '☆ 收藏');
     },
 
-    /** 想看/已看按钮高亮同步（未收藏两键均不亮）。 */
     async _refreshTagBtns() {
         if (typeof Records === 'undefined') return;
         const tag = await Records.getFavTag(this.site, this.vodId);
@@ -274,16 +556,17 @@ const Detail = {
         $('#detail-tag-seen').toggleClass('tag-active', tag === 'seen');
     },
 
-    /** 标记想看/已看：未收藏先收藏再置标签；点击已生效的按钮则取消标记。 */
     async setTag(tag) {
         if (typeof Records === 'undefined') return;
         const vod = this._lastVod;
         if (!vod) return;
         const cur = await Records.getFavTag(this.site, this.vodId);
-        const next = (cur === tag) ? '' : tag; // 再点一次 = 取消
+        const next = (cur === tag) ? '' : tag;
         await Records.setFavTag({
             site: this.site, vodId: this.vodId,
-            name: vod.vod_name || this.vodName, pic: vod.vod_pic, remarks: vod.vod_remarks,
+            name: this._bgmInfo ? (this._bgmInfo.name_cn || this._bgmInfo.name || vod.vod_name || this.vodName) : (vod.vod_name || this.vodName),
+            pic: this._bgmInfo && this._bgmInfo.images ? (this._bgmInfo.images.large || this._bgmInfo.images.common || this._bgmInfo.images.medium || vod.vod_pic) : (vod.vod_pic || ''),
+            remarks: vod.vod_remarks || '',
             siteName: this._siteName(this.site),
         }, next);
         if (next === '') warnToast('已取消想看/已看标记');
@@ -292,30 +575,29 @@ const Detail = {
         this._refreshTagBtns();
     },
 
-    /** 收藏/取消收藏当前影片。 */
     async toggleFav() {
         const vod = this._lastVod;
         if (!vod || typeof Records === 'undefined') return;
         const added = await Records.toggleFavorite({
             site: this.site, vodId: this.vodId,
-            name: vod.vod_name || this.vodName, pic: vod.vod_pic, remarks: vod.vod_remarks,
+            name: this._bgmInfo ? (this._bgmInfo.name_cn || this._bgmInfo.name || vod.vod_name || this.vodName) : (vod.vod_name || this.vodName),
+            pic: this._bgmInfo && this._bgmInfo.images ? (this._bgmInfo.images.large || this._bgmInfo.images.common || this._bgmInfo.images.medium || vod.vod_pic) : (vod.vod_pic || ''),
+            remarks: vod.vod_remarks || '',
             siteName: this._siteName(this.site),
         });
-        warnToast(added ? '已收藏，可在“收藏”页查看' : '已取消收藏');
+        warnToast(added ? '已收藏，可在“我的 → 我的收藏”查看' : '已取消收藏');
         this._refreshFavBtn();
     },
 
     selectSource(idx) {
         if (idx < 0 || idx >= this.sources.length) return;
         this.activeSource = idx;
-        $('#detail-body .play-src').removeClass('active');
-        $(`#detail-body .play-src[data-idx="${idx}"]`).addClass('active');
+        $('#detail-tab-content .play-src').removeClass('active');
+        $(`#detail-tab-content .play-src[data-idx="${idx}"]`).addClass('active');
         this.renderEpisodes();
-        // 记住本次选择的线路（按影片 key 持久化，下次进入同片自动恢复）
         this._saveLastSource();
     },
 
-    /** 持久化当前影片最后使用的线路索引。 */
     async _saveLastSource() {
         if (!this.site || !this.vodId) return;
         try {
@@ -326,7 +608,6 @@ const Detail = {
         } catch (e) { /* 保存失败不影响主流程 */ }
     },
 
-    /** 恢复上次使用的线路索引；未记录或索引越界则保持默认 0。 */
     async _restoreLastSource() {
         if (!this.site || !this.vodId) return;
         try {
@@ -339,7 +620,6 @@ const Detail = {
         } catch (e) { /* 读取失败使用默认值 */ }
     },
 
-    /** 播放当前线路的指定集；失败自动尝试下一线路，直到成功或全部线路耗尽。 */
     async _playEpisode(idx) {
         const src = this.sources[this.activeSource];
         if (!src) return;
@@ -353,9 +633,8 @@ const Detail = {
             if (!curEp) { this._advanceSource(); tried++; continue; }
             if (tried > 0) {
                 warnToast(`线路「${curSrc.from}」尝试中…`);
-                // 切换线路时同步更新 UI 标签
-                $('#detail-body .play-src').removeClass('active');
-                $(`#detail-body .play-src[data-idx="${this.activeSource}"]`).addClass('active');
+                $('#detail-tab-content .play-src').removeClass('active');
+                $(`#detail-tab-content .play-src[data-idx="${this.activeSource}"]`).addClass('active');
                 this.renderEpisodes();
                 this._saveLastSource();
             }
@@ -364,27 +643,20 @@ const Detail = {
                 this.vodName || '', curEp.name,
                 curSrc.episodes, idx,
             );
-            if (result && result.ok) return; // 起播成功
-            // mpv 缺失是全局问题，换线路也没用
+            if (result && result.ok) return;
             if (result && result.reason === 'mpv-missing') return;
-            // 其余失败（解析失败/取地址失败等）自动尝试下一线路
             this._advanceSource();
             tried++;
         }
         warnToast(`全部 ${this.sources.length} 条线路均播放失败`);
-        // 恢复到最初选择的线路
-        if (this.activeSource !== startSrc) {
-            this.selectSource(startSrc);
-        }
+        if (this.activeSource !== startSrc) this.selectSource(startSrc);
     },
 
-    /** 切换到下一条线路（循环）。 */
     _advanceSource() {
         if (this.sources.length <= 1) return;
         this.activeSource = (this.activeSource + 1) % this.sources.length;
     },
 
-    /** 选集正序/倒序切换（按钮文案表示点击后的目标方向）。 */
     toggleEpOrder() {
         this._epDesc = !this._epDesc;
         this.renderEpisodes();
@@ -396,7 +668,6 @@ const Detail = {
         if (!src) return;
         $('#ep-count').text(`共 ${src.episodes.length} 集`);
         $('#ep-order').text(this._epDesc ? '⇅ 切正序' : '⇅ 切倒序');
-        // 倒序仅翻转展示顺序，data-idx 仍为原下标（播放/下载/连播链不受影响）
         const order = src.episodes.map((_, i) => i);
         if (this._epDesc) order.reverse();
         order.forEach((i) => {
@@ -410,7 +681,6 @@ const Detail = {
         this._syncDlBar();
     },
 
-    /** 勾选计数与按钮文案同步。 */
     _syncDlBar() {
         const n = $('#ep-list .ep-check.checked').length;
         $('#ep-dl-count').text(n ? `已勾选 ${n} 集` : '');
@@ -418,9 +688,6 @@ const Detail = {
         $('#ep-play-selected').text(n ? `▶ 播放勾选集（${n}）` : '▶ 播放勾选集');
     },
 
-    /** 播放勾选集：按勾选顺序组成连播链交 Player.play（每集播完 mpv 退出后
-     *  由渲染层自动起播下一集，直链/解析源同逻辑），从第一勾集开始。
-     *  首集播放失败时自动尝试下一线路。 */
     async playSelected() {
         const src = this.sources[this.activeSource];
         if (!src) return;
@@ -428,7 +695,6 @@ const Detail = {
             .map(function () { return parseInt($(this).data('idx'), 10); })
             .get().sort((a, b) => a - b);
         if (!idxs.length) { warnToast('请先勾选要播放的集'); return; }
-        // 首集走自动重试逻辑：失败会尝试下一线路再起播
         const firstIdx = idxs[0];
         const startSrc = this.activeSource;
         let tried = 0;
@@ -439,12 +705,11 @@ const Detail = {
             if (!curEp) { this._advanceSource(); tried++; continue; }
             if (tried > 0) {
                 warnToast(`线路「${curSrc.from}」尝试中…`);
-                $('#detail-body .play-src').removeClass('active');
-                $(`#detail-body .play-src[data-idx="${this.activeSource}"]`).addClass('active');
+                $('#detail-tab-content .play-src').removeClass('active');
+                $(`#detail-tab-content .play-src[data-idx="${this.activeSource}"]`).addClass('active');
                 this.renderEpisodes();
                 this._saveLastSource();
             }
-            // 从当前线路取所有勾选集对应的条目
             const eps = idxs.map((i) => curSrc.episodes[i]).filter(Boolean);
             if (!eps.length) { this._advanceSource(); tried++; continue; }
             const first = eps[0];
@@ -459,12 +724,9 @@ const Detail = {
             this._advanceSource();
             tried++;
         }
-        if (!ok && this.activeSource !== startSrc) {
-            this.selectSource(startSrc);
-        }
+        if (!ok && this.activeSource !== startSrc) this.selectSource(startSrc);
     },
 
-    /** 下载当前勾选的集（多选批量；单集勾一个即可）。 */
     downloadSelected() {
         const src = this.sources[this.activeSource];
         if (!src) return;
@@ -475,7 +737,6 @@ const Detail = {
         this._downloadEps(src, idxs);
     },
 
-    /** 逐集解析出可下载直链后交 aria2；m3u8 切片流经 ffmpeg 自动合成（addHls）。 */
     async _downloadEps(src, idxs) {
         if (!src || !idxs.length) return;
         showLoading();
@@ -486,7 +747,6 @@ const Detail = {
             const r = await this._resolveDownloadUrl(src.from, ep.url);
             if (!r) { failed++; continue; }
             const isM3u8 = /\.m3u8(\?|#|$)/i.test(r.url.split('?')[0]);
-            // 文件名：片名 - 集名，补上链接自带的扩展名（m3u8 固定合成为 mp4）
             const ext = isM3u8 ? '.mp4' : (r.url.split('?')[0].match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0];
             const out = `${this.vodName || '视频'} - ${ep.name}${ext}`;
             try {
@@ -506,7 +766,6 @@ const Detail = {
         warnToast(bits.join('；') || '没有可下载的集');
     },
 
-    /** 集地址 → 可下载直链：playerContent 判断 parse，需要时走解析接口。 */
     async _resolveDownloadUrl(flag, url) {
         try {
             const rsp = await doAction('playerContent', {
@@ -515,7 +774,6 @@ const Detail = {
             const data = (rsp && typeof rsp === 'object') ? rsp : {};
             const u = data.url || url;
             if (parseInt(data.parse, 10) !== 1) return { url: u };
-            // parse=1：已是媒体直链直接用，否则走解析接口（带 Referer 头供下载）
             if (/\.(mp4|flv|mov|mkv|webm|ts|m3u8)(\?|#|$)/i.test(u.split('?')[0])) return { url: u };
             const r = await window.vpc.resolveParse(u);
             if (r && r.ok) return { url: r.url, header: r.header };

@@ -45,3 +45,98 @@ test('_ts: 秒转 ASS 时间轴', () => {
     assert.equal(MpvPlayer._ts(3661.25), '01:01:01.25');
     assert.equal(MpvPlayer._ts(-5), '00:00:00.00'); // 负值钳制 0
 });
+
+test('property-change 持续缓存播放进度与时长', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._lastFs = false;
+    p._lastSp = 1;
+    p._activeSession = { id: 7, pos: null, duration: null, fullscreen: false, speed: 1 };
+    p._onEvent({ event: 'property-change', name: 'time-pos', data: 42.5 });
+    p._onEvent({ event: 'property-change', name: 'duration', data: 120 });
+    assert.equal(p._activeSession.pos, 42.5);
+    assert.equal(p._activeSession.duration, 120);
+});
+
+test('旧会话 teardown 不会清理新会话', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    const proc = {};
+    p._activeSession = { id: 8 };
+    p.proc = proc;
+    p.socket = null;
+    p._pending = new Map();
+    p._connected = true;
+    p._teardown(7);
+    assert.equal(p.proc, proc);
+    assert.equal(p._activeSession.id, 8);
+    assert.equal(p._connected, true);
+});
+
+test('end-file eof 附带会话号并把进度补满后发出 ended', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 9, pos: 42.5, duration: 120, fullscreen: false, speed: 1 };
+    p._queueLen = 3;
+    let ended = null;
+    p.on('ended', (info) => { ended = info; });
+    p._onEvent({ event: 'end-file', reason: 'eof', playlist_pos: 1 });
+    assert.equal(p._activeSession.pos, 120); // 播完把进度补满，供退出判定
+    assert.deepEqual(ended, { sessionId: 9, playlistPos: 1, queueLen: 3 });
+});
+
+test('end-file eof 会话号只属当前活动会话', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 10, pos: 10, duration: 90, fullscreen: false, speed: 1 };
+    p._queueLen = 1;
+    let ended = null;
+    p.on('ended', (info) => { ended = info; });
+    // 旧会话（id 5）的 ended 事件不应携带活动会话 id
+    p._activeSession.id = 10;
+    p._onEvent({ event: 'end-file', reason: 'eof', playlist_pos: 0 });
+    assert.equal(ended.sessionId, 10);
+});
+
+// ---------------------------------------------------------------- 用户主动关闭 vs 断流（重连修复）
+
+test('end-file quit（用户关窗）记录 endReason 且不触发 ended', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 12, pos: 30, duration: 120 };
+    let ended = null;
+    p.on('ended', (info) => { ended = info; });
+    p._onEvent({ event: 'end-file', reason: 'quit' });
+    assert.equal(p._activeSession.endReason, 'quit');
+    assert.equal(ended, null); // quit 不是播放完成，不发出 ended
+});
+
+test('end-file stop 记录 endReason', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 13 };
+    p._onEvent({ event: 'end-file', reason: 'stop' });
+    assert.equal(p._activeSession.endReason, 'stop');
+});
+
+test('end-file eof 记录 endReason 且触发 ended（既有行为保持）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 14, pos: 10, duration: 90 };
+    p._queueLen = 1;
+    let ended = null;
+    p.on('ended', (info) => { ended = info; });
+    p._onEvent({ event: 'end-file', reason: 'eof', playlist_pos: 0 });
+    assert.equal(p._activeSession.endReason, 'eof');
+    assert.ok(ended);
+});
+
+test('stop() 标记当前会话 userStopped（退出时不得断流重连）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    const session = { id: 15, userStopped: false };
+    p._activeSession = session;
+    p.proc = { pid: 999, kill() {} };
+    p._teardown = () => {}; // 阻止清空以便断言
+    p._pending = new Map();
+    p.stop();
+    assert.equal(session.userStopped, true);
+});

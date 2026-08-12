@@ -1,292 +1,325 @@
-# 影视 PC — 开发总纲（跨会话续作唯一入口）
+# YuKi（原影视 PC） — 当前开发状态
 
-> 续作开发只需读本文件。本文档已整合原 `重构方案.md`、`PHASE0_依赖矩阵.md`、`BUILD.md`、`FEATURES.md`、`PROGRESS.md` 五份文档，其余 md 已删除。
-> 约定：改动架构/链路前先更新「§4 架构决策」；新增功能后在「§7 功能清单」补一行；收尾跑 `npm run test:all` 全绿。
-> 行号锚点目录（编辑后若漂移，grep `^##` 重新定位）：§1 项目概述 L9 · §2 Phase 总览 L17 · §3 环境与命令 L33 · §4 架构决策 L57（子节：进程通信 L59 / 插件爬虫 L66 / 前端UI L77 / 文件管理 L86 / 下载 L91 / 推送设置解析 L99）· §5 Spider 契约 L132 · §6 构建打包 L147 · §7 前端注意与功能 L167（注意事项 L169 / 功能概览 L179）· §8 已知坑位 L199 · §8.7 待完成 L222 · §8.8 进行中任务 L229
+> 更新时间：2026-08-11
+>
+> 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
 
----
+## 1. 项目快照
 
-## 1. 项目概述
+| 项目 | 当前值 |
+|---|---|
+| 应用版本 | `0.1.0` |
+| 桌面宿主 | Electron 31，JavaScript |
+| 后端 | FastAPI，Python 3.14 独立进程 |
+| 内容引擎 | CatVod + Kazumi 双引擎 |
+| 播放 | mpv 独立窗口 |
+| 下载 | aria2c + ffmpeg |
+| 主要平台 | Windows |
+| 数据目录 | `~/.video-pc/` 与 Electron `userData` |
+| 项目状态 | 第一阶段修复已完成；2A 与「我的」页/观看统计代码及界面验收均通过；2B 及后续产品项待确认 |
 
-将 Android TV 盒子视频源聚合应用（CatVod 架构）重构为 PC 桌面端。Phase 0~8 已全部完成。
+源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
-- **源应用**：Leanback 原生 UI + WebView 辅助面板 + Chaquopy Python 3.10 后端 + QuickJS JS 爬虫 + mpv/FFmpeg + 迅雷 SDK（逆向产物在 `../apk_analysis/`）。
-- **目标架构（已实现）**：Electron 31（JS 非 TS）+ 独立 Python 后端进程（FastAPI，Python 3.14 venv）+ mpv 独立窗口 + quickjs-ng JS 引擎 + aria2c 下载 + ffmpeg（HLS 合成/抓帧）。
-- **本期不做**：直播 UI 已实装基础版；DLNA 投屏、P2P/P3P、ed2k/thunder 协议不做；自动更新未接（见 §8.7）。
+## 2. 文档入口
 
-## 2. Phase 总览（全部完成 ✅）
+| 需要了解的内容 | 文档 |
+|---|---|
+| 文档层级与维护规则 | [docs/README.md](docs/README.md) |
+| 进程、接口、数据流和关键约束 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Kazumi 规则引擎实现 | [docs/KAZUMI_INTEGRATION.md](docs/KAZUMI_INTEGRATION.md) |
+| Kazumi 与原版的功能差距 | [docs/KAZUMI_GAP_ANALYSIS.md](docs/KAZUMI_GAP_ANALYSIS.md) |
+| 最新运行异常与修复验证 | [docs/RUNTIME_ISSUES.md](docs/RUNTIME_ISSUES.md) |
+| 全量功能测试矩阵与测试结果 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) |
+| Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
 
-| Phase | 内容 | 验证 |
-|---|---|---|
-| 0 | 资产提取与源码恢复 | 4 个核心 py 高保真重建，TOTAL DIFF: 0 |
-| 1 | Electron + Python 宿主骨架 | 冒烟 13/13 |
-| 2 | 主 UI（首页/搜索/详情/播放入口） | 前端链路 11/11 |
-| 3 | 爬虫引擎（Py/JS spider、ESM、CMS、config、SSE 聚合搜索） | 测试 23/23 |
-| 4 | mpv 播放器（独立窗口 + ASS 弹幕基建 + 连播） | 集成测试全绿 |
-| 5 | 文件管理（白名单根 + 防穿越 + 本地播放） | 26/26 |
-| 6 | 下载（aria2c JSON-RPC + UI + 通知） | 13/13 |
-| 7 | 推送/设置/VIP 解析隐藏窗口 | 14/14 + 7/7 |
-| 8 | 打包（Windows NSIS 安装包已出） | exe 已生成 |
+状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
 
-单人开发顺序记录：0 → 1 → 3 → 2 → 4 → 5 → 6 → 7 → 8。
+## 3. 当前已完成范围
 
-## 3. 环境快照与常用命令
+### 内容与搜索
 
-**环境**（2026-08-07 验证）：Python 3.14.4 + venv（fastapi 0.141 / uvicorn 0.52 / lxml 6.1.1 / requests 2.34 / quickjs-ng 0.16）；Node v24.18.1 + Electron 31.7.7；mpv v0.41.0（shinchiro 构建）；aria2c v1.37.0；ffmpeg 由启动时 ensureFfmpeg 自动下载。
+- CatVod Python、JavaScript、CMS 和多仓配置加载。
+- 首页、分类、当前源搜索、SSE 聚合搜索、详情、收藏和历史。
+- Kazumi XPath/API 规则导入、编辑、测试、商店、有效性检测和批量更新。
+- Bangumi 搜索、详情、日历、榜单、分集、角色、Staff、评论、关联和收藏同步。
+
+### 播放与解析
+
+- mpv 播放、硬件加速、倍速、续播、自动连播、断流重连和失败换线。
+- 隐藏 BrowserWindow 通过媒体请求拦截、DOM 轮询和 legacy iframe 跟随提取真实视频流。
+- Anime4K 三档、VLC 外部播放、截图、定时关机和 DLNA。
+- 解析窗口使用 3 个独立 partition 槽位，并通过 single-flight 合并同地址并发请求。
+
+### 下载与数据
+
+- aria2c 直链/种子下载与 ffmpeg HLS 合成。
+- HLS 下载广告段过滤、下载记录持久化、完成通知和一键播放。
+- 本地文件白名单、防路径穿越、上传、删除和本地播放。
+- WebDAV、Bangumi 收藏同步、SyncPlay、观看统计和最近观看。
+
+### UI 与桌面能力
+
+- 设置中心、主题、壁纸、系统字体、字号、分页、托盘驻留、快捷键、自定义缓存路径和首次引导。
+- 2A：移除运行时 MiSans 动态下载/注入和画中画入口；关于内容迁入设置一级分类；系统页移除版本号；设置固定在左侧功能项底部。
+- Windows NSIS 安装包和自定义图标。
+
+### 2026-08-09 2A 改动记录
+
+- `src/renderer/index.html`：删除左侧独立“关于”入口和独立视图，将关于卡片迁入“设置 → 关于”；版本号仅保留在关于分类；系统页删除画中画控件和系统页版本号；设置保持在左侧功能项末尾，收缩按钮位于其下方。
+- `src/renderer/js/app.js`、`panels.js`、`about.js`：移除字体注入启动链路和画中画事件绑定；进入设置的“关于”分类时渲染版本与系统信息。
+- `src/preload/preload.js`、`src/main/index.js`：删除字体 CSS IPC、字体就绪事件、画中画 preload API 和主进程小窗 IPC；保留关于页使用的版本/系统信息 IPC。
+- `src/renderer/css/ui.css`：统一使用系统字体，并补充设置/收缩按钮的导航顺序样式。
+- `tests/js/settings-2a.test.js`：增加 2A 静态回归检查，确保旧入口、旧 DOM、字体运行时钩子和 PiP 钩子不会回归。
+
+## 4. 当前边界与未完成项
+
+### 需要继续完成
+
+- [x] 重启应用后验证 `RUNTIME_ISSUES.md` 中 R1/R2/R4/R5/R6 的真实运行结果，尤其是 Bangumi token 与收藏接口。
+- [x] 2A 实际界面验收：已通过临时调试实例（CDP 驱动）完成实测，全部通过，详见 §7。
+- [x] 2B：直播页分页数量纳入设置（pageSizeLive）；下载页「打开下载目录」按钮；本地文件页背景模糊闪烁修复（T54）——均已完成。
+- [x] 后续产品整理：“我的”页最近观看与左侧历史的整合方式已确认（历史保留左侧独立视图，最近观看并入“我的 → 最近观看”，收藏入口整合到“我的 → 我的收藏”，左侧独立收藏入口已删除）。
+- [x] Kazumi/UI 后续：规则页布局优化（T55）、首页推荐功能（T62）均已完成。
+- [x] 时间表后续：完整对齐 Kazumi 时间表——完整季节索引（近 20 年）、封面排名角标、排序/收藏过滤、点击进入二级详情页（T57/T58）。
+- [ ] macOS/Linux 实际打包与运行测试。
+- [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
+- [ ] 自动更新；当前未接入 `electron-updater`。
+- [ ] 代码签名与 CI/CD，可在发布流程确定后补齐。
+
+### 明确不作为当前待办
+
+- 弹幕产品功能当前关闭。DanDanPlay API、ASS 生成和历史端点虽仍存在，但前端没有启用入口，不应把“补弹幕渲染”当作当前缺陷。
+- P2P/P3P、ed2k 和 thunder 协议不在当前范围。
+- 验证码自动识别/自动过验证不在当前交付范围；现阶段保留检测、打开验证页面和 Cookie 复用。
+
+## 5. 开发约束
+
+1. CatVod 与 Kazumi 必须保持物理隔离：CatVod 走 `/action`，Kazumi 走 `/kazumi/action`。
+2. 不修改恢复源码的行为契约。`app.py`、`runner.py`、`trigger.py` 保持原语义，`base/spider.py` 只允许已有 PC 适配。
+3. 配置热更新必须先完整构建新状态，再一次性替换；禁止先销毁当前可用配置。
+4. 所有异步 UI 请求使用 token/会话号防止过期回调覆盖新状态。
+5. 删除和恢复默认等操作统一使用 `confirmDialog`。
+6. 本地文件操作必须通过主进程和白名单根，任何解析结果都要再次检查路径未越界。
+7. 播放器每次只接收单集；连播由渲染层维护上下文，旧播放会话退出事件不得推进新会话。
+8. 解析窗口必须使用隔离 partition，用后销毁并清理 `webRequest` 监听。
+9. 新增 UI 文案使用简体中文；所有远程封面使用 `referrerpolicy="no-referrer"` 和统一兜底。
+10. 架构或链路变化先更新 [架构说明](docs/ARCHITECTURE.md)，功能状态变化同步更新本文件。
+
+更细的 Spider、mpv、下载和历史决策见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
+
+## 6. 环境与命令
+
+已验证环境快照：Python 3.14.4、Node 24.18.1、Electron 31.7.7、mpv 0.41.0、aria2c 1.37.0。ffmpeg 等本地扩展由项目脚本准备；MiSans 旧静态资源和辅助脚本仍保留，但应用运行时已不再下载、注入或切换该字体。
 
 ```powershell
-# 工作目录 video-pc；PowerShell 用 ; 不用 &&
-# 后端冒烟（无需 Electron）
-python-backend\.venv\Scripts\python.exe python-backend\tests\smoke.py
-# Phase 3 全链路测试（Py/JS 双源 config + SSE）
-python-backend\.venv\Scripts\python.exe python-backend\tests\test_phase3.py
-# 单独跑后端
-python-backend\.venv\Scripts\python.exe python-backend\server.py
 # 启动完整应用
 npm start
-# 手动下载二进制（mpv/aria2 通常由脚本覆盖；ffmpeg 约 90MB；misans 为内置 UI 字体）
-node scripts\download-binaries.js mpv
-node scripts\download-binaries.js aria2
-node scripts\download-binaries.js ffmpeg
-node scripts\download-binaries.js misans
-# 一键回归（smoke + phase3 + py 编译 + src js 语法检查）
+
+# 运行全部 Python 测试、JavaScript 单元测试和语法检查
 npm run test:all
-# 打包 Python 后端 + Windows 安装包（见 §6）
+
+# 单独运行后端
+npm run backend
+
+# 构建 Python 后端
 npm run build:py
+
+# 构建 Windows 安装包
+npm run build:win
 ```
 
-## 4. 架构决策（续作时遵守，改前先更新本节）
+PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
-### 进程与通信
-1. **进程模型**：Electron 主进程 spawn Python 子进程；后端打印 `VPC_BACKEND_READY port=<p> token=<t>` 到 stdout，python-bridge 解析后经 IPC 给渲染层。
-2. **鉴权**：服务绑 `127.0.0.1` + 随机端口 + 一次性 token（`VPC_TOKEN` 环境变量可固定）。`/health`、`/cache`、`/proxy` 免 token（spider 回环调用不带 token）；其余端点须 `?token=` 或 `X-Token` 头。
-3. **缓存协议**：`/cache?do=get|set|del&key=`，value 原样字符串存取；`expiresAt` 过期判断在 spider 侧（保持原版语义），存储层不做过期；文件层按 sha1(key) 命名。
-4. **代理协议**：`/proxy?do=py&...` → `runner.localProxy(param_dict)`；结果支持 `[code, mime, body]` / `[code, mime, body, headers]` / 字符串(302) / dict。
-5. **数据目录**：`~/.video-pc/`（cache / cache/py / logs），由 `hoststate.ensure_dirs()` 创建。缓存目录可自定义（决策 48）。
+## 7. 最近验证结果
 
-### 插件与爬虫
-6. **插件加载**：本地文件走 `SiteManager.load_local`（SourceFileLoader）；http/内联源码走 `SiteManager.load_api` → 恢复版 `app.spider()`（下载到 `~/.video-pc/cache/py`）。插件约定：顶层类名 `Spider`，继承 `base.spider.Spider`，必须实现 `init`。
-7. **兼容层**：`compat.py` 为 3.12+ 补回 `SourceFileLoader.load_module`（3.12 已移除），保证恢复源码零改动。venv 在 `python-backend/.venv`。
-8. **JS 引擎选 quickjs-ng**（PyPI 包名，import 名 `quickjs`；cp310-abi3 轮子兼容 py3.14）。原生回调只能传/收标量 → HTTP 桥返回 JSON 字符串。
-9. **ESM 处理**：quickjs-ng `ctx.module()` 仅支持匿名单参模块，故用 `esm_to_script()` 把 export 收集到 `globalThis.<ns>`、import 注释掉，当普通脚本 eval。多模块 spider 经 `module_resolver.py` 递归抓依赖（上限 40）+ 逐模块 IIFE 隔离执行。
-10. **方法调用桥**：`__VPC_CALL__(method, argsJson)`；异步方法返回 `'__PROMISE__'`，Python 侧 `execute_pending_job()` 泵微任务（上限 10 万次）后 `__VPC_FETCH_RESULT__()` 取结果。
-11. **JsSpider 动态子类**：base Spider 按类隔离单例，多 JS 站点必须 `type(f'JsSpider_{key}', ...)` 各自建类。
-12. **config 热更新协议**：`do=setting&name=config&text=<URL或JSON>` → ConfigManager.load，立即返回 `{code:202}`，后台线程执行，`do=configTask` 查状态（loading/done/error）。热更新必须"先纯构建（_prepare）后一次性热换（_apply）"，禁止先 destroy_all。另提供 `do=loadConfig`、`GET /sites`。
-13. **站点类型支持面**：type=3 Python（http .py / 内联）、type=4 与 type=3+http .js 直链（JS spider）、type=0/1 CMS（苹果 CMS JSON/XML，`cms_spider.py` 纯 HTTP）。api 相对路径按配置 URL urljoin。TVBox jar 型源（api=csp_XXX）与 drpy 源识别后跳过，勿当 Python 源码执行；spider.jar 依赖 Android API，勿尝试 JRE。多仓 config（顶层 `urls`）优先上次成功条目（last_repo.txt，T40），首个 `sites>0` 的条目作主仓；命中后并行补拉其余条目跨仓合并（T44）：lives 按 url 去重（嵌套 channels 展平）、sites 按 key 去重追加，主仓优先只增不删；偏好条目首次失败自动重试一次。
-14. **JS init 双协议**：CatVod 单文件收字符串（`init_protocol='string'`）；TVBox/FongMi 多模块源收对象 `{skey, stype, ext}`（`'fongmi'`）。
+2026-08-10 全量功能测试（已完成）：自动化测试共 **200 项全部通过**——JS 单元 60/60、Python 38/38（smoke 13 + phase3 25）、JS 语法 34 文件 0 错误、真实界面验收 10 个脚本 **102/102** 检查项（内容页/系统页/时间表/推荐/详情卡/我的页/观看统计/Kazumi 布局/分页滚动条/MiSans）。完整功能测试矩阵、自动化明细与需用户实测清单见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 
-### 前端与 UI
-15. **Electron 用 JS 非 TS**：省去构建步骤；后续可迁 TS。
-16. **主 UI 布局**：左侧主导航（首页/搜索/直播/收藏/历史/直链播放/下载/工具面板/设置）+ 右侧视图区；工具面板为源配置/本地文件两页签；公共逻辑在 `js/common.js`，`panels.js` 暴露 `initAuxPanels()` 由 `app.js` 启动时调用一次。设置已拆为侧栏独立视图 view-settings（决策 53）。
-17. **播放源解析**：`vod_play_from` 按 `$$$` 分源、`vod_play_url` 按 `$$$` 对齐、每源内 `#` 分集、集内 `$` 分名址。选集点击走 `do=playerContent` 得 `{url, parse}`。
-18. **播放 IPC 契约**：`window.vpc.playUrl(url, meta)` → 主进程 `vpc:play` 返回 `{ok, reason, anime4k}`；mpv 缺失返回 `{ok:false, reason:'mpv-missing'}`，渲染层提示后走 `<video>` 预览（m3u8 不给内嵌预览，只留复制地址）。
-19. **Esc 派发**：`common.js dispatchEsc()` 先关对话框栈，再自顶向下调用视图 `registerEsc` 处理器；全局仅一处 keydown 监听（`app.js`）。
-20. **弹幕链路已移除**（用户要求）：面板页签/设置项/主进程轮询全删；后端 `/danmaku` 端点与 mpv ASS 基建保留但无人调用。**新增功能勿再引入弹幕。**
-21. **经典脚本全局词法陷阱**：渲染层顶层 `const X` 不会成为 window 属性。跨脚本全局对象一律 `typeof X !== 'undefined'` 判断后直接用标识符，**禁止 window.X 探测**。
+2026-08-10 UI 打磨与性能优化（T65/T66）：列表批量渲染（home/live/records/timeline 由逐条 append 改拼串单次写入）+ 响应式卡片/字号（宽窗放大、窄窗缩小）；JS 语法 34/34、单元 60/60、`acceptance-bugfix.js` 6/6 通过（收藏 25 条分页渲染 + 滚动条隐藏 + 应用启动无本轮相关错误）。
 
-### 文件管理
-22. **本地文件走主进程**：浏览/上传/删除全部 IPC + `file-manager.js`，后端无该组端点；相对路径经 `resolveSafe()` 规范化后必须仍在白名单根内，拒绝 `..`/绝对路径/盘符跳转；根目录持久化 `<userData>/file-manager.json`，未设置默认=下载目录（决策 75）；前端只见相对路径。
-23. **上传实现**：主进程系统对话框选源 + `fs.copyFileSync`（不经渲染层 FormData）。
-24. **本地播放链路**：`vpc:file-push` 校验白名单 + isMedia（视频+音频）后直接 mpv.play。
+2026-08-10 Bug 清理批次真实界面验收（已完成）：临时调试实例 + CDP 实测（`scripts/acceptance-bugfix.js`），**6/6 全部通过**：预置 25 条收藏，「我的 → 我的收藏」首页渲染 20 条、分页器可见、翻页后第 2 页显示剩余 5 条（分页功能实测正常）；`#view-my` 视图 `scrollbar-width:none`（滚动条已隐藏）；「我的」页仅两标签（无最近观看）；无本轮相关文件控制台错误。
 
-### 下载
-25. **下载引擎**：`downloader.js` 惰性 spawn `aria2c --enable-rpc`（随机端口 + secret）；渲染层经 `vpc:dl` 单通道 action 分发；主进程 1s 轮询 tellActive/Waiting/Stopped 聚合推 `vpc:dl-list`，渲染层无状态只渲染。aria2 参数：`--seed-time=0 --max-concurrent-downloads=3 --continue=true --file-allocation=none`（并发数 settings.dlConcurrency，changeGlobalOption 即时生效）。
-26. **aria2 删除语义**：`remove` 只对 active/waiting/paused 有效；stopped 任务需 `removeDownloadResult`（downloader.purge）。
-27. **完成通知链路**：downloader emit completed（gid 去重）→ Notification + `vpc:dl-event` toast；一键播放 `vpc:dl-play` 直接播产出文件（不受白名单限制）。
-28. **下载目录**：默认系统 Downloads，键 `dlDir`；换目录走 `vpc:dl pickDir` → dl.stop()+dl.start(newDir)（引擎重启，任务可续传）；种子档经对话框选文件 → base64 → addTorrent/addMetalink。
-29. **系统代理任务级注入**（决策 79）：代理不能烘焙进 CLI 参数；addUri/addTorrent/addMetalink 时经 `system-proxy.js` 读实时代理写入任务级 options（WinINET 注册表/环境变量，5s TTL）。三通道：aria2 任务级、ffmpeg 子进程 http_proxy、m3u8 探测走 net.fetch。
-30. **m3u8 下载走 ffmpeg 通道**（决策 71）：`hls-downloader.js`，ffmpeg -c copy 拉流合成（AES-128 内嵌 KEY 自动解密，bsf 失败不带 bsf 重试一次）；进度=先抓播放列表估时长、stderr time= 折算；gid 前缀 `hls-`；任务结构 kind:'hls' 与 aria2 对齐。**临时文件名必须保留 .mp4 扩展名**（如 xxx.mp4.incomplete.mp4，ffmpeg 按扩展名推断容器）。
+2026-08-10 返工两项真实界面验收（已完成）：临时调试实例 + CDP 实测（`scripts/acceptance-rework.js`），**10/10 全部通过**：「我的」页仅 观看统计/我的收藏 两标签、无最近观看标签与面板 DOM；时间表卡片点击进入 `#view-bangumi-info` 二级详情视图（渲染 banner 与分集/角色/制作/评论/关联页签），源弹窗未弹出（非弹窗交互），返回键回到时间表；无本轮相关文件控制台错误。
 
-### 推送/设置/解析
-31. **推送链路**：面板手动推送与局域网推送共用主进程 playPushedUrl（mpv + 通知 + `vpc:push-received`）；push-server 绑 0.0.0.0 随机端口 + token，仅收 http(s)，GET `/` 有说明页；非直链页面用 parse-window `captureDirect` 抓媒体请求；后端不处理 do=push。
-32. **设置持久化**：`settings.js` 存 `<userData>/settings.json`，键 camelCase。约定键：lastConfigUrl / playerVolume / customLives / dlDir / configHistory / favorites / history / theme / wallpaper / colorMode / fontSize / textSize / textColor / wallpaperDim / blockedSites / probedSites / playerHotkeys / navCollapsed / playerSpeed / autoNext / resumePos / bgPlay / animEnabled / closeAction / incognito / cacheDir / dlConcurrency / playerCacheMode / playerCacheDir / simulDownload / hlsAdFilter / watchStats / recentWatches / bangumiToken 等。自定义数据键（customLives、lastConfigUrl、favorites、history、dlDir、cacheDir、playerCacheMode、playerCacheDir、configHistory、watchStats、recentWatches、bangumiToken）在 `settings.reset()` 中显式保留。
-33. **配置自动重载**：setting(name=config) 成功后渲染层存 URL 与历史；启动时主进程在 backend ready 后 POST do=setting 自动重载，成功发 `vpc:config-reloaded`，前端 Home/Live 刷新。
-34. **配置重载状态机**（修首屏）：主进程 `configReload = {reloading, url}`，backend ready 进入重载时同步置位，所有收尾路径经 `finishReload(ok, sites)` 复位并发 `vpc:config-reloaded`；渲染层经 `vpc:config-state` IPC 取权威状态，app.js waitConfigDone 双状态轮询。改动启动链路时保持该状态机。
-35. **VIP 解析**（决策 38/33）：parses 来自 config（/sites）。parse=1 全自动起播流程：地址已是媒体直链 → 直接 mpv；否则 type=1 JSON 接口优先直接 fetch（兼容 url/data.url/vurl/play_url 多字段，抓返回里的 Referer/UA 交 mpv，解出 .html 视为失败）→ 失败再 iframe 型隐藏 BrowserWindow（partition 'parse' 独立 session，webRequest.onBeforeRequest 捕获 resourceType=media 或媒体扩展名）→ 再失败 `vpc:capture-direct`（隐藏窗口直开链接抓页面自身播放器请求）。每接口 20s 超时按序尝试。解析窗口 sandbox=true + nodeIntegration=false + contextIsolation=true，用后即 destroy。mpv 经 `--http-header-fields` 注入 Referer。
-36. **缓存统计**：`do=cacheSize` 返回 `{bytes, items}`（KV 目录 + js_local.json + cache/dl）；`do=clearCache` 返回释放字节数；设置页签清理按钮先展示再清理。
-37. **直播 mpv 健壮性**：TXT 源频道行多地址解析为 `fallbackUrls`；起播后 `mpvStartedOk()` 用 core-idle 轮询 8s 判断真实开播，未开播自动切备用线路并推 `vpc:play-retry`，全失败推 `vpc:play-failed`。
-38. **连播统一为渲染层驱动**（决策 70，替代旧队列/接力双方案）：每次只交 mpv 单集（**不传 playlist**），Player._seq 保存 `{site, flag, title, episodes, index}` 上下文；`vpc:player-exit` 附退出进度 `{pos, duration}`；「看完」双判据：剩余 < 8 秒，或 IPC 抢不到进度时 10 秒内收到过 ended 事件；看完且队列有下一集则 play() 递归推进，用户提前关闭则 _seq=null 终止链。教训：IPC 负载嵌套字段必须双端对齐校验（曾误读 payload.playlist 致连播恒单集）。
-39. **播放会话制**（决策 78）：mpv 每次起播分配自增会话号，随 playUrl 返回并附在 exit 事件；渲染层仅处理与当前会话匹配的退出，防切集时旧进程延迟退出误推进、本地/推送播放（noSeq 负号）干扰连播、exit 处理期间又起新播（_playToken 双保险）。断流重连由主进程直接 mpv.play 起新会话，经 `vpc:player-session` 同步，重连集播完仍可续连播；「开播≥15s 且剩余≥8s 的媒体直链」退出不置空 _seq 等待重连。
-40. **断流自动重连**（决策 59）：proc exit 回调趁 IPC 未拆除抢读 time-pos/duration（Promise.race 400ms），剩余 ≥8s 视为断流 → 重播当前集一次（watch-later 自动续位）+ 系统通知；剩余 <8s 是正常播完，开播 <15s 退出是起播失败（另有直播备用线路），均不重试；_stallRetried 每会话一次。
-41. **mpv 播放偏好注入**（决策 47）：续播用 mpv 原生 watch-later（--save-position-on-quit + --watch-later-directory，userData/mpv-watch-later），直播地址 meta.fallbackUrls 存在则 resume=false 不记录；默认倍速 --speed；音轨/字幕语言 --alang/--slang（playerAlang/playerSlang）；偏好变更经 `vpc:update-player-prefs` 下次起播生效。
-42. **mpv 快捷键自定义**（决策 45）：settings.playerHotkeys 步长 → 主进程 writeMpvAssets 生成 userData/mpv-scripts/input.conf + lua 提示脚本；起播经 --input-conf / --scripts-append 加载（scripts-append 不覆盖 mpv 默认 scripts 目录）；生成 input.conf 合并用户全局 input.conf（WIN `%APPDATA%\mpv\input.conf` / POSIX `~/.config/mpv/input.conf`）——`--input-conf` 会取代而非追加默认 input.conf，故必须把用户键位带进生成文件，用户已绑定的键不写入应用段、同键冲突以用户为准；`vpc:update-hotkeys` 修改后重写（下次起播生效）。T8 增强：键位可自定义（playerHotkeys.keys 11 个动作，设置页按键捕获+恢复默认+冲突红标；捕获用捕获阶段监听防全局 Esc 抢发）；动作附中文 show-text 反馈，暂停状态由 lua observe_property 中文提示；补齐逐帧 , . 绑定（--input-conf 取代默认键位后原本丢失）；lua 起播提示随自定义键位动态生成。
-43. **详情页下载**（决策 50）：选集勾选（.ep-check 阻止冒泡）或悬停单集图标；下载前逐集 playerContent 判断 parse，parse=1 走 vpc:parse 解直链（带 Referer）。vpc:dl add 扩展 out/header：out=「片名 - 集名 + URL 扩展名」（非法字符替换 _）；m3u8 切片流 aria2 无法下载单独计数提示；批量串行解析避免隐藏窗口并发冲突。多选集播放复用连播机制（勾选集按序作为 episodes 交 Player.play）。
-44. **选集倒序只翻展示不动下标**（决策 77）：Detail._epDesc 仅翻转渲染顺序，data-idx 始终为原下标，连播/勾选下载不受影响。
-45. **线路记忆 + 失败自动换线**（决策 83）：切线路持久化 `settings.lastSourceMap`（键 `site|vodId`）；`Player.play()` 返回 `{ok, reason}`；失败自动循环尝试下一线路（mpv 缺失不换线），全失败恢复最初线路。
-46. **收藏/历史**（决策 39/81）：条目结构一致（site/vodId/name/pic/remarks/ts），存 settings 各上限 200 最新在前；records.js makeRecordView 工厂共用；历史在 Detail.open 自动写入（隐身模式 incognito 除外），**历史按片名去重合并**（跨源同名合并置顶，保留原显示名）；想看/已看 tag 三态（want/seen/''，normTag 归一，决策 74），详情按钮与收藏卡徽章双通道共写（setFavTag/getFavTag 唯一读写口，决策 66）。
-47. **空源自动探测屏蔽**（决策 41）：首屏就绪后异步探测未探过站点（probedSites 防重复），homeContent 推荐位有内容即过，否则复查首分类；空/错记入 blockedSites 过滤首页下拉（不打断当前选中源，被屏蔽自动切首源），并发 4；仅过滤首页下拉，搜索 SSE 仍全源聚合；源配置「屏蔽源」卡片可恢复重探、查看屏蔽源列表。
-48. **首页/分类渐进加载**（决策 51）：首屏数据一到立即 renderGrid + hideLoading，剩余铺满量后台逐页 _appendGrid 增量追加；_loadToken 令牌防串流（切源/切分类/翻页后旧循环回来先比令牌）；自适应目标 36~120；resize 补拉沿用当前令牌。首页搜索只走当前源自身 searchContent（决策 65），不走聚合 SSE。
-49. **搜索结果分组分页**（决策 80，T6 改版）：每源分组内部统一分页器翻页，每页 30 条（SEARCH_PAGE_SIZE=30，纯前端切片）；来源筛选纯前端 toggle src-group 不重发请求（决策 58）。分类/当前源搜索一页一次请求 + 源+分类 LRU 页缓存；无 pagecount 的源暂报 pg+1、拉到空页修正（短页不当末页）。
-50. **直播源**：config `lives` 三形态（{name,url} 直链 / {group,channels} 嵌套 / proxy://do=live&ext=base64），live.js normalizeLive 统一归一化；频道文本经后端 do=fetchText 拉取（渲染层直 fetch 会被 CORS 拦），支持 txt(#genre#)/m3u；自定义源存 settings.customLives（TVBox 式导入：txt/m3u 地址、粘贴配置 JSON、.json 配置地址，展平嵌套 channels，上限 30，决策 52）；中文域名需 punycode；customLives 增删置 Live._dirty 强制重载（决策 42）。
-51. **换肤**（决策 40/73）：主题色 6 套内置（html[data-color] 覆写 MD3 变量）+ 自定义单基色 HSL 推导浅深两套（html.theme-custom，customColor 与 theme 互斥）；明暗 auto/light/dark 由 common.js applySkin 挂 html.dark 类（废弃 @media）；壁纸 vpc:pick-wallpaper 写 settings.wallpaper，渲染层 toFileUrl 铺 body + --wall-veil 遮罩三档；界面缩放 60~200 写 html.style.zoom，字体大小 80~200 注入临时样式表按基准字号等比（决策 55），change 钳制回写。
-52. **托盘驻留与关闭行为**（决策 46）：closeAction 三态 tray(默认)/exit/ask；托盘图标代码生成 16x16 PNG 免资源；bgPlay 开启时选退出但 mpv 在播也转托盘保播；isQuitting 区分真退出与托盘驻留；恢复默认设置只清偏好保留数据类键后 relaunch。
-53. **缓存位置自定义**（决策 48）：hoststate 统一管理 cache_dir（kv/dl/py），主进程经 python-bridge.extraEnv 注入 VPC_CACHE_DIR，server.py main() 读取后 configure 再 ensure_dirs；换目录需重启后端（端口/令牌变），渲染层 onBackendReady → setBackendInfo 刷新连接信息；旧目录缓存不迁移。
-54. **Anime4K 超分**（决策 60/69/64）：不内置 glsl；download-binaries.js anime4k 从 bloc97/Anime4K 拉 v4.1 Mode A 链 6 个 glsl（仓库按 Restore/Upscale/Experimental-Effects 分子目录，扁平存 vendor/anime4k）；启动 ensureAnime4k 多镜像补齐缺失（raw.githubusercontent → jsdelivr CDN → ghfast.top 代理，镜像返回内容须过大小+头部版权行校验拦错误页）；文件齐全才 buildAnime4kChain 拼链（win 分隔符 ';'）注入 --glsl-shaders，缺文件静默降级；从未设置过开关默认开启（手动关过保持关）；**状态以起播反馈为准**：vpc:play 返回 anime4k 标志，toast 明示「超分已生效」。T8 增强：三档位 anime4kMode（a 均衡 Mode A 链/aa 细节增强 A+A 链/restore 仅修复不升频），所需着色器均在下载清单内无需新增；设置页档位下拉，lua 起播提示附当前档位名。
-55. **ffmpeg 内置化**（决策 72）：m3u8 合成与本地预览图共用；启动 ensureFfmpeg 幂等下载 gyan.dev essentials（约 90MB）→ vendor/ffmpeg，失败静默降级、其次探测 PATH；缩略图 5s 处抓帧缩 480 宽 jpg，md5(路径|mtime|大小) 缓存 userData/local-thumbs，并发 4。
-56. **鼠标侧键导航**（决策 63/67）：视图级两栈 _navStack/_navForward（showView 入栈同顶去重，新跳转清前进链，栈底不弹）；app-command 与 mousedown button 3/4 双通道，400ms 时间戳去重防双跳。
-57. **确认对话框**（决策 54）：全部 confirm 用 common.js confirmDialog（md-dialog 风格，Promise<boolean>，Esc/遮罩=取消）；_confirmResolve 持有待决回调，closeDialog 未决按取消 resolve(false) 防挂死；done 先置空再 closeDialog 防双重 resolve；okText/cancelText 可定制。
-58. **二进制存放与路径适配**（决策 84）：vendor/{mpv,aria2,ffmpeg,anime4k}（.gitignore 忽略）；开发模式 ROOT=`path.join(__dirname,'..','..')`，打包模式 `process.resourcesPath`；`index.js` 统一 `RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT`；python-bridge 打包后启动 PyInstaller exe。
-59. **mpv 二进制来源**：shinchiro/mpv-winbuild-cmake latest release 动态取 tag（官方 mpv 无 Windows 发行）；.7z 用 Windows 内置 tar 解（勿用 unzip）。
-60. **mpv 视频缓冲缓存**（决策 85）：设置 `playerCacheMode`（memory/disk，默认 memory）+ `playerCacheDir`（默认 `<userData>/mpv-cache`）；disk 模式起播注入 `--cache=yes --cache-on-disk=yes --demuxer-cache-dir=<dir>`（**mpv v0.41 目录选项是 `--demuxer-cache-dir`，`--cache-dir` 非法**）。mpv 平铺写 `mpv-cache-<hex>.dat`，默认 `--demuxer-cache-unlink-files=immediate` 播完即删，仅被杀/崩溃时残留；清理只删该文件名模式（防误删自选目录里的无关文件）、逐文件 try/catch 跳过正被占用者。IPC：`vpc:pick-folder`（通用选目录）→ `vpc:set-player-cache(mode, dir)`（切内存/换路径自动清旧目录残留，返回 `cleanedBytes`；未传目录沿用已记忆目录=还原）+ `vpc:clear-player-cache`（只清不换）。两键均入 settings.reset 保留清单。
-61. **封面补拉优先级体系**（决策 86）：优先级 = 点开详情 > 搜索拉页 > 封面补拉。实现四件套（common.js）：① 世代制 `_coverFillGen` + `abortCoverFill()`（Detail.open/源切换时中止）；② IntersectionObserver 只入队可见卡（rootMargin 300px，120s 超时自退）；③ worker 池并发 10（T45 从 5 提档）；④ 补拉经 `detailContent` 取详情封面，`data-cover-missing` 标记 + 防抖不重复入队。屏蔽确认弹窗后补拉恢复入口：首页 load done/refresh、search done、detail render 后。
+2026-08-10 时间表完整复刻真实界面验收（已完成）：临时调试实例（独立 userData 副本清空 `lastConfigUrl`、跳过引导）+ CDP 实测（`scripts/acceptance-timeline.js`），**11/11 全部通过**：季节下拉含「本周（在播）」+ 近 20 年季度选项（≥70 项）按年 optgroup 分组；排序下拉三模式默认热度；收藏过滤行三 chip（无 token 置灰降级）；星期 tab 7 个默认高亮今天；切换历史季度进入 season 模式触发检索；时间表网格渲染本周 14 张卡片、8 个排名角标（真实 Bangumi 数据）；无 timeline.js 相关控制台错误。后端 `TestBangumiSeason` 4 例、前端 `timeline.test.js` 8 例通过；`test:py`/`test:jsunit`/`test:js` 全绿（JS 60/60）。
 
-## 5. Spider 引擎契约（Phase 0 固化结论，勿重做）
+2026-08-10 T54/T55 + YuKi 更名真实界面验收（已完成）：临时调试实例（独立 userData 副本清空 `lastConfigUrl`、跳过引导）+ CDP 实测（`scripts/acceptance-t55.js`），**13/13 全部通过**：软件名 title/关于均为 YuKi；Kazumi 5 卡渲染并入全宽组（grid-column 1/-1）、规则行两行主块/时间可见/去折名/去误导 pointer/清空危险色；本地文件 `#view-tools` 不再应用 viewIn 入场动画且模糊卡保留 blur(8px)，首页对照视图仍有入场动画；无本轮相关文件控制台错误。
 
-- 源码来自 `apk_analysis/extracted/assets/chaquopy/app.imy`（**实为标准 ZIP**）内 Python 3.10 `.pyc` 高保真重建，校验脚本 `../apk_analysis/verify_recovered.py`（TOTAL DIFF: 0）。重建源在 `../apk_analysis/recovered_python/`，已复制进 `python-backend/`：`app.py` / `runner.py` / `trigger.py` **原样未动**；`base/spider.py` 仅替换 3 处 Android API：
-  | # | 方法 | PC 端替换 |
-  |---|---|---|
-  | 1 | `loadModule` 的 getCacheDir | `os.path.join(APP_DATA_DIR, 'cache')` |
-  | 2 | `getProxyUrl` | `http://127.0.0.1:{port}/proxy` |
-  | 3 | `getCache/setCache/delCache` | 本地 `/cache` 端点（expiresAt 过期语义保留） |
-- **app.py 模块级入口**（第一参数 `ru` 为 Runner 实例，返回均为 JSON 字符串）：spider(cache, api) / getDependence / getName / init(ru, extend) / homeContent(ru, filter) / homeVideoContent / categoryContent(ru, tid, pg, filter, extend) / detailContent(ru, array) / searchContent(ru, key, quick, pg='1') / playerContent(ru, flag, id, vipFlags) / liveContent / localProxy / action / destroy。入参 array/vipFlags/extend/param 先 `str2json`。
-- **字节码细节陷阱**：① Spider 单例（`__new__` + `_instance`），`init` 是 abstractmethod 子类必须实现；② `str2json/json2str` 原版未写 self，按类方法语义用，勿"修复"；③ fetch/post 默认 `timeout=5, verify=True, stream=False, allow_redirects=True`，响应强制 utf-8，勿改默认值；④ getCache 过期自动 delCache 返回 None，setCache 把 int/float 转 str、dict/list 转 JSON；⑤ app.spider() 支持 http 地址（递归跟 Location）与内联源码（str.encode 直写）两种 api；⑥ cleanText emoji 正则含字面 emoji，文件必须 UTF-8；⑦ 插件加载用 SourceFileLoader（3.12+ 经 compat.py）。
-- **pip 依赖**（requirements 已锁定）：requests 2.34.2 / lxml 5.3+ / pycryptodome 3.21 / beautifulsoup4 4.15 / pyquery 2.1 / cssselect / cachetools / certifi 等传递依赖；ujson 无 3.14 轮子未收录。
-- **quickjs 宿主须提供 TVBox 全局**：`local`（key+kv 两级 KV，落盘 `~/.video-pc/js_local.json`）、`md5X`、`js2Proxy`、`TextEncoder/TextDecoder`；HTTP 响应同时带 `content` 与 `data` 字段。缺任何一个，jadehh 系源报 "xxx is not defined"。
-- **Spider 返回值契约**：必须返回 dict（app.py 包装层统一 json.dumps）；返回 JSON 字符串会被二次序列化致前端取不到 list。
-- **CMS 适配要点**：XML（type=0）子标签无 vod_ 前缀，`_xml_video` 负责映射 + $$$ 拼多线路；JSON（type=1）vod_id 为整数，接收 ids 的入口一律先 `str(i)` 再 join。
+2026-08-10「我的」页与观看统计真实界面验收（已完成）：临时调试实例（独立 userData 副本预置 favorites/recentWatches/watchStats 测试数据、清空 `lastConfigUrl`）以 `--remote-debugging-port` 启动，经 CDP 实测（`scripts/acceptance-my-watch.js`，零依赖），**24/24 全部通过**：
 
-## 6. 构建与打包
+- 观看统计链：渲染层真实 IPC 链路模拟断流重连，重连后 totalSeconds = 30+增量 30 = 60（非 30+60 双计）、观看次数只 +1、标题计数不重复、链内最大进度 60。
+- ended 会话归属：当前会话 ended 判看完；旧会话延迟 ended 不误判新会话；新会话自身 ended 判看完。
+- 「我的」页三标签切换 active 状态与面板显隐正确；收藏面板渲染/搜索过滤/标签筛选/多选删除（含确认对话框，删除后 settings.favorites 同步减条）/最近观看卡片（来源/时长/进度条）/统计数值（60s→1 分钟、1 次、1 部、7 天柱）。
+- 旧收藏路由重定向到「我的 → 我的收藏」；本轮相关文件无控制台错误（仅一条与本轮无关的 Electron CSP 安全提示）。
 
-```powershell
-# 开发模式：npm install → node scripts\download-binaries.js → npm start
-# 打包：
-npm install                                    # 首次
-python-backend\.venv\Scripts\pip.exe install pyinstaller   # 首次
-npm run build:py                               # → python-dist/video-pc-backend.exe（约 50MB）+ 数据目录 js-engine/spiders/base
-# Windows 安装包（国内需镜像；PowerShell 用 $env:VAR=... 语法）
-$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
-$env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
-$env:CSC_IDENTITY_AUTO_DISCOVERY="false"
-npx electron-builder --win --publish=never --config.directories.output="C:/temp/vpc-dist"
-```
+2026-08-09 本轮 2A 代码验证结果：
 
-- **产物**：`影视 PC Setup 0.1.0.exe`（NSIS，约 175 MB）+ `win-unpacked/`（约 1.7 GB）；macOS/Linux 预留未测。
-- **electron-builder 配置**在 `package.json` 的 `"build"` 字段：extraResources `python-dist/` → `resources/python-backend/`、`vendor/` → `resources/vendor/`；files 排除 `.venv/`、`__pycache__/`、`.pyc`、`tests/`；NSIS 可选安装路径 + 快捷方式 + 中英文。
-- **打包后目录**：`resources/app.asar` + `resources/python-backend/`（video-pc-backend.exe + js-engine/spiders/base）+ `resources/vendor/`（mpv/aria2/ffmpeg/anime4k）。
-- **已知问题**：① Windows Defender 锁文件 → 用外部输出目录 C:/temp/vpc-dist；② winCodeSign macOS dylib 符号链接报错不影响安装器生成；③ 自定义图标已配置（assets/icon.png → .ico，8.7.3 完成）；④ 无代码签名（CSC_LINK/CSC_KEY_PASSWORD 未配）；⑤ PyInstaller 警告 tzdata hidden import not found（非关键）。
+- Python 全量测试：38 项通过（smoke 13、phase3 25、编译检查 29 个 Python 文件）。
+- JavaScript 单元测试：45/45 通过，包含本轮 2A 回归测试。
+- JavaScript 语法检查：33/33 通过。
 
-## 7. 前端修改注意事项与功能清单
+2026-08-09 2A 实际界面验收（已完成）：用临时调试实例（独立 userData 副本清空 `lastConfigUrl`，避免 auto-reload 干扰）以 `--remote-debugging-port` 启动，经 CDP 实测，全部通过：
 
-### 修改注意事项（必读）
-1. **滚动容器**是 `.view` 元素（overflow-y:auto），回顶部用 `$('#view-xxx').scrollTop(0)` 而非 window.scrollTo。
-2. **mpv 全屏状态追踪**：退出时 IPC 查询 fullscreen 不可靠（mpv 先退全屏），必须 observe_property 实时追踪用缓存值。
-3. **异步取消**用 token 模式（_loadToken / _probeToken / _playToken）防过期回调。
-4. **确认操作**用 confirmDialog，不用原生 confirm。
-5. **播放器功能联动文件链**：`mpv-player.js`（核心）→ `index.js`（IPC + 启动初始化）→ `preload.js`（桥接）→ 渲染层 JS + `index.html`（UI）。
-6. **UI 文案统一简体中文**：新增文案勿用繁体/台式用词（视窗→窗口、资料夹→文件夹、档案→文件、侦测→检测、支援→支持、视讯→视频、搜寻→搜索、重新整理→刷新、影片→视频）。
-7. **不要重新引入已回滚功能**：弹幕功能。（2026-08 解禁）视频缓存到硬盘切换与直播源后台探测已应用户要求恢复为正式功能（见 §8.8 T1/T3）；二者历史上曾回滚，重新实现须保证：探测全程静默无阻塞、换缓存路径必须清理旧目录且防误删。
-8. **封面防盗链**：所有 `<img>` 加 `referrerpolicy="no-referrer"`；`//` 开头补 https（common.js normalizePic，非 http(s)/data 协议视为无封面走占位）；兜底图 assets/cover-fallback.svg，onerror=null 防循环。
+- 导航顺序：设置按真实几何排序位于左侧功能项末尾（`order:98`，其余功能项之上），收缩按钮在其下方并贴导航底部（`order:99`/`margin-top:auto`）。
+- 关于分类：设置 → 关于渲染版本号 `0.1.0` 与系统信息（Electron 31.7.7 / Chromium 126 / Node 20.18 / V8 / win32·x64），技术栈与致谢完整。
+- 系统页：无画中画控件、无版本号。
+- 页面无 MiSans 动态注入：仅加载 `ui.css`，无 MiSans `link`/`@font-face`，根字体为系统字体栈。
+- 控制台无错误（仅一条与 2A 无关的 Electron CSP 安全提示）。
+- 验收脚本：`scripts/acceptance-2a.js`（临时脚本，独立实例运行，结束自动清理；不污染真实用户数据）。
 
-### 已实现功能概览（U 批次 U1~U115 摘要，细节见对应决策号）
-- **启动与配置**：首屏配置重载状态机（U1/37）、历史源/直播历史源卡片（U22/75/81）、自动屏蔽空源（U20/41）、缓存大小清理（U7/35）、版本号（U21→U72 移至系统卡）。
-- **首页/分类/搜索**：渐进加载铺满（U4/12/34/64/51）、搜索封面修复（U5/33）、搜索来源筛选（U80/58）、分组分页折叠（决策 80）、首页当前源搜索（U94/65）、历史按片名去重（决策 81）。
-- **详情页**：简介段落化（U3/11/107）、封面放大单例浮层滚轮缩放（U15/58/60）、收藏/想看已看（U16/89/95/106/74/66）、线路记忆+自动换线（决策 83）、选集倒序（U107/77）、多选集播放/下载（U59/91/50/62）。
-- **播放**：mpv 基础控制 lua OSD（U27）、快捷键自定义（U32/45）、全屏倍速延续（FEATURES#3，observe_property）、记忆播放（U44/47）、自动连播开关（U45）、默认倍速/语言偏好（U48/104）、断流自动重连（U86/59）、连播重写渲染层驱动（U106/70）、会话制防竞态（U109⑦/78）、Anime4K 超分（U85/93/99/60/69/64）、mpv 本地配置兼容（scripts-append + input.conf 合并用户键位，T2）、Anime4K 多镜像下载加固（T2）、视频缓冲缓存内存/硬盘切换（T3/决策85）。
-- **直播**：mpv 健康检测备用线路（U2/36）、TVBox 式导入（U65/52）、频道可用性探测（2026-08 起改静默后台探测，见 §8.8 T1）、IDN punycode（U36）。
-- **下载**：并发数设置（U42）、系统代理感知（U110/79）、m3u8 ffmpeg 合成（U102/103/71/72）、合成与删除修复（U111）、删除失败下载清理产物（U112）、打开下载目录（U74）、设置归位（U66/53）。
-- **收藏/历史**：视图工厂共用（U16/17/39）、搜索+标签（U89/61）、多选删除（U63）、编辑标题（U41/57）、源标识徽章化（U29/69/78/57）、跨源去重（决策 81）。
-- **外观**：主题色/自定义色（U19/101/73）、明暗/缩放/字号数值化（U26/35/71/55）、壁纸遮罩（U19/76）、字体颜色大小（U31）、动画开关（U46/39）、弹窗 flex 居中修复（U113/54）、隐藏滚动条（U62）、4K 自适应（U56）、圆角统一（U52/54）、设置布局（U53/87/114）、占位封面资产（U51/68/56）、UI 清单式优化（T4：工具栏控件对齐 / danger 按钮 / 焦点轮廓 / 字体间距 hover 统一）。
-- **系统**：托盘驻留/后台播放（U43/46）、隐身模式（U47）、恢复默认（U50）、缓存目录自定义（U49/48）、资产状态卡（决策 82）、mpv 自定义路径（FEATURES#6）、鼠标侧键导航（U92/97/63/67）、本地文件卡片网格预览图分页（U105/114/115/112）、直链播放视图（U18/37）、侧栏收缩（U38）、回到顶部（U40）、自定义应用图标（8.7.3）。
-- **T9~T20 批次**（细节见 §8.8 表）：边下边播开关（T9）、dlTimer 空闲自停防泄漏（T10）、按钮去透明化（T11/T16）、设置二级菜单+字号 6 档（T12/T17）、收藏/历史工具条对齐首页（T13）、封面淡入防闪烁（T14）、下载页卡片化+总网速（T15）、侧栏去 brand（T18）、详情页全选栏上移+集数胶囊+倒序紧邻（T19）、文案精简（T20）。
-- **T21~T35 批次**（细节见 §8.8 表）：倒序按钮归位+收藏按钮间距（T21）、动画改下拉筛选框（T22）、snackbar 跳移修复（T23）、资产→扩展改名+系统置底（T24）、配置重载后屏蔽源筛选修复（T25/_probeToken）、外观卡布局统一（T26）、缓存两卡等高（T27）、直链改名+本地文件独立板块（T28）、源配置迁入设置一级菜单（T29）、动画体验整体优化 M3 loading/退场/错峰入场（T30）、设置页非全屏适配+性能+封面 img 收口 vodCoverImg（T31）、背景区按钮重排（T32）、删除类二次确认补全（T33）、直播频道分页（T34）、直播可用性本地缓存 liveProbeCache（T35）。
-- **T36~T39 批次**（细节见 §8.8 表）：扩展卡并入全宽组+搜索每源多页拉取+条数全站对齐（T36）、「自动」分页上限收 24+新增 20 条选项（T37）、分页体系定稿：收藏/历史固定 20 条、搜索全部视图限 20 条点来源进单源翻页、后端拉全部页、「自动铺满」模式移除（T38）、设置卡宽度归组+每页条数拆四项独立设置 pageSizeOf(key)+直播铺满一屏 liveFitPageSize+搜索来源筛选 bug（T39）。
-- **T40 批次**：屏蔽逻辑改逐分类探测（任一分类有资源即不屏蔽，此前只查首个分类会误屏蔽）+ 屏蔽列表弹窗去滚动条；收藏多选拆删除/标记想看/标记已看三操作并删清空按钮，历史多选移除全选；下载新建空输入给反馈；本地文件刷新内容无变化不重渲防闪烁；每页影片数量去注释改两列网格布局（非全屏不再挤行）；移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补二次确认；直播源消失根治：多仓配置载入优先上次成功条目（last_repo.txt 跨重启持久化）防不同次命中不同仓致 lives 漂移。
-- **T41 批次**：横屏封面也算有封面：coverFadeIn 检出横图加 landscape 类，卡片改 object-fit:contain 完整显示（此前固定竖版框裁中间细条看似没封面）；修复搜索进行中点单源筛选后往下滑看到其他源影片（后到 SSE 组未按 _curSrc 隐藏）；修复壁纸遮罩选项与描述相反（low/high 的 veil 数值写反互换）；屏蔽源弹窗恢复 max-height:50vh 滚轮滚动。
-- **T42 批次**：封面补拉：列表无 vod_pic 但详情有的卡片，后台逐个 detailContent 补封面（fillMissingCovers 并发 3/每次渲染上限 24，卡片标 data-cover-missing，vodCard 增 data-source，绑定加载令牌切页中止）；屏蔽源弹窗保留滚轮滑动但隐藏滚动条。
-- **T43 批次**：搜索中点详情转圈久修复（优先级划分：点开详情 > 搜索拉页 > 封面补拉）：Detail.open 先 abortCoverFill 中止后台补拉让路（根因：同一 JS 源共享 QuickJS 上下文，JsEngine.call 持锁串行，详情排在补拉/拉页后面）；详情就绪后恢复补拉；搜索流式期间暂缓补拉待 done 后统一补；封面补拉改只补当前屏幕可见卡片（IntersectionObserver 上下预热 300px），并发改 5。
-- **T44 批次**：直播源消失/视频源变少根治（多仓跨条目合并）：根因是偏好仓 supermeguo18（6 个直播源）偶发超时，回退仓 bizhangjie🐶1 只有 1 条无效 lives（无 url）且站点 key 不同触发重新探测屏蔽。修复：多仓命中主条目后并行补拉其余条目，lives 按 url 去重合并（嵌套 channels 展平、无 url 丢弃），sites 按 key 去重合并（主条目优先，只增不删）；偏好条目首次失败自动重试一次防偶发超时仓漂移。
-- **T45 批次**：封面补拉并发 5→10（_coverFillPump，可见卡才入队+详情让路机制不变，提速不阻塞用户操作）；文档整理：§7 功能清单 T9~T39 流水账压缩为三行摘要（细节统一查 §8.8 表，消除双份维护），决策 13 同步 T44 多仓合并机制，TOC 锚点行号重新校准。
-- **T46 批次**：Kazumi 规则系统补全——安装/更新时间追踪（installed_at/updated_at 持久化）、有效性检测（后台 4 并发搜索测试关键词标记 valid/invalid/captcha，列表徽标）、批量更新（后台 4 并发商店检查+版本比较+更新，保留安装时间）。（细节见 §8.8 表）
-- **T47 批次**：下载与播放增强——下载记录持久化（dl-records.json 跨重启恢复，删除/清空同步）、mpv 截图（快捷键 s 截图存图片/video-pc，原生 s 键与 IPC 双通道，设置页打开截图目录）。（细节见 §8.8 表）
-- **T48 批次**：「我的」页面——观看统计（累计时长/次数/部数 + 近 7 天条形图）与最近观看（卡片点击回详情），埋点在 mpv 退出时累计。（细节见 §8.8 表）
-- **T49 批次**：爬虫健壮性——Cookie 持久化（解析会话 Cookie 落盘，规则引擎自动带上）、视频源解析池（3 槽位独立 partition 并发解析）、HLS 广告过滤（m3u8 下载前剔除广告分段，设置开关）。（细节见 §8.8 表）
-- **T50 批次**：视频流提取三机制 + 组件测试 + 旧解析器 + MiSans 字体——webRequest 拦截 + JS 轮询 video 元素 + legacy iframe 监听；node --test 27 个 JS 单测；useLegacyParser 贯通；MiSans 内置子集化字体（download-binaries misans，未就绪回退系统字体）。（细节见 §8.8 表）
-- **T51 批次**：异步会话 + 关于页——AsyncSingleFlight/AsyncSerialQueue 并发控制（接入 captureDirect 去重，7 例单测）；独立「关于」视图（标识/版本/技术栈/致谢/系统信息）。（细节见 §8.8 表）
-- **T52 批次**：Bangumi 收藏同步 + 域名镜像迁移——bgm.tv 切 bangumi.lol 镜像；用户收藏同步（token 管理/测试连接/我的收藏/详情弹窗追番）；8 例单测。（细节见 §8.8 表）
+此前的临时调试实例因浏览器控制连接中断未计为通过；本轮已重新启动独立实例完成实测。
 
-## 8. 已知坑位（踩过的，别再踩）
+## 4.1 2026-08-09 用户任务整理与执行状态
 
-- PowerShell 不支持 `&&`，用 `;`；中文输出经 `Out-File` 易乱码，脚本输出用 ASCII。
-- `SourceFileLoader.load_module()` 3.12+ 不存在 → 必须经 `compat.py`（server.py 已 import）。
-- lxml 6.1.1 支持 py3.14；测试用 python 必须在 `python-backend\.venv`（系统 python 无 fastapi/pytest）。
-- quickjs-ng：`add_callable` 只能收/返标量，返回 dict 报错 → 一律 JSON 字符串桥接；`ctx.get('obj')` 返回 Object 无属性访问 → 方法调用走 eval/`__VPC_CALL__`；JS spider 无 destroy 方法打 "js destroy error" 日志属正常。
-- `js-engine` 目录名含连字符非合法包名 → sys.path 注入后 `from quickjs_host import`。
-- 多模块 ESM spider：module_resolver 上限 40 模块；新增 `export class` 形态需在 `esm_transform.py` 补规则，兜底 `_RE_EXPORT_RESIDUAL` 清除残留 export 前缀。
-- config 异步任务：同步阻塞会卡住 /action 分钟级（多仓扫描），前端 fetch 加 30s 超时兜底。
-- 启动自动重载两个竞态：① READY 行早于 uvicorn 监听，收到 READY 立即 POST 会 connection refused → 先轮询 /health；② `vpc:config-reloaded` 可能早于渲染层监听注册丢失 → app.js bootstrap 另加 configTask 轮询兜底。
-- mpv 未开始播放（core-idle=true）时 get_property 报 "property available"，判播放状态用 core-idle 轮询而非 time-pos。
-- mpv `--input-conf` 是取代而非追加默认 input.conf → 应用自定义 input.conf 必须合并用户全局键位（writeMpvAssets），否则用户自定义快捷键在起播时静默失效。
-- mpv v0.41 硬盘缓存目录选项是 `--demuxer-cache-dir`（传 `--cache-dir` 会报 "option not found" 直接退出）；缓存文件平铺为 `mpv-cache-<hex>.dat`，Windows 下 mpv 以共享删除方式打开（播放中可删，但空间延迟到句柄关闭才释放），默认 `--demuxer-cache-unlink-files=immediate` 播完即删——清理目录按该文件名模式匹配（防误删用户自选目录里的无关文件），逐文件 try/catch 跳过占用。
-- Google Storage 样片本机不可达，demo 样片用 media.w3.org 与 vjs.zencdn.net。
-- Grep 输出的缩进不可信（可能去掉行首空格），SearchReplace 前先 Read 目标行段。
-- Node EventEmitter：`emit('error')` 无监听器抛 ERR_UNHANDLED_ERROR，自定义类须在构造器兜底 noop 监听（downloader.js 已做）。
-- aria2 `--continue=true` 要求服务器支持 Range；测试服务器不返 206 报 "No URI available."；`writeHead` 头值 undefined 直接报错。
-- Electron：最后一个窗口 destroy 触发 window-all-closed 默认退出；无界面测试脚本须 `app.on('window-all-closed', e => e.preventDefault())`。
-- Chromium 启动 `WSALookupServiceBegin failed with: 10108` 为良性日志。
-- session webRequest 每 session 仅一份且全局生效 → 解析窗口用独立 partition，结束 onBeforeRequest(null) 清理。
-- mpv 不能直接播 HTML 页面，推送非直链走 captureDirect 抓媒体请求，抓不到返 resolve-failed。
-- 多仓条目托管于 raw.githubusercontent / jsdelivr，网络抖动频繁（偶发超时/404）：T44 已用「偏好条目失败重试一次 + 跨条目合并」兼顾，新增多仓功能勿假设单条目必达；Windows 控制台 GBK 无法打印条目名 emoji（🈲），脚本输出前 `.encode('ascii','replace')`。
+### 已完成（本轮已写入代码并通过 JavaScript 验证）
 
-## 8.7 待完成
+- [x] 修复统一封面失败兜底：封面原图加载失败切换占位图后同步显示，避免因 `opacity:0` 看起来空白。
+- [x] 修复搜索来源提示固定显示 20 条的问题，改为使用当前搜索分页设置值。
+- [x] 增加直播分页设置项 `pageSizeLive`，接入设置页回填、保存和直播页分页计算。
+- [x] 下载页增加“打开下载目录”按钮，复用既有下载目录 IPC，并提供失败提示。
+- [x] 删除左侧独立“收藏”导航入口，开始将收藏与最近观看迁移到“我的”页面内部标签结构。
+- [x] 完成“我的”页面内部三标签（观看统计/我的收藏/最近观看）的数据渲染与收藏操作接入：`my.js` 复用 `records.js` 的 `makeRecordView` 工厂（新增容器选择器参数）接入 `#my-panel-favorites`，支持搜索、标签筛选、分页、多选删除、批量标记想看/已看；`app.js` 旧收藏路由重定向到“我的 → 我的收藏”；`detail.js` 收藏提示改为“我的 → 我的收藏”。
+- [x] 修复观看统计链路：`ended` 事件携带会话号并按会话匹配“看完”判定，起播时重置上一集 ended 时间戳；观看统计按观看链去重，断流重连复用旧链元信息、退出只补进度增量且不重复计次数/部数。
+- [x] 已运行 `npm run test:js`：33 个 JavaScript 文件语法检查通过。
+- [x] 已运行 `npm run test:jsunit`：52/52 个 JavaScript 单元测试通过（含新增的观看链去重、ended 会话归属、`mpv end-file eof` 会话测试）。
+- [x] 2026-08-10「我的」页与观看统计真实界面验收：临时调试实例（独立 userData 副本预置收藏/最近观看/统计测试数据，清空 `lastConfigUrl`）+ CDP 实测，24 项全部通过，详见 §7。验收脚本 `scripts/acceptance-my-watch.js`（临时脚本，独立实例运行，结束自动清理，不污染真实用户数据）。
 
-- [ ] 8.7.1 macOS / Linux 平台实际打包测试
-- [ ] 8.7.2 安装后首次启动验证（冷启动时间、资源路径、后端拉取）
-- [x] 8.7.3 自定义应用图标（assets/icon.png 已配置并嵌入 Windows 安装器）
-- [ ] 8.7.4 electron-updater 自动更新（可选，GitHub Releases）
+### 2026-08-11 首页空分类隐藏加固（T60 续）
 
-## 8.8 进行中任务批次（T1~T52，2026-08）
+- [x] 空分类结果持久化：`Home._emptyCls` 按 site 落盘到 `localStorage['vpc_home_empty_classes']`（`{ site: { ts, empty, ok } }`，兼容旧数组格式），`init()` 时载入——再次载入该源/重启后首屏即隐藏已知空分类，无「先闪现再隐藏」；源集合变更时同步清空持久化。
+- [x] 探测不丢进度：结果按 site 键隔离记录，不随 token/换源丢弃——中断/换源不影响分类，任一轮完整探测即全部分类；`unclassified===0`（全部分类确认）才标记 `_clsProbed[site]`，出错留待下次载入重试且只探测未知分类；`_clsBusy[site]` 防并发重复探测。
+- [x] **全源探测**：新增 `_probeAllClasses()` 后台扫描——为所有未探测分类的活跃源补齐类别空态探测（站点级并发 2、分类级并发 6），切换任意源即可直接过滤空分类；数据新鲜（`EMPTY_CLS_TTL` 24h）的源跳过不重复探测，过期/缺失才补探。
+- [x] `renderClass` 激活分类判断做 `String(type_id)` 归一化，防数字型 type_id 误隐藏激活分类；曾判空分类恢复内容后自动取消隐藏并重渲。
+- [x] 测试与验收：`tests/js/home-probe.test.js` 19 例（分类/门控/中断不丢进度/换源不重渲/出错重试/恢复显示/持久化往返+旧格式兼容+新鲜/过期/全源扫描/过滤）；`scripts/acceptance-empty-class.js` 6/6 PASS（内置离线 demo 源）；真实源诊断（`scripts/diag-real-app.js`，用户真实多仓配置）7/7 PASS——后台扫描自动探测 ≥5 个未选中源、量子资源（电影资讯/新闻资讯/娱乐新闻/演员空分类消失）+ 新浪资源 + 豆瓣资源探测完成且空分类全部隐藏、持久化多源落盘、无 home.js 控制台错误。
 
-| 批次 | 任务 | 状态 |
-|---|---|---|
-| T1 | 直播静默探测与自动刷新（HEAD→GET 回退防误杀）：已实现静默分批探测 + HEAD→GET 回退 | 已完成 |
-| T2 | mpv 本地配置兼容（scripts-append + input.conf 合并）+ Anime4K 多镜像下载加固 | 已完成 |
-| T3 | 视频缓冲缓存设置（内存默认/硬盘 + 路径选择/还原/换路径清缓存） | 已完成 |
-| T4 | UI 按钮/组件/字体布局检查清单式优化：工具栏 select/input/btn 高度对齐 40px + gap 10px；新增 .md-btn-danger-text 并应用到删除/清空/恢复默认等按钮；#live-status 右对齐样式移入 CSS；全局字号 14px + tip-line 12px + dark 资产状态色对比；:focus-visible 轮廓 2px/1px；pill 间距统一 6px；输入框/下载项/文件行补 hover | 已完成 |
-| T5 | Kazumi XPath 规则引擎适配（独立排期，待用户确认） | 待确认 |
-| T6 | 翻页架构重设计：废除分类"自适应铺满"连拉多页，改一页一次请求 + 每页条数限制（设置项 listPageSize 自动/24/36/60/120）；统一分页器 renderPagerBox（页码±2+首尾省略号+跳转输入）；按 源+分类 LRU 页缓存（32 分类×10 页，命中即显+后台静默刷新，切源清理）；当前源搜索真分页；聚合搜索组内翻页替代展开全部；收藏/历史客户端分页 | 已完成 |
-| T7 | UI 布局与说明系统重设计：ⓘ 信息点展开组件（.info-tip/.info-dot 全局委托切换，10 处长说明收入 info-detail，短说明保持内联）；设置页卡片网格显式列数响应式（默认 2 列/≤760px 单列/≥1500px 3 列）；设置页 tip-line 字号层级 13px；本地文件卡说明并入信息点 | 已完成 |
-| T8 | mpv 播放器设置增强：键位自定义（11 动作按键捕获 UI + 恢复默认键位 + 冲突红标，存 playerHotkeys.keys 写 input.conf）、Anime4K 三档位（均衡 Mode A/细节 A+A/仅修复，anime4kMode）、中文化（窗口标题模板 video-pc · 片名、--osd-font 微软雅黑、动作中文 show-text 反馈、暂停中文 OSD、补齐逐帧键位） | 已完成 |
-| T9 | 边下边播：设置开关 simulDownload（默认关）；起播成功后静默追加下载——m3u8 走 hls 合成通道、其余走 aria2，任务名「片名·集名」去非法字符；失败静默跳过不影响播放；返回 r.simulDl 由渲染层 toast 提示 | 已完成 |
-| T10 | 内存泄漏审计与优化：渲染层 11 处监听器均有 _inited/单例守卫无泄漏；主进程 dlTimer 1s 轮询改空闲自停（aria2 无 active/waiting/paused 且 hls 无 active 时 clearInterval），启动即推一次列表 | 已完成 |
-| T11 | 按钮去透明化：下载页删除/继续/清除、工具面板源配置/本地文件按钮改 md-btn-tonal 不透明底；下载空态引导文案删除（空列表留白） | 已完成 |
-| T12 | 设置二级菜单：settings-wrap 改左侧导航（外观/播放与快捷键/下载/缓存/系统/资产，settingsCat 持久化）+ 内容区按 data-setcat 分类显隐；switch/tip 文案短语化、长说明转 title 悬停提示；字体大小/界面缩放改 6 档下拉（80/90/100/110/125/150，snapSizeTier 吸附旧数值） | 已完成 |
-| T13 | 收藏/历史工具条对齐首页：搜索框并入顶部 view-toolbar（与首页 home-search 同规格 40px 高/≤300px 宽/胶囊圆角），按钮靠右；收藏标签筛选行保留 | 已完成 |
-| T14 | 封面刷新闪烁优化：卡片/详情封面 img 初始透明，加载完成经 coverFadeIn 加 loaded 淡入（0.25s），加载期间由占位底色托底，兼容缓存命中 complete 直加 | 已完成 |
-| T15 | 下载页仿直链播放卡片样式（标题+说明+输入行）+ 总网速显示（dl-speed 汇总 active 任务速度，render 时刷新） | 已完成 |
-| T16 | 透明按钮全量去透明化：新增 .md-btn-danger-tonal（error-container 底）替换全部 md-btn-danger-text（清空收藏/历史、删除勾选×2、恢复默认）；弹窗 md-dialog-btn 补 surface 底色 | 已完成 |
-| T17 | 设置页再整理：一级导航加大（15px/200px 列）；字体颜色移至主题色下；壁纸区改名「背景」且选图/移除按钮前置遮罩后置；界面动画改普通复选框（.set-check，T22 再改下拉筛选框）；快捷键（步长+键位）拆独立一级板块 hotkey；卡片内 select 统一 240px 宽 | 已完成 |
-| T18 | 侧栏移除「影视 PC」brand 文字（首页本就首位，同步清理 .brand 相关 CSS） | 已完成 |
-| T19 | 详情页选集区重排：全选/勾选操作栏移至视频源按钮下方；共 X 集改胶囊框；倒序按钮移至集数旁紧邻 | 已完成 |
-| T20 | 举一反三文案精简：直链播放去 mpv 术语、本地文件说明短语化 | 已完成 |
-| T21 | 详情页倒序按钮移至播放勾选集左侧（同 md-btn-tonal/sm 样式大小一致）；收藏/想看/已看按钮行改 flex gap 12px 加大间距 | 已完成 |
-| T22 | 界面动画改下拉筛选框（开启/关闭，与遮罩下拉同款；animEnabled 持久化不变） | 已完成 |
-| T23 | 修复设置 toast 弹出后向右跳移：snackbar 入场动画 viewIn 末态 transform:none 覆盖居中 translateX(-50%)，改专用 snackIn keyframes 末态保留居中位移 | 已完成 |
-| T24 | 设置一级菜单「资产」改「扩展」（卡片标题扩展状态/安装方式）；系统移至导航最底；mpv 状态行长路径超格修复（路径只进悬停 title，hint 仅显示已就绪 + asset-hint 省略号保护） | 已完成 |
-| T25 | 启动时屏蔽源未筛选修复：配置自动重载后源 key 集变化，旧 probedSites/blockedSites 不再匹配致新源不被过滤；loadSites 检测 key 集变化则重置记录并重新探测，_probeToken 世代校验使进行中的旧探测写入作废 | 已完成 |
-| T26 | 外观卡布局/字号统一：界面动画原用无样式定义的 .settings-item 致裸排错位，统一改 tip-line(13px)+控件模式与卡内其余项一致 | 已完成 |
-| T27 | 缓存页两卡等高：.settings-grid .tool-card[data-setcat=cache] 加 align-self:stretch，同排时框一样大 | 已完成 |
-| T28 | 侧栏「直链播放」改「直链」；「工具面板」改「本地文件」独立板块：删顶部页签（含本地文件切换按钮）直显本地文件卡，showToolPanel 删改 ensureLocalPanel 首次进入懒加载（app.js showView tools 挂钩）；tools-tabs/set-check 死 CSS 清理 | 已完成 |
-| T29 | 源配置迁入设置一级菜单「源设置」（导航位置：扩展与系统之间）：载入视频源/视频历史源/直播源/直播历史源/屏蔽源五卡整体迁入 settings-grid（data-setcat=source，控件 id 与卡片内样式不变，绑定维持原位）；home/player/live 引导文案同步改「设置→源设置」 | 已完成 |
-| T30 | 动画体验整体优化：loading 升级 M3 变弧 spinner（md-dash 弧长伸缩）+ scrim 淡入/关闭淡出 + 「载入中…」文案；warnToast 退场淡出（snackOut）；弹窗退场动画（dlg-out 淡出缩小 150ms 延迟隐藏，重开清 timer 防误藏 + pointer-events 禁点）；vod-card 前 10 张错峰入场（30ms/张）；view/card/dialog/snackbar easing 统一 cubic-bezier(.2,.7,.3,1)；panels.js 12 处 loadingToast 直引改 show/hideLoading 统一淡出；no-anim 开关自动兼容（过渡被禁不影响隐藏时机） | 已完成 |
-| T31 | 设置页非全屏适配 + 性能 + 可维护性：①适配：settings-grid 单列断点 760→900（与 settings-wrap 导航横排断点对齐）；外观/播放/快捷键/源设置高内容分类 grid-column 横跨全宽限 max-width:880px，下载/扩展/系统短卡限宽 680px，全屏 3 列时全宽分类 span 2 保持层级一致 ②性能：封面 img 增 decoding=async（异步解码降主线程卡顿）；下载列表渲染改指纹增量（gid 序列不变时只换变化条目，全同直接跳过，避免每秒全量 DOM 重建） ③可维护性：vodPlaceholder/coverFadeIn 从 home.js 迁至 common.js，新增 vodCoverImg 统一生成封面标签（lazy/async/no-referrer/淡入/兜底），home/records/detail 三处手写 img 收口（detail 缺 lazy/decoding 的参数漂移根治）；ui.css 文件头增板块索引注释（关键词定位不带行号防漂移） | 已完成 |
-| T32 | 外观设置背景区重排：遮罩强度下拉置顶，选择本地图片/移除背景两按钮移至其下方单独一行（wall-row 拆两行） | 已完成 |
-| T33 | 删除类操作二次确认补全：下载页「清除已完成」（clearDone）、源设置历史源✕（removeConfigHistory）、直播源✕（removeLiveSource）三处补 confirmDialog；其余删除入口（收藏/历史单条+多选+清空、下载单删+清失败、本地文件/文件夹、缓存清理、恢复默认）盘点确认已有确认 | 已完成 |
-| T34 | 直播频道列表分页：新增 #live-pager 容器 + renderPagerBox（同首页/收藏历史规格）；每页频道数 = 每页影片数×3（频道行紧凑，至少 60），切分组/切源回第一页，探测过滤后当前页自动 clamp；索引保留完整 channels 位置（点击播放不受分页影响）；搜索页（源内 30 条/页）与收藏/历史（listPageSize 客户端分页）盘点确认已有分页无需改 | 已完成 |
-| T35 | 直播可用性本地缓存：探测结果按源 URL 存 settings.liveProbeCache（{ts, dead:[不可用频道 url]}，最多 20 个源超出丢最旧）；进页/切源默认按缓存过滤不再探测（状态栏提示「已按缓存结果过滤 N 个 · 点刷新重新检测」，5s 自隐）；仅手动点「刷新」重新全量探测并更新缓存；首次无缓存仍探测一次建缓存；探测异常不写缓存保留旧值 | 已完成 |
-| T36 | 用户反馈三连修复：①扩展状态卡非全屏半宽内容挤窄 → 从短卡限宽组移入全宽组（grid-column:1/-1 限 880px，与外观/播放/快捷键/源设置同规格） ②搜索每源只见 20 条：根因非前端分页而是 CMS 源搜索接口服务端分页（limit=20）且聚合搜索只拉 pg=1 → server.py 新增 _search_source_pages 每源拉前 3 页合并去重（遇空页/短页即停，异常不抛），aggregate_search 与 SSE /search/stream 均接入，前端每源最多可见 60 条并正常翻页 ③每页条数全站对齐首页：新增 common.js adaptivePageSize（首页 _adaptiveTarget 收口于此），收藏/历史 render、搜索 run/_renderGrpPage、直播 _pageSize 的「自动」回退从固定 36 改自适应估算；搜索页每页条数从固定 30 改为跟随「每页影片数量」设置 | 已完成 |
-| T37 | 收藏/历史超过 20 几条不出分页器修复：根因是「自动」模式 adaptivePageSize 按大窗口估算 36~120，记录数少于估算值时 pagecount=1 不渲染分页器 → 收藏/历史 render 与搜索 run 的「自动」回退改 adaptivePageSize(24) 上限 24（超 24 条即分页）；设置「每页影片数量」新增「20 条」选项（listPageSize 白名单同步加 20）；首页分类保持铺满窗口自适应不变（源数据量大本来就有分页器） | 已完成 |
-| T38 | 分页体系定稿（用户四连要求）：①收藏/历史移除「自动」模式，固定每页 20 条（RECORDS_PAGE_SIZE）超过即出底部分页器 ②搜索后端取消最大页数限制：_search_source_pages 从拉前 3 页改拉全部页（空页/短页/整页无新增即停防伪分页死循环，max_pages=50 仅作防护上限），aggregate_search 超时 15s→60s、SSE as_completed 30s→120s 且超时异常仍发 done 事件防前端挂死 ③搜索页「全部」视图每组限显前 20 条不出分页器（附提示行），点来源标签进单源视图才启用分页器翻看全部（_paintGrp 按 _curSrc 判 focused） ④「自动（铺满窗口）」模式整体移除：删 common.js adaptivePageSize，新增 pageSizeSync 同步版，listPageSize 空/非法默认 20，首页 _pageSize/_adaptiveTarget 与直播 _pageSize 改直取设置值，设置下拉移除自动选项文案改「每页影片数量（首页/直播）」 | 已完成 |
-| T39 | 设置宽度 + 分页面条数 + 搜索筛选 bug（用户四连）：①ui.css 下载/系统卡从 680px 限宽组移入全宽组（非全屏 grid-column:1/-1 限 880px 与扩展状态同宽，全屏 ≥1500px span 2 与扩展同宽） ②每页条数拆四项独立设置：common.js listPageSize/pageSizeSync 改 pageSizeOf(key)（pageSizeHome/pageSizeSearch/pageSizeFavorites/pageSizeHistory，按 key 缓存，首页回退旧键 listPageSize 兼容迁移），index.html 单下拉改四下拉（首页/搜索/收藏/历史各 20~120 五档），panels.js load/change 同步四项，home _pageSize/_adaptiveTarget（改 async + await）、search run 恢复 _size、records 工厂加 pageSizeKey 参数（Favorites/HistoryView 各自传键） ③直播改铺满一屏后翻页：live.js 新增 liveFitPageSize（#live-list 宽÷230 列数 × 可见高÷55 行数）替代原设置×3 ④修复搜索页点来源标签不筛选：根因 jQuery .each(function) 内 this 是 DOM 元素却被 .bind(this) 覆盖成 Search 对象 → 改闭包变量 cur | 已完成 |
-| T40 | 用户反馈十三连：①屏蔽源查看弹窗去滚动条（blocked_list 删 max-height/overflow 内联样式） ②屏蔽逻辑改逐分类探测：home.js _probeSites 推荐位空后逐分类 categoryContent，任一分类有资源即不屏蔽（此前只查首个分类），单分类出错跳过继续 ③收藏多选拆三操作：工具栏新增标记想看/标记已看按钮（tagChecked 批量写 tag），入口按钮改「多选」，删「清空收藏」按钮（清空仅历史保留） ④历史多选删全选（checkall 仅 withTags 视图绑定/同步） ⑤下载新建空输入给 toast 反馈并聚焦输入框 ⑥本地文件刷新防闪烁：listFile 加 silent 参数，目录指纹（路径+条目 dir/名/时间）不变跳过重渲提示「目录内容无变化」 ⑦每页影片数量去注释文案 ⑧非全屏布局优化：四项改 .pagesize-grid 两列网格（标签定宽右对齐 + 下拉等宽 110px，≤700px 折单列） ⑨移除背景/恢复主题/恢复字体颜色/恢复快捷键/清理缓存五处补 confirmDialog（panels.js global 补声明） ⑩直播源消失根治：config.py 多仓载入优先上次成功条目（last_repo_name 存 data_dir/last_repo.txt 跨重启持久化，sorted 置顶），/sites state 增 repo 字段供排查 | 已完成 |
-| T41 | 用户反馈四连：①横屏封面也算有封面：coverFadeIn 加载完成后检出 naturalWidth>naturalHeight 加 landscape 类，ui.css .vod-cover img.landscape 改 object-fit:contain 完整显示（此前固定 160/220 竖版框 + cover 裁中间细条，看似没封面） ②修复搜索进行中点单源筛选后往下滑看到其他源影片：search.js renderGroup 末尾按 _curSrc 隐藏后到的非目标源组（此前仅切换时对存量组 toggle，SSE 后到组直接按「全部」模式追加） ③修复壁纸遮罩选项与描述相反：ui.css data-dim low/high 的 --wall-veil 数值互换（低=62% 背景更醒目，高=90% 内容更清晰） ④屏蔽源弹窗恢复滚轮滚动：blocked_list 加回 max-height:50vh;overflow-y:auto（T40 曾整体移除） | 已完成 |
-| T42 | 用户反馈二连：①封面补拉：common.js 新增 fillMissingCovers（找容器内 data-cover-missing 占位图卡片，并发 3 逐个 doAction detailContent 取 vod_pic 换入，每次渲染上限 24 张，写入前校验 isValid 与卡片仍在 DOM）；vodCoverImg 无封面时给 img 标 data-cover-missing，home.js vodCard 增 src 参数写 data-source（首页/分类/源内搜索渲染后挂 _fillCovers 绑定 _loadToken 中止），search.js _paintGrp 同挂（卡片本就注入 data-source） ②屏蔽源弹窗可滚轮滑动但隐藏滚动条：ui.css #blocked_list scrollbar-width:none + ::-webkit-scrollbar display:none（保留 T41 内联 max-height/overflow） | 已完成 |
-| T43 | 搜索中点详情转圈久 + 封面补收紧（优先级：点开详情 > 搜索拉页 > 封面补拉）：根因同一 JS 源共享 QuickJS 上下文、JsEngine.call 持锁串行，详情请求排在后台补拉/搜索拉页后面 → ①common.js 补拉重写为世代制：abortCoverFill（世代自增+清队列+断开观察器），fillMissingCovers 改 IntersectionObserver 只补屏幕可见卡（rootMargin 上下 300px，入视口才入队），worker 池并发改 5（_coverFillPump/_coverFillWorker），同容器旧观察器先断开防累积，120s 安全释放 ②detail.js open 入口先 abortCoverFill 让路；load 成功后恢复补拉（搜索仍在流式时只补首页区不碰搜索区） ③search.js 流式期间 _paintGrp 暂缓补拉（!this.es 才补），done/error 收尾后 _fillAllCovers 统一补各组 | 已完成 |
-| T44 | 直播源消失/视频源变少根治（多仓跨条目合并）：根因偏好仓 supermeguo18（6 直播源）raw.githubusercontent 超时回退 bizhangjie🐶1（仅 1 条无 url 的无效 lives），且仓间站点 key 不同触发探测重新屏蔽 → ①config.py 多仓命中主条目后 _merge_repo_extras 并行补拉其余条目（ThreadPoolExecutor ≤4）：_merge_lives 按 url 去重合并（_iter_live_urls 嵌套 channels 展平，无 url 条目丢弃，主条目优先），_merge_sites 按 key 去重追加构建（主条目优先只增不删），summary 计数同步更新 ②偏好条目首次拉取失败自动重试一次（防偶发超时仓漂移） | 已完成 |
-| T45 | 封面补拉提档 + 文档整理：①common.js _coverFillPump 并发上限 5→10（只补可见卡+Detail.open abortCoverFill 让路机制不变，提速不阻塞用户操作） ②PROGRESS.md 整理：§7 功能清单 T9~T39 十行流水账压缩为三行批次摘要（细节统一查 §8.8 表消除双份维护漂移），决策 13 同步 T40/T44 多仓偏好与跨仓合并机制，TOC 锚点行号重新校准 | 已完成 |
-| T46 | Kazumi 规则系统补全：①安装/更新时间追踪（Plugin 增 installed_at/updated_at，add() 新装记 installed、更新保 installed 记 updated，内置规则导入也盖章，列表行悬停展示）②有效性检测（后台 4 并发按启用规则搜索测试关键词「海贼王」标记 valid/invalid/captcha，写回 validity_checked_at，列表徽标绿/红/橙，kazumiCheckValidity/kazumiValidityStatus 端点，前端轮询）③批量更新（后台 4 并发 fetch_shop_rule 拉最新版，版本数字段比较 _should_update，较新则 add() 覆盖保留安装时间，kazumiBatchUpdate/kazumiUpdateStatus 端点，前端 confirmDialog+轮询汇总 toast）④test_kazumi.py 增 9 用例（41 全绿），npm run test:all 全绿 | 已完成 |
-| T47 | 下载与播放增强：①下载记录持久化（新 dl-record.js 存 userData/dl-records.json 上限 200，完成/失败落盘，buildDlList 合并推送时按 gid 补回跨会话记录避免与实时任务重复，删除/清空/清失败同步删记录防复活，HLS 与 aria2 同一链路）②mpv 截图（mpv-player 增 screenshot() screenshot-to-file subtitles 模式 + 起播注入 --screenshot-directory/--screenshot-template 使原生 s 键也存图，HK 新增 screenshot 动作默认 s 键+lua 提示+绑定，设置页快捷键卡加「打开截图目录」按钮，vpc:mpv-screenshot/vpc:mpv-screenshot-dir IPC 截图到图片/video-pc 并弹通知） | 已完成 |
-| T48 | 「我的」页面（观看统计 + 最近观看）：①埋点 player.js 新增 _curMeta + _recordWatch，mpv 退出时（pos≥15s 计有效观看）累计 totalSeconds/sessionCount/titles 去重/daily 近 30 天分布，并 upsert recentWatches（site\|vodId 去重，无 id 按标题）上限 50 ②新增视图 my.js + 侧栏「我的」导航（历史后）+ #view-my 区块：三统计卡（累计时长/观看次数/观看部数）+ 近 7 天条形图（my-bar-chart）+ 最近观看网格（自定义卡片带时长角标与进度条，分页 24/页，有 site\|vodId 点击进详情，无则 toast）③ui.css 增 my-stats/my-bar/my-watch-dur 样式，index.html 增 script 引入 | 已完成 |
-| T49 | 爬虫健壮性：①Cookie 持久化（新 kazumi/cookie_jar.py 落盘 kazumi/cookies.json，CookieJar.set_domain_cookies/cookie_header 域名+父域匹配；RuleEngine 增 cookie_jar 参数 _do_request 自动带 Cookie 头；server.py kazumiCookieSet/List/Clear 端点；parse-window.js 捕获结束后读会话 Cookie 按域名回传后端；设置页 Kazumi 区加 Cookie 管理卡查看/清除；test_kazumi.py 增 CookieJar 5 例 + RuleEngine 带 Cookie 1 例）②视频源解析池（parse-window.js 改 3 独立 partition parse-0/1/2 槽位池 _acquire/_release，并发解析互不冲突——原共用 partition 的 session.webRequest 单例会被后注册者覆盖致并发丢请求）③HLS 广告过滤（hls-downloader.js 增 adFilter 参数 + filterAdSegments 重写播放列表：CUE-OUT/CUE-IN 之间分段 + DATERANGE ad 行 + /ad/、/ads/、/adbreak/、adsegment 路径特征分段剔除，相对地址解析绝对化，写临时 .m3u8 交 ffmpeg 后清理；设置项 hlsAdFilter 开关，addHls 读取） | 已完成 |
-| T50 | 真实视频流提取三机制 + 组件测试 + 旧解析器 + MiSans 字体：①parse-window.js 视频流提取补齐三机制（webRequest 拦截媒体请求 + JS 注入轮询 <video>/<audio> 元素拿 currentSrc/src + legacy 旧解析器 iframe src 监听：注入 MutationObserver 记 window.__vpc_iframe_src，媒体直链即命中、非媒体页跟随加载限深 2 防环；captureDirect/_tryIframe/resolve 增 legacy 参数，vpc:capture-direct 兼容 {url,legacy}，kazumiResolve 返回 useLegacyParser 前端透传）②组件测试（新 tests/js/ 4 个 node --test 单测 27 例：downloader.flatten / mpv-player 静态助手 parseDanmaku·_assColor·_ts / hls-downloader filterAdSegments·isAdUri（新增导出）/ dl-record（构造器改可注入路径）；npm 增 test:jsunit 并入 test:all）③旧解析器（同上 legacy 分支，Plugin.use_legacy_parser 贯通）④MiSans 内置字体（download-binaries.js 增 misans 目标：拉 misans@4.1.0 lib/Normal 的 Regular+Bold .min.css + 按 url() 解析分片 woff2 并发 8 下载幂等；新 src/main/misans.js ensureMisans 后台跑脚本 + fontCssUrls 返回 file:// URL；index.js 启动 ensure 就绪发 vpc:font-ready + vpc:font-css IPC；preload fontCss/onFontReady；app.js 启动注入 <link> 并在就绪后重注入；ui.css font-family 置 MiSans 于系统字体前，缺字回退） | 已完成 |
-| T51 | 异步会话 + 关于页：①新 src/main/async-session.js（AsyncSingleFlight.run 同 key 并发只执行一次其余复用 Promise、成功失败均释放；AsyncSerialQueue.push FIFO 串行、前一个失败不阻断后续），接入 parse-window.captureDirect 按 legacy\|url 去重合并并发捕获；tests/js/async-session.test.js 7 例（34 全绿）②关于页完整化（独立视图）：侧栏导航「关于」（设置后）+ #view-about 区块（应用 SVG 标识/名称/版本/简介 + 技术栈 chips + 致谢列表 mpv/aria2c/ffmpeg/Anime4K/MiSans/Bangumi/弹弹 play/trace.moe/Kazumi + 系统信息行）；主进程 vpc:app-info IPC 返回 version/platform/arch/electron/chromium/node/v8，preload appInfo 暴露，about.js 渲染，app.js 接线，ui.css 样式 | 已完成 |
-| T52 | Bangumi 收藏同步 + 域名镜像迁移：①bgm.tv 国内被屏蔽，BANGUMI_API/BANGUMI_API_NEXT 全切 api.bangumi.lol / next.bangumi.lol 镜像（docstring 同步，KAZUMI_INTEGRATION.md 更新）②plugin_manager.py 增用户收藏同步：bangumi_me（GET /v0/me 验 token）/bangumi_user_collections（GET /v0/users/-/collections）/bangumi_collection（GET 单条）/bangumi_update_collection（PUT 失败回退 POST，type 0想看 1看过 2在看 3搁置 4抛弃）/bangumi_delete_collection；server.py 增 kazumiBangumiMe/Collections/CollectionGet/CollectionSet/CollectionDel 端点 ③前端：设置页 Kazumi 区加「Bangumi 同步」卡（token 输入保存/测试连接/我的收藏列表可删，token 存 settings.bangumiToken 仅本机）；Bangumi 详情弹窗 banner 下加「Bangumi 收藏」下拉（未收藏/想看/在看/看过/搁置/抛弃）同步按钮，打开时回填当前状态 ④bangumiToken 入 settings 约定键与 reset 保留清单 ⑤test_kazumi.py 增 TestBangumiSync 8 例（mock requests + 域名镜像回归断言，55 全绿） | 已完成 |
+### 2026-08-11 推荐页切换卡顿修复
+
+- [x] 卡顿根因：`Popular.enter()` 首次进入推荐页时同步等 `kazumiBangumiTrends` 网络请求（真实源实测 ~1.9s，命中 api.bgm.tv），期间网格空白 → 感知为「切换卡顿」。切换本身（showView 同步部分）实测仅 4ms。
+- [x] 修复：①推荐（热门番组）数据本地缓存 `localStorage['popular_cache']`——首次进入先命中缓存立即上屏，再后台静默刷新；无缓存才等网络 ②启动时后台预载 `Popular.preload()` 填充内存并刷新缓存，点开推荐页即时显示、无首次网络等待 ③`load(page, silent)` 静默模式不弹 loading/toast，不打断已见内容；标签视图不覆盖热门番组缓存。
+- [x] 测试与实测：`tests/js/popular-cache.test.js` 5 例（缓存命中上屏+后台刷新/无缓存加载+写缓存/会话内复用不重拉/silent 不弹 loading/标签不覆盖缓存）；真实应用 CDP 实测——点开推荐页网格填充耗时 **1906ms → 6ms**、showView 同步 0ms、无长任务。
+
+### 2026-08-11 每页影片数量超过 20 不生效修复（T75）
+
+- [x] 根因（真实源 CDP 实测，pageSizeHome=36）：①首页填充 `_extendHome` 只取 `classes[0]`（首个分类）——量子资源首个分类「电影片」仅 1 条，首页只显示 1 张卡，填不满设置条数；②分类页 `_fetchCat` 只取源返回的一页（源每页 ~20 条）→ 设 36 也只显示 20。
+- [x] 修复：①首页填充改为逐分类逐页推进，首个分类空页/短页（<10 条）自动换下一个分类，直到填满目标（含 `_onResize` 补拉）；②分类页新增 `_catWin` 源页合并窗口（site|tid LRU）——`_fetchCat` 连续拉取后续源页合并填满每页条数，应用 pagecount = ceil(源总量/每页条数)，前进/后退翻页复用已拉数据不重复请求；force 刷新/切源/配置变更作废窗口。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +3 例（合并 2 源页得 36 条/翻页只补缺失源页/短页跳分类填满目标）；真实源 CDP——首页填充 1→46 卡（≥36）、分类页(动作片)显示 36 条、pagecount 137、翻第 2 页内容不同；全量回归 + 空分类隐藏实测通过。
+
+### 2026-08-11 「全部」标签分页（T76）
+
+- [x] 问题：「全部」标签是首页自适应视图（推荐位 + 分类铺满一页），末尾 `$('#home-pager').empty()` 明确清空分页器——设计上单页、无法翻页浏览源全部内容。
+- [x] 修复：①后端 `homeVideoContent` 支持分页——`cms_spider.py` 返回 page/pagecount/limit/total/list，`server.py`/`app.py`/`runner.py` 透传 `pg`（runner 对不接受 pg 的旧爬虫 try/except 回退）；②前端 `loadHome(pg)`——第 1 页保持自适应首页，第 2 页起用源总览 feed（`_fetchHomeFeed`，复用 `_catWin` 合并窗口 key `site|__all__`，合并源页填满每页条数，翻页只补缺失源页）；③第 1 页载入后 `_probeHomeFeedTotal` 后台取 feed 首页定总页数并渲染分页器（总页数 = 1 自适应首页 + ceil(源总量/每页条数)；源无「全部」feed 则单页不出分页器）；`renderPager` mode=home 跳转 `loadHome(pg)`，刷新保留当前页。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +4 例（feed 第 2 页合并得 36 条/翻页只补源页 3,4/第 1 页定总页数并出分页器/无 feed 单页）；真实源 CDP（pageSizeHome=36）——「全部」第 1 页出分页器（pagecount 4138）、真实点击「下一页」→ 第 2 页显示 36 条 feed、第 3 页正常、页间内容不同；后端 `homeVideoContent pg=2` 返回 20 条 + total 148923；Python/JS/验收全绿。
+
+### 2026-08-11 修改配置/每页条数后回到页面不立即生效修复（T77）
+
+- [x] 问题：重新载入源配置（改分类）或改每页条数后，回到分类页仍显示旧缓存内容，需手动点刷新（force 清缓存）才生效。根因：`_pageCache`（分类页缓存）和 `_catWin`（合并窗口）在配置重载/改每页条数时未作废——`loadSites` 的源集合变更分支只重置了空分类探测状态，未清 `_pageCache`；改每页条数只清了 `pageSizeOf` 缓存，未清分类内容缓存。
+- [x] 修复：新增 `Home.invalidatePageCaches()`（清 `_pageCache` + `_catWin`）；`loadSites()` 开头调用（覆盖配置重载/屏蔽源变更/启动），`invalidatePageSizeCache()`（common.js）改每页条数时联动调用。回到页面即命中新数据，无需手动刷新。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +1 例（invalidatePageCaches 作废两缓存）；真实应用 CDP——`loadSites` 后 `_catWin` 由 2→0（修复前不清）、离线 demo 源验证 `invalidatePageSizeCache` 清空 Home 内容缓存 + pageSizeOf 缓存；全量回归通过。
+
+### 2026-08-11 「全部」标签按设置每页条数显示（T78）
+
+- [x] 问题：设每页条数后，「全部」第 1 页（自适应首页：推荐位 + 各分类逐页铺满）显示条数与设置不符——首个分类内容少/源限流时填充极慢（实测 30s 未到目标、量子资源只到 6 条），而第 2 页起的 feed 正常（严格 = 设置条数）。
+- [x] 修复：「全部」**所有页统一用源总览 feed**（`homeVideoContent`，合并源页填满每页条数）——`loadHome(pg)` 第 1 页也走 `_fetchHomeFeed`，`_fetchHomeFeed` 公式改为 `slice((pg-1)*size, pg*size)`、总页数 `ceil(源总量/每页条数)`（去掉第 1 页自适应首页的 +1 偏移）；仅当源不支持 homeVideoContent（feed 空）时，第 1 页回退自适应首页（推荐位 + 分类铺满），此时单页不分页。删除冗余 `_probeHomeFeedTotal`。
+- [x] 测试与实测：`tests/js/home-probe.test.js` 更新 T76 用例（第 1 页 = feed 前 size 条、总页数无 +1、翻页补源页、无 feed 返回空触发回退）；真实源 CDP（PS=24）——「全部」第 1 页 **24/24 条**（原 6 条）、第 2/3 页 24 条、分页器渲染（PS=36 时 pagecount 4137、8 按钮、点「下一页」36 卡）；全量回归通过。
+
+### 2026-08-11 「全部」底部分页器消失修复（T79）
+
+- [x] 问题：T78 后「全部」标签分页器在部分源上消失。根因：`_fetchHomeFeed` 的总页数逻辑在 feed 有内容但源不返回 total/pagecount（如默认源 zp059，返回 20 条、total=0）时设为 `max(1, pg)=1` → `renderPagerBox` pagecount≤1 不渲染；旧 `_probeHomeFeedTotal` 在此情形会设成 2。
+- [x] 修复：`_fetchHomeFeed` 总页数逻辑对齐分类页「未知总量暂允试下一页」——`total>0` 用 `ceil(total/size)`；已拉空（`items<need`）按实际条数；否则 `max(this.pagecount||1, pg+1)`，保证 feed 有内容就有分页器可翻页。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +1 例（feed 有内容无总量 → pagecount 2、翻页 pagecount 3）；离线 demo 源 + 桩 doAction 确定性验证——「全部」pagecount 2、分页器 6 按钮、20 条；全量回归通过。
+
+### 2026-08-11 设置改每页条数后回页面不更新修复（T80）
+
+- [x] 问题：设置里改完每页影片数量，返回对应页面（首页/分类）每页条数没更新，需手动切换页面或点刷新。根因：改页数只清了 `_pageSizeCache` 和分类内容缓存，但 `showView('home')` 不会重渲染当前模式（分类/全部仍用内存里的旧列表与旧分页器）。
+- [x] 修复：`Home.invalidatePageCaches()` 置 `_pageSizeDirty` 脏标记；新增 `Home.onViewShown()`——回到首页视图时若脏，按当前模式（分类→`loadCategory`、搜索→`searchCurrent`、全部→`loadHome`）以新条数自动重载并清标记；`app.js showView('home')` 调用 `onViewShown()`；`loadHome` 完整重载后清标记。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +2 例（invalidatePageCaches 置脏、onViewShown 按模式重载/未脏不重载）；离线 demo 源 CDP——改页数→切设置再回首页：脏标记 true→false、`_loadToken` 变化（触发重载）、新页数 36 生效；全量回归通过。
+
+### 2026-08-11 首页探测进度条（T81）
+
+- [x] 需求（与用户商量确认）：启动/配置重载后的后台源探测（`_probeSites` 屏蔽无内容源 + `_probeAllClasses` 隐藏空分类）在首页显示进度条。时机：**合并两个探测为总进度**；**超过约 1 秒才显示**（避免快速探测闪现）；**完成显示「已完成」约 1.5 秒后淡出隐藏**。
+- [x] 实现：`home.js` 新增 `_probeBar` 状态与 `_startProbe(total)`/`_probeOneDone()`/`_endProbe()`/`_updateProbeBar()`/`_hideProbeBar()`——`_probeSites` 按源、`_probeAllClasses` 按源各计进度，合并 total/done；1s 阈值用 showTimer 控制，完成态用 doneTimer 延迟 1.5s 隐藏；`index.html` 首页 `#home-probe-bar` 复用搜索进度条 `.search-status`/`.ss-*` 样式（spinner + 进度条 + X/Y 计数）。
+- [x] 测试与实测：`tests/js/home-probe.test.js` +3 例（合并两探测总进度/完成态延迟隐藏/total≤0 不计入）；离线 demo 源 CDP 直接驱动——开始不显示、超 1s 显示「正在探测源…0/100」、完成态「已完成100/100」、1.5s 后隐藏；全量回归通过。
+
+### 2026-08-11 搜索进度条卡顿修复 + 显示逻辑统一（T82）
+
+- [x] 问题：搜索进度条搜索时 spinner 旋转动画卡顿——`_setStatus` 每次源完成都用 `.html()` 重建整个进度条（含 spinner 元素），CSS 旋转动画每次重置（源多时 ~141 次重建）；且搜索一开始就显示（与首页「超 1s 才显示」不一致）。
+- [x] 修复（与用户商量确认）：①common.js 新增 `renderStatusBar($el, opts)`——spinner 元素一次性创建、后续只更新文字/进度条宽度/计数，动画不中断；②search.js `_setStatus` 重写——显示逻辑同首页：**有首个结果(recv>0)或超 1s 才显示**（避免快速搜索闪现）、**完成态约 1.5s 后淡出隐藏**，`run`/`stop` 重置状态；③home.js `_updateProbeBar` 改用 `renderStatusBar`（修同样的隐患）。
+- [x] 测试与实测：CDP 实测（离线 demo）——spinner 元素跨更新稳定不重建、搜索 recv=0 不显示→超 1s 显示「0/50」→计数 7/50 更新→完成态「已完成」→1.5s 后隐藏；JS 单测 120、语法 34 文件、demo 验收全绿。
+
+### 2026-08-11 搜索页签切换进度条凭空出现/常驻修复（T83）
+
+- [x] 问题：点击聚合搜索/Kazumi 源页签，进度条会重新出现并常驻。根因：`search.js` 页签切换 `$('#search-filters, #search-status, #search-results').toggle(!isImage)`——切到聚合/Kazumi 时 `.toggle(true)` **无条件显示 `#search-status`**，即使没有任何搜索在进行；无搜索就不会触发隐藏逻辑 → 常驻。
+- [x] 修复：①`#search-status` 改为 `$('#search-status').toggle(!isImage && this._statusShown)`——只在有进行中的搜索状态时才随页签显示；②`_setStatus` 显示路径（recv>0 / 1s 定时器）加 `_stab !== 'image'` 守卫——切到「以图搜番」页签时搜索仍在后台跑但状态不显示。
+- [x] 测试与实测：CDP 实测（离线 demo）——无搜索切聚合/Kazumi 进度条隐藏（修复前显示）；有搜索按页签显隐（聚合/Kazumi 显示、以图搜番隐藏）；以图搜番页签下 `_setStatus(recv>0)` 不显示；全量回归通过。
+
+### 2026-08-12 UI/功能批次（T1–T23，按 `.omo/plans/ui-batch-2026-08-11.md` 分 7 批并行执行）
+
+- [x] **B1 记录系统（T4/T5）**：记录新增唯一 `uid`（`recGet` 迁移回填、`recCard` 输出 `data-uid`），历史/收藏的删除/编辑/标签/多选删除 6 处判定改按 `uid`（`updateProgress`/`getProgress` 仍用 `site|vodId` 条目级身份）；历史卡新增 `kazumi:` 分支（镜像 search.js → `openSourceDialog`），`kazumiSrc` 源页 URL 从 kazumi.js 经 `Player.play`→`_curMeta` 穿到记录；堵住 `Detail.vodId` 泄漏与跨引擎按名合并；`openBangumi` 清 `_vod` 防写 `site:''` 收藏；「我的→收藏」标签绑定选择器修正。records.test.js 13/13。
+- [x] **B2 推荐/直播（T1/T2/T3/T14）**：推荐标签弹窗改原生 `#popular-tags` 下拉（首项「热门番组」）；直播默认跳过 redirect/live 项；频道检测复用 `renderStatusBar` 进度条（`#live-probe-bar`，1s 延迟显示 + 1.5s 完成隐藏 + `_probeToken` 作废）；外观新增「推荐」每页数量 `pageSizePopular`（选项限 ≤50 对齐后端趋势上限）。
+- [x] **B3 卡片布局（T7/T8/T9）**：`fmtTime` 改 `YYYY-MM-DD HH:mm`；`.rec-playinfo` 补 `padding` 与标题左对齐（含响应式档）；移除「Bangumi 收藏」备注文字（保留封面角标）；`.rec-progress` 由绝对定位改入正常流（不再被圆角裁切）。
+- [x] **B4 下载页（T11/T12/T13）**：五个工具栏按钮统一尺寸（去 `md-btn-sm`）；`.dl-list` 加 `margin-top` 消除与首卡重合；总速度常显（空闲 `0 B/s`）；HLS 速度从 ffmpeg `size=` 差分计算（异常安全回落 0，历史记录仍 0）。
+- [x] **B6 收藏上传 Bangumi（T6）**：`uploadFavoritesToBangumi` 批量把非 bangumi 收藏按 `tag→type`（1想看/2看过/3在看/4搁置/5抛弃）幂等 set 到 Bangumi（免远端读绕开 100 上限），回写 `bangumiId` 避免重算，单条失败不中断；「我的→收藏」同步按钮先上传后拉取，汇总 toast。新增 kazumi-bgm-upload.test.js 7 例。
+- [x] **B5 统计/进度/日志（T10/T18/T21）**：观看统计新增分来源（近 200 次，可选 `bySite` 累加器）、按星期分布（近 30 天）、最常观看（归一化近似重名）三块，`.my-stats-grid` 自适应 + 全量 `escHtml`；Kazumi 检测有效性真进度条（后端 `check_validity` 逐条写共享 `_validity_results` + 暴露 `total`，`_pollTask` 泛型进度条，批量更新搭车）；应用日志逐文件 try/catch（单文件锁定不作废整体）+ 来源过滤下拉 + 翻页请求前钳位 + `clearLogs` 真实计数/写入器 `_size` 复位 + 渲染端 `window.onerror`/`unhandledrejection` 上报。
+- [x] **B7 设置页搬迁/文案（T15–T23）**：缓存卡宽度对齐外观（并入全宽组 `grid-column:1/-1`）；「指定 mpv.exe 路径」→「指定播放器路径」；`catvodBgmMatch` 开关移入「Bangumi 同步」；查看 Cookie 改 `#kazumiCookieDialog` 弹窗；Cookie 管理 + Bangumi 封面缓存移入「缓存」分类；恢复默认设置删内联提示、说明移入二次确认弹窗；关于页数据校正。
+- [x] 修正 T74 全矩阵实现导致的 3 个陈旧收藏测试（`test_update_collection_put_ok` 等 mock 用旧 `raise_for_status` 语义，实现已改 `status_code` 检查）——测试对齐实现，test_kazumi 78/78。
+- 验证：`npm run test:all` 全绿——Python smoke 13 + phase3 25 + compile 29 文件 0 错、JS 单元 131/131、JS 语法 34 文件 0 错。真实界面 QA 待用户在打包/运行环境实测。
+
+### 进行中
+
+- 无（本轮两项已完成代码验证与真实界面验收；后续项见 §4「需要继续完成」与「未完成」清单）。
+
+### 未完成
+
+- [x] Kazumi 独立首页推荐页及趋势数据适配（T62：新增「推荐」导航 + #view-popular，bangumi_trends 归一化 {items,total} 解 {subject} 包裹，卡片封面/排名角标/评分，分页，点击进二级详情页）。
+- [x] 影片详情页仿 Kazumi 的视觉与二级内容结构优化（T63：`_renderBangumiDetail` banner 改仿 Kazumi InfoPage 信息卡——大标题 + 封面/放送开始/评分星级/「Bangumi Ranked」排名/评分透视柱状图，弹窗与二级页复用；新增 `.bangumi-info-card` 系列样式，窄窗隐藏柱状图）。
+- [x] MiSans 改为打包内置并统一全站字体（T61：misans.js 去运行时下载仅探测内置字体、恢复主进程 vpc:font-css → 渲染层注入 <link>、ui.css 字体栈 MiSans 优先、build:* 前置 download-binaries misans 保证打包随附；真实验收确认 file:// 内置加载非网络下载）。
+- [x] 响应式封面/字体与整体现代化交互收尾：滚动条隐藏（T59）、无内容源/空分类过滤（T59/T60）、列表批量渲染（T65）、卡片列宽与标题/备注字号随窗口自适应（T66）均已完成；交互动效（卡片 hover、视图切换、封面淡入）此前已具备。
+- [ ] 完成 Windows 冷启动、打包后资源、离线/慢网和多窗口尺寸实测。
+
+### 2026-08-10 本轮完成（T54/T55/T56/T57/T58/T59/T60/T61/T62/T63/T65/T66）
+
+- [x] 本地文件页背景模糊闪烁修复（T54）：根因为 `.view.active` 入场动画作用在含 `backdrop-filter` 视图的祖先上（Chromium 合成闪烁）+ 列表逐条 append 反复重栅格化；修复为入场动画排除 `#view-tools`/`#view-detail`、`renderLocalPage` 改拼串一次性写入并删除逐条 `addFile`。
+- [x] Kazumi 规则设置布局优化（T55）：Kazumi 分类卡并入全宽组（grid-column 1/-1，≥1500px 跨 2 列）；规则行改「名称+版本 / 安装·更新时间」两行主块，控件跨行对齐，去掉误导 pointer 与 break-all 折名，编辑钮 hover 与删除红区分，清空按钮改危险色；版本号内联样式收敛为 `.kazumi-subver`。
+- [x] 软件显示名全面改为 YuKi（T56）：窗口标题/托盘/通知/关于/引导页/`build.productName`/`shortcutName`；内部兼容键保留——`name=video-pc`、`appId`、数据目录 `~/.video-pc/`、Electron userData（`AppData/Roaming/video-pc`，由 package name 决定不受 productName 影响）、协议标识与 IPC 前缀 `vpc:*`。
+- [x] 时间表完整复刻（T57，对齐 Kazumi TimelinePage）：①后端新增 `bangumi_season_calendar(start,end)` + `/kazumi/action do=kazumiBangumiSeason` 端点（v0/search/subjects 按 air_date 区间多页拉取去重、按播出星期分桶，与本周放送同形状）②近 20 年季节索引（下拉按年 optgroup，首项「本周（在播）」，季度键算日期区间）③排序（热度/评分/播出时间）④收藏过滤（不显示已抛弃/已看完、只看在看；经 Bangumi token 拉收藏建集合，无 token 置灰降级）⑤卡片排名角标（`rating.rank`）+ 评分/播出日期，二级详情弹窗 banner 补 Ranked #N⑥星期 tab 默认今天。真实界面验收 11/11 通过（本周 14 卡、8 排名角标实测渲染）。
+- [x] 返工两项（T58，按用户最新要求）：①「我的」页移除「最近观看」标签与面板（与左侧历史页重复），保留 观看统计 + 我的收藏 两标签，my.js 删除 recent 渲染逻辑②时间表卡片点击改为进入仿 Kazumi 二级详情页（新增 `#view-bangumi-info` 视图 + 返回键回时间表），不再用弹窗；`Kazumi._renderBangumiDetail` 重构为容器化（`$box` 参数 + tabs/content 由 id 改 class），弹窗（Kazumi 源流程）与二级页复用同一渲染。真实界面验收 10/10 通过（`scripts/acceptance-rework.js`）。
+- [x] Bug 清理批次（T59/T60）：①搜索封面立即加载——`vodCoverImg`/`vodCard` 增 eager 参数，搜索当前页封面改 `loading="eager"` 不再等懒加载②内嵌滚动区统一隐藏滚动条（弹窗体/Bangumi 详情内容/详情简介/直链视图，补 `scrollbar-width:none` + webkit 伪元素）③搜索页隐藏无结果的源（不出分组卡与来源筛选标签，源计数只统计有结果源）④首页屏蔽无影片分类（`_probeClasses` 后台并发 4 探测各分类 categoryContent，确认空的分类从分类栏隐藏，同源只探一次、激活分类不隐藏、出错保留，源集合变更作废缓存）⑤修复 `bangumi_user_collections` limit 上限钳制为 100（此前时间表收藏过滤请求 limit=200 触发 Bangumi API 400）⑥验证日志功能有效（`~/.video-pc/logs/` electron-main/python-backend/python-console 正常写入，RotatingLogWriter 轮转）。真实界面验收：分页实测正常（25 条收藏→2 页、翻页生效，`scripts/acceptance-bugfix.js` 6/6 通过）；分页代码经核查本无缺陷。
+- [x] 搜索页 Kazumi 结果封面从 Bangumi 拉取并缓存（T73）：Kazumi 规则源搜索无源封面，现按片名查 Bangumi 首个匹配 `{id, cover}` 并缓存——`Kazumi.getBangumiMatch`/`getCachedBangumiMatch`/`getBangumiCover`（内存 Map + `kazumi_bgm_cover` localStorage 持久化，同片名在途搜索去重、空匹配仅会话内缓存、旧版仅封面格式自动迁移）；复用既有 `fillMissingCovers` 补拉池（视口优先/并发/abortCoverFill），`_coverFillOne` 对 `kazumi:` 源改走 Bangumi 而非 detailContent，补上后重插规则名徽章；`_paintGrp` Kazumi 卡命中缓存直接渲染、未命中占位图标 `data-cover-missing`；点击卡片命中缓存 id 直接进 Bangumi 二级详情页（免重复搜索、封面与详情同源一致），搜索后回填缓存；设置页新增「Bangumi 封面缓存」卡 + 清空按钮（`clearBangumiCoverCache`）供匹配错误时重置。
+
+### 2026-08-10 第二轮（问题清单批处理）
+
+- [x] 详情页"想看"收藏 404 修复（T74）：`bangumi_update_collection`/`bangumi_delete_collection` 重写为全矩阵尝试 `{POST, PUT} × {`-` 通配当前用户, 真实用户名} × {当前基址, 官方/镜像另一基址}`，首个 2xx 即成功（对齐 Kazumi 原版 POST `/v0/users/-/collections/{id}`）；鉴权类错误 401/403 优先于 404 返回，便于排查。
+- [x] 第三方源收藏自动匹配 Bangumi（T74）：`Records.toggleFavorite` 收藏时按片名 `bangumiSearch`+`bangumiInfo`，命中则用 Bangumi 片名/封面/`bangumiId` 存储（已存在，复核确认）。
+- [x] 历史卡片按次记录（T74）：`recordPlay` 每次真实播放新增一条独立 `kind:'play'` 记录，不再合并累加「已播几集」；`addHistory`（打开详情）标 `kind:'view'`，`recordPlay` 清掉同片名浏览卡避免「开→播」双卡；`recCard` 移除「已播 N 集」文案，改为显示「集名 · 时长 · 播放时间」；历史/收藏缺封面后台补拉（`fillMissingCovers` + `data-source`），Kazumi 源历史卡封面从 Bangumi 拉取并缓存。
+- [x] 搜索页 Kazumi 边搜边加载（T74）：新增后端 SSE 端点 `/search/kazumi-stream`（每源完成即推一条，含状态字段），前端 `_runKazumi` 改走 EventSource 流式渲染，不再等全部源结束。
+- [x] 搜索进度提示优化（T74）：`#search-status` 由纯文字改为「spinner + 进度条 + 源/结果计数」组件（`.search-status` 系列样式）；后端 `/search/stream` 先发 `event: meta` 携总源数，进度条按已收/总数确定填充；Kazumi 页签按启用规则数确定进度；搜索启动立即显示（消除首个源到达前的空档），完成态转摘要文字 + 进度条满。
+- [x] Kazumi 验证码源可见窗口验证（T74）：主进程 `vpc:captcha-verify` + `ParseWindow.captchaVerify`（可见 BrowserWindow，关闭/超时收割会话 Cookie 推给后端 cookie_jar，rule_engine 搜索自动带上）；搜索页验证码源分组提示行 + Kazumi 源弹窗验证码项点击打开，完成后自动重搜。
+- [x] 搜索页源名分隔线与卡片间距（T74）：`.src-group > .vod-grid { margin-top:8px }` 在分隔线与首行卡片间留出清晰间距（曾用 -1px 使线与封面顶部重合，用户反馈后改为 8px）。
+- [x] 卡片标题限行防溢出（T74）：`.vod-name` 固定 2 行（border-box 精确 min/max-height，响应式各档同步），非全屏窄窗也不溢出。
+- [x] 获取 Bangumi Token 跳系统默认浏览器（T74）：主进程 `setWindowOpenHandler` 对 http(s) 外链调 `shell.openExternal` 并 `deny`，不再开应用内新窗。
+- [x] 每页数量增加 10/16 选项（T74）：`PAGE_SIZE_OPTIONS` 加 10/16，设置页 5 个分页下拉同步；每页数量设置本就在「外观」分类下。
+- [x] 界面动画开关与 MiSans 统一（T74）：`set_anim` 由下拉改为 `md-switch` 开关，移至「外观」MiSans 界面字体下方，panels.js 改 checked 处理。
+- [x] 设置页删除外部播放器按钮（T74）：移除系统页「指定外部播放器/恢复默认」区块（功能已在播放页），清理 panels.js 失效绑定。
+- [x] 缓存板块合并（T74）：「缓存」+「播放缓存（mpv）」合并为一个「缓存与播放缓存」卡，中间分隔线区分应用缓存与 mpv 缓存。
+- [x] 下载页按钮排一行（T74）：`dl-uri` 输入单独一行，「新建下载/种子文件/打开下载目录/删除失败/清除已完成」统一 `.wall-row` 一排，新建下载位置在输入栏下方。
+- [x] Kazumi 规则「检测有效性/批量更新」按钮避让（T74）：按钮独立一行，任务状态提示移到下方独立行，与规则列表留间距。
+- [x] 代理开关关闭恢复（T74）：主进程关闭分支 `session.setProxy({proxyRules:''})` 改 `{mode:'system'}` 显式还原系统代理（部分 Electron 版本空规则不还原，渲染层网络仍走旧代理）。
+- [x] 以图搜番修复（T74）：trace.moe URL 直传返回 403（反爬/需它自行抓取），后端改为先下载图片字节再原始上传（POST + `anilistInfo=2`，浏览器 UA）；`Content-Type` 按文件头自动识别（Kazumi 硬编码 jpeg，PNG 会被拒）；失败返回 `error` 字段，前端 toast 真实原因。另修复结果卡片封面显示：原 `onerror` 隐藏 img 在 AniList 封面被墙/慢时留灰底空框，改为 `vodCoverChain` 多级兜底（AniList 封面 → trace.moe 匹配帧 → 占位图，新增 `coverChainNext` 逐级切换），配单元测试（cover-chain.test.js）。
+- [x] 详情页缓存（T74）：`detailContent` 按 `site|vodId` 缓存 10 分钟（detail.js），`Kazumi.bangumiInfo` 缓存 30 分钟（kazumi.js），详情页 Bangumi 匹配改走 `getBangumiMatch`（复用 T73 封面缓存），重复打开详情免重新拉取/免重复搜索 Bangumi。
+- [x] CatVod 详情页自动匹配 Bangumi 可开关（T74）：设置 → 源设置新增「详情页自动匹配 Bangumi 数据」开关（默认关）；关闭时打开非 Kazumi 影片详情仅显示源自身信息，不再按片名匹配/拉取 Bangumi 数据；开启时恢复自动匹配（评分/吐槽/角色/收藏同步等）。
+- [x] 开始观看重构为流式 SourceSheet（T74，完整对齐 Kazumi）：后端 `kazumiSearch` 支持 `plugin` 过滤 + 返回丰富状态（success/noresult/captcha/error），SSE `/search/kazumi-stream` 同步返回状态；`openSourceDialog` 改为并发流式弹窗——每启用源一张卡片带状态徽标（检索中/N 条/需验证/检索失败/无结果），首个有结果源自动展开；点结果行「获取中」→ 选集视图（带「← 返回选源」）；每源补救操作（重试/进行验证/手动检索/浏览器打开），手动检索关键词重查该源；验证码源弹窗验证后自动重查该源；弹窗关闭清理 SSE 流。
+- [x] 统一两种详情页为单一自适应页（T74）：新增 `Detail.openBangumi`（Bangumi-only 入口复用 `#view-detail`），头部/概览自适应——有 CatVod 源显示线路/选集/本地收藏，有 Bangumi id 显示评分/收藏同步（想看/在看/看过/搁置/抛弃）/开始观看（Kazumi 源）/标签/分集；`Kazumi.openBangumiInfoPage` 改为委托统一页；移除 `#view-bangumi-info` 视图与 `_backFromInfo`，时间表/推荐/收藏/Bangumi 搜索入口全部进统一详情页；详情页图片点击放大、标签点击跳搜索。
+- [x] 首页空分类自动隐藏（T60 已实现，复核确认）；卡片封面「已播几集」角标移除（并入历史按次记录重构）。
+- [x] 卡片标题「恰好两行」精确截断（T74 收尾）：CSS `-webkit-line-clamp` 只隐藏超行文本显示，超出的行仍参与布局与绘制（触发 Chromium 白块绘制缺陷）。现由 common.js 新增 `fitVodTitle`/`fitVodTitles`/`refitVodTitles` 在网格渲染后按实际列宽把标题 JS 截到恰好两行——临时解除 line-clamp 读 `scrollHeight` 判溢出，二分求「加 '…' 后仍不超两行」的最长前缀改写 textContent，DOM 不再存在超行文字（无超行 → 无白块），省略号 JS 显式补单 '…'，完整标题保留在 title 悬浮提示。已接入 6 个渲染点（home 渲染/追加、search 分组/以图搜番、records、timeline、popular），并在窗口 resize（防抖 300ms，响应式断点）与 `applySkin`（字号/缩放变化）后全量重适配；`ui.css` clamp 注释同步说明其降级为 resize 防抖期间的瞬时兜底。
+
+
+2026-08-09 已完成以下代码修复：
+
+- Bangumi 搜索改为官方 `POST /v0/search/subjects` 并统一 User-Agent。
+- Bangumi 收藏先通过 `/v0/me` 获取 username，再访问用户收藏端点。
+- XPath 节点内 `//` 查询归一化为 `.//`，对齐 Kazumi Dart 语义。
+- 解析窗口主框架加载失败时快速跳过，不再对每个死站等待完整超时。
+- 解析窗口关闭 EventEmitter 监听器数量告警。
+
+重启后的真实运行结果（2026-08-09）：Bangumi token 已配置（长度 40），`/v0/me` 有效，收藏接口返回 12 条；Bangumi 搜索返回 3 条。Kazumi 有效性检查中 7sefun 返回 3 条，DM84/enlie 分别仍受 522/SSL EOF 外部故障影响。失效解析地址通过 Electron IPC 在 128ms 内失败返回；连续 5 次解析调用均在 118–155ms 返回，应用与后端保持健康。详见 [运行时问题](docs/RUNTIME_ISSUES.md) 的重启后实测表。
+
+这些修复的日志、证据和待验证项统一记录在 [运行时问题](docs/RUNTIME_ISSUES.md)，不要在其他文档重复维护故障细节。

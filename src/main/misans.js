@@ -1,17 +1,17 @@
 /**
- * misans.js — MiSans 内置 UI 字体（T46）
+ * misans.js — MiSans 内置 UI 字体（打包内置，无运行时下载，T61）
  *
  * 字体源：vendor/misans/MiSans-{Regular,Bold}.min.css + 分片 woff2
- * （scripts/download-binaries.js misans 下载；子集化方案按 unicode-range 分片，
+ * （随包内置于 extraResources vendor/；子集化按 unicode-range 分片，
  *  浏览器只加载用到的分片，总 ~4MB 两字重：Regular 正文 / Bold 标题）。
+ * 本地缺失时可 `node scripts/download-binaries.js misans` 手动补齐（开发用）。
  *
  * - fontCssUrls()：已就绪时返回各字重 CSS 的 file:// URL，渲染层注入 <link>；
  *   未就绪返回空数组（回退系统字体，不影响使用）。
- * - ensureMisans()：缺失时后台跑下载脚本，完成后返回是否就绪（幂等）。
+ * - ensureMisans()：仅探测内置字体是否就绪（不做运行时下载），返回 Promise<boolean>。
  */
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 
 // 打包后 extraResources 放在 resources/，vendor 从该处读取
@@ -40,21 +40,11 @@ function fontCssUrls() {
     return readyCssPaths().map((p) => pathToFileURL(p).href);
 }
 
-let _ensuring = null;
-
-/** 后台确保 MiSans 就绪（幂等，并发复用同一 Promise）：缺失则跑下载脚本，完成返回是否就绪。 */
+/** 内置字体就绪探测（打包内置，无运行时下载）：返回是否就绪。 */
 function ensureMisans() {
-    if (_ensuring) return _ensuring;
-    if (readyCssPaths().length) return Promise.resolve(true);
-    const script = path.join(ROOT, 'scripts', 'download-binaries.js');
-    if (!fs.existsSync(script)) return Promise.resolve(false);
-    _ensuring = new Promise((resolve) => {
-        console.log('[misans] 后台下载 MiSans 字体（首次约 6MB）…');
-        const proc = spawn(process.execPath, [script, 'misans'], { stdio: 'ignore' });
-        proc.on('exit', () => { _ensuring = null; resolve(readyCssPaths().length > 0); });
-        proc.on('error', () => { _ensuring = null; resolve(false); });
-    });
-    return _ensuring;
+    const ready = readyCssPaths().length > 0;
+    if (!ready) console.log('[misans] 内置字体未就绪，回退系统字体');
+    return Promise.resolve(ready);
 }
 
 module.exports = { ensureMisans, fontCssUrls, readyCssPaths };

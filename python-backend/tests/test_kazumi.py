@@ -151,6 +151,36 @@ class TestXPathStrategy(unittest.TestCase):
         self.assertEqual(len(result.items), 0)
         self.assertTrue(len(result.diagnostics) > 0)
 
+    def test_parse_search_double_slash_is_node_relative(self):
+        # R2：Kazumi 规则 searchName/searchResult 用 `//` 前缀，须为节点内查询（对齐 Dart queryXPath）
+        html = '''
+        <html><body>
+          <div class="item"><a href="/nav">导航</a><a href="/vod/1">标题1</a></div>
+          <div class="item"><a href="/nav">导航</a><a href="/vod/2">标题2</a></div>
+        </body></html>
+        '''
+        config = Plugin.from_json({
+            'api': '5', 'name': 'test', 'baseURL': 'https://example.com',
+            'searchList': '//div[@class="item"]', 'searchName': '//a[2]', 'searchResult': '//a[2]',
+        }).execution_config()
+        result = self.strategy.parse_search(html, config)
+        self.assertEqual(len(result.items), 2)
+        self.assertEqual(result.items[0].name, '标题1')
+        self.assertEqual(result.items[0].src, 'https://example.com/vod/1')
+        self.assertEqual(result.items[1].name, '标题2')
+
+    def test_parse_search_text_selector(self):
+        # R2：`/text()` 选中结果是 str，需直接取用而非 text_content()
+        html = '<div class="item"><div>片名</div><a href="/vod/1">x</a></div>'
+        config = Plugin.from_json({
+            'api': '5', 'name': 'test', 'baseURL': 'https://example.com',
+            'searchList': '//div[@class="item"]', 'searchName': '//div[1]/text()', 'searchResult': '//a',
+        }).execution_config()
+        result = self.strategy.parse_search(html, config)
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual(result.items[0].name, '片名')
+        self.assertEqual(result.items[0].src, 'https://example.com/vod/1')
+
 
 class TestApiStrategy(unittest.TestCase):
     def setUp(self):
@@ -241,6 +271,32 @@ class TestPluginManager(unittest.TestCase):
         self.assertFalse(self.mgr.has_enabled())
         self.assertTrue(self.mgr.toggle('test', True))
         self.assertTrue(self.mgr.has_enabled())
+
+    # ---------------------------------------------------------------- 手动排序（2.5）
+
+    def _rule(self, name):
+        return Plugin.from_json({'api': '5', 'name': name, 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'})
+
+    def test_reorder_persists_given_order(self):
+        for name in ('a', 'b', 'c'):
+            self.mgr.add(self._rule(name))
+        ok, msg = self.mgr.reorder(['c', 'a', 'b'])
+        self.assertTrue(ok)
+        self.assertEqual([p['name'] for p in self.mgr.list_all()], ['c', 'a', 'b'])
+
+    def test_reorder_appends_unmentioned_in_original_order(self):
+        for name in ('a', 'b', 'c'):
+            self.mgr.add(self._rule(name))
+        self.mgr.add(self._rule('d'))
+        self.mgr.reorder(['c', 'a'])
+        # b 未提及 → 追加在末尾，保持原有相对顺序（c,a,b,d 中 b 在 d 前）
+        self.assertEqual([p['name'] for p in self.mgr.list_all()], ['c', 'a', 'b', 'd'])
+
+    def test_reorder_case_insensitive(self):
+        for name in ('a', 'b', 'c'):
+            self.mgr.add(self._rule(name))
+        self.mgr.reorder(['A', 'C'])
+        self.assertEqual([p['name'] for p in self.mgr.list_all()], ['a', 'c', 'b'])
 
     # ---------------------------------------------------------------- 安装时间追踪
 
@@ -453,13 +509,13 @@ class TestBangumiSync(unittest.TestCase):
         self.mgr = PluginManager()
         self.mgr._plugins = []
 
-    def test_domain_is_bangumi_lol_mirror(self):
-        # 2026-06 起 bgm.tv 被屏蔽，必须走 bangumi.lol 镜像
+    def test_domain_is_official_bgm_tv(self):
+        # 2026-08-09 改回官方域名 api.bgm.tv / next.bgm.tv（对齐 Kazumi api_endpoints.dart）
         from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT
-        self.assertIn('bangumi.lol', BANGUMI_API)
-        self.assertIn('bangumi.lol', BANGUMI_API_NEXT)
-        self.assertNotIn('bgm.tv', BANGUMI_API)
-        self.assertNotIn('bgm.tv', BANGUMI_API_NEXT)
+        self.assertIn('api.bgm.tv', BANGUMI_API)
+        self.assertIn('next.bgm.tv', BANGUMI_API_NEXT)
+        self.assertNotIn('bangumi.lol', BANGUMI_API)
+        self.assertNotIn('bangumi.lol', BANGUMI_API_NEXT)
 
     def test_me_with_token(self):
         import requests
@@ -477,7 +533,7 @@ class TestBangumiSync(unittest.TestCase):
             result = self.mgr.bangumi_me('tok')
         self.assertEqual(result, me)
         url = m.call_args[0][0]
-        self.assertIn('api.bangumi.lol/v0/me', url)
+        self.assertIn('api.bgm.tv/v0/me', url)
         self.assertEqual(m.call_args[1]['headers']['Authorization'], 'Bearer tok')
 
     def test_me_empty_token(self):
@@ -494,13 +550,17 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return data
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice') as um, \
+                mock.patch('requests.get', return_value=FakeRsp()) as m:
             items = self.mgr.bangumi_user_collections('tok', limit=50)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['type'], 2)
-        self.assertIn('/v0/users/-/collections', m.call_args[0][0])
+        um.assert_called_once_with('tok')
+        self.assertIn('/v0/users/alice/collections', m.call_args[0][0])
+        self.assertNotIn('/v0/users/-/collections', m.call_args[0][0])
 
-    def test_update_collection_put_ok(self):
+    def test_bangumi_username_resolves(self):
+        # R1：收藏接口先 /v0/me 拿真实用户名（`-` 会被当字面用户名返回 404）
         from unittest import mock
 
         class FakeRsp:
@@ -508,50 +568,398 @@ class TestBangumiSync(unittest.TestCase):
                 pass
 
             def json(self):
-                return {}
+                return {'username': 'alice', 'nickname': '爱丽丝'}
 
-        with mock.patch('requests.request', return_value=FakeRsp()) as m:
-            ok, msg = self.mgr.bangumi_update_collection('tok', '42', 2)
-        self.assertTrue(ok)
-        self.assertEqual(m.call_args[0][0], 'PUT')
-        self.assertEqual(m.call_args[1]['json'], {'type': 2})
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            username = self.mgr._bangumi_username('tok')
+        self.assertEqual(username, 'alice')
+        self.assertIn('api.bgm.tv/v0/me', m.call_args[0][0])
+        self.assertEqual(self.mgr._username_cache, 'alice')
 
-    def test_update_collection_put_fallback_post(self):
+    def test_bangumi_username_invalid_token(self):
+        from unittest import mock
+        with mock.patch('requests.get', side_effect=Exception('401')):
+            username = self.mgr._bangumi_username('bad-token')
+        self.assertIsNone(username)
+
+    def test_search_post_v0(self):
+        # R6：搜索改为 POST api.bgm.tv/v0/search/subjects（对齐 Kazumi buildBangumiSearchParams）
         import requests
         from unittest import mock
-        calls = {'n': 0}
+        items = [{'id': 311310, 'name_cn': '番剧A'}]
 
-        def fake_request(method, url, **kw):
-            calls['n'] += 1
-            if calls['n'] == 1:
-                raise requests.exceptions.HTTPError('bad')
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
 
-            class R:
-                def raise_for_status(self):
-                    pass
-            return R()
+            def json(self):
+                return {'data': items}
 
-        with mock.patch('requests.request', side_effect=fake_request):
-            ok, _ = self.mgr.bangumi_update_collection('tok', '42', 1)
-        self.assertTrue(ok)
-        self.assertEqual(calls['n'], 2)  # PUT 失败后回退 POST
+        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+            result = self.mgr.bangumi_search('海贼王', limit=5)
+        self.assertEqual(result, items)
+        url = m.call_args[0][0]
+        self.assertIn('api.bgm.tv/v0/search/subjects', url)
+        self.assertEqual(m.call_args[1]['params'], {'limit': 5, 'offset': 0})
+        body = m.call_args[1]['json']
+        self.assertEqual(body['keyword'], '海贼王')
+        self.assertEqual(body['sort'], 'heat')
+        self.assertEqual(body['filter']['type'], [2])
 
-    def test_delete_collection(self):
+    def test_trends_with_params(self):
+        # /p1/trending/subjects 必须带 type/limit/offset，否则官方 API 返回 400
         from unittest import mock
 
         class FakeRsp:
             def raise_for_status(self):
                 pass
 
-        with mock.patch('requests.delete', return_value=FakeRsp()) as m:
+            def json(self):
+                return {'data': []}
+
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            self.mgr.bangumi_trends()
+        self.assertIn('next.bgm.tv/p1/trending/subjects', m.call_args[0][0])
+        self.assertEqual(m.call_args[1]['params'], {'type': 2, 'limit': 24, 'offset': 0})
+
+    def test_calendar_normalizes_weekday_map(self):
+        from unittest import mock
+
+        data = {
+            '1': [{
+                'subject': {
+                    'id': 42,
+                    'name': 'Original',
+                    'nameCN': '中文名',
+                    'info': '12话 / 2026年7月6日 / 制作组',
+                    'images': {'large': 'https://example.com/cover.jpg'},
+                },
+                'watchers': 123,
+            }],
+            '2': [],
+        }
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return data
+
+        with mock.patch('requests.get', return_value=FakeRsp()):
+            calendar = self.mgr.bangumi_calendar()
+        self.assertEqual(len(calendar), 7)
+        self.assertEqual(calendar[0]['weekday']['id'], 1)
+        self.assertEqual(calendar[0]['items'][0]['id'], 42)
+        self.assertEqual(calendar[0]['items'][0]['name_cn'], '中文名')
+        self.assertEqual(calendar[0]['items'][0]['air_date'], '2026-07-06')
+        self.assertEqual(calendar[0]['items'][0]['watchers'], 123)
+
+    def test_update_collection_put_ok(self):
+        from unittest import mock
+
+        class FakeRsp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}
+
+        # 对齐 T74 全矩阵实现：首个尝试为 POST + `-` 通配用户，2xx 即成功。
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request', return_value=FakeRsp()) as m:
+            ok, msg = self.mgr.bangumi_update_collection('tok', '42', 2)
+        self.assertTrue(ok)
+        self.assertEqual(m.call_args[0][0], 'POST')
+        self.assertEqual(m.call_args[1]['json'], {'type': 2})
+        self.assertIn('/collections/42', m.call_args[0][1])
+
+    def test_update_collection_fallback(self):
+        from unittest import mock
+        calls = {'n': 0}
+
+        class Rsp:
+            def __init__(self, code):
+                self.status_code = code
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}
+
+        def fake_request(method, url, **kw):
+            calls['n'] += 1
+            # 首个组合返回非 2xx，回退到下一组合成功
+            return Rsp(500 if calls['n'] == 1 else 200)
+
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request', side_effect=fake_request):
+            ok, _ = self.mgr.bangumi_update_collection('tok', '42', 1)
+        self.assertTrue(ok)
+        self.assertEqual(calls['n'], 2)  # 首个组合失败后回退下一组合成功
+
+    def test_delete_collection(self):
+        from unittest import mock
+
+        class FakeRsp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+        # 实现走 requests.request('DELETE', ...)，首个 `-` 通配用户 2xx 即成功。
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request', return_value=FakeRsp()) as m:
             ok, msg = self.mgr.bangumi_delete_collection('tok', '42')
         self.assertTrue(ok)
-        self.assertIn('/v0/users/-/collections/42', m.call_args[0][0])
+        self.assertEqual(m.call_args[0][0], 'DELETE')
+        self.assertIn('/collections/42', m.call_args[0][1])
 
     def test_missing_token(self):
         ok, msg = self.mgr.bangumi_update_collection('', '42', 2)
         self.assertFalse(ok)
         self.assertIn('token', msg.lower())
+
+    # ---------------------------------------------------------------- 镜像源（4.1）
+
+    def test_set_mirror_switches_public_endpoint_base(self):
+        from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT, BANGUMI_MIRROR_API, BANGUMI_MIRROR_NEXT
+        # 默认官方
+        self.assertEqual(self.mgr._base_api(), BANGUMI_API)
+        self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
+        # 开启 Bangumi 镜像 → 全域名反代 api.bangumi.lol / next.bangumi.lol
+        self.mgr.set_mirror(bangumi=True)
+        self.assertEqual(self.mgr._base_api(), BANGUMI_MIRROR_API)
+        self.assertEqual(self.mgr._base_next(), BANGUMI_MIRROR_NEXT)
+        # 关闭恢复官方
+        self.mgr.set_mirror(bangumi=False)
+        self.assertEqual(self.mgr._base_api(), BANGUMI_API)
+        self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
+
+    def test_mirror_enabled_trends_uses_mirror(self):
+        # 镜像开启 → 推荐走 next.bangumi.lol（全域名反代），且 nameCN 归一到 name_cn
+        from kazumi.plugin_manager import BANGUMI_MIRROR_NEXT
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': [{'id': 1, 'name': '番A', 'nameCN': '番A中', 'rating': {'score': 8.0}}]}
+
+        self.mgr.enable_bangumi_proxy = True
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            out = self.mgr.bangumi_trends(limit=5)
+        self.assertIn(BANGUMI_MIRROR_NEXT + '/p1/trending/subjects', m.call_args[0][0])
+        self.assertEqual(out['items'][0]['name_cn'], '番A中')
+        self.assertEqual(out['total'], 1)
+
+    def test_mirror_enabled_search_uses_mirror(self):
+        # 镜像开启 → 搜索走 api.bangumi.lol（免签名，全路径可用）
+        from kazumi.plugin_manager import BANGUMI_MIRROR_API
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': [{'id': 1, 'name_cn': '番A'}]}
+
+        self.mgr.enable_bangumi_proxy = True
+        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+            out = self.mgr.bangumi_search('测试', limit=3)
+        self.assertIn(BANGUMI_MIRROR_API + '/v0/search/subjects', m.call_args[0][0])
+        self.assertEqual(len(out), 1)
+
+    def test_mirror_enabled_season_calendar_uses_mirror(self):
+        # 镜像开启 → 季度放送检索（v0/search/subjects POST）走 api.bangumi.lol
+        from kazumi.plugin_manager import BANGUMI_MIRROR_API
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': []}
+
+        self.mgr.enable_bangumi_proxy = True
+        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+            self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01')
+        self.assertIn(BANGUMI_MIRROR_API + '/v0/search/subjects', m.call_args[0][0])
+
+    def test_mirror_disabled_trends_uses_official(self):
+        # 镜像关闭 → 推荐仍走官方 next.bgm.tv（回归保护）
+        from kazumi.plugin_manager import BANGUMI_API_NEXT
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': []}
+
+        self.mgr.enable_bangumi_proxy = False
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            self.mgr.bangumi_trends(limit=5)
+        self.assertIn(BANGUMI_API_NEXT + '/p1/trending/subjects', m.call_args[0][0])
+
+    def test_mirror_enabled_auth_collections_uses_mirror(self):
+        # 全域名反代也代理鉴权/收藏接口（镜像开启时走 api.bangumi.lol）
+        from kazumi.plugin_manager import BANGUMI_MIRROR_API
+        from unittest import mock
+        self.mgr.enable_bangumi_proxy = True
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.get') as m:
+            class FakeRsp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {'data': []}
+            m.return_value = FakeRsp()
+            self.mgr.bangumi_user_collections('tok', limit=10)
+        self.assertIn(BANGUMI_MIRROR_API + '/v0/users/alice/collections', m.call_args[0][0])
+
+    def test_character_detail(self):
+        from unittest import mock
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'id': 123, 'name': '角色A', 'summary': '简介'}
+
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            info = self.mgr.bangumi_character_detail('123')
+        self.assertEqual(info['name'], '角色A')
+        self.assertIn('/v0/characters/123', m.call_args[0][0])
+
+
+class TestBangumiSeason(unittest.TestCase):
+    """Bangumi 季度放送检索（mock requests.post，不触网）。"""
+
+    def setUp(self):
+        self.mgr = PluginManager()
+        self.mgr._plugins = []
+
+    def test_season_calendar_merges_and_buckets(self):
+        from unittest import mock
+        from datetime import date
+        pages = {
+            0: [
+                {'id': 1, 'name': 'A', 'name_cn': '番A', 'date': '2026-07-06',
+                 'rating': {'rank': 5, 'score': 8.0, 'total': 100}, 'images': {'large': 'http://x/a.jpg'}},
+                {'id': 2, 'name': 'B', 'name_cn': '番B', 'date': '2026-07-07',
+                 'rating': {'rank': 9, 'score': 7.0, 'total': 50}, 'images': {'large': 'http://x/b.jpg'}},
+            ],
+            2: [
+                {'id': 2, 'name': 'B', 'name_cn': '番B', 'date': '2026-07-07'},  # 与第 1 页重复 → 去重
+                {'id': 3, 'name': 'C', 'name_cn': '番C'},                        # 无播出日期 → weekday 1
+            ],
+            4: [],
+        }
+
+        class FakeRsp:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': self._rows, 'total': len(self._rows)}
+
+        def fake_post(url, params=None, json=None, **kw):
+            return FakeRsp(pages.get(params['offset'], []))
+
+        with mock.patch('requests.post', side_effect=fake_post) as m:
+            calendar = self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01', page_size=2)
+        # 7 个星期桶
+        self.assertEqual(len(calendar), 7)
+        all_items = [it for d in calendar for it in d['items']]
+        # 去重后 3 条（id=2 跨页重复只算一次）
+        self.assertEqual(sorted(it['id'] for it in all_items), [1, 2, 3])
+        # id=1 落入其播出日期对应的星期桶
+        wd1 = date(2026, 7, 6).isoweekday()
+        bucket = calendar[wd1 - 1]
+        self.assertEqual(bucket['weekday']['id'], wd1)
+        self.assertIn(1, [it['id'] for it in bucket['items']])
+        # 无日期条目落入 weekday 1 桶
+        self.assertIn(3, [it['id'] for it in calendar[0]['items']])
+        # 请求 body：sort=rank + air_date 区间 + type=2
+        first_body = m.call_args_list[0][1]['json']
+        self.assertEqual(first_body['sort'], 'rank')
+        self.assertEqual(first_body['filter']['air_date'], ['>=2026-07-01', '<2026-10-01'])
+        self.assertEqual(first_body['filter']['type'], [2])
+
+    def test_season_calendar_empty_args(self):
+        self.assertEqual(self.mgr.bangumi_season_calendar('', ''), [])
+        self.assertEqual(self.mgr.bangumi_season_calendar(None, '2026-10-01'), [])
+
+    def test_season_calendar_request_failure(self):
+        from unittest import mock
+        with mock.patch('requests.post', side_effect=Exception('net down')):
+            self.assertEqual(self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01'), [])
+
+    def test_season_weekday_helper(self):
+        from datetime import date
+        self.assertEqual(self.mgr._season_weekday('2026-07-06'), date(2026, 7, 6).isoweekday())
+        self.assertEqual(self.mgr._season_weekday('bad'), 1)
+        self.assertEqual(self.mgr._season_weekday(None), 1)
+
+
+class TestBangumiTrends(unittest.TestCase):
+    """Bangumi 趋势榜单归一化（mock requests.get，不触网）。"""
+
+    def setUp(self):
+        self.mgr = PluginManager()
+        self.mgr._plugins = []
+
+    def test_trends_unwraps_subject_and_normalizes(self):
+        from unittest import mock
+        payload = {
+            'total': 2,
+            'data': [
+                {'subject': {'id': 1, 'name': 'A', 'nameCN': '番A', 'date': '2026-07-06',
+                             'rating': {'rank': 5, 'score': 8.0, 'total': 100},
+                             'images': {'large': 'http://x/a.jpg'}}, 'watchers': 9},
+                {'subject': {'id': 2, 'name': 'B', 'name_cn': '番B'}},
+            ],
+        }
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return payload
+
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            out = self.mgr.bangumi_trends(limit=24, offset=0)
+        self.assertEqual(out['total'], 2)
+        self.assertEqual(len(out['items']), 2)
+        self.assertEqual(out['items'][0]['name_cn'], '番A')       # nameCN → name_cn
+        self.assertEqual(out['items'][0]['air_date'], '2026-07-06')
+        self.assertEqual(out['items'][0]['rating']['rank'], 5)
+        self.assertEqual(out['items'][1]['name_cn'], '番B')
+        params = m.call_args[1]['params']
+        self.assertEqual(params['type'], 2)
+        self.assertEqual(params['limit'], 24)
+        self.assertEqual(params['offset'], 0)
+
+    def test_trends_failure_returns_empty(self):
+        from unittest import mock
+        with mock.patch('requests.get', side_effect=Exception('net down')):
+            out = self.mgr.bangumi_trends()
+        self.assertEqual(out, {'items': [], 'total': 0})
 
 
 if __name__ == '__main__':

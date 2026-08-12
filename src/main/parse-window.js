@@ -20,7 +20,7 @@ const { BrowserWindow } = require('electron');
 const { AsyncSingleFlight } = require('./async-session');
 
 const MEDIA_EXT = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
-const IFRAME_TIMEOUT = 20000;
+const IFRAME_TIMEOUT = 12000;
 const POOL_SIZE = 3; // 解析池并发窗口数
 
 /** http(s) 且路径命中媒体扩展名 → 可交 mpv 的直链。 */
@@ -226,7 +226,10 @@ class ParseWindow {
             } catch (e) { this._release(slot); return resolve(null); }
 
             const ses = win.webContents.session;
+            // R5：隐藏窗口反复加载失败会累积 Electron 内部 did-stop-loading 监听器，放开上限抑制告警
+            win.webContents.setMaxListeners(0);
             let settled = false;
+            let initialLoadDone = false;  // 首个页面是否已成功加载（did-fail-load 快速失败判定用）
             let jsPoll = null;      // 视频元素轮询（非 legacy）
             let legacyPoll = null;  // iframe src 轮询（legacy）
             const done = (r) => {
@@ -249,6 +252,15 @@ class ParseWindow {
             };
             const timer = setTimeout(() => finish(null), timeout);
 
+            // R4：主框架加载失败（解析站死链/连接被拒）→ 秒级跳过该解析站，不必烧满 IFRAME_TIMEOUT。
+            // 忽略：非主框架（页面内 iframe 失败）、ERR_ABORTED(-3，跟随加载/主动中断）、
+            // 以及首帧已成功加载后的后续失败（legacy 跟随加载失败不误杀，交给轮询/超时兜底）。
+            win.webContents.on('did-fail-load', (_e, errorCode, _desc, _vUrl, isMainFrame) => {
+                if (settled) return;
+                if (!isMainFrame || errorCode === -3 || initialLoadDone) return;
+                finish(null);
+            });
+
             const isMedia = (details) => {
                 if (details.resourceType === 'media') return true;
                 return isMediaUrl(details.url);
@@ -266,11 +278,28 @@ class ParseWindow {
                 cb({});
             });
 
+            // 首帧加载完成：置位 initialLoadDone 后立即执行一次元素检测，比等 300ms 轮询快
+            win.webContents.on('did-finish-load', () => {
+                initialLoadDone = true;
+                if (legacy) {
+                    win.webContents.executeJavaScript(JS_LEGACY_IFRAME, true).catch(() => { });
+                } else {
+                    win.webContents.executeJavaScript(JS_POLL_VIDEO, true)
+                        .then((srcs) => {
+                            if (!Array.isArray(srcs) || settled) return;
+                            for (const s of srcs) {
+                                if (isMediaUrl(s) && s !== url) {
+                                    finish({ ok: true, url: s, header: {}, via: `${via}·dom-ready` });
+                                    return;
+                                }
+                            }
+                        })
+                        .catch(() => { /* 页面未就绪，等轮询 */ });
+                }
+            });
+
             if (legacy) {
                 // 旧解析器（useLegacyParser）：监听 iframe src，媒体直链即命中；非媒体页跟随加载（限深防环）
-                win.webContents.on('did-finish-load', () => {
-                    win.webContents.executeJavaScript(JS_LEGACY_IFRAME, true).catch(() => { });
-                });
                 const followed = new Set();
                 let depth = 0;
                 const MAX_DEPTH = 2;
@@ -291,7 +320,7 @@ class ParseWindow {
                             }
                         })
                         .catch(() => { /* 页面未就绪，下轮再试 */ });
-                }, 800);
+                }, 300);
             } else {
                 // JS 注入兜底（第二机制）：轮询页面 <video>/<audio> 元素拿媒体直链，
                 // 覆盖 webRequest 未命中（资源经 XHR/fetch 拉取、resourceType 非 media）的场景。
@@ -308,10 +337,59 @@ class ParseWindow {
                             }
                         })
                         .catch(() => { /* 页面未就绪/跨域限制，下轮再试 */ });
-                }, 800);
+                }, 300);
             }
 
             win.loadURL(url).catch(() => { /* 加载失败等超时 */ });
+        }));
+    }
+
+    // ------------------------------------------------------------ 验证码验证
+
+    /** 验证码源验证（T73）：可见窗口加载验证页供用户交互填写，关闭时收割会话 Cookie 推给后端持久化。
+     *  验证通过后下次搜索自动带上 Cookie（rule_engine 搜索请求应用 cookie_jar）。返回 {ok:boolean}。 */
+    captchaVerify(url, timeout = 180000) {
+        return this._acquire().then((slot) => new Promise((resolve) => {
+            let win;
+            try {
+                win = new BrowserWindow({
+                    show: true, width: 900, height: 700,   // 可见窗口，用户可交互过验证
+                    title: '验证码验证',
+                    autoHideMenuBar: true,
+                    webPreferences: {
+                        partition: `parse-${slot}`, // 独立槽位会话：与解析互不冲突
+                        contextIsolation: true,
+                        nodeIntegration: false,
+                        sandbox: true,
+                    },
+                });
+            } catch (e) { this._release(slot); return resolve({ ok: false }); }
+            const ses = win.webContents.session;
+            win.webContents.setMaxListeners(0);
+            let settled = false;
+            const done = (ok) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                // 先读会话 Cookie 再销毁窗口（session 随最后窗口关闭销毁）；推给后端持久化
+                ses.cookies.get({}).then((cookies) => {
+                    this._pushCookies(cookies);
+                    try { win.destroy(); } catch (e) { /* ignore */ }
+                    this._release(slot);
+                    resolve({ ok });
+                }).catch(() => {
+                    try { win.destroy(); } catch (e) { /* ignore */ }
+                    this._release(slot);
+                    resolve({ ok });
+                });
+            };
+            const timer = setTimeout(() => done(true), timeout); // 超时也尽力收 cookie
+            win.on('closed', () => done(true)); // 用户关闭窗口即视为验证完成
+            // 多步验证（输入→提交→跳转）每次加载完成都顺手收割一次 Cookie
+            win.webContents.on('did-finish-load', () => {
+                ses.cookies.get({}).then((cookies) => this._pushCookies(cookies)).catch(() => { });
+            });
+            win.loadURL(url).catch(() => done(true));
         }));
     }
 }

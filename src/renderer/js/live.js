@@ -12,7 +12,7 @@
  * 播放：首地址交主进程 mpv；未真正开播时主进程自动切换备用线路
  * （vpc:play-retry/failed 事件提示）。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar */
 
 /**
  * T39：直播每页频道数 = 铺满一屏的容量（铺满后才翻页）。
@@ -38,6 +38,7 @@ const Live = {
     _inited: false,
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
     _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
+    _probeBar: null,   // 频道探测进度条状态
 
     init() {
         if (this._inited) return;
@@ -99,6 +100,7 @@ const Live = {
     /** 从 /sites 拉取 lives + 设置里自定义的直播源（配置载入完成后调用）。 */
     async load() {
         ++this._probeToken; // 作废进行中的探测批次（重载下拉）
+        this._clearProbeBar();
         try {
             const st = await getJson('/sites');
             // 部分配置用 {group, channels:[{name, urls}]} 嵌套形式，先展平再归一化
@@ -136,7 +138,10 @@ const Live = {
             $('#live-list').html('<div class="tip-line">当前配置没有直播源。可到“设置 → 源设置 → 直播源”添加 txt/m3u 直播源或导入 TVBox 配置，也可载入含 lives 的配置。</div>');
             return;
         }
-        this.lives.forEach((l, i) => sel.append(`<option value="${i}">${escHtml(l.name || l.url)}</option>`));
+        // T65：直播源选项拼串一次性写入
+        sel.append(this.lives.map((l, i) => `<option value="${i}">${escHtml(l.name || l.url)}</option>`).join(''));
+        const idx = this.lives.findIndex((l) => !/(redirect|live)/i.test(String(l.name || '')));
+        sel.val(idx >= 0 ? idx : 0);
         await this.loadChannels();
     },
 
@@ -146,8 +151,9 @@ const Live = {
         const live = this.lives[idx];
         if (!live) return;
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
-        // T39：每页频道数 = 铺满一屏的容量，铺满后才翻页（不再跟随每页影片数设置）
-        this._pageSize = liveFitPageSize();
+        this._clearProbeBar();
+        // 设置值优先；未设置时按窗口容量铺满一屏。
+        this._pageSize = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
         this._page = 1;
         $('#live-status').hide();
         showLoading();
@@ -207,13 +213,12 @@ const Live = {
      *  探测完成后写入本地缓存（T35：下次进入直接用，手动刷新才重探）。 */
     async _probeChannels(token, liveUrl) {
         const BATCH = 50;
-        const status = $('#live-status');
         const all = this.channels.slice();
         const kept = new Array(all.length).fill(true);
-        let done = 0;
         const alive = () => token === this._probeToken;
 
-        status.text(`正在检测频道可用性 0/${all.length} …`).show();
+        if (!alive()) return;
+        this._startProbeBar(token, all.length);
         try {
             for (let i = 0; i < all.length; i += BATCH) {
                 if (!alive()) return;
@@ -221,18 +226,16 @@ const Live = {
                 const results = await window.vpc.probeUrls(batch.map((c) => c.url));
                 if (!alive()) return; // 探测期间已切源/刷新，丢弃本批
                 results.forEach((ok, j) => { kept[i + j] = !!ok; });
-                done += results.length;
                 this.channels = all.filter((c, k) => kept[k]);
                 // 保持当前选中分组：该分组已被过滤空则回退「全部」
                 if (this.group && !this.channels.some((c) => c.group === this.group)) this.group = '';
                 this.renderGroups();
                 this.renderList();
-                status.text(`正在检测频道可用性 ${done}/${all.length} …`).show();
+                this._probeOneDone(token, results.length);
             }
             if (!alive()) return;
             const hidden = all.length - this.channels.length;
-            status.text(hidden > 0 ? `已过滤 ${hidden} 个不可用频道` : '全部频道可用').show();
-            setTimeout(() => { if (alive()) status.hide(); }, 5000);
+            this._endProbeBar(token, hidden > 0 ? `已过滤 ${hidden} 个不可用频道` : '全部频道可用');
             // T35：探测结果落盘（下次进页/切源直接按缓存过滤）
             this._saveProbeCache(liveUrl, all, kept);
         } catch (e) {
@@ -241,9 +244,67 @@ const Live = {
                 this.channels = all;
                 this.renderGroups();
                 this.renderList();
-                status.hide();
+                this._clearProbeBar(token);
             }
         }
+    },
+
+    _startProbeBar(token, total) {
+        this._clearProbeBar();
+        const bar = { token, total, done: 0, shown: false, showTimer: null, doneTimer: null };
+        this._probeBar = bar;
+        bar.showTimer = setTimeout(() => {
+            if (this._probeBar !== bar || token !== this._probeToken || bar.done >= bar.total) return;
+            bar.shown = true;
+            this._updateProbeBar(false);
+        }, 1000);
+    },
+
+    _probeOneDone(token, count) {
+        const bar = this._probeBar;
+        if (!bar || bar.token !== token) return;
+        bar.done = Math.min(bar.total, bar.done + count);
+        if (bar.shown) this._updateProbeBar(false);
+    },
+
+    _endProbeBar(token, text) {
+        const bar = this._probeBar;
+        if (!bar || bar.token !== token) return;
+        clearTimeout(bar.showTimer);
+        if (!bar.shown) {
+            this._clearProbeBar(token);
+            return;
+        }
+        bar.done = bar.total;
+        this._updateProbeBar(true, text);
+        bar.doneTimer = setTimeout(() => {
+            if (this._probeBar === bar && token === this._probeToken) this._clearProbeBar(token);
+        }, 1500);
+    },
+
+    _updateProbeBar(done, text) {
+        const bar = this._probeBar;
+        if (!bar || bar.token !== this._probeToken) return;
+        const el = $('#live-probe-bar');
+        if (!el.length) return;
+        renderStatusBar(el, {
+            text: done ? text : '正在检测频道可用性…',
+            recv: bar.done,
+            total: bar.total,
+            done,
+        });
+        el.show();
+    },
+
+    _clearProbeBar(token) {
+        const bar = this._probeBar;
+        if (token !== undefined && (!bar || bar.token !== token)) return;
+        if (bar) {
+            clearTimeout(bar.showTimer);
+            clearTimeout(bar.doneTimer);
+        }
+        this._probeBar = null;
+        $('#live-probe-bar').hide().empty();
     },
 
     /** T35：可用性探测结果写入 settings.liveProbeCache（按源 URL 索引，最多留 20 个源，超出丢最旧）。 */
@@ -311,8 +372,10 @@ const Live = {
         this.channels.forEach((c) => { if (groups.indexOf(c.group) < 0) groups.push(c.group); });
         // 按 this.group 标记 active（探测刷新原地重渲染时保持当前选中分组，勿总重置为「全部」）
         const tab = (g, label) => `<span class="class-tab${this.group === g ? ' active' : ''}" data-group="${escHtml(g)}">${escHtml(label)}</span>`;
-        box.append(tab('', '全部'));
-        groups.forEach((g) => box.append(tab(g, g)));
+        // T65：分组标签拼串一次性写入
+        const tabs = [tab('', '全部')];
+        groups.forEach((g) => tabs.push(tab(g, g)));
+        box.html(tabs.join(''));
     },
 
     renderList() {
@@ -330,11 +393,12 @@ const Live = {
         const size = this._pageSize || liveFitPageSize();
         const pagecount = Math.ceil(shown.length / size);
         this._page = Math.min(Math.max(1, this._page), pagecount);
-        shown.slice((this._page - 1) * size, this._page * size).forEach(({ c, i }) => {
-            box.append(`<div class="live-item" data-idx="${i}" tabindex="0">
+        // T65：当前页频道拼串一次性写入（替代逐条 append）
+        const html = shown.slice((this._page - 1) * size, this._page * size).map(({ c, i }) =>
+            `<div class="live-item" data-idx="${i}" tabindex="0">
                 <span class="live-name">${escHtml(c.name)}</span>
-                <span class="live-group">${escHtml(c.group)}</span></div>`);
-        });
+                <span class="live-group">${escHtml(c.group)}</span></div>`).join('');
+        box.html(html);
         renderPagerBox($('#live-pager'), {
             page: this._page,
             pagecount,

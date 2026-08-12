@@ -62,9 +62,16 @@ class CmsSpider:
                 logger.debug('cms %s home list failed: %s', self.key, e)
         return result
 
-    def homeVideoContent(self):
-        data = self._fetch({'ac': 'videolist', 'pg': '1'})
-        return {'list': [self._vod_short(v) for v in (data.get('list') or [])]}
+    def homeVideoContent(self, pg='1'):
+        # 「全部」总览 feed（不带分类 t，源全部/最新）：支持分页（T76）
+        data = self._fetch({'ac': 'videolist', 'pg': str(pg)})
+        return {
+            'page': int(data.get('page') or pg or 1),
+            'pagecount': int(data.get('pagecount') or 0),
+            'limit': int(data.get('limit') or 20),
+            'total': int(data.get('total') or 0),
+            'list': [self._vod_short(v) for v in (data.get('list') or [])],
+        }
 
     def categoryContent(self, tid, pg, filter, extend):
         params = {'ac': 'videolist', 't': str(tid), 'pg': str(pg)}

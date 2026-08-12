@@ -8,7 +8,7 @@
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
 /* global $, doAction, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading,
-          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads */
+          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -380,11 +380,6 @@ function goParent() {
     }
 }
 
-/** 追加一条列表项。 */
-function addFile(node) {
-    $('#file_list').append(node);
-}
-
 /** 选中文件：展示路径信息确认框（确认后经 vpc:file-push 交 mpv 播放）。 */
 function selectFile(path) {
     currentFile = path;
@@ -444,15 +439,16 @@ function renderLocalPage() {
     const dirs = slice.filter((n) => n.dir === 1);
     const videos = slice.filter((n) => n.dir !== 1 && isLocalVideo(n.name));
     const audios = slice.filter((n) => n.dir !== 1 && isLocalAudio(n.name));
-    $('#file_list').html('');
-    if (st.parent !== '.') addFile(buildParentItem());
-    dirs.forEach((node) => addFile(buildDirItem(node.name, node.time, node.path)));
-    if (videos.length) {
-        addFile(`<div class="local-grid">${videos.map((n) => buildVideoCard(n.name, n.time, n.path)).join('')}</div>`);
-        loadLocalThumbs();
-    }
-    audios.forEach((node) => addFile(buildFileItem(node.name, node.time, node.path)));
-    if (!total && st.parent === '.') addFile('<div class="tip-line">（无视频/音频文件）</div>');
+    // T54：先拼串再一次性写入 DOM，避免在 backdrop-filter 卡片内多次 append
+    //      触发反复重栅格化导致的背景细闪
+    const parts = [];
+    if (st.parent !== '.') parts.push(buildParentItem());
+    dirs.forEach((node) => parts.push(buildDirItem(node.name, node.time, node.path)));
+    if (videos.length) parts.push(`<div class="local-grid">${videos.map((n) => buildVideoCard(n.name, n.time, n.path)).join('')}</div>`);
+    audios.forEach((node) => parts.push(buildFileItem(node.name, node.time, node.path)));
+    if (!total && st.parent === '.') parts.push('<div class="tip-line">（无视频/音频文件）</div>');
+    $('#file_list').html(parts.join(''));
+    if (videos.length) loadLocalThumbs();
     // 分页条：仅多于一页时展示
     if (pages > 1) {
         $('#local-page-info').text(`第 ${page} / ${pages} 页 · 共 ${total} 项`);
@@ -729,6 +725,7 @@ function initSettingsPanel() {
         $('#view-settings .tool-card[data-setcat]').each(function () {
             $(this).toggle(String($(this).data('setcat')) === cat);
         });
+        if (cat === 'about' && typeof About !== 'undefined' && About.enter) About.enter();
     };
     showSetCat('appearance'); // 先按默认分类收纳，回填后切到记忆分类
     $('#settings-nav').on('click', '.settings-nav-item', function () {
@@ -762,12 +759,14 @@ function initSettingsPanel() {
             $('#set_textcolor_pick').val(s.textColor);
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
-        $('#set_anim').val(s.animEnabled !== false ? 'on' : 'off'); // 界面动画（T22：筛选框）
+        $('#set_anim').prop('checked', s.animEnabled !== false); // 界面动画（T73：改为与 MiSans 一致的开关）
         // 每页条数（T39：首页/搜索/收藏/历史各自一项；首页兼容旧键 listPageSize）
         if (s.pageSizeHome || s.listPageSize) $('#set_pagesize_home').val(s.pageSizeHome || s.listPageSize);
         if (s.pageSizeSearch) $('#set_pagesize_search').val(s.pageSizeSearch);
         if (s.pageSizeFavorites) $('#set_pagesize_fav').val(s.pageSizeFavorites);
         if (s.pageSizeHistory) $('#set_pagesize_history').val(s.pageSizeHistory);
+        if (s.pageSizeLive) $('#set_pagesize_live').val(s.pageSizeLive);
+        if (s.pageSizePopular) $('#set_pagesize_popular').val(s.pageSizePopular);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -782,6 +781,15 @@ function initSettingsPanel() {
         // 系统：关闭行为 / 隐身模式 / 缓存位置
         $('#set_closeaction').val(s.closeAction || 'tray');
         $('#set_incognito').prop('checked', !!s.incognito);
+        // 系统：启动进入页面 / 应用内错误提示；外观：MiSans 字体
+        $('#set_startup_view').val(s.startupView || 'home');
+        $('#set_error_toast').prop('checked', s.errorToast !== false);
+        $('#set_use_misans').prop('checked', s.useMisansFont !== false);
+        // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
+        $('#set_catvod_bgm_match').prop('checked', s.catvodBgmMatch === true);
+        // 系统：网络代理
+        $('#set_proxy_url').val(s.proxyUrl || '');
+        $('#set_proxy_enable').prop('checked', !!s.proxyEnable);
         refreshCacheDirLine(s.cacheDir);
         // mpv 视频缓冲缓存：模式 + 目录展示（目录未设置时显示默认路径）
         $('#set_cache_mode').val(s.playerCacheMode === 'disk' ? 'disk' : 'memory');
@@ -789,6 +797,7 @@ function initSettingsPanel() {
         // 下载：目录展示（读持久化值，不拉起 aria2）+ 并发数回填
         refreshDlDirLine(s.dlDir);
         $('#set_dl_concurrency').val(String(s.dlConcurrency || '3'));
+        $('#set_dl_split').val(String(s.dlSplitConcurrency || '5'));
         // 快捷键步长回填
         const hk = s.playerHotkeys || {};
         if (hk.seek) $('#set_hotkey_seek').val(hk.seek);
@@ -975,15 +984,16 @@ function initSettingsPanel() {
         if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
         warnToast('Anime4K 档位已保存，下次起播生效');
     });
-    // 界面动画筛选框（T22：由开关改为下拉）
+    // 界面动画开关（T73：由下拉改为与 MiSans 一致的开关）
     $('#set_anim').on('change', function () {
-        const on = this.value === 'on';
+        const on = this.checked;
         window.vpc.settingsSet('animEnabled', on);
         applySkin({ animEnabled: on });
     });
     // 每页影片数量（T39：首页/搜索/收藏/历史各自持久化，作废渲染层缓存，下次进列表页生效）
     [['#set_pagesize_home', 'pageSizeHome'], ['#set_pagesize_search', 'pageSizeSearch'],
-     ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory']].forEach(([sel, key]) => {
+     ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory'],
+     ['#set_pagesize_live', 'pageSizeLive'], ['#set_pagesize_popular', 'pageSizePopular']].forEach(([sel, key]) => {
         $(sel).on('change', function () {
             window.vpc.settingsSet(key, this.value);
             if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
@@ -993,6 +1003,34 @@ function initSettingsPanel() {
     // 关闭主窗口行为
     $('#set_closeaction').on('change', function () {
         window.vpc.settingsSet('closeAction', this.value);
+    });
+    // 启动进入页面
+    $('#set_startup_view').on('change', function () {
+        window.vpc.settingsSet('startupView', this.value);
+    });
+    // 应用内错误提示开关
+    $('#set_error_toast').on('change', function () {
+        window.vpc.settingsSet('errorToast', this.checked);
+        if (typeof setErrorToastEnabled === 'function') setErrorToastEnabled(this.checked);
+    });
+    // MiSans 界面字体开关（立即生效：重载渲染层字体注入）
+    $('#set_use_misans').on('change', function () {
+        window.vpc.settingsSet('useMisansFont', this.checked);
+        try { window.location.reload(); } catch (e) { /* 重载失败不影响保存 */ }
+    });
+    // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
+    $('#set_catvod_bgm_match').on('change', function () {
+        window.vpc.settingsSet('catvodBgmMatch', this.checked);
+    });
+    // 网络代理：保存并应用（重启后端使 Python requests 生效）
+    $('#set_proxy_save').on('click', async () => {
+        const url = $('#set_proxy_url').val().trim();
+        const enable = $('#set_proxy_enable').prop('checked');
+        if (enable && !url) { warnToast('请填写代理地址'); return; }
+        try {
+            const r = await window.vpc.setProxy({ url, enable });
+            warnToast(r && r.ok ? '代理已保存并应用（后端已重启）' : '保存失败');
+        } catch (e) { warnToast('保存失败'); }
     });
     // 隐身模式（不记历史）
     $('#set_incognito').on('change', function () {
@@ -1069,6 +1107,12 @@ function initSettingsPanel() {
         if (r && r.ok) warnToast(`并发任务数已设为 ${r.n}`);
         else warnToast('已保存，将在下载引擎启动后生效');
     });
+    // 分片并发数（单文件分片/每服务器连接数）：即时生效并持久化
+    $('#set_dl_split').on('change', async function () {
+        const r = await window.vpc.download.control('setSplit', { n: parseInt(this.value, 10) || 5 });
+        if (r && r.ok) warnToast(`分片并发数已设为 ${r.n}`);
+        else warnToast('已保存，将在下载引擎启动后生效');
+    });
     // 恢复默认设置（二次确认：先说明范围，再最终确认；应用自动重启）
     $('#set_reset').on('click', async () => {
         if (!await confirmDialog('将恢复外观/播放等偏好设置为默认值。\n不会删除收藏、历史与已载入的源。继续？')) return;
@@ -1081,10 +1125,6 @@ function initSettingsPanel() {
     });
     $('#set_wallpaper').on('click', chooseWallpaper);
     $('#clear_wallpaper').on('click', clearWallpaper);
-    // 版本号（主进程 app.getVersion）
-    if (window.vpc.appVersion) {
-        window.vpc.appVersion().then((v) => $('#app_version').text(`版本号：${v}`)).catch(() => { });
-    }
     // 屏蔽源：查看列表（key 映射为可读源名，取不到时回退 key）
     $('#blocked_view').on('click', async () => {
         try {
@@ -1142,48 +1182,64 @@ function initSettingsPanel() {
     window.vpc.onPushReceived((info) => {
         warnToast(`收到推送，已开始播放：${(info.url || '').slice(0, 60)}`);
     });
-    // 外部播放器：指定路径 / 恢复默认
-    $('#set_external_player_pick').on('click', async () => {
-        const r = await window.vpc.pickExternalPlayer();
-        if (r && r.ok) warnToast(`已指定外部播放器：${r.path}`);
-    });
-    $('#set_external_player_clear').on('click', async () => {
-        await window.vpc.settingsSet('externalPlayerPath', '');
-        warnToast('已恢复默认（自动探测 VLC）');
-    });
-    // 画中画：开启 / 关闭 mini 置顶窗
-    $('#set_pip_open').on('click', async () => {
-        const r = await window.vpc.pipOpen();
-        if (r && r.ok) warnToast('画中画小窗已开启');
-    });
-    $('#set_pip_close').on('click', async () => {
-        await window.vpc.pipClose();
-        warnToast('画中画小窗已关闭');
-    });
     // 定时关机：设定 N 分钟后关机
     $('#set_shutdown_set').on('click', async () => {
         const minutes = parseInt($('#set_shutdown_minutes').val(), 10) || 0;
         const r = await window.vpc.shutdownTimer(minutes);
         if (r && r.ok) warnToast(r.msg || (minutes > 0 ? `已设定 ${minutes} 分钟后关机` : '已取消定时关机'));
     });
-    // 日志查看器：打开 + 翻页
+    // 日志查看器：打开 + 翻页 + 按文件筛选
     let _logPage = 1;
+    let _logPages = 1;      // 已知总页数（loadLogPage 返回后更新），供“下一页”提前钳位
+    let _logSource = '';    // 当前筛选的日志文件（空 = 全部）
     $('#log-viewer-open').on('click', async () => {
         _logPage = 1;
+        _logSource = '';
         openDialog('logViewerDialog');
         await loadLogPage();
     });
     $('#log-prev').on('click', async () => { if (_logPage > 1) { _logPage--; await loadLogPage(); } });
-    $('#log-next').on('click', async () => { _logPage++; await loadLogPage(); });
+    // 提前钳位：点过末页不再请求空白页（旧逻辑的钳位在请求返回后才生效，会先闪一次空 body）
+    $('#log-next').on('click', async () => { if (_logPage < _logPages) { _logPage++; await loadLogPage(); } });
+    // 切换日志来源：回到第 1 页重新载入
+    $('#log-source').on('change', async () => {
+        _logSource = $('#log-source').val() || '';
+        _logPage = 1;
+        await loadLogPage();
+    });
+    // 清空日志：确认后清空目录，并刷新为第一页
+    $('#log-clear').on('click', async () => {
+        if (!await confirmDialog('清空全部应用日志？此操作不可撤销。', { okText: '清空' })) return;
+        try {
+            const r = await window.vpc.clearLogs();
+            if (r && r.ok) {
+                const failed = (r.failed && r.failed.length) ? `，${r.failed.length} 个文件占用未删除（${r.failed.join('、')}）` : '';
+                warnToast(`已清空 ${r.removed || 0} 个日志文件${failed}`);
+            } else {
+                warnToast('清空失败');
+            }
+            _logPage = 1;
+            await loadLogPage();
+        } catch (e) { warnToast('清空日志失败'); }
+    });
     async function loadLogPage() {
         $('#log-viewer-body').html('<div class="tip-line">载入中…</div>');
         try {
-            const r = await window.vpc.getLogs(_logPage, 50);
+            const r = await window.vpc.getLogs(_logPage, 50, _logSource);
             if (!r || !r.ok) { $('#log-viewer-body').html('<div class="tip-line">无日志</div>'); return; }
             const total = r.total || 0;
             const ps = r.pageSize || 50;
             const pages = Math.max(1, Math.ceil(total / ps));
+            _logPages = pages;
             _logPage = Math.min(_logPage, pages);
+            // 同步来源下拉（首次或来源集合变化时重建 option）
+            const sources = r.sources || [];
+            const sel = $('#log-source');
+            const existing = sel.find('option').map(function () { return this.value; }).get().filter(Boolean);
+            if (existing.join('|') !== sources.join('|')) {
+                sel.html('<option value="">全部日志</option>' + sources.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join(''));
+                sel.val(_logSource);
+            }
             $('#log-page-info').text(`第 ${_logPage} / ${pages} 页 · 共 ${total} 行`);
             const html = (r.logs || []).map(l => `<div style="border-bottom:1px solid var(--md-outline-variant);padding:2px 4px;"><span style="color:var(--md-on-surface-variant)">[${l.file}]</span> ${escHtml(l.line)}</div>`).join('');
             $('#log-viewer-body').html(html || '<div class="tip-line">无日志</div>');
@@ -1213,10 +1269,17 @@ async function playDirectLink() {
     const url = $('#direct_play_url').val().trim();
     if (!url) { warnToast('请先粘贴视频链接'); return; }
     if (!/^(https?:|rtmp:|rtsp:)/i.test(url)) { warnToast('链接格式不支持（http/https/rtmp/rtsp）'); return; }
+    // T70：直链播放也注册 Player 会话，退出时计入观看统计（此前绕过 _rememberSession 导致不统计）
+    const regSession = (r) => {
+        if (r && r.ok && typeof Player !== 'undefined' && Player._rememberSession) {
+            Player._curMeta = { site: '', siteName: '直链', title: '直链播放', subtitle: '', vodId: '' };
+            Player._rememberSession(r);
+        }
+    };
     // rtmp/rtsp 与媒体直链无需解析
     if (/^(rtmp:|rtsp:)/i.test(url) || /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i.test(url.split('?')[0])) {
         const r = await window.vpc.playUrl(url, { title: '直链播放' });
-        if (r && r.ok) warnToast('已在 mpv 窗口播放');
+        if (r && r.ok) { regSession(r); warnToast('已在 mpv 窗口播放'); }
         else warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
         return;
     }
@@ -1233,7 +1296,7 @@ async function playDirectLink() {
     hideLoading();
     if (resolved && resolved.ok) {
         const r = await window.vpc.playUrl(resolved.url, { title: '直链播放', header: resolved.header });
-        if (r && r.ok) { warnToast('已在 mpv 窗口播放'); return; }
+        if (r && r.ok) { regSession(r); warnToast('已在 mpv 窗口播放'); return; }
     }
     warnToast('未能解析该链接，请确认链接有效');
 }
