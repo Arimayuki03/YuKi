@@ -141,7 +141,8 @@ class MpvPlayer extends EventEmitter {
             // 起播即抢焦点：请求 mpv 打开窗口时获得前台焦点。
             // 注：Windows 前台锁（foreground lock）下后台进程 spawn 的窗口常被系统
             // 压制在后台，单靠此选项不可靠，另见下方 _bringToFront 的 AppActivate 兜底。
-            '--focus-on-open=yes',
+            // 注意 v0.41 起 --focus-on-open 已移除，改用 --focus-on（open=新窗口时获得焦点）。
+            '--focus-on=open',
             `--input-ipc-server=${this.ipcPath}`,
             // 窗口始终置顶（win32 gdi 后端）：从根源上杜绝 mpv 窗口落在主窗口背后，
             // 与 _bringToFront 的激活兜底互补（前置只是改 z 序，不一定抢到输入焦点）。
