@@ -16,6 +16,7 @@ const net = require('net');
 const path = require('path');
 const { spawn, exec, execSync, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
+const { bringToFront } = require('./win-focus');
 
 // 打包后 extraResources 放在 resources/，vendor 从该处读取
 const ROOT = (() => {
@@ -69,9 +70,11 @@ class MpvPlayer extends EventEmitter {
         this.binary = findMpv();
         this.proc = null;
         this.socket = null;
+        // IPC 命名管道：pid + 最近一次播放时间戳，杜绝「管道已存在（残留 mpv 仍占用）→
+        // IPC 连接失败 → 首次起播无窗口/无控制」的偶发 bug（二次点击因残留退出才成功）。
         this.ipcPath = WIN
-            ? `\\\\.\\pipe\\vpc-mpv-${process.pid}`
-            : path.join(os.tmpdir(), `vpc-mpv-${process.pid}.sock`);
+            ? `\\\\.\\pipe\\vpc-mpv-${process.pid}-${Date.now()}`
+            : path.join(os.tmpdir(), `vpc-mpv-${process.pid}-${Date.now()}.sock`);
         this.assPath = path.join(os.tmpdir(), `vpc-danmaku-${process.pid}.ass`);
         this._reqId = 0;
         this._buf = '';
@@ -94,6 +97,8 @@ class MpvPlayer extends EventEmitter {
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
         this._lastSp = 1;          // 播放期间倍速（实时追踪，exit 时无需查询）
         this._activeSession = null; // {id, proc, pos, duration, fullscreen, speed}，退出时使用缓存
+        this._frontTimer = null;   // 前台抢焦重试定时器（Windows foreground lock 兜底）
+        this._frontTries = 0;
     }
 
     isAvailable() { return !!this.binary; }
@@ -133,7 +138,14 @@ class MpvPlayer extends EventEmitter {
 
         const args = [
             '--idle=no', '--no-terminal',
+            // 起播即抢焦点：请求 mpv 打开窗口时获得前台焦点。
+            // 注：Windows 前台锁（foreground lock）下后台进程 spawn 的窗口常被系统
+            // 压制在后台，单靠此选项不可靠，另见下方 _bringToFront 的 AppActivate 兜底。
+            '--focus-on-open=yes',
             `--input-ipc-server=${this.ipcPath}`,
+            // 窗口始终置顶（win32 gdi 后端）：从根源上杜绝 mpv 窗口落在主窗口背后，
+            // 与 _bringToFront 的激活兜底互补（前置只是改 z 序，不一定抢到输入焦点）。
+            '--ontop',
             '--sub-auto=no', '--sub-visibility=yes',
             `--osd-playing-msg=${opts.title || 'YuKi'}`,
             // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
@@ -186,6 +198,11 @@ class MpvPlayer extends EventEmitter {
         this._lastSp = (speed && speed > 0) ? speed : 1;
         const sessionId = ++this._sessionId; // 闭包捕获：进程退出时附带，区分新旧会话
         const proc = spawn(this.binary, args, { stdio: 'ignore' });
+        // 起播即带入前台：前置(ontop)保证不被主窗遮住，激活兜底尽可能抢到输入焦点。
+        // （务必在 proc 赋值后调用；fire-and-forget，不阻塞起播。）
+        this._frontTimer = null;
+        this._frontTries = 0;
+        this._bringToFront(proc.pid);
         const session = {
             id: sessionId,
             proc,
@@ -195,6 +212,11 @@ class MpvPlayer extends EventEmitter {
             speed: this._lastSp,
             endReason: null,    // 最近一次 end-file reason（eof/quit/stop/error…），用于区分断流与用户关闭
             userStopped: false, // 应用主动 stop() 置位：退出时不得断流重连
+            // 观看时长统计（墙钟）：累计播放器运行时长（打开播放器后运行了多久，含暂停）。
+            playStartMs: Date.now(),
+            pausedMs: 0,        // 累计暂停时长（毫秒）
+            paused: false,
+            pauseSince: 0,
         };
         this.proc = proc;
         this._activeSession = session;
@@ -209,11 +231,14 @@ class MpvPlayer extends EventEmitter {
         });
         proc.on('exit', (code) => {
             // ChildProcess 的 exit 触发时 mpv IPC 通常已经断开；直接使用播放期间持续观察的缓存。
+            // 观看时长（墙钟）：从起播到退出的总运行时长（打开播放器后运行了多久），暂停期间也算。
+            const wallWatched = Math.max(0, Math.round((Date.now() - session.playStartMs) / 1000));
             const info = {
                 code,
                 sessionId,
                 pos: typeof session.pos === 'number' ? session.pos : null,
                 duration: typeof session.duration === 'number' ? session.duration : null,
+                wallWatched,   // 播放器运行时长（墙钟，含暂停）：观看统计以此累计
                 fullscreen: session.fullscreen,
                 speed: session.speed,
                 endReason: session.endReason || null,
@@ -250,12 +275,33 @@ class MpvPlayer extends EventEmitter {
 
     _teardown(sessionId = null) {
         if (sessionId != null && this._activeSession && this._activeSession.id !== sessionId) return;
+        if (this._frontTimer) { clearTimeout(this._frontTimer); this._frontTimer = null; }
+        this._frontTries = 0;
         this._connected = false;
         if (this.socket) { try { this.socket.destroy(); } catch (e) { /* ignore */ } this.socket = null; }
         this.proc = null;
         this._activeSession = null;
         for (const [, p] of this._pending) p.reject(new Error('mpv stopped'));
         this._pending.clear();
+    }
+
+    /**
+     * 起播后把 mpv 窗口带到前台。
+     *
+     * 背景：Electron 应用（尤其无边框/自绘标题栏模式）点击「播放」时自身已持有前台焦点，
+     * Windows 前台锁（foreground lock）会拒绝后台进程激活窗口——mpv 窗口因此常静默落在
+     * 主窗口背后（「播放器不出现在前台」）。--focus-on-open 只是请求，不可靠。
+     * 方案双重保证：起播参数注入 --ontop（z 序置顶，从根源上不被主窗遮住）+
+     * 这里从 Electron 主进程侧兜底（spawn PowerShell 辅助进程周期性尝试激活 mpv
+     * 顶层窗口：Win32 AttachThreadInput + SetForegroundWindow，前台锁只允许持有
+     * 前台线程的关联线程成功激活），mpv 窗口真正出现在前台后辅助进程自行退出。
+     *
+     * @param {number} [pid] 目标进程 PID（缺省取当前会话 proc.pid）
+     */
+    _bringToFront(pid) {
+        // 真实实现见 win-focus.js（spawn PowerShell 辅助进程 + Win32 P/Invoke），
+        // 这里仅作调用入口；辅助进程自检窗口在前台或超时后自行退出。
+        bringToFront(pid || (this.proc && this.proc.pid) || 0);
     }
 
     // ------------------------------------------------------------ IPC
@@ -281,6 +327,7 @@ class MpvPlayer extends EventEmitter {
             this.command('observe_property', 0x102, 'speed').catch(() => { });
             this.command('observe_property', 0x103, 'time-pos').catch(() => { });
             this.command('observe_property', 0x104, 'duration').catch(() => { });
+            this.command('observe_property', 0x105, 'pause').catch(() => { });
         });
         sock.once('error', () => {
             setTimeout(() => this._connectIpc(attempt + 1, active.id), 100);
@@ -323,6 +370,15 @@ class MpvPlayer extends EventEmitter {
             }
             if (msg.name === 'duration' && typeof msg.data === 'number' && msg.data > 0 && active) {
                 active.duration = msg.data;
+            }
+            // 暂停态计入观看时长扣除：暂停期间不算真实观看
+            if (msg.name === 'pause' && active) {
+                const p = !!msg.data;
+                if (p && !active.paused) { active.paused = true; active.pauseSince = Date.now(); }
+                else if (!p && active.paused) {
+                    active.paused = false;
+                    if (active.pauseSince) { active.pausedMs += Date.now() - active.pauseSince; active.pauseSince = 0; }
+                }
             }
             return;
         }
@@ -378,6 +434,47 @@ class MpvPlayer extends EventEmitter {
         this._danmakuLines.push(this._assDialogue(d, atSec));
         this._writeAss();
         if (this._connected) this.command('sub-reload').catch(() => { });
+    }
+
+    /**
+     * 批量装载整集弹幕（方案 A：起播后一次性预生成完整 ASS）。
+     * comments 为弹弹 play /comment 返回的数组，元素形如 { p:"时间,模式,颜色,uid", m:"文本" }：
+     *   - 时间：绝对秒（浮点），直接作为弹幕出现时刻（非 addDanmaku 的相对累加）；
+     *   - 模式：弹弹 play 1/2/3/6→滚动，4→底部，5→顶部；
+     *   - 颜色：十进制 0xRRGGBB。
+     * 全部转成 ASS Dialogue 行后写盘，已连接则 sub-reload 生效。返回装载条数。
+     */
+    loadDanmakuBatch(comments) {
+        if (!Array.isArray(comments) || !comments.length) return 0;
+        this._danmakuLines = [];
+        this._laneCounter = 0;
+        // 按时间排序，弹道分配更稳定
+        const parsed = [];
+        for (const c of comments) {
+            const d = MpvPlayer._parseDandan(c);
+            if (d) parsed.push(d);
+        }
+        parsed.sort((a, b) => a.time - b.time);
+        for (const d of parsed) {
+            this._danmakuLines.push(this._assDialogue(d, 0)); // atSec=0：d.time 即绝对时刻
+        }
+        this._writeAss();
+        if (this._connected) this.command('sub-reload').catch(() => { });
+        return this._danmakuLines.length;
+    }
+
+    /** 弹弹 play comment → 内部弹幕对象 {time,mode,size,color,content}。非法项返回 null。 */
+    static _parseDandan(c) {
+        if (!c || typeof c !== 'object') return null;
+        const content = String(c.m || '').trim();
+        if (!content) return null;
+        const parts = String(c.p || '').split(',');
+        const time = parseFloat(parts[0]) || 0;
+        const rawMode = parseInt(parts[1], 10) || 1;
+        // 弹弹 play：1/2/3 滚动，4 底部，5 顶部，6 反向（少见）→ 归一到内部协议
+        const mode = (rawMode === 4) ? 4 : (rawMode === 5) ? 5 : (rawMode === 6) ? 6 : 1;
+        const color = parseInt(parts[2], 10);
+        return { time, mode, size: 25, color: isNaN(color) ? 0xFFFFFF : color, content };
     }
 
     /** 解析 [time,mode,size,color]text；time 缺省 0。mode: 1滚动 4底部 5顶部 6反向滚动 */
