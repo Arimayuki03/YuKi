@@ -147,104 +147,11 @@ class Spider(Spider):
         check('jar config: site has spiderType', all('spiderType' in s for s in st['sites']), str(st['sites']))
 
 
-def test_jar_init_failure_short_circuit():
-    """jar auto-init 失败后：_init_failed 置 True，业务方法短路返回空结果，
-    不再发起必然失败的 JVM 调用（坏蜘蛛如 Getapp 不再 NPE 刷屏）。"""
-    from jar_spider import make_jar_spider_class
-
-    calls = []
-
-    class FailingInitBridge:
-        def call(self, method, *args, class_name='', pan_cookies=None):
-            calls.append(method)
-            if method == 'init':
-                raise RuntimeError('FormBody$Builder.add null (network fail)')
-            raise AssertionError('business method should not be reached after init failure: ' + method)
-
-    bridge = FailingInitBridge()
-    # 不显式 init：首个业务调用触发 auto-init
-    spider = make_jar_spider_class('badjar', bridge, 'getapp', 'csp_Getapp')
-
-    # init 失败路径 A：auto-init 在业务方法入口失败（模拟未 init 状态）
-    assert not spider._init_failed
-    check('init-fail: searchContent short-circuit', spider.searchContent('x', True) == {'list': []})
-    check('init-fail: _init_failed set after auto-init fail', spider._init_failed is True)
-    check('init-fail: auto-init attempted once', calls.count('init') == 1)
-    called = list(calls)
-
-    # 后续业务方法全部短路，不再调桥
-    check('init-fail: detailContent short-circuit', spider.detailContent(['d-1']) == {'list': []}, str(spider.detailContent(['d-1'])))
-    check('init-fail: homeContent short-circuit', spider.homeContent(False) == {})
-    check('init-fail: homeVideoContent short-circuit', spider.homeVideoContent() == {'list': []})
-    check('init-fail: categoryContent short-circuit', spider.categoryContent('1', '1', False, {}) == {})
-    # 除 init 外不应再有任何桥调用
-    check('init-fail: no extra jvm calls', all(m == 'init' for m in calls), str(calls))
-    check('init-fail: only one init call total', calls.count('init') == 1, str(calls))
-
-    # 失败后 return None 不再触发 JVM 调用
-    check('init-fail: _call returns None for blocked method',
-          spider._call('searchContent', 'x', True) is None)
-
-    # 显式 init 失败路径 B：init() 捕获桥异常后同样 _init_failed
-    calls.clear()
-    spider2 = make_jar_spider_class('badjar2', FailingInitBridge(), 'getapp2', 'csp_Getapp')
-    spider2.init('ext')
-    check('init-fail: explicit init marks _init_failed', spider2._init_failed is True)
-    check('init-fail: explicit init business blocked',
-          spider2.searchContent('x', True) == {'list': []})
-
-
-def test_detail_content_error_structure():
-    """detailContent 失败必须返回 200 规范的 {list: [], error}，绝不 500。
-
-    模拟 jar 桥 detailContent 抛上游解析 bug（如 Fmys 的 NPE / Jinpai 的
-    ClassCastException），验证 server._attach_jar_error(..., ensure_list=True)
-    在 dispatch 层归一为 {list: []} + 友好 error 透传前端。
-    """
-    from jar_spider import make_jar_spider_class
-
-    class ThrowingBridge:
-        msg = ('java.lang.reflect.InvocationTargetException'
-               ' ... Caused by: java.lang.NullPointerException')
-        def call(self, method, *args, class_name='', pan_cookies=None):
-            if method == 'init':
-                return None
-            raise RuntimeError(self.msg)
-
-    spider = make_jar_spider_class('errs', ThrowingBridge(), 'error', 'csp_Fail')
-    spider.init('')
-    dc = spider.detailContent(['x-1'])
-    # 桥异常被 _call 捕获 → 兜底 dict 返回，不抛
-    check('jar detailContent fails to empty dict', isinstance(dc, dict), str(dc))
-
-    class FakeRunner:
-        spider = None
-        def detailContent(self, ids):
-            return self.spider.detailContent(ids)
-    ru = FakeRunner()
-    ru.spider = spider
-    # ensure_list=True：失败时强制 {list:[], error}
-    body = server._attach_jar_error(ru, server.spider_app.detailContent(ru, '["x-1"]'), ensure_list=True)
-    obj = json.loads(body)
-    check('detailContent error has list=[]', obj.get('list') == [], str(obj))
-    check('detailContent error has friendly error',
-          isinstance(obj.get('error'), str) and len(obj['error']) > 0, str(obj))
-
-    # 无 last_error 且有正常 list → body 原样（成功数据不被动过）
-    spider2 = make_jar_spider_class('ok', None, 'ok', 'csp_Ok')
-    ra = FakeRunner()
-    ra.spider = spider2
-    body2 = server._attach_jar_error(ra, '{"list":[{"vod_id":"1"}]}', ensure_list=True)
-    check('detailContent success not mangled', json.loads(body2)['list'][0]['vod_id'] == '1', body2)
-
-
 def main():
     test_java_probe()
     test_norm_jar_src()
     test_jar_spider_direct()
-    test_jar_init_failure_short_circuit()
     test_config_load_jar_sites()
-    test_detail_content_error_structure()
 
     print()
     print(f'RESULT: {len(PASSED)} passed, {len(FAILED)} failed')

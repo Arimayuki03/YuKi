@@ -348,30 +348,8 @@ const Detail = {
                 if (vod) _detailCacheSet(DETAIL_VOD_CACHE_PREFIX, cacheKey, vod, DETAIL_CACHE_TTL);
             }
             if (!vod) {
-                // 未取得详情（上游 jar/CMS/js 蜘蛛 detailContent 解析失败等）：
-                // 显示友好原因，并提供可操作回退——用 Kazumi 规则引擎搜同名影片 / 返回。
                 const err = data && data.error ? `（${String(data.error).slice(0, 120)}）` : '';
-                const name = String(this.vodName || '').trim();
-                const kazumiOk = typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog
-                    && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules();
-                const kazumiBtn = (kazumiOk && name)
-                    ? `<button type="button" id="detail-fallback-kazumi" class="md-btn md-btn-filled md-btn-sm">使用 Kazumi 引擎搜索「${escHtml(name)}」</button>`
-                    : '';
-                $('#detail-body').html(`<div class="tip-line">未取得详情${err}</div>
-                    <div class="detail-fallback-row">
-                        ${kazumiBtn}
-                        <button type="button" id="detail-fallback-back" class="md-btn md-btn-tonal md-btn-sm">返回</button>
-                    </div>`);
-                if (kazumiBtn && $('#detail-fallback-kazumi').length) {
-                    $('#detail-fallback-kazumi').on('click', () => {
-                        if (name && typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
-                            Kazumi.openSourceDialog(name, 'kazumi', '');
-                        } else {
-                            warnToast('Kazumi 引擎不可用');
-                        }
-                    });
-                }
-                $('#detail-fallback-back').on('click', () => this.back());
+                $('#detail-body').html(`<div class="tip-line">未取得详情${err}</div>`);
                 return;
             }
             if (vod.vod_name) this.vodName = vod.vod_name;

@@ -265,10 +265,6 @@ public class SpiderRunner {
     // ---- 反射调用 ----
 
     static Object invoke(Object spider, Class<?> cls, String method, Map<String,Object> params) throws Exception {
-        // init 重载复杂（String / JSONObject / Context,String / 无参），按参数类型逐个试调
-        if (method.equals("init")) {
-            return invokeInit(spider, cls, params);
-        }
         for (Method m : cls.getMethods()) {
             if (!m.getName().equals(method)) continue;
             int want = m.getParameterCount();
@@ -287,100 +283,6 @@ public class SpiderRunner {
             return m.invoke(spider, args);
         }
         throw new NoSuchMethodException(method + " not found on " + cls.getName());
-    }
-
-    /**
-     * init 专用反射调用：对同名重载按参数类型逐个试调。
-     * 优先带参重载（String / JSONObject / Context,String），无参 init() 最后兜底。
-     * IllegalArgumentException（形参类型不匹配）捕获后继续试下一个重载。
-     */
-    static Object invokeInit(Object spider, Class<?> cls, Map<String,Object> params) throws Exception {
-        String ext = (params.containsKey("ext") && params.get("ext") != null)
-                ? String.valueOf(params.get("ext")) : "";
-        List<Method> withArgs = new ArrayList<>();
-        List<Method> noArg = new ArrayList<>();
-        for (Method m : cls.getMethods()) {
-            if (!m.getName().equals("init")) continue;
-            if (m.getParameterCount() == 0) noArg.add(m);
-            else withArgs.add(m);
-        }
-        if (withArgs.isEmpty() && noArg.isEmpty()) {
-            throw new NoSuchMethodException("init not found on " + cls.getName());
-        }
-        // 顺序：带参重载在前，无参兜底在后
-        List<Method> ordered = new ArrayList<>(withArgs);
-        ordered.addAll(noArg);
-        for (Method m : ordered) {
-            Object[] args = initArgs(m, ext);
-            if (args == null) {
-                // 存在无法安全构造的形参类型 → 跳该重载，试下一个
-                continue;
-            }
-            try {
-                return m.invoke(spider, args);
-            } catch (IllegalArgumentException | IllegalAccessException e) {
-                // 参数类型不匹配 → 试下一个重载
-            }
-        }
-        throw new NoSuchMethodException("no invokable init overload on " + cls.getName());
-    }
-
-    /**
-     * 为 init 的某个重载按形参类型构造实参。无法安全构造的类型返回 null（跳过该重载）。
-     * 特别地，init(org.json.JSONObject) 形参：把 ext 字符串解析为 JSONObject
-     * （空串/非 JSON → 空对象）；org.json 不在运行时类路径时也返回 null（跳过重载）。
-     */
-    static Object[] initArgs(Method m, String ext) {
-        Class<?>[] types = m.getParameterTypes();
-        Object[] args = new Object[types.length];
-        for (int i = 0; i < types.length; i++) {
-            Class<?> t = types[i];
-            String tname = t.getName();
-            if (tname.equals("org.json.JSONObject")) {
-                Object jo = jsonObjectOf(ext);
-                if (jo == null) return null;  // org.json 不可用 → 无法构造实参，跳过该重载
-                args[i] = jo;
-            } else if (t == String.class) {
-                args[i] = ext;
-            } else if (t == boolean.class || t == Boolean.class) {
-                args[i] = Boolean.FALSE;
-            } else if (t == int.class || t == Integer.class) {
-                args[i] = 0;
-            } else if (t == Map.class || t == HashMap.class
-                    || t == LinkedHashMap.class || t == AbstractMap.class) {
-                args[i] = new LinkedHashMap<>();
-            } else if (t == List.class) {
-                args[i] = new ArrayList<>();
-            } else if ("android.content.Context".equals(t.getCanonicalName())) {
-                // headless PC 无 Context → null 注入
-                args[i] = null;
-            } else {
-                return null;  // 不认识的形参类型，跳过该重载
-            }
-        }
-        return args;
-    }
-
-    /**
-     * 反射构造 org.json.JSONObject，避免编译期依赖 org.json（普通 .jar 启动时
-     * 运行时类路径不含 dexdeps/org-json.jar）。ext 为合法 JSON → 解析；空串/
-     * 非 JSON 内容 → 空对象（不抛异常）；org.json 不可加载 → 返回 null。
-     */
-    static Object jsonObjectOf(String s) {
-        try {
-            Class<?> cls = Class.forName("org.json.JSONObject");
-            if (s != null && !s.trim().isEmpty()) {
-                try {
-                    java.lang.reflect.Constructor<?> ctor = cls.getConstructor(String.class);
-                    return ctor.newInstance(s);
-                } catch (Exception ignore) {
-                    // 非 JSON 内容 → 空对象
-                }
-            }
-            return cls.getConstructor().newInstance();
-        } catch (Throwable t) {
-            return null;  // org.json 不可用
-        }
     }
 
     /** 按 TVBox 方法签名约定返回参数名序列。 */
@@ -438,10 +340,6 @@ public class SpiderRunner {
         if (t == List.class) {
             if (val instanceof List) return val;
             return new ArrayList<>();
-        }
-        if (t.getName().equals("org.json.JSONObject")) {
-            // 反射构造；org.json 不可用时返回 null（避免 TypeError）
-            return jsonObjectOf(String.valueOf(val));
         }
         return val;
     }

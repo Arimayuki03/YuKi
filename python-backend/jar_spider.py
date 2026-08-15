@@ -33,7 +33,6 @@ class JarSpider(Spider):
     site_name = ''
 
     _inited = False
-    _init_failed = False   # init 失败后置 True：业务方法短路返回空结果，不再发起必然失败的 JVM 调用
     _ext = ''
     last_error = ''  # 最近一次桥调用错误（供 server 层附加到响应，前端可提示具体原因）
 
@@ -47,7 +46,6 @@ class JarSpider(Spider):
         else:
             ext = str(extend) if extend else ''
         self._ext = ext
-        # 显式 init：skip_init=True 直接走桥调用；失败时 _call 已置 _init_failed，可阻止业务方法。
         self._call('init', self._ext, skip_init=True)
         self._inited = True
 
@@ -55,44 +53,21 @@ class JarSpider(Spider):
         return self.site_name
 
     def homeContent(self, filter):
-        if self._init_failed:
-            return {}
         return self._json(self._call('homeContent', bool(filter)), {})
 
     def homeVideoContent(self, pg='1'):
-        if self._init_failed:
-            return {'list': []}
         return self._json(self._call('homeVideoContent', str(pg)), {'list': []})
 
     def categoryContent(self, tid, pg, filter, extend):
-        if self._init_failed:
-            return {}
         return self._json(self._call('categoryContent', str(tid), str(pg),
                                      bool(filter), extend or {}), {})
 
     def detailContent(self, ids):
-        if self._init_failed:
-            return {'list': []}
         # TVBox jar 蜘蛛需要 String[]，传 list 即可。
-        # 上游 jar 内部解析 bug（Fmys/Ddyy/Jinpai/Mogg 的 NPE/ClassCastException）不可在此层修复，
-        # 只需确保任何失败都兜底返回 {'list': []}，last_error 由 _call 记录，server 层附加友好原因透传前端。
-        try:
-            id_list = list(ids) if isinstance(ids, (list, tuple)) else [str(ids)]
-        except Exception as e:
-            if not self.last_error:
-                self.last_error = str(e)[:300]
-            return {'list': []}
-        result = self._json(self._call('detailContent', id_list), {})
-        if not isinstance(result, dict):
-            # 蜘蛛返回裸串/非 dict（异常后桥接层可能给回不可解析内容）→ 归一为空详情
-            if not self.last_error:
-                self.last_error = '站点接口返回格式不正确'
-            return {'list': []}
-        return result
+        id_list = list(ids) if isinstance(ids, (list, tuple)) else [str(ids)]
+        return self._json(self._call('detailContent', id_list), {})
 
     def searchContent(self, key, quick, pg='1'):
-        if self._init_failed:
-            return {'list': []}
         return self._json(self._call('searchContent', key, self._truthy(quick), str(pg)),
                           {'list': []})
 
@@ -146,27 +121,18 @@ class JarSpider(Spider):
                 # "no scheme was found for {}/App..."），故空配置必须传空串。
                 ext = self._ext if self._ext and self._ext.strip() else ''
                 self.bridge.call('init', ext, class_name=self.class_name)
-                self._inited = True
-                self._init_failed = False
             except Exception as e:
-                # 仅当 init 成功才认为已初始化；失败标记 _init_failed，
-                # 业务方法据此短路，避免对坏蜘蛛反复发起必然失败的 JVM 调用。
                 logger.warning('jar auto-init %s failed: %s', self.class_name, e)
-                self._init_failed = True
-        # init 失败（含显式 init 失败）后，非 init 业务调用不再发起必然失败的 JVM 调用。
-        if self._init_failed and not skip_init and method != 'init':
-            return None
+            finally:
+                # 无论 init 成败均标记已初始化：蜘蛛可能带内置默认配置，
+                # 业务方法照常调用（与 TVBox 宿主行为一致）。
+                self._inited = True
         try:
             self.last_error = ''
             result = self.bridge.call(method, *args, class_name=self.class_name,
                                       pan_cookies=_load_pan_cookies())
-            if method == 'init':
-                self._init_failed = False
             return result
         except Exception as e:
-            if method == 'init':
-                # 显式 init 路径（skip_init=True 直接走此处）：失败同样标记，阻止后续业务调用。
-                self._init_failed = True
             self.last_error = str(e)[:300]
             logger.warning('jar call %s.%s failed: %s', self.class_name, method, e)
             return None

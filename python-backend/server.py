@@ -389,21 +389,8 @@ def dispatch_action(form):
                 ru, form.get('tid', ''), form.get('pg', '1'),
                 _bool(form.get('filter', 'false')), form.get('extend', '{}')))
         if do == 'detailContent':
-            # 任何失败都必须返回 200 + {list: [], error}，绝不 500：
-            # 1) jar/CMS/js 蜘蛛内部解析 bug（上游 jar 侧不可修）→ last_error 附加友好原因；
-            # 2) 蜘蛛方法自身抛异常（如 JS 蜘蛛透传原生异常）→ 就地兜底为 {list: [], error}。
-            try:
-                detail_body = spider_app.detailContent(ru, form.get('ids', '[]'))
-            except Exception as e:
-                logger.warning('detailContent spider threw: %s', e)
-                detail_body = '{}'
-                # 把异常含义交给 _attach_jar_error 的兜底文案；若蜘蛛有 last_error 优先用
-                if not getattr(getattr(ru, 'spider', None), 'last_error', ''):
-                    try:
-                        getattr(ru, 'spider').last_error = str(e)[:300]
-                    except Exception:
-                        pass
-            return 200, _attach_jar_error(ru, detail_body, ensure_list=True)
+            return 200, _attach_jar_error(ru, spider_app.detailContent(
+                ru, form.get('ids', '[]')))
         if do == 'searchContent':
             return 200, spider_app.searchContent(
                 ru, form.get('word', form.get('key', '')),
@@ -465,24 +452,11 @@ def _search_source_pages(runner, word, max_pages=50):
     return merged
 
 
-def _spider_init_failed(site):
-    """站点对应 spider 实例的 init 是否失败（jar 蜘蛛标识 _init_failed）。
-
-    jar 蜘蛛在首次业务调用前自动 init，若 init 联网失败内部状态损坏，
-    后续 search 等必然抛错刷屏。init 失败后在此短路，搜索直接跳过该站点。
-    非 jar 蜘蛛（无 _init_failed 属性）返回 False。
-    """
-    runner = getattr(site, 'runner', None)
-    spider = getattr(runner, 'spider', None) if runner is not None else None
-    return bool(getattr(spider, '_init_failed', False))
-
-
 def aggregate_search(word, timeout=60):
     """线程池并发搜索全部可搜站点（T38 起单源拉全部页，耗时变长放宽超时），
     单源超时/异常不拖累整体。"""
     merged = []
-    site_list = [s for s in sites.sites
-                 if getattr(s, 'searchable', True) and not _spider_init_failed(s)]
+    site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
     if not site_list or not word:
         return {'list': merged}
     with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
@@ -603,8 +577,7 @@ def create_app():
     def search_stream(word: str = Query('')):
         """SSE 流式聚合搜索：先发 event: meta（总源数，供前端确定进度条），每源完成推一条 data，全部结束发 event: done。"""
         def gen():
-            site_list = [s for s in sites.sites
-                         if getattr(s, 'searchable', True) and not _spider_init_failed(s)]
+            site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
             if not word or not site_list:
                 yield 'event: done\ndata: {}\n\n'
                 return

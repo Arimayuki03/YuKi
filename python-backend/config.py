@@ -15,7 +15,6 @@ type 处理：
 """
 import os
 import json
-import zipfile
 import logging
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
@@ -37,35 +36,17 @@ DEFAULT_RUNNER_JAR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'spider-runner.jar')
 
 
-def fetch_text(url, timeout=8):
-    """http(s) 递归跟重定向取文本；默认 8s 超时（走本地 requests 而非 app.redirect，
-    避免死源/反爬页在 15s 的 app.redirect 超时上拖累站点装配与抓取）。失败返回 ''。"""
-    import requests
+def fetch_text(url, timeout=15):
+    """http(s) 递归跟重定向取文本（委托 app.redirect，15s 超时）。失败返回 ''。"""
     try:
-        rsp = requests.get(url, allow_redirects=False, verify=False, timeout=timeout)
-        if 'Location' in rsp.headers:
-            return fetch_text(rsp.headers['Location'], timeout)
+        from app import redirect
+        rsp = redirect(url)
+        if rsp is None:
+            return ''
         return rsp.content.decode('utf-8', errors='replace')
     except Exception as e:
         logger.warning('fetch_text %s failed: %s', url, str(e)[:80])
         return ''
-
-
-def jar_has_class(jar_path, class_name):
-    """加载期检查 jar 中是否存在指定类（zipfile 读取，不启动 JVM）。
-
-    class_name 兼容两种形态：'csp_X'（jar 根路径 csp_X.class）与
-    'com.github.catvod.spider.X'（斜杠路径）。jar 不可读/异常时保守放行（True）。
-    """
-    target = class_name.replace('.', '/')
-    if not target.endswith('.class'):
-        target += '.class'
-    try:
-        with zipfile.ZipFile(jar_path) as z:
-            names = z.namelist()
-    except Exception:
-        return True   # 不可读/异常：保守放行
-    return target in names
 
 
 def _looks_like_live_source(text):
@@ -268,10 +249,7 @@ class ConfigManager:
                 else:
                     summary['skipped'].append(item.get('key', '?'))
             except Exception as e:
-                # 简洁降级：不打印完整 traceback（避免死源每次启动刷屏）；
-                # 细节仅在 DEBUG 级记录。
-                logger.debug('load site %s failed: %s', item.get('key'), e, exc_info=True)
-                logger.warning('load site %s failed: %s', item.get('key'), e)
+                logger.exception('load site %s failed: %s', item.get('key'), e)
                 summary['skipped'].append(f"{item.get('key', '?')}: {e}")
         parses = cfg.get('parses') or []
         flags = cfg.get('flags') or []
@@ -468,9 +446,6 @@ class ConfigManager:
         is_js = stype == 4 or (stype == 3 and api.startswith('http') and api.split('?')[0].endswith('.js'))
         if is_js:
             spider = self._load_js_spider(key, name, api)
-            if spider is None:
-                logger.info('skip site %s: js spider unavailable (fetch failed / non-JS content)', key)
-                return None
         elif stype == 3:
             spider = self._load_python_spider(key, api)
         elif stype in (0, 1):
@@ -533,13 +508,9 @@ class ConfigManager:
             else:
                 ok = engine.load_spider(api)
         except Exception as e:
-            # 抓取/执行失败（如死源、超时、HTML 反爬页）：降级跳过，不打 traceback
-            logger.warning('skip site %s: js spider load/execute failed: %s', key, str(e)[:80])
-            return None
+            raise ValueError(f'js spider load/execute failed: {e}')
         if not ok:
-            # load_spider_url/load_spider 返回 False：非 JS 内容（HTML 头等）或未产出 __JS_SPIDER__
-            logger.warning('skip site %s: spider fetch produced non-JS content or failed', key)
-            return None
+            raise ValueError('js spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
         return make_js_spider_class(key, engine, name)
 
     def _load_jar_spider(self, key, name, api, spider_jar=''):
@@ -567,12 +538,6 @@ class ConfigManager:
         jar_path = JarBridge.download_jar(jar_url, md5, site_key=key)
         # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
         class_name = JarBridge.map_class_name(jar_path, class_name)
-        # 加载期类存在性检查：映射后仍以 csp_ 开头（映射失败标志）且 jar 中确无该类
-        # （csp_ 类在 jar 根路径 / com.github.catvod.spider 斜杠路径两种形态）→ 装配期跳过，
-        # 避免运行时 Class.forName ClassNotFoundException 刷屏。
-        if class_name.startswith('csp_') and not jar_has_class(jar_path, class_name):
-            logger.info('skip site %s: class %s not in jar', key, class_name)
-            return None
         # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
         bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
         return make_jar_spider_class(key, bridge, name, class_name)
