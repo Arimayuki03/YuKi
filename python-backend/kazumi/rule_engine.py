@@ -28,16 +28,27 @@ class RuleEngine:
 
     # ---------------------------------------------------------------- 搜索
 
-    def search(self, config, keyword, cancel_token=None):
-        """执行规则搜索，返回 RuleSearchTrace。"""
+    def search(self, config, keyword, cancel_token=None, filters=None):
+        """执行规则搜索，返回 RuleSearchTrace。
+
+        filters（任务三 part2，可选）：{'tag','year','sort'} 类型/年份/排序筛选值。
+        规则通过在模板中引用占位符「opt-in」使用它们：
+          - XPath 模式：searchURL 含 @tag/@year/@sort 才替换（不含则忽略，优雅降级）；
+          - API 模式：request 的 url/query/body 引用 @tag/@year/@sort 才注入（未引用不影响）。
+        不声明占位的规则原样只用 @keyword 搜索，对齐 Kazumi 仅传 keyword 的行为。"""
+        filters = filters or {}
         try:
             if config.search_mode == 'api':
+                variables = {'keyword': keyword}
+                # 可选筛选变量：加入模板变量表；仅当规则 url/query/body 引用 @tag 等时才生效。
+                for key in ('tag', 'year', 'sort'):
+                    variables[key] = str(filters.get(key) or '')
                 request = self._api_strategy.prepare_request(
                     config.search_api_config.get('request', {}),
-                    {'keyword': keyword},
+                    variables,
                 )
             else:
-                request = self._xpath_strategy.prepare_search_request(config, keyword)
+                request = self._xpath_strategy.prepare_search_request(config, keyword, filters)
         except Exception as e:
             self._log_failure(config, 'search request preparation', e)
             raise SearchErrorException(config.plugin_name, cause=e)
@@ -108,10 +119,10 @@ class RuleEngine:
 
     # ---------------------------------------------------------------- 验证码处理
 
-    def search_with_captcha_retry(self, config, keyword, cancel_token=None):
+    def search_with_captcha_retry(self, config, keyword, cancel_token=None, filters=None):
         """搜索，遇到验证码时返回需要验证的状态（由前端决定是否打开验证窗口）。"""
         try:
-            return self.search(config, keyword, cancel_token)
+            return self.search(config, keyword, cancel_token, filters=filters)
         except CaptchaRequiredException as e:
             # 返回需要验证的状态与验证页 URL
             return {

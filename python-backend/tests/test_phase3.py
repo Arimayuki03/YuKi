@@ -195,6 +195,25 @@ def main():
     c3, b3 = req('POST', '/action', data={'do': 'clearCache'})
     r3 = json.loads(b3)
     check('clearCache', c3 == 200 and r3.get('code') == 200 and server.cache_store.get('t_ck') == '', b3[:80])
+
+    # ---- CacheStore TTL 语义（任务十一） ----
+    cs = server.cache_store
+    cs.set('ttl_forever', 'keep')            # ttl=0 永久
+    check('CacheStore forever', cs.get('ttl_forever') == 'keep')
+    cs.set('ttl_soon', 'gone', 1)            # 1s 过期
+    check('CacheStore ttl not-yet-expired', cs.get('ttl_soon') == 'gone')
+    # 直接改内存条目为已过期，验证惰性删除（避免 sleep 拖慢）
+    import time as _t
+    cs.set('ttl_exp', 'stale', 60)
+    with cs.lock:
+        v, _ = cs.mem['ttl_exp']
+        cs.mem['ttl_exp'] = (v, _t.time() - 1)
+    check('CacheStore expired -> empty', cs.get('ttl_exp') == '')
+    import os as _os
+    check('CacheStore expired file deleted', not _os.path.exists(cs._path('ttl_exp')))
+    b, n, exp = cs.stats()
+    check('CacheStore stats shape', isinstance(b, int) and isinstance(n, int) and isinstance(exp, int), f'{b},{n},{exp}')
+
     c4, b4 = req('POST', '/action', data={'do': 'fetchText', 'url': f'http://127.0.0.1:{PORT}/health'})
     r4 = json.loads(b4)
     check('fetchText', c4 == 200 and 'status' in r4.get('text', ''), b4[:80])

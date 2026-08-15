@@ -1,7 +1,20 @@
 /**
  * preload.js — contextBridge 安全暴露（contextIsolation 开启，nodeIntegration 关闭）
  */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
+
+// 设置读取内存缓存：settingsGet 被几乎每个页面渲染多次调用（收藏/历史/统计/首页屏蔽源
+// 等都读同一份 settings.json），每次都走 IPC + 主进程内存对象。这里做写穿透缓存：
+//   - 读：命中未过期缓存直接返回深拷贝（TTL 兜底，防主进程侧直写 mpvPath/dlDir 等造成陈旧）
+//   - 写：settingsSet 后同步更新缓存该键，后续读立即可见（无需等下次 IPC）
+//   - 深拷贝返回：调用方普遍就地修改返回的数组（recGet→list.unshift→recSet），
+//     共享引用会污染缓存，故读写均用 structuredClone 隔离。
+let _settingsCache = null;
+let _settingsCacheTs = 0;
+const _SETTINGS_TTL = 3000; // 3s：同一次交互内的连续读走缓存，跨交互/外部直写在 TTL 后自愈
+function _clone(v) {
+    try { return structuredClone(v); } catch (e) { try { return JSON.parse(JSON.stringify(v)); } catch (e2) { return v; } }
+}
 
 contextBridge.exposeInMainWorld('vpc', {
     /** 返回 { port, token, base } 或 null（超时未就绪） */
@@ -91,13 +104,30 @@ contextBridge.exposeInMainWorld('vpc', {
     appVersion: () => ipcRenderer.invoke('vpc:app-version'),
     /** 关于页系统信息：{version, platform, arch, electron, chromium, node, v8} */
     appInfo: () => ipcRenderer.invoke('vpc:app-info'),
+    /** 窗口控制（无边框模式下的最小化/最大化/关闭） */
+    winMinimize: () => ipcRenderer.invoke('vpc:win-minimize'),
+    winMaximize: () => ipcRenderer.invoke('vpc:win-maximize'),
+    winClose: () => ipcRenderer.invoke('vpc:win-close'),
     /** 内置 MiSans 字体 CSS 的 file:// URL 列表（渲染层注入 <link>；空数组回退系统字体，T61） */
     fontCss: () => ipcRenderer.invoke('vpc:font-css'),
     /** 设置持久化（userData/settings.json） */
-    settingsGet: () => ipcRenderer.invoke('vpc:settings-get'),
-    settingsSet: (key, value) => ipcRenderer.invoke('vpc:settings-set', key, value),
+    settingsGet: async () => {
+        if (_settingsCache && Date.now() - _settingsCacheTs < _SETTINGS_TTL) {
+            return _clone(_settingsCache);
+        }
+        const all = await ipcRenderer.invoke('vpc:settings-get');
+        _settingsCache = all || {};
+        _settingsCacheTs = Date.now();
+        return _clone(_settingsCache);
+    },
+    settingsSet: async (key, value) => {
+        const r = await ipcRenderer.invoke('vpc:settings-set', key, value);
+        // 写穿透：更新缓存该键，后续读立即可见（缓存未初始化则不猜整体，下次读拉全量）
+        if (_settingsCache) { _settingsCache[String(key)] = _clone(value); _settingsCacheTs = Date.now(); }
+        return r;
+    },
     /** 恢复默认设置（清偏好类键，保留收藏/历史/源），应用自动重启 */
-    settingsReset: () => ipcRenderer.invoke('vpc:settings-reset'),
+    settingsReset: () => { _settingsCache = null; return ipcRenderer.invoke('vpc:settings-reset'); },
     /** 缓存位置：不传 dir 弹目录选择框（返回 need-restart+path）；传 dir 提交并重启后端 */
     pickCacheDir: (dir) => ipcRenderer.invoke('vpc:pick-cache-dir', dir || ''),
     /** 通用目录选择（mpv 硬盘缓存目录用）：{ok, path} | {ok:false, reason:'cancelled'} */
@@ -107,12 +137,16 @@ contextBridge.exposeInMainWorld('vpc', {
     setPlayerCache: (mode, dir) => ipcRenderer.invoke('vpc:set-player-cache', mode, dir || ''),
     /** 清空 mpv 硬盘缓存（不改变模式/目录）：{ok, cleanedBytes} */
     clearPlayerCache: () => ipcRenderer.invoke('vpc:clear-player-cache'),
+    /** 统一清理主进程侧本地缓存（mpv 缓存 / 预览图 / 解析窗口会话）：{ok, cleanedBytes, detail} */
+    clearAppCaches: () => ipcRenderer.invoke('vpc:clear-app-caches'),
     /** 快捷键步长变更后通知主进程重写 mpv input.conf */
     updateHotkeys: () => ipcRenderer.invoke('vpc:update-hotkeys'),
     /** 播放偏好（默认倍速 / 记忆位置）变更后通知主进程，下次起播生效 */
     updatePlayerPrefs: () => ipcRenderer.invoke('vpc:update-player-prefs'),
     /** mpv 截图：当前帧存 PNG（{ok, path} | {ok:false, reason}） */
     mpvScreenshot: () => ipcRenderer.invoke('vpc:mpv-screenshot'),
+    /** 弹幕装载（方案 A）：把整集弹弹 play 弹幕转 ASS 推给 mpv（{ok, count} | {ok:false, reason}） */
+    loadDanmaku: (comments) => ipcRenderer.invoke('vpc:load-danmaku', comments),
     /** 打开截图目录：{ok, dir} | {ok:false, reason} */
     mpvScreenshotDir: () => ipcRenderer.invoke('vpc:mpv-screenshot-dir'),
     /** 启动自动重载 lastConfigUrl 完成 */
@@ -155,19 +189,41 @@ contextBridge.exposeInMainWorld('vpc', {
         onDevices: (cb) => ipcRenderer.on('vpc:dlna-devices', (_e, devices) => cb(devices)),
         onError: (cb) => ipcRenderer.on('vpc:dlna-error', (_e, info) => cb(info)),
     },
-    /** 外部播放器：用 VLC/PotPlayer 等外部播放器播放 */
+    /** 外部播放器：在弹窗/手动场景主动唤起 VLC/PotPlayer/mpv 或系统默认程序（opts.header 带 Referer/UA） */
     externalPlayer: (url, opts) => ipcRenderer.invoke('vpc:external-player', url, opts || {}),
-    pickExternalPlayer: () => ipcRenderer.invoke('vpc:pick-external-player'),
+    /** 统一「指定播放器」：选 mpv → 内置全功能；选 VLC/PotPlayer → 作为主播放器 */
+    pickPlayer: () => ipcRenderer.invoke('vpc:pick-player'),
+    /** 当前播放器配置 { mode:'external'|'internal-mpv', path, kind, available } */
+    playerConfig: () => ipcRenderer.invoke('vpc:player-config'),
+    /** 恢复默认播放器（回内置自动发现 mpv） */
+    clearPlayer: () => ipcRenderer.invoke('vpc:clear-player'),
     /** 定时关机：设定 N 分钟后关机（0 = 取消） */
     shutdownTimer: (minutes) => ipcRenderer.invoke('vpc:shutdown-timer', minutes),
     /** 代理设置：{url, enable}；应用后重启后端使 Python requests 生效 */
     setProxy: (opts) => ipcRenderer.invoke('vpc:set-proxy', opts),
+    /** 代理连通性测试：{proxyUrl, url}；不改变持久化设置，返回 {ok, statusCode, elapsedMs, reason} */
+    testProxy: (opts) => ipcRenderer.invoke('vpc:test-proxy', opts),
+    /** 弹幕凭据：{appid, secret}；保存并重启后端使弹弹 play 弹幕生效 */
+    setDandan: (opts) => ipcRenderer.invoke('vpc:set-dandan', opts),
     /** 日志查看器：分页获取应用日志（source 可选，按日志文件筛选） */
     getLogs: (page, pageSize, source) => ipcRenderer.invoke('vpc:get-logs', page, pageSize, source),
     /** 渲染端错误上报：window.onerror / unhandledrejection 转发到主进程日志 */
     logRenderer: (level, message) => ipcRenderer.invoke('vpc:log-renderer', level, message),
     /** 日志查看器：清空应用日志 */
     clearLogs: () => ipcRenderer.invoke('vpc:clear-logs'),
+    /** 日志级别：'DEBUG'|'INFO'|'WARN'|'ERROR'，立即生效并持久化 */
+    setLogLevel: (level) => ipcRenderer.invoke('vpc:set-log-level', level),
+    /** 定时清空日志：{enabled, days}，立即生效并持久化 */
+    setLogCleanup: (opts) => ipcRenderer.invoke('vpc:set-log-cleanup', opts),
     /** 首次引导：标记已完成 */
     onboardingDone: () => ipcRenderer.invoke('vpc:onboarding-done'),
+    /** 夸克网盘扫码登录（官方页面方案）：
+     *  打开官方落地页登录窗口，官方 JS 完成全部流程后收割完整 Cookie（含 __puus）。
+     *  panQrLogin() → {ok, cookies} | {ok:false, message}（等待用户扫码，最长 5 分钟）
+     *  panQrCancel() → 取消登录（关闭窗口） */
+    panQrLogin: () => ipcRenderer.invoke('vpc:pan-qr-login'),
+    panQrCancel: () => ipcRenderer.invoke('vpc:pan-qr-cancel'),
+    /** 界面缩放：用 Electron 页面级缩放（webFrame）替代 CSS zoom，
+     *  避免 CSS zoom 破坏 unicode-range 子集化的 MiSans 字体匹配（回退系统字体的 bug）。 */
+    setZoomFactor: (factor) => { try { webFrame.setZoomFactor(factor); } catch (e) { /* ignore */ } },
 });

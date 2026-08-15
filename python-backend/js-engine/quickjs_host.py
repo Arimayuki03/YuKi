@@ -194,6 +194,15 @@ class JsEngine:
         self.init_protocol = 'fongmi'
         with self.lock:
             for i, (url, src) in enumerate(bundle.modules):
+                # JS 前置探测：站点挂了/反爬页时抓到的往往是 HTML 而非 JS。
+                # 直接 eval 会造成 SyntaxError + 完整堆栈；改记 WARNING 并返回 False，
+                # 由上层跳过该站点。入口模块（拓扑序最后）失败直接 return False。
+                if src.lstrip().startswith('<'):
+                    snippet = src.strip()[:80]
+                    logger.warning(
+                        'js module fetch is not JS (HTML), skip site: %s '
+                        'content_head=%r', url, snippet)
+                    return False
                 ns = f'__MOD{i}__'
                 preamble = []
                 for clause, dep_url in bundle.imports.get(url, []):

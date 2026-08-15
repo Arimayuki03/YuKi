@@ -1,0 +1,4 @@
+package com.google.android.gms.common.api;
+
+/** Auto-generated stub for com.google.android.gms.common.api.GoogleApiActivity. */
+public class GoogleApiActivity { }

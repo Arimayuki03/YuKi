@@ -15,12 +15,14 @@ type 处理：
 """
 import os
 import json
+import zipfile
 import logging
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
 
 import app as spider_app
 import hoststate
+import java_probe
 from runner import Runner
 from site_manager import Site
 from js_spider import make_js_spider_class
@@ -30,10 +32,77 @@ logger = logging.getLogger('vpc.config')
 # 多仓扫描上限：防止条目过多导致加载时间不可控
 MAX_MULTI_REPO_ENTRIES = 12
 
+# 内置 JVM runner jar（与 python-backend 同层 vendor/，开发与打包路径均兼容）
+DEFAULT_RUNNER_JAR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'spider-runner.jar')
 
-def fetch_text(url):
-    """http(s) 递归跟重定向取文本（复用恢复版 app.redirect）。"""
-    return spider_app.redirect(url).content.decode('utf-8', errors='replace')
+
+def fetch_text(url, timeout=8):
+    """http(s) 递归跟重定向取文本；默认 8s 超时（走本地 requests 而非 app.redirect，
+    避免死源/反爬页在 15s 的 app.redirect 超时上拖累站点装配与抓取）。失败返回 ''。"""
+    import requests
+    try:
+        rsp = requests.get(url, allow_redirects=False, verify=False, timeout=timeout)
+        if 'Location' in rsp.headers:
+            return fetch_text(rsp.headers['Location'], timeout)
+        return rsp.content.decode('utf-8', errors='replace')
+    except Exception as e:
+        logger.warning('fetch_text %s failed: %s', url, str(e)[:80])
+        return ''
+
+
+def jar_has_class(jar_path, class_name):
+    """加载期检查 jar 中是否存在指定类（zipfile 读取，不启动 JVM）。
+
+    class_name 兼容两种形态：'csp_X'（jar 根路径 csp_X.class）与
+    'com.github.catvod.spider.X'（斜杠路径）。jar 不可读/异常时保守放行（True）。
+    """
+    target = class_name.replace('.', '/')
+    if not target.endswith('.class'):
+        target += '.class'
+    try:
+        with zipfile.ZipFile(jar_path) as z:
+            names = z.namelist()
+    except Exception:
+        return True   # 不可读/异常：保守放行
+    return target in names
+
+
+def _looks_like_live_source(text):
+    """判断文本是否为直播源（TXT / M3U）而非 CatVod 配置 JSON。
+
+    TXT 直播源：含「,#genre#」分组行；M3U：以 #EXTM3U 开头或含 #EXTINF。
+    命中任一即视为直播源，用于把「误把直播源当配置载入」引导到正确入口。
+    """
+    head = (text or '').lstrip()[:4096]
+    if not head:
+        return False
+    if head.startswith('#EXTM3U') or '#EXTINF' in head:
+        return True
+    if ',#genre#' in head:
+        return True
+    return False
+
+
+def parse_config_json(text):
+    """解析 CatVod 配置 JSON；非 JSON 时抛出可读的 ValueError（而非裸 JSONDecodeError）。
+
+    最常见的误用是把直播源地址（.txt/.m3u）粘进「配置」框——这里显式识别并给出
+    可操作的引导，避免用户只看到 'Expecting value: line 1 column 1'。
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        if _looks_like_live_source(text):
+            raise ValueError(
+                '这是直播源（txt/m3u），不是配置。请到「设置 → 源设置 → 直播源」'
+                '添加该地址，而不是从这里载入配置。'
+            ) from e
+        snippet = (text or '').strip()[:80].replace('\n', ' ')
+        raise ValueError(
+            '配置不是有效的 JSON（无法解析）。请确认地址返回的是 CatVod 配置文件。'
+            '内容开头：%r' % snippet
+        ) from e
 
 
 class ConfigManager:
@@ -94,7 +163,7 @@ class ConfigManager:
         失败不破坏现有站点：新内容全部构建成功后才一次性热替换。
         """
         text = _text if _text is not None else self._fetch_config(url_or_json)
-        cfg = json.loads(text)
+        cfg = parse_config_json(text)
         # 多仓格式（顶层 urls 列表）：预检后按序尝试直到第一条成功（限一层递归防循环）
         if not isinstance(cfg.get('sites'), list) and isinstance(cfg.get('urls'), list) and cfg['urls']:
             if _depth >= 1:
@@ -119,7 +188,7 @@ class ConfigManager:
                 try:
                     logger.info('multi-repo: trying entry %s', name)
                     sub_text = self._fetch_config(sub)
-                    sub_cfg = json.loads(sub_text)
+                    sub_cfg = parse_config_json(sub_text)
                     if not isinstance(sub_cfg.get('sites'), list) or not sub_cfg['sites']:
                         raise ValueError('entry has no sites')
                     sub_cfgs[sub] = sub_cfg
@@ -135,7 +204,7 @@ class ConfigManager:
                         try:
                             logger.info('multi-repo: retry preferred entry %s once', name)
                             sub_text = self._fetch_config(sub)
-                            sub_cfg = json.loads(sub_text)
+                            sub_cfg = parse_config_json(sub_text)
                             if isinstance(sub_cfg.get('sites'), list) and sub_cfg['sites']:
                                 sub_cfgs[sub] = sub_cfg
                                 prepared = self._prepare(sub_cfg, sub)
@@ -159,23 +228,50 @@ class ConfigManager:
         self._apply(prepared)
         return prepared['summary']
 
+    @staticmethod
+    def _resolve_spider_jar(cfg, base_url):
+        """解析 config 顶层 spider（TVBox 共享 jar）为可下载的 http 地址（保留 ;md5）。
+
+        形态：'https://x/fun.jar;md5' / './jar/x.jar'（相对 config 源）。
+        非 jar（如 drpy js spider）或无法解析为 http 时返回 ''（csp_ 站点将被跳过）。
+        """
+        raw = str(cfg.get('spider') or '').strip()
+        if not raw:
+            return ''
+        head, sep, tail = raw.partition(';')
+        head = head.strip()
+        if head.startswith('./') or head.startswith('../'):
+            head = urljoin(base_url, head) if base_url else ''
+        if not head.startswith('http'):
+            return ''
+        # 仅 .jar 视为共享 jar；drpy/js spider（.js 等）无 PC 运行时，返回空。
+        if not head.split('?')[0].lower().endswith('.jar'):
+            return ''
+        return head + (';' + tail.strip() if sep else '')
+
     def _prepare(self, cfg, source):
         """纯构建：解析 config 并构建新站点列表，不触碰现有全局状态。"""
         summary = {'sites': 0, 'skipped': [], 'parses': 0, 'flags': 0, 'lives': 0}
-        if cfg.get('spider'):
-            logger.info('config.spider(jar) ignored on PC: %s', cfg['spider'])
         base_url = source if str(source).startswith('http') else ''
+        # TVBox 标准：顶层 spider 是所有 csp_ 站点共享的 jar；解析出 http 地址后
+        # 供 type=3 且 api 为类名（csp_XXX）的站点加载（见 _build_site）。
+        spider_jar = self._resolve_spider_jar(cfg, base_url)
+        if cfg.get('spider'):
+            logger.info('config.spider=%s → shared jar: %s', cfg['spider'], spider_jar or '(not a jar / unresolved)')
         new_sites = []
         for item in cfg.get('sites') or []:
             try:
-                site = self._build_site(item, base_url)
+                site = self._build_site(item, base_url, spider_jar)
                 if site:
                     new_sites.append(site)
                     summary['sites'] += 1
                 else:
                     summary['skipped'].append(item.get('key', '?'))
             except Exception as e:
-                logger.exception('load site %s failed', item.get('key'))
+                # 简洁降级：不打印完整 traceback（避免死源每次启动刷屏）；
+                # 细节仅在 DEBUG 级记录。
+                logger.debug('load site %s failed: %s', item.get('key'), e, exc_info=True)
+                logger.warning('load site %s failed: %s', item.get('key'), e)
                 summary['skipped'].append(f"{item.get('key', '?')}: {e}")
         parses = cfg.get('parses') or []
         flags = cfg.get('flags') or []
@@ -268,12 +364,14 @@ class ConfigManager:
         for url, cfg in sub_cfgs.items():
             if url == prepared['source_url']:
                 continue
+            # 每个子仓的 csp_ 站点用该仓自己的顶层 spider jar 加载
+            sub_spider_jar = self._resolve_spider_jar(cfg, url if str(url).startswith('http') else '')
             for item in cfg.get('sites') or []:
                 key = item.get('key') or ''
                 if not key or key in existing:
                     continue
                 try:
-                    site = self._build_site(item, url)
+                    site = self._build_site(item, url, sub_spider_jar)
                     if site:
                         prepared['sites'].append(site)
                         existing.add(key)
@@ -296,8 +394,12 @@ class ConfigManager:
                 return f.read()
         raise ValueError('unsupported config source')
 
-    def _build_site(self, item, base_url=''):
-        """按 config 条目构建 Site（不注册）；不支持返回 None。"""
+    def _build_site(self, item, base_url='', spider_jar=''):
+        """按 config 条目构建 Site（不注册）；不支持返回 None。
+
+        spider_jar：config 顶层共享 jar 的 http 地址（TVBox 标准），供
+        type=3 且 api 为类名（csp_XXX）的站点加载类。
+        """
         key = item.get('key') or ''
         name = item.get('name') or key
         stype = int(item.get('type', 0))
@@ -314,9 +416,48 @@ class ConfigManager:
             api = urljoin(base_url, api)
 
         if stype == 3 and api.startswith('csp_'):
-            # jar 内 Java 爬虫类（TVBox spider.jar），PC 侧无 jar 运行时，跳过
-            logger.info('skip site %s: jar-based csp class not supported on PC', key)
-            return None
+            # jar 内 Java 爬虫类（TVBox csp_*.jar）：经 JVM 子进程桥加载（见 jar_bridge.py）
+            # api 为纯类名（csp_XXX）时，jar 来自 config 顶层共享 spider；否则跳过。
+            spider = self._load_jar_spider(key, name, api, spider_jar)
+            if spider is None:
+                logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
+                return None
+            site = Site(key, api, ext)
+            site.spider_type = 'jar'
+            site.runner = Runner(spider)
+            site.searchable = bool(item.get('searchable', 1))
+            site.quick_search = bool(item.get('quickSearch', 1))
+            site.filterable = bool(item.get('filterable', 1))
+            # 把 ext 配置存到蜘蛛实例上，自动 init 时使用正确的 ext（关键！）
+            # 相对路径（./lib/x.json，如 Bili 系蜘蛛的 json 配置）相对配置源 URL 解析为绝对地址
+            ext = self._resolve_ext(ext, base_url)
+            if ext:
+                ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
+                if ext_str:
+                    spider._ext = ext_str
+            logger.info('site built: %s (%s, type=jar)', key, name)
+            return site
+
+        # jar 直链 api（.jar 后缀）或 jar 内类名（csp_ 开头）之外的形态：若 api 是 http .jar 直链
+        # （如部分源直接以 jar URL 作为 api），同样走 jar 装配
+        if stype == 3 and api.split('?')[0].lower().endswith('.jar'):
+            spider = self._load_jar_spider(key, name, api)
+            if spider is None:
+                logger.info('skip site %s: jar runtime unavailable (java not found)', key)
+                return None
+            site = Site(key, api, ext)
+            site.spider_type = 'jar'
+            site.runner = Runner(spider)
+            site.searchable = bool(item.get('searchable', 1))
+            site.quick_search = bool(item.get('quickSearch', 1))
+            site.filterable = bool(item.get('filterable', 1))
+            ext = self._resolve_ext(ext, base_url)
+            if ext:
+                ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
+                if ext_str:
+                    spider._ext = ext_str
+            logger.info('site built: %s (%s, type=jar-url)', key, name)
+            return site
 
         if 'drpy' in api.lower():
             # drpy 框架源（依赖 drpy 服务端），PC 侧无 drpy 运行时，跳过
@@ -327,6 +468,9 @@ class ConfigManager:
         is_js = stype == 4 or (stype == 3 and api.startswith('http') and api.split('?')[0].endswith('.js'))
         if is_js:
             spider = self._load_js_spider(key, name, api)
+            if spider is None:
+                logger.info('skip site %s: js spider unavailable (fetch failed / non-JS content)', key)
+                return None
         elif stype == 3:
             spider = self._load_python_spider(key, api)
         elif stype in (0, 1):
@@ -344,6 +488,22 @@ class ConfigManager:
         site.runner.init(ext)
         logger.info('site built: %s (%s, type=%s)', key, name, stype)
         return site
+
+    def _resolve_ext(self, ext, base_url):
+        """把 ext 配置中的相对路径（./lib/x.json）解析为相对配置源的绝对 URL。
+
+        多个配置把蜘蛛配置（如 csp_Bili 的 json 文件）写成 ./lib/xxx.json，
+        蜘蛛在 JVM 内直接 fetch ext 值，必须拿到完整 URL 才能工作。
+        递归处理 dict/str；绝对 URL / 非路径字符串原样返回。
+        """
+        if isinstance(ext, dict):
+            return {k: self._resolve_ext(v, base_url) for k, v in ext.items()}
+        if isinstance(ext, str):
+            e = ext.strip()
+            if (e.startswith('./') or e.startswith('../')) and base_url:
+                return urljoin(base_url, e)
+            return e
+        return ext
 
     def _load_python_spider(self, key, api):
         if api.startswith('http'):
@@ -366,14 +526,56 @@ class ConfigManager:
         from quickjs_host import JsEngine   # js-engine 目录（server.py 已加入 sys.path）
         engine = JsEngine()
         engine.proxy_port = hoststate.get_port()   # js2Proxy 生成后端代理 URL 用
-        if api.startswith('http'):
-            # 多模块 ESM：递归抓取 import 依赖后展平执行（单文件也兼容）
-            if not engine.load_spider_url(api, fetch_text):
-                raise ValueError('js spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
-        else:
-            if not engine.load_spider(api):
-                raise ValueError('js spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
+        try:
+            if api.startswith('http'):
+                # 多模块 ESM：递归抓取 import 依赖后展平执行（单文件也兼容）
+                ok = engine.load_spider_url(api, fetch_text)
+            else:
+                ok = engine.load_spider(api)
+        except Exception as e:
+            # 抓取/执行失败（如死源、超时、HTML 反爬页）：降级跳过，不打 traceback
+            logger.warning('skip site %s: js spider load/execute failed: %s', key, str(e)[:80])
+            return None
+        if not ok:
+            # load_spider_url/load_spider 返回 False：非 JS 内容（HTML 头等）或未产出 __JS_SPIDER__
+            logger.warning('skip site %s: spider fetch produced non-JS content or failed', key)
+            return None
         return make_js_spider_class(key, engine, name)
+
+    def _load_jar_spider(self, key, name, api, spider_jar=''):
+        """装配 jar spider：jar 落盘（带 md5 校验）→ JarBridge → JarSpider 适配。
+
+        api 有两种形态：
+        - 'https://x/csp_MaoYan.jar[;md5]'：站点自带 jar 直链，class 从文件名推断。
+        - 'csp_MaoYan'：纯类名，jar 来自 config 顶层共享 spider（spider_jar）。
+        无 java 运行时或无法定位 jar 时返回 None（调用方跳过该站点）；其余异常向上抛。
+        """
+        import java_probe
+        if not java_probe.find_java():
+            return None
+        from jar_bridge import JarBridge
+        from jar_spider import make_jar_spider_class
+        jar_url, md5, class_name = JarBridge.norm_jar_src(api)
+        if not jar_url:
+            # api 是纯类名（csp_XXX）：用 config 顶层共享 jar 下载，class 取 api。
+            if api.startswith('csp_') and spider_jar:
+                jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
+                class_name = api
+            if not jar_url:
+                logger.info('skip site %s: csp_ class but no shared spider jar', key)
+                return None
+        jar_path = JarBridge.download_jar(jar_url, md5, site_key=key)
+        # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
+        class_name = JarBridge.map_class_name(jar_path, class_name)
+        # 加载期类存在性检查：映射后仍以 csp_ 开头（映射失败标志）且 jar 中确无该类
+        # （csp_ 类在 jar 根路径 / com.github.catvod.spider 斜杠路径两种形态）→ 装配期跳过，
+        # 避免运行时 Class.forName ClassNotFoundException 刷屏。
+        if class_name.startswith('csp_') and not jar_has_class(jar_path, class_name):
+            logger.info('skip site %s: class %s not in jar', key, class_name)
+            return None
+        # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
+        bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
+        return make_jar_spider_class(key, bridge, name, class_name)
 
     # ------------------------------------------------------------ 查询
 
@@ -385,6 +587,7 @@ class ConfigManager:
             'flags': self.flags,
             'lives': self.lives,
             'wallpaper': self.wallpaper,
-            'sites': [{'key': s.key, 'name': s.name, 'searchable': s.searchable}
+            'sites': [{'key': s.key, 'name': s.name, 'searchable': s.searchable,
+                       'spiderType': getattr(s, 'spider_type', '')}
                       for s in self.sites.sites],
         }

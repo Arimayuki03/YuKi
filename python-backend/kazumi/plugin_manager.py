@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Kazumi 规则管理器：规则 CRUD、持久化、启用/禁用。
+"""Kazumi 规则管理器：规则 CRUD、持久化、启�?禁用�?
 
-持久化：~/.video-pc/kazumi/plugins.json（单文件存储全部规则）。
-线程安全：threading.Lock 保护规则列表读写。
+持久化：~/.video-pc/kazumi/plugins.json（单文件存储全部规则）�?
+线程安全：threading.Lock 保护规则列表读写�?
 """
 import json
 import logging
@@ -15,9 +15,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import hoststate
+import requests
 
 from .plugin import Plugin
 from .utils import NoResultException, CaptchaRequiredException
+
+logger = logging.getLogger('vpc.kazumi.manager')
+
+# 代理：requests 自动读取环境变量 HTTP_PROXY/HTTPS_PROXY（由主进程在设置代理/启动时注入）；
+# 全部 http(s) 请求认可代理环境变量（trust_env 默认 True）。socks 代理需 socks 支持库，
+# 未安装时 requests 会忽略 socks:// 变量并直连 —— 主进程已把 socks 归一化为 http 规范化处理。
 
 logger = logging.getLogger('vpc.kazumi.manager')
 
@@ -68,6 +75,7 @@ class PluginManager:
         self.enable_git_proxy = False
         self._load()
         self._import_builtin_rules()
+        self._load_mirror_state()
 
     @staticmethod
     def _now():
@@ -85,13 +93,51 @@ class PluginManager:
         return BANGUMI_MIRROR_NEXT if self.enable_bangumi_proxy else BANGUMI_API_NEXT
 
     def set_mirror(self, bangumi=None, git=None):
-        """设置镜像开关（持久化到后端内存）；返回当前状态。"""
+        """设置镜像开关（持久化到后端内存 + 落盘镜像状态文件）；返回当前状态。"""
         with self._lock:
             if bangumi is not None:
                 self.enable_bangumi_proxy = bool(bangumi)
             if git is not None:
                 self.enable_git_proxy = bool(git)
+            self._save_mirror_state()
         return {'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy}
+
+    # ---------------------------------------------------------------- 镜像开关持久化
+
+    def _mirror_state_file(self):
+        try:
+            d = hoststate.get_data_dir()
+            if d:
+                os.makedirs(os.path.join(d, 'kazumi'), exist_ok=True)
+                return os.path.join(d, 'kazumi', 'mirror.json')
+        except Exception:
+            pass
+        return ''
+
+    def _load_mirror_state(self):
+        """启动时恢复镜像开关（此前开关只存前端 settings，后端重启后丢失）。"""
+        try:
+            fp = self._mirror_state_file()
+            if not fp or not os.path.exists(fp):
+                return
+            with open(fp, encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.enable_bangumi_proxy = bool(data.get('bangumi'))
+                self.enable_git_proxy = bool(data.get('git'))
+                logger.info('[kazumi] mirror state restored: %s', data)
+        except Exception as e:
+            logger.warning('[kazumi] mirror state load failed: %s', e)
+
+    def _save_mirror_state(self):
+        try:
+            fp = self._mirror_state_file()
+            if not fp:
+                return
+            with open(fp, 'w', encoding='utf-8') as f:
+                json.dump({'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy}, f)
+        except Exception as e:
+            logger.warning('[kazumi] mirror state save failed: %s', e)
 
     # ---------------------------------------------------------------- 内置规则
 
@@ -172,6 +218,8 @@ class PluginManager:
                 'enabled': p.enabled,
                 'useWebview': p.use_webview,
                 'api': p.api,
+                'baseURL': p.base_url,
+                'searchURL': p.search_url,
                 'installed_at': p.installed_at,
                 'updated_at': p.updated_at,
                 'validity': p.validity,
@@ -474,6 +522,78 @@ class PluginManager:
             logger.warning('[kazumi] bangumi search failed: %s', e)
             return []
 
+    @staticmethod
+    def _build_number_filter(low, high):
+        """构造 Bangumi 数值区间过滤（对齐 Kazumi _buildNumberFilter：min→>=，max→<=）。"""
+        out = []
+        if low is not None:
+            out.append('>=%s' % low)
+        if high is not None:
+            out.append('<=%s' % high)
+        return out
+
+    def bangumi_search_filtered(self, keyword='', tags=None, sort='heat',
+                                date_start='', date_end='',
+                                rank_min=None, rank_max=None,
+                                score_min=None, score_max=None,
+                                weekdays=None, limit=20, offset=0):
+        """带筛选的 Bangumi 番剧搜索（对齐 Kazumi buildBangumiSearchParams + bangumiSearch）。
+
+        复刻 Kazumi 搜索工作台的全部筛选维度：关键词、标签（AND 语义）、
+        排序（heat/rank/score/match）、播出日期区间、排名区间、评分区间、放送星期。
+        POST api.bgm.tv/v0/search/subjects，结果经日历归一化补 name_cn/air_date，
+        按 id 去重后返回 {items, total}。镜像开启时经 _base_api() 走全域名反代。"""
+        import requests
+        tags = list(tags or [])
+        weekdays = sorted({int(w) for w in (weekdays or []) if str(w).strip()})
+        # rank：显式区间优先；sort=rank 时用 Kazumi 的 >0 下限，否则 >=0
+        rank_filter = self._build_number_filter(rank_min, rank_max)
+        if not rank_filter:
+            rank_filter = ['>0', '<=99999'] if sort == 'rank' else ['>=0', '<=99999']
+        filter_body = {
+            'type': [2],
+            'tag': tags,
+            'rank': rank_filter,
+            'nsfw': False,
+        }
+        if date_start and date_end:
+            filter_body['air_date'] = ['>=' + str(date_start), '<' + str(date_end)]
+        score_filter = self._build_number_filter(score_min, score_max)
+        if score_filter:
+            filter_body['rating'] = score_filter
+        if weekdays:
+            filter_body['air_weekday'] = weekdays
+        body = {
+            'keyword': keyword or '',
+            'sort': sort or 'heat',
+            'filter': filter_body,
+        }
+        try:
+            rsp = requests.post(
+                f'{self._base_api()}/v0/search/subjects',
+                params={'limit': min(int(limit), 50), 'offset': max(int(offset), 0)},
+                json=body,
+                headers={'User-Agent': BANGUMI_UA},
+                timeout=(5, 10),
+                verify=False,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            raw = data.get('data', []) if isinstance(data, dict) else data
+            items = []
+            seen = set()
+            if isinstance(raw, list):
+                for entry in raw:
+                    item = self._normalize_calendar_item(entry)
+                    if item and item.get('id') and item['id'] not in seen:
+                        seen.add(item['id'])
+                        items.append(item)
+            total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
+            return {'items': items, 'total': total, 'raw_count': len(raw) if isinstance(raw, list) else 0}
+        except Exception as e:
+            logger.warning('[kazumi] bangumi search filtered failed: %s', e)
+            return {'items': [], 'total': 0, 'raw_count': 0}
+
     def bangumi_info(self, subject_id):
         """Bangumi 番剧详情（api.bgm.tv）。"""
         import requests
@@ -720,7 +840,13 @@ class PluginManager:
             return None
 
     def bangumi_characters(self, subject_id):
-        """Bangumi 番剧角色信息（api.bgm.tv）。"""
+        """Bangumi 番剧角色信息（api.bgm.tv）。
+
+        列表端点 /v0/subjects/{id}/characters 只返回原名（多为日文），无中文名；
+        中文名藏在单角色详情 /v0/characters/{id} 的 infobox「别名」项里。故拉到列表后
+        并发补全每个角色的 name_cn（有界线程池，best-effort：单个失败保留原名），
+        供前端「角色卡片默认用简体中文名」渲染。首次较慢，由 server 层 TTL 缓存兜住重复访问。
+        """
         import requests
         try:
             rsp = requests.get(
@@ -730,10 +856,90 @@ class PluginManager:
                 verify=False,
             )
             rsp.raise_for_status()
-            return rsp.json()
+            chars = rsp.json()
         except Exception as e:
             logger.warning('[kazumi] bangumi characters failed: %s', e)
             return []
+        if not isinstance(chars, list) or not chars:
+            return chars if isinstance(chars, list) else []
+        self._enrich_characters_name_cn(chars)
+        return chars
+
+    def _enrich_characters_name_cn(self, chars):
+        """并发为角色列表补全 name_cn（就地写入）：逐个拉 /v0/characters/{id} 详情，
+        从 infobox 提取简体中文名。有界并发≤6，单角色失败/无中文名时不写（保留原名回退）。"""
+        def _fill(ch):
+            if not isinstance(ch, dict):
+                return
+            cid = ch.get('id')
+            if not cid or ch.get('name_cn'):
+                return
+            info = self.bangumi_character_detail(cid)
+            cn = self._pick_char_name_cn(info)
+            if cn and cn != (ch.get('name') or ''):
+                ch['name_cn'] = cn
+        targets = [c for c in chars if isinstance(c, dict) and c.get('id') and not c.get('name_cn')]
+        if not targets:
+            return
+        try:
+            with ThreadPoolExecutor(max_workers=min(6, len(targets))) as pool:
+                list(pool.map(_fill, targets))
+        except Exception as e:
+            logger.warning('[kazumi] enrich character name_cn failed: %s', e)
+
+    @staticmethod
+    def _pick_char_name_cn(info):
+        """从角色详情提取简体中文名。优先级：
+        1) 基本信息 infobox 里的「简体中文名」项（Bangumi 角色资料常见字段，最准确）；
+        2) 显式 name_cn 字段（部分接口/镜像返回）；
+        3) infobox「别名/中文名」项里含「中文/简体」的值。
+        infobox 可能是 [{key, value}]（value 又可能是 [{k, v}] 或字符串）。对齐前端 _pickCharNameCn。"""
+        if not isinstance(info, dict):
+            return ''
+        ib = info.get('infobox') if isinstance(info.get('infobox'), list) else []
+
+        # 1) 基本信息里的「简体中文名」（精确 key 命中，优先级最高）
+        for it in ib:
+            if not isinstance(it, dict):
+                continue
+            k = str(it.get('key') or '').strip()
+            if k in ('简体中文名', '简体中文', '中文名'):
+                v = it.get('value')
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+                if isinstance(v, list):
+                    for x in v:
+                        if isinstance(x, dict) and x.get('v'):
+                            return str(x['v'])
+
+        # 2) 显式 name_cn 字段
+        if info.get('name_cn'):
+            return str(info['name_cn'])
+
+        # 3) 别名项里的中文/简体值兜底
+        alias_keys = ('别名', 'alternate name', 'alias')
+        for it in ib:
+            if not isinstance(it, dict):
+                continue
+            k = str(it.get('key') or '').strip().lower()
+            if k not in [a.lower() for a in alias_keys]:
+                continue
+            v = it.get('value')
+            if isinstance(v, list):
+                # [{k:'简体中文', v:'...'}] 形式：优先含「中文/简体」的项
+                for x in v:
+                    if isinstance(x, dict) and ('中文' in str(x.get('k') or '') or '简体' in str(x.get('k') or '')):
+                        if x.get('v'):
+                            return str(x['v'])
+                for x in v:
+                    if isinstance(x, dict) and x.get('v'):
+                        return str(x['v'])
+            elif isinstance(v, str) and v.strip():
+                m = re.search(r'(?:简体)?中文\s*[:：]\s*([^\n;；/、]+)', v)
+                if m:
+                    return m.group(1).strip()
+                return re.split(r'[\n;；/、]', v)[0].strip()
+        return ''
 
     def bangumi_character_detail(self, character_id):
         """单个角色详情（api.bgm.tv /v0/characters/{id}）：资料 + 简介。"""
@@ -751,6 +957,22 @@ class PluginManager:
             logger.warning('[kazumi] bangumi character detail failed: %s', e)
             return None
 
+    def bangumi_character_comments(self, character_id):
+        """单个角色吐槽（next.bgm.tv /p1/characters/{id}/comments）。"""
+        import requests
+        try:
+            rsp = requests.get(
+                f'{self._base_next()}/p1/characters/{character_id}/comments',
+                headers={'User-Agent': BANGUMI_UA},
+                timeout=10,
+                verify=False,
+            )
+            rsp.raise_for_status()
+            return rsp.json()
+        except Exception as e:
+            logger.warning('[kazumi] bangumi character comments failed: %s', e)
+            return []
+
     def bangumi_staff(self, subject_id):
         """Bangumi 番剧制作人员（api.bgm.tv）。"""
         import requests
@@ -766,7 +988,6 @@ class PluginManager:
         except Exception as e:
             logger.warning('[kazumi] bangumi staff failed: %s', e)
             return []
-
     def bangumi_comments(self, subject_id, limit=20, offset=0):
         """Bangumi 番剧评论（next.bgm.tv）。"""
         import requests
@@ -918,7 +1139,9 @@ class PluginManager:
                     try:
                         url = f'{base}/v0/users/{uname}/collections/{subject_id}'
                         rsp = requests.request(method, url, json=body, headers=headers, timeout=(5, 8), verify=False)
-                        if rsp.status_code in (200, 201, 204):
+                        # Bangumi 收藏写接口成功返回 2xx（含 202 Accepted）；只认 200/201/204 会把
+                        # 202 误判为失败 → 前端弹「同步失败」但实际已同步。统一按 2xx 判定成功。
+                        if 200 <= rsp.status_code < 300:
                             return True, 'ok'
                         msg = f'{method} {url} -> {rsp.status_code}'
                         if rsp.status_code in (401, 403):
@@ -937,6 +1160,11 @@ class PluginManager:
         import requests
         if not token:
             return False, '缺少 Bangumi token'
+        # subject_id 必须是有效整数，否则 Bangumi API 返回 404
+        try:
+            subject_id = int(subject_id)
+        except (TypeError, ValueError):
+            return False, '无效的 subject_id'
         self._username_cache = None
         self._username_ts = 0
         username = self._bangumi_username(token)
@@ -947,7 +1175,8 @@ class PluginManager:
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
         if alt not in bases:
             bases.append(alt)
-        usernames = ['-', username] if username != '-' else ['-']
+        # DELETE 操作用真实用户名优先（- 通配符对 DELETE 不可靠，会返回 404）
+        usernames = [username, '-'] if username != '-' else ['-']
         auth_err = None
         other_err = None
         for base in bases:
@@ -955,8 +1184,11 @@ class PluginManager:
                 try:
                     url = f'{base}/v0/users/{uname}/collections/{subject_id}'
                     rsp = requests.request('DELETE', url, headers=headers, timeout=(5, 8), verify=False)
-                    if rsp.status_code in (200, 201, 204):
+                    if 200 <= rsp.status_code < 300:
                         return True, 'ok'
+                    # 404 在 DELETE 上视为「已不在收藏中」，幂等成功
+                    if rsp.status_code == 404:
+                        return True, 'ok (already not collected)'
                     msg = f'DELETE {url} -> {rsp.status_code}'
                     if rsp.status_code in (401, 403):
                         auth_err = msg
@@ -968,15 +1200,227 @@ class PluginManager:
         logger.warning('[kazumi] bangumi collection delete failed: %s', last)
         return False, last
 
+    # ---------------------------------------------------------------- 收藏批量同步（任务六 6.1）
+
+    def _bangumi_all_collections(self, token, subject_type=2, per_page=100, page_delay=0.25):
+        """获取当前用户【全部】收藏（分页遍历 5 种收藏类型 1..5）。
+
+        对齐 Kazumi bangumi_api.dart getBangumiCollectibles：
+          - 逐收藏类型（1想看 2看过 3在看 4搁置 5抛弃）分页拉取，每页 limit=100；
+          - 依据响应 `total` 循环 offset += limit 直到取完；
+          - 页间 250ms 限速（page_delay），单页失败（429/5xx/网络）容忍：小退避后中止该类型继续下一类型；
+          - 返回按 subject_id 去重的合并列表（每项保留原始 subject/subject_id，并回填 type）。
+
+        与 bangumi_user_collections（单页、上限 100）区别：本方法拉全量供同步用，不截断。"""
+        import requests
+        if not token:
+            return []
+        username = self._bangumi_username(token)
+        if not username:
+            logger.warning('[kazumi] bangumi all collections: 无法获取用户名（token 无效或网络失败）')
+            return []
+        per_page = max(1, min(int(per_page or 100), 100))
+        headers = self._bangumi_auth_headers(token)
+        base = self._base_api()
+        merged = {}  # subject_id -> item（去重）
+        url = f'{base}/v0/users/{username}/collections'
+        for ctype in (1, 2, 3, 4, 5):
+            offset = 0
+            total = None
+            while True:
+                data = None
+                for attempt in range(2):  # 单页最多 1 次退避重试（429/5xx）
+                    try:
+                        rsp = requests.get(url, params={'subject_type': subject_type, 'type': ctype,
+                                                         'limit': per_page, 'offset': offset},
+                                           headers=headers, timeout=(5, 10), verify=False)
+                        if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
+                            time.sleep(0.5)
+                            continue  # 退避后重试本页
+                        rsp.raise_for_status()
+                        data = rsp.json() or {}
+                        break
+                    except Exception as e:
+                        logger.warning('[kazumi] bangumi collections page failed type=%s offset=%s: %s',
+                                       ctype, offset, e)
+                        data = None
+                        break
+                if data is None:
+                    break  # 本类型分页失败，容忍并继续下一类型
+                rows = data.get('data', []) or []
+                if total is None:
+                    try:
+                        total = int(data.get('total', 0) or 0)
+                    except (TypeError, ValueError):
+                        total = 0
+                for it in rows:
+                    sid = it.get('subject_id')
+                    if sid is None:
+                        continue
+                    if it.get('type') is None:
+                        it['type'] = ctype
+                    merged[sid] = it
+                offset += per_page
+                if not rows or (total is not None and offset >= total):
+                    break
+                time.sleep(page_delay)  # Kazumi 风格页间限速
+        return list(merged.values())
+
+    def bangumi_sync_collections(self, token, local_favorites, priority='local', last_sync_at=0):
+        """Kazumi 风格三方合并（collect_sync_merger.dart planBangumi）：拉取远端全量收藏，
+        与本地收藏（已在渲染端解析出 subjectId + type）比对，生成同步计划。
+
+        local_favorites: list[{subjectId|bangumiId, type(1-5), ts(unix), name}]
+        priority: 冲突时优先方（'local' 本地覆盖远端 / 'remote' 远端保留）。
+        last_sync_at: unix 秒；本地 ts < last_sync_at 且远端已存在的冲突视为「本地未改动」→ 远端胜（跳过上传）。
+
+        返回 plan:
+          upload   本地新增 + 冲突且本地胜（需上传的 {subjectId,type,name}）
+          pull     远端独有（渲染端合并进网格用的原始远端条目）
+          conflict 双方都有但 type 不同的明细（含 resolved: local/remote）
+          skipped  已同步一致 + 冲突且远端胜 的计数（去重/增量的核心）"""
+        remote_list = self._bangumi_all_collections(token)
+        remote = {}
+        for it in remote_list:
+            sid = it.get('subject_id')
+            if sid is None:
+                continue
+            try:
+                remote[str(sid)] = int(it.get('type') or 0)
+            except (TypeError, ValueError):
+                remote[str(sid)] = 0
+        try:
+            last_sync_at = float(last_sync_at or 0)
+        except (TypeError, ValueError):
+            last_sync_at = 0
+        upload, conflict = [], []
+        skipped = 0
+        seen_local = set()
+        for f in (local_favorites or []):
+            sid = str(f.get('subjectId') or f.get('bangumiId') or '').strip()
+            if not sid or sid == '0':
+                continue
+            try:
+                ltype = int(f.get('type') or 0)
+            except (TypeError, ValueError):
+                ltype = 0
+            if ltype <= 0:
+                continue
+            seen_local.add(sid)
+            name = f.get('name', '')
+            rtype = remote.get(sid)
+            try:
+                ts = float(f.get('ts') or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if rtype is None:
+                upload.append({'subjectId': sid, 'type': ltype, 'name': name})  # 本地独有
+            elif rtype == ltype:
+                skipped += 1  # 已同步且一致 → 跳过（去重）
+            else:
+                # 冲突：默认本地胜；但「本地未改动（ts<last_sync_at）」或 priority=remote 时远端胜
+                local_wins = priority != 'remote' and not (last_sync_at and ts and ts < last_sync_at)
+                conflict.append({'subjectId': sid, 'localType': ltype, 'remoteType': rtype,
+                                 'resolved': 'local' if local_wins else 'remote'})
+                if local_wins:
+                    upload.append({'subjectId': sid, 'type': ltype, 'name': name})
+                else:
+                    skipped += 1
+        pull = [it for it in remote_list if str(it.get('subject_id')) not in seen_local]
+        return {'upload': upload, 'pull': pull, 'conflict': conflict, 'skipped': skipped,
+                'remoteTotal': len(remote_list), 'localTotal': len(local_favorites or [])}
+
+    def _bangumi_set_one(self, subject_id, ctype, headers, bases, usernames):
+        """单条收藏写入（并发上传内部用）：沿用 bangumi_update_collection 的
+        {POST,PUT} × usernames × bases 兜底逻辑，但用预解析好的 username/headers/bases，
+        不重置用户名缓存（并发场景复用）。429/5xx 小退避后继续尝试其他组合。返回 (ok, msg)。"""
+        import requests
+        body = {'type': int(ctype)}
+        auth_err = None
+        other_err = None
+        for base in bases:
+            for uname in usernames:
+                for method in ('POST', 'PUT'):
+                    try:
+                        url = f'{base}/v0/users/{uname}/collections/{subject_id}'
+                        rsp = requests.request(method, url, json=body, headers=headers,
+                                               timeout=(5, 8), verify=False)
+                        if 200 <= rsp.status_code < 300:
+                            return True, 'ok'
+                        if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
+                            time.sleep(0.5)  # 限速/服务端错误：退避后继续兜底
+                        msg = f'{method} {url} -> {rsp.status_code}'
+                        if rsp.status_code in (401, 403):
+                            auth_err = msg
+                        else:
+                            other_err = msg
+                    except Exception as e:
+                        other_err = f'{method} {base}/v0/users/{uname}/collections/{subject_id} ERR {str(e)[:80]}'
+        return False, (auth_err or other_err or '未知错误')
+
+    def bangumi_apply_sync_plan(self, token, uploads, max_workers=3, op_delay=0.25):
+        """并发执行同步计划的上传部分（ThreadPoolExecutor，max_workers≤3，每请求前 250ms 限速）。
+
+        对齐 Kazumi async_serial_queue 的限速上传，但用有界并发提速。username 只解析一次并复用
+        （不像 bangumi_update_collection 每条重置缓存），避免每条上传都打一次 /v0/me。
+        uploads: list[{subjectId, type}]。返回 {uploaded, failed, results:[{subjectId,ok,msg}]}。"""
+        if not token:
+            return {'uploaded': 0, 'failed': 0, 'results': [], 'error': '缺少 Bangumi token'}
+        uploads = list(uploads or [])
+        if not uploads:
+            return {'uploaded': 0, 'failed': 0, 'results': []}
+        username = self._bangumi_username(token)
+        if not username:
+            return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': 'Bangumi token 无效或网络不可达'}
+        headers = self._bangumi_auth_headers(token)
+        bases = [self._base_api()]
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
+        if alt not in bases:
+            bases.append(alt)
+        usernames = ['-', username] if username != '-' else ['-']
+
+        def _apply(item):
+            sid = item.get('subjectId') or item.get('id')
+            try:
+                ctype = int(item.get('type') or 0)
+            except (TypeError, ValueError):
+                ctype = 0
+            if not sid or ctype <= 0:
+                return {'subjectId': sid, 'ok': False, 'msg': 'invalid item'}
+            time.sleep(op_delay)  # 每 worker 请求前限速（3 worker 稳态 ≈ 每 250ms 一批，尊重 ~5 req/s）
+            ok, msg = self._bangumi_set_one(sid, ctype, headers, bases, usernames)
+            return {'subjectId': sid, 'ok': ok, 'msg': msg}
+
+        results = []
+        uploaded = 0
+        failed = 0
+        workers = max(1, min(int(max_workers or 3), 3))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for r in pool.map(_apply, uploads):
+                results.append(r)
+                if r['ok']:
+                    uploaded += 1
+                else:
+                    failed += 1
+        return {'uploaded': uploaded, 'failed': failed, 'results': results}
+
     # ---------------------------------------------------------------- 弹弹 play 弹幕
+
+    def _dandan_creds(self):
+        """DanDanPlay AppId/AppSecret：优先读环境变量（构建注入），其次运行时环境（主进程按设置注入并重启后端）。
+        运行时动态读取，便于用户在设置里填入凭据后重启后端即生效（不再依赖模块加载时的常量）。"""
+        appid = os.environ.get('DANDANAPI_APPID', '') or DANDAN_APPID
+        key = os.environ.get('DANDANAPI_KEY', '') or DANDAN_KEY
+        return appid, key
 
     def _dandan_signature(self, path, timestamp):
         """弹弹 play API 签名（HMAC-SHA256）。"""
         import hashlib
         import base64
-        if not DANDAN_APPID or not DANDAN_KEY:
+        appid, key = self._dandan_creds()
+        if not appid or not key:
             return ''
-        data = DANDAN_APPID + str(timestamp) + path + DANDAN_KEY
+        data = appid + str(timestamp) + path + key
         digest = hashlib.sha256(data.encode('utf-8')).digest()
         return base64.b64encode(digest).decode('utf-8')
 
@@ -984,14 +1428,15 @@ class PluginManager:
         """弹弹 play 番剧搜索（获取 DanDanBangumiID）。"""
         import requests
         import time
-        if not DANDAN_APPID or not DANDAN_KEY:
+        appid, key = self._dandan_creds()
+        if not appid or not key:
             logger.warning('[kazumi] danmaku: missing DANDANAPI_APPID/DANDANAPI_KEY')
             return []
         try:
             ts = int(time.time())
             path = '/api/v2/search/anime'
             headers = {
-                'X-AppId': DANDAN_APPID,
+                'X-AppId': appid,
                 'X-Timestamp': str(ts),
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
@@ -1014,13 +1459,14 @@ class PluginManager:
         """从 Bangumi ID 获取弹弹 play 分集弹幕 ID。"""
         import requests
         import time
-        if not DANDAN_APPID or not DANDAN_KEY:
+        appid, key = self._dandan_creds()
+        if not appid or not key:
             return 0
         try:
             ts = int(time.time())
             path = f'/api/v2/bangumi/bgmtv/{bangumi_id}'
             headers = {
-                'X-AppId': DANDAN_APPID,
+                'X-AppId': appid,
                 'X-Timestamp': str(ts),
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
@@ -1043,13 +1489,14 @@ class PluginManager:
         """获取弹幕评论（弹弹 play）。"""
         import requests
         import time
-        if not DANDAN_APPID or not DANDAN_KEY:
+        appid, key = self._dandan_creds()
+        if not appid or not key:
             return []
         try:
             ts = int(time.time())
             path = f'/api/v2/comment/{episode_id}'
             headers = {
-                'X-AppId': DANDAN_APPID,
+                'X-AppId': appid,
                 'X-Timestamp': str(ts),
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
@@ -1128,17 +1575,20 @@ class PluginManager:
     _shop_catalog_ts = 0
 
     def fetch_shop_catalog(self):
-        """从 KazumiRules 仓库拉取规则目录（index.json），5 分钟缓存。"""
+        """从 KazumiRules 仓库拉取规则目录（index.json），5 分钟缓存。
+        镜像开关（enable_git_proxy）开启时强制 GitCode 镜像；关闭时按「GitCode 优先、GitHub 备用」的双地址容错。"""
         import time
         now = time.time()
         if self._shop_catalog_cache and now - self._shop_catalog_ts < 300:
             return self._shop_catalog_cache
         import requests
-        # 优先 GitCode 镜像（国内可达），GitHub 作为备用
-        urls = [
-            'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json',
-            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
-        ]
+        if self.enable_git_proxy:
+            urls = ['https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json']
+        else:
+            urls = [
+                'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json',
+                'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
+            ]
         for url in urls:
             try:
                 rsp = requests.get(url, timeout=10, verify=False)
@@ -1153,12 +1603,15 @@ class PluginManager:
         return []
 
     def fetch_shop_rule(self, name):
-        """从 KazumiRules 仓库下载单个规则，优先 GitCode 镜像。"""
+        """从 KazumiRules 仓库下载单个规则；镜像开关开启时强制 GitCode 镜像。"""
         import requests
-        urls = [
-            f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json',
-            f'https://raw.githubusercontent.com/Predidit/KazumiRules/main/{name}.json',
-        ]
+        if self.enable_git_proxy:
+            urls = [f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json']
+        else:
+            urls = [
+                f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json',
+                f'https://raw.githubusercontent.com/Predidit/KazumiRules/main/{name}.json',
+            ]
         for url in urls:
             try:
                 rsp = requests.get(url, timeout=10, verify=False)

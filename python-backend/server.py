@@ -19,6 +19,7 @@ import time
 import socket
 import secrets
 import logging
+import hashlib
 from logging.handlers import RotatingFileHandler
 import re
 import threading
@@ -212,6 +213,52 @@ def _cache_size():
     return total, items
 
 
+def _friendly_jar_error(err):
+    """把 jar 蜘蛛的原始异常翻译为用户可读的提示。"""
+    e = err or ''
+    if 'InvocationTargetException' in e or 'JsonSyntaxException' in e or 'MalformedJson' in e \
+            or 'IllegalStateException' in e:
+        return '站点接口异常或风控，暂时无法获取内容'
+    if 'TimeoutError' in e or 'timeout' in e.lower():
+        return '站点响应超时'
+    if 'ClassNotFoundException' in e or 'NoClassDefFoundError' in e:
+        return 'jar 缺少类定义（可能需更新爬虫运行环境）'
+    if 'NoSuchMethodError' in e or 'NoSuchFieldError' in e or 'AbstractMethodError' in e:
+        return 'jar 与运行环境不兼容（缺少接口，可能需更新爬虫运行环境）'
+    return e[:120]
+
+
+def _attach_jar_error(ru, body, ensure_list=False):
+    """jar 蜘蛛最近一次调用失败时，把错误原因附加到响应 JSON 的 error 字段，
+    前端可据此提示「站点接口异常」而非笼统的「暂无内容/未取得详情」。
+
+    ensure_list=True（detailContent 用）：失败时要保证 body 含 list（空数组），
+    使前端「无 vod + 有 error」可稳定判定，且严格返回 200 + {list: [], error}，
+    绝不走 dispatch 的 500 分支。
+    """
+    sp = getattr(ru, 'spider', None)
+    err = getattr(sp, 'last_error', '') if sp is not None else ''
+    if not err and not ensure_list:
+        return body
+    fallback = (err and _friendly_jar_error(err)) or '站点接口异常或风控，暂时无法获取内容'
+    try:
+        data = json.loads(body)
+        if isinstance(data, dict):
+            if err:
+                data['error'] = _friendly_jar_error(err)
+            if ensure_list:
+                data.setdefault('list', [])
+            return json.dumps(data, ensure_ascii=False)
+        if ensure_list:
+            # 非 dict 响应（蜘蛛异常后桥接返回奇怪类型）→ 归一为 {list:[], error}
+            return json.dumps({'list': [], 'error': fallback}, ensure_ascii=False)
+    except (TypeError, ValueError):
+        if ensure_list:
+            # 完全无法解析为 JSON 时仍返回规范结构，避免前端拿到裸串无从判断
+            return json.dumps({'list': [], 'error': fallback}, ensure_ascii=False)
+    return body
+
+
 def dispatch_action(form):
     """返回 (status_code, body_text)。spider 调用均为同步阻塞，由调用方放线程池。"""
     do = form.get('do', '')
@@ -241,7 +288,13 @@ def dispatch_action(form):
                                    ensure_ascii=False, default=str)
         if do == 'cacheSize':
             total, items = _cache_size()
-            return 200, json.dumps({'code': 200, 'bytes': total, 'items': items})
+            # TTL 感知：附带 KV 缓存里已过期待清理的条目数（供面板展示）
+            expired = 0
+            try:
+                _, _, expired = cache_store.stats()
+            except Exception:
+                expired = 0
+            return 200, json.dumps({'code': 200, 'bytes': total, 'items': items, 'expired': expired})
         if do == 'clearCache':
             # 缓存清理：spider KV 缓存 + JS 本地存储 + 下载缓存目录（返回释放字节数）
             import shutil
@@ -267,6 +320,53 @@ def dispatch_action(form):
             from config import fetch_text
             text = fetch_text(form.get('url', ''))
             return 200, json.dumps({'code': 200, 'text': text[:500000]}, ensure_ascii=False)
+        if do == 'panCookie':
+            # 网盘 Cookie 配置（JAR 网盘源播放用）：act=get 读取 / act=set 保存
+            from pan_cookies import load_pan_cookies, save_pan_cookies, PAN_COOKIE_KEYS, _PROVIDER_NAMES
+            act = form.get('act', 'get')
+            if act == 'get':
+                return 200, json.dumps({'code': 200, 'cookies': load_pan_cookies(),
+                                        'keys': list(PAN_COOKIE_KEYS),
+                                        'names': _PROVIDER_NAMES}, ensure_ascii=False)
+            if act == 'set':
+                try:
+                    cookies = json.loads(form.get('cookies', '{}'))
+                except ValueError:
+                    return 400, '{"code":400,"msg":"cookies 需为 JSON 对象"}'
+                saved, warnings = save_pan_cookies(cookies)
+                return 200, json.dumps({'code': 200, 'cookies': saved, 'warnings': warnings},
+                                       ensure_ascii=False)
+            if act == 'qrCreate':
+                # 夸克网盘二维码登录：返回二维码图片 + 轮询用 token
+                from pan_login import quark_qr_create
+                try:
+                    info = quark_qr_create()
+                    return 200, json.dumps({'code': 200, **info}, ensure_ascii=False)
+                except Exception as e:
+                    logger.warning('pan qr create failed: %s', e)
+                    return 200, json.dumps({'code': 500, 'msg': '获取二维码失败：%s' % str(e)[:100]},
+                                           ensure_ascii=False)
+            if act == 'qrPoll':
+                # 轮询扫码状态；成功时后端已自动保存 Cookie
+                from pan_login import quark_qr_poll
+                token = form.get('token', '')
+                try:
+                    res = quark_qr_poll(token)
+                    return 200, json.dumps({'code': 200, **res}, ensure_ascii=False)
+                except Exception as e:
+                    logger.warning('pan qr poll failed: %s', e)
+                    return 200, json.dumps({'code': 500, 'status': 'error',
+                                            'message': '轮询失败：%s' % str(e)[:100]},
+                                           ensure_ascii=False)
+            if act == 'qrRender':
+                # 渲染二维码 PNG（主进程扫码登录模式：token 由主进程 Chromium 获取）
+                from pan_login import render_qr_png
+                text = form.get('text', '')
+                if not text:
+                    return 400, '{"code":400,"msg":"缺少 text"}'
+                png = render_qr_png(text)
+                return 200, json.dumps({'code': 200, 'qr_png': png}, ensure_ascii=False)
+            return 400, '{"code":400,"msg":"unknown panCookie act"}'
         if do == 'file':
             logger.info('file play: %s', form.get('path'))
             return 200, '{"code":200,"msg":"file received"}'
@@ -281,15 +381,29 @@ def dispatch_action(form):
 
         # ---- Spider 内容 API（契约见 PHASE0_依赖矩阵.md 第 3 节）----
         if do == 'homeContent':
-            return 200, spider_app.homeContent(ru, _bool(form.get('filter', 'false')))
+            return 200, _attach_jar_error(ru, spider_app.homeContent(ru, _bool(form.get('filter', 'false'))))
         if do == 'homeVideoContent':
-            return 200, spider_app.homeVideoContent(ru, form.get('pg', '1'))
+            return 200, _attach_jar_error(ru, spider_app.homeVideoContent(ru, form.get('pg', '1')))
         if do == 'categoryContent':
-            return 200, spider_app.categoryContent(
+            return 200, _attach_jar_error(ru, spider_app.categoryContent(
                 ru, form.get('tid', ''), form.get('pg', '1'),
-                _bool(form.get('filter', 'false')), form.get('extend', '{}'))
+                _bool(form.get('filter', 'false')), form.get('extend', '{}')))
         if do == 'detailContent':
-            return 200, spider_app.detailContent(ru, form.get('ids', '[]'))
+            # 任何失败都必须返回 200 + {list: [], error}，绝不 500：
+            # 1) jar/CMS/js 蜘蛛内部解析 bug（上游 jar 侧不可修）→ last_error 附加友好原因；
+            # 2) 蜘蛛方法自身抛异常（如 JS 蜘蛛透传原生异常）→ 就地兜底为 {list: [], error}。
+            try:
+                detail_body = spider_app.detailContent(ru, form.get('ids', '[]'))
+            except Exception as e:
+                logger.warning('detailContent spider threw: %s', e)
+                detail_body = '{}'
+                # 把异常含义交给 _attach_jar_error 的兜底文案；若蜘蛛有 last_error 优先用
+                if not getattr(getattr(ru, 'spider', None), 'last_error', ''):
+                    try:
+                        getattr(ru, 'spider').last_error = str(e)[:300]
+                    except Exception:
+                        pass
+            return 200, _attach_jar_error(ru, detail_body, ensure_list=True)
         if do == 'searchContent':
             return 200, spider_app.searchContent(
                 ru, form.get('word', form.get('key', '')),
@@ -300,8 +414,8 @@ def dispatch_action(form):
             cached = _player_content_cache.get(cache_key)
             if cached and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL:
                 return 200, cached['result']
-            result = spider_app.playerContent(
-                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]'))
+            result = _attach_jar_error(ru, spider_app.playerContent(
+                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')))
             _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
             # 防无限增长，超过 1024 项时清理过期项
             if len(_player_content_cache) > 1024:
@@ -351,11 +465,24 @@ def _search_source_pages(runner, word, max_pages=50):
     return merged
 
 
+def _spider_init_failed(site):
+    """站点对应 spider 实例的 init 是否失败（jar 蜘蛛标识 _init_failed）。
+
+    jar 蜘蛛在首次业务调用前自动 init，若 init 联网失败内部状态损坏，
+    后续 search 等必然抛错刷屏。init 失败后在此短路，搜索直接跳过该站点。
+    非 jar 蜘蛛（无 _init_failed 属性）返回 False。
+    """
+    runner = getattr(site, 'runner', None)
+    spider = getattr(runner, 'spider', None) if runner is not None else None
+    return bool(getattr(spider, '_init_failed', False))
+
+
 def aggregate_search(word, timeout=60):
     """线程池并发搜索全部可搜站点（T38 起单源拉全部页，耗时变长放宽超时），
     单源超时/异常不拖累整体。"""
     merged = []
-    site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
+    site_list = [s for s in sites.sites
+                 if getattr(s, 'searchable', True) and not _spider_init_failed(s)]
     if not site_list or not word:
         return {'list': merged}
     with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
@@ -425,6 +552,15 @@ def create_app():
     kazumi_mgr = PluginManager()
     kazumi_cookies = CookieJar()
     kazumi_engine = RuleEngine(cookie_jar=kazumi_cookies)
+    # FongMi localProxy（127.0.0.1:7944 go-proxy）兼容转发服务：网盘 jar 蜘蛛
+    # 生成的播放地址指向该端口，PC 端需自建等价服务（见 go_proxy.py）
+    if not globals().get('_go_proxy_started'):
+        globals()['_go_proxy_started'] = True
+        try:
+            import go_proxy
+            go_proxy.start_go_proxy()
+        except Exception as e:
+            logger.warning('go-proxy start failed: %s', e)
     fastapi_app = FastAPI(title='video-pc backend')
 
     @fastapi_app.middleware('http')
@@ -467,7 +603,8 @@ def create_app():
     def search_stream(word: str = Query('')):
         """SSE 流式聚合搜索：先发 event: meta（总源数，供前端确定进度条），每源完成推一条 data，全部结束发 event: done。"""
         def gen():
-            site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
+            site_list = [s for s in sites.sites
+                         if getattr(s, 'searchable', True) and not _spider_init_failed(s)]
             if not word or not site_list:
                 yield 'event: done\ndata: {}\n\n'
                 return
@@ -495,9 +632,15 @@ def create_app():
         return StreamingResponse(gen(), media_type='text/event-stream')
 
     @fastapi_app.get('/search/kazumi-stream')
-    def kazumi_search_stream(word: str = Query('')):
+    def kazumi_search_stream(word: str = Query(''), tag: str = Query(''),
+                             year: str = Query(''), sort: str = Query('')):
         """SSE 流式 Kazumi 规则源搜索（T73）：每个规则源完成即推一条 data，全部结束发 event: done。
-        结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。"""
+        结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。
+
+        可选筛选参数 tag/year/sort（任务三 part 2）：作为模板变量 @tag/@year/@sort
+        注入声明支持它们的规则源搜索请求（searchURL 含 @tag 等占位，或 API 模式 query 引用）。
+        不声明这些占位的规则源忽略筛选、返回未过滤结果（优雅降级，对齐 Kazumi 仅传 keyword 的行为）。"""
+        filters = {'tag': tag, 'year': year, 'sort': sort}
         def gen():
             if not word:
                 yield 'event: done\ndata: {}\n\n'
@@ -509,7 +652,7 @@ def create_app():
 
             def _search_one(plugin):
                 try:
-                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), word)
+                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), word, filters=filters)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
                         return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
                     data = [vars(it) for it in trace.response.data]
@@ -568,10 +711,82 @@ def create_app():
     async def kazumi_action_endpoint(request: Request):
         form = {k: v for k, v in (await request.form()).items()}
         status, body = await run_in_threadpool(dispatch_kazumi_action, form)
+        headers = {}
+        # 只读 Bangumi 元数据：附 Cache-Control（浏览器/中间层可短期复用；后端已按 TTL 落盘缓存）
+        ttl = _BANGUMI_CACHE_TTL.get(form.get('do', ''), 0)
+        if ttl > 0 and status == 200:
+            headers['Cache-Control'] = 'max-age=1800'
         return PlainTextResponse(body, status_code=status,
-                                 media_type='application/json; charset=utf-8')
+                                 media_type='application/json; charset=utf-8',
+                                 headers=headers)
 
     return fastapi_app
+
+
+# 只读 Bangumi 元数据端点 → TTL（秒）。命中缓存直接返回落盘 JSON，
+# ?refresh=1 绕过。info/episodes 变动罕见给 30min，search/listByTag 结果时效性稍强给 10min。
+_BANGUMI_CACHE_TTL = {
+    'kazumiBangumiInfo': 1800,
+    'kazumiBangumiEpisodes': 1800,
+    'kazumiBangumiSearch': 600,
+    'kazumiBangumiSearchFilter': 600,
+    'kazumiBangumiListByTag': 600,
+    # 角色列表现会并发补全每个角色的中文名（多次详情请求），开销大且变动罕见 → 缓存 30min
+    'kazumiBangumiCharacters': 1800,
+}
+
+
+def _bangumi_cache_key(do, form):
+    """按 endpoint + 相关参数 hash 生成缓存键（忽略 token/refresh 等无关项）。"""
+    keys = ('id', 'keyword', 'limit', 'offset', 'tag',
+            'tags', 'sort', 'dateStart', 'dateEnd',
+            'rankMin', 'rankMax', 'scoreMin', 'scoreMax', 'weekdays')
+    parts = [do] + ['%s=%s' % (k, form.get(k, '')) for k in keys]
+    raw = '|'.join(parts)
+    return 'bgm:' + hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
+def _cached_bangumi(do, form, builder):
+    """TTL 缓存包装：命中未过期缓存直接返回；否则调 builder() 生成 body，
+    仅成功（code==200 且有实际数据）才写缓存。返回 (status, body)。
+    builder 返回 (status, body)。?refresh=1 跳过读缓存但仍回写。"""
+    ttl = _BANGUMI_CACHE_TTL.get(do, 0)
+    if ttl <= 0 or cache_store is None:
+        return builder()
+    refresh = str(form.get('refresh', '')).lower() in ('1', 'true', 'yes')
+    ckey = _bangumi_cache_key(do, form)
+    if not refresh:
+        cached = cache_store.get(ckey)
+        if cached:
+            return 200, cached
+    status, body = builder()
+    # 只缓存成功且非空响应，绝不缓存错误/空结果
+    if status == 200 and _bangumi_body_ok(do, body):
+        cache_store.set(ckey, body, ttl)
+    return status, body
+
+
+def _bangumi_body_ok(do, body):
+    """判定响应是否值得缓存：code==200 且核心数据字段非空。"""
+    try:
+        d = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    if d.get('code') != 200:
+        return False
+    if do == 'kazumiBangumiInfo':
+        return bool(d.get('info'))
+    if do == 'kazumiBangumiEpisodes':
+        return bool(d.get('episodes'))
+    if do == 'kazumiBangumiSearch':
+        return bool(d.get('results'))
+    if do == 'kazumiBangumiSearchFilter':
+        return bool(d.get('items'))
+    if do == 'kazumiBangumiListByTag':
+        return bool(d.get('items'))
+    if do == 'kazumiBangumiCharacters':
+        return bool(d.get('characters'))
+    return True
 
 
 def dispatch_kazumi_action(form):
@@ -735,15 +950,52 @@ def dispatch_kazumi_action(form):
 
         # ---- Bangumi 元数据 ----
         if do == 'kazumiBangumiSearch':
-            keyword = form.get('keyword', '')
-            limit = int(form.get('limit', '10'))
-            results = kazumi_mgr.bangumi_search(keyword, limit)
-            return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+            def _build():
+                keyword = form.get('keyword', '')
+                limit = int(form.get('limit', '10'))
+                results = kazumi_mgr.bangumi_search(keyword, limit)
+                return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
+
+        # 带筛选的 Bangumi 搜索（复刻 Kazumi 搜索工作台：标签/排序/日期/排名/评分/星期）。
+        # tags/weekdays 以逗号分隔透传；数值筛选空串视为不限。
+        if do == 'kazumiBangumiSearchFilter':
+            def _build():
+                def _num(key):
+                    raw = form.get(key, '')
+                    if raw == '' or raw is None:
+                        return None
+                    try:
+                        return float(raw) if '.' in str(raw) else int(raw)
+                    except (TypeError, ValueError):
+                        return None
+                tags = [t.strip() for t in form.get('tags', '').split(',') if t.strip()]
+                weekdays = [w.strip() for w in form.get('weekdays', '').split(',') if w.strip()]
+                data = kazumi_mgr.bangumi_search_filtered(
+                    keyword=form.get('keyword', ''),
+                    tags=tags,
+                    sort=form.get('sort', 'heat'),
+                    date_start=form.get('dateStart', ''),
+                    date_end=form.get('dateEnd', ''),
+                    rank_min=_num('rankMin'),
+                    rank_max=_num('rankMax'),
+                    score_min=_num('scoreMin'),
+                    score_max=_num('scoreMax'),
+                    weekdays=weekdays,
+                    limit=int(form.get('limit', '20')),
+                    offset=int(form.get('offset', '0')),
+                )
+                return 200, json.dumps({'code': 200, 'items': data.get('items', []),
+                                        'total': data.get('total', 0),
+                                        'rawCount': data.get('raw_count', 0)}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiInfo':
-            subject_id = form.get('id', '')
-            info = kazumi_mgr.bangumi_info(subject_id)
-            return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
+            def _build():
+                subject_id = form.get('id', '')
+                info = kazumi_mgr.bangumi_info(subject_id)
+                return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiCalendar':
             data = kazumi_mgr.bangumi_calendar()
@@ -762,28 +1014,42 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200, 'trends': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
 
         if do == 'kazumiBangumiListByTag':
-            tag = form.get('tag', '')
-            limit = int(form.get('limit', '100'))
-            offset = int(form.get('offset', '0'))
-            data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 200), max(offset, 0))
-            return 200, json.dumps({'code': 200, 'items': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
+            def _build():
+                tag = form.get('tag', '')
+                limit = int(form.get('limit', '100'))
+                offset = int(form.get('offset', '0'))
+                data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 200), max(offset, 0))
+                return 200, json.dumps({'code': 200, 'items': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiEpisodes':
-            subject_id = form.get('id', '')
-            data = kazumi_mgr.bangumi_episodes(subject_id)
-            return 200, json.dumps({'code': 200, 'episodes': data}, ensure_ascii=False)
+            def _build():
+                subject_id = form.get('id', '')
+                data = kazumi_mgr.bangumi_episodes(subject_id)
+                return 200, json.dumps({'code': 200, 'episodes': data}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiCharacters':
-            subject_id = form.get('id', '')
-            data = kazumi_mgr.bangumi_characters(subject_id)
-            return 200, json.dumps({'code': 200, 'characters': data}, ensure_ascii=False)
+            def _build():
+                subject_id = form.get('id', '')
+                data = kazumi_mgr.bangumi_characters(subject_id)
+                return 200, json.dumps({'code': 200, 'characters': data}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiCharacter':
             character_id = form.get('id', '')
             info = kazumi_mgr.bangumi_character_detail(character_id)
             return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
 
+        if do == 'kazumiBangumiCharacterComments':
+            character_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_character_comments(character_id)
+            return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
+
         if do == 'kazumiBangumiStaff':
+            subject_id = form.get('id', '')
+            data = kazumi_mgr.bangumi_staff(subject_id)
+            return 200, json.dumps({'code': 200, 'staff': data}, ensure_ascii=False)
             subject_id = form.get('id', '')
             data = kazumi_mgr.bangumi_staff(subject_id)
             return 200, json.dumps({'code': 200, 'staff': data}, ensure_ascii=False)
@@ -808,9 +1074,46 @@ def dispatch_kazumi_action(form):
 
         if do == 'kazumiBangumiCollections':
             token = form.get('token', '')
-            limit = int(form.get('limit', '100'))
-            items = kazumi_mgr.bangumi_user_collections(token, limit=min(limit, 200))
+            # all=1（默认）：分页拉全量（任务六 6.1，>100 收藏也完整）；all=0：兼容旧单页行为
+            fetch_all = str(form.get('all', '1')).lower() not in ('0', 'false', '')
+            if fetch_all:
+                items = kazumi_mgr._bangumi_all_collections(token)
+            else:
+                limit = int(form.get('limit', '100'))
+                offset = int(form.get('offset', '0'))
+                items = kazumi_mgr.bangumi_user_collections(token, limit=min(limit, 100), offset=max(offset, 0))
             return 200, json.dumps({'code': 200, 'items': items}, ensure_ascii=False)
+
+        # ---- Bangumi 收藏批量同步（任务六 6.1：三方合并计划 + 并发上传） ----
+        if do == 'kazumiBangumiSync':
+            # 生成同步计划：拉远端全量收藏 → 与本地收藏三方合并 → {upload,pull,conflict,skipped}
+            token = form.get('token', '')
+            priority = form.get('priority', 'local')
+            try:
+                last_sync_at = float(form.get('lastSyncAt', '0') or 0)
+            except (TypeError, ValueError):
+                last_sync_at = 0
+            try:
+                local_favorites = json.loads(form.get('favorites', '[]'))
+            except Exception:
+                local_favorites = []
+            if not isinstance(local_favorites, list):
+                local_favorites = []
+            plan = kazumi_mgr.bangumi_sync_collections(token, local_favorites,
+                                                       priority=priority, last_sync_at=last_sync_at)
+            return 200, json.dumps({'code': 200, 'plan': plan}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiSyncApply':
+            # 并发执行同步计划的上传部分（ThreadPoolExecutor max_workers=3，每请求 250ms 限速）
+            token = form.get('token', '')
+            try:
+                uploads = json.loads(form.get('uploads', '[]'))
+            except Exception:
+                uploads = []
+            if not isinstance(uploads, list):
+                uploads = []
+            result = kazumi_mgr.bangumi_apply_sync_plan(token, uploads)
+            return 200, json.dumps({'code': 200, 'result': result}, ensure_ascii=False)
 
         if do == 'kazumiBangumiCollectionGet':
             token = form.get('token', '')

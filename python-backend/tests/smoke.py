@@ -27,6 +27,12 @@ import hoststate  # noqa: E402
 hoststate.configure(port=PORT, token=TOKEN)
 hoststate.ensure_dirs()
 
+import java_probe  # noqa: E402
+
+# 测试环境可能装有 JDK（本机验证用）；测试逻辑不依赖 java 具体存在与否，
+# 只保证探测函数可调用且不抛异常。
+java_probe.clear_cache()
+
 import server  # noqa: E402
 import uvicorn  # noqa: E402
 

@@ -16,6 +16,8 @@ PY = sys.executable
 STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
+    ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
+    ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
 ]
 
 SKIP_DIRS = {'.venv', '__pycache__', 'tests'}

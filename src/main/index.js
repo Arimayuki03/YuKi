@@ -33,7 +33,10 @@ const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
 const SyncplayClient = require('./syncplay-client');
 const DlnaCaster = require('./dlna-caster');
-const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs } = require('./logger');
+const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs, setLogLevel, startScheduledLogCleanup, stopScheduledLogCleanup } = require('./logger');
+const { formatAndValidateProxyUrl, setManualProxySource, invalidateCache } = require('./system-proxy');
+const PanQr = require('./pan-qr');
+const PanQrWindow = require('./pan-qr-window');
 const misans = require('./misans');
 
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
@@ -239,11 +242,15 @@ async function watchLiveFallbacks(title, alts, header) {
 }
 
 function createWindow() {
+    // 系统标题栏开关（默认使用自定义标题栏以获得更现代的外观）
+    const useSystemTitleBar = settings.get('systemTitleBar') === true;
     win = new BrowserWindow({
-        width: 1180,
-        height: 760,
-        minWidth: 860,
-        minHeight: 560,
+        width: 1480,
+        height: 900,
+        minWidth: 960,
+        minHeight: 600,
+        frame: useSystemTitleBar,
+        titleBarStyle: useSystemTitleBar ? 'default' : 'hidden',
         backgroundColor: '#121212',
         title: 'YuKi',
         webPreferences: {
@@ -387,6 +394,21 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:config-state', () => ({ ...configReload }));
     ipcMain.handle('vpc:app-version', () => app.getVersion());
 
+    // ---- 夸克网盘扫码登录（官方页面方案，见 pan-qr-window.js）----
+    // 打开官方落地页登录窗口，官方 JS 完成全部流程后收割完整 Cookie（含 __puus）。
+    ipcMain.handle('vpc:pan-qr-login', async () => {
+        try {
+            const result = await PanQrWindow.openLoginWindow();
+            return { ok: true, cookies: result.cookies };
+        } catch (e) {
+            return { ok: false, message: String((e && e.message) || e).slice(0, 200) };
+        }
+    });
+    ipcMain.handle('vpc:pan-qr-cancel', async () => {
+        PanQrWindow.closeLoginWindow();
+        return { ok: true };
+    });
+
     // 关于页系统信息：应用版本 + 运行环境版本
     ipcMain.handle('vpc:app-info', () => ({
         version: app.getVersion(),
@@ -399,6 +421,10 @@ app.whenReady().then(() => {
     }));
     // 内置 MiSans 字体 CSS 的 file:// URL（渲染层注入 <link>；打包内置，无运行时下载，T61）
     ipcMain.handle('vpc:font-css', () => misans.fontCssUrls());
+    // 窗口控制（无边框模式下渲染层调用）
+    ipcMain.handle('vpc:win-minimize', () => { if (win) win.minimize(); return { ok: true }; });
+    ipcMain.handle('vpc:win-maximize', () => { if (!win) return { ok: false }; if (win.isMaximized()) win.unmaximize(); else win.maximize(); return { ok: true, maximized: win.isMaximized() }; });
+    ipcMain.handle('vpc:win-close', () => { if (win) win.close(); return { ok: true }; });
     // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
     ipcMain.handle('vpc:asset-status', () => {
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
@@ -419,11 +445,20 @@ app.whenReady().then(() => {
         const anime4kFiles = [...new Set(Object.values(ANIME4K_CHAINS).flat())];
         const anime4kOk = anime4kFiles.every((f) => anime4kFileOk(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
         const mpvPath = mpv.binary || '';
+        // Java 运行时探测（jar spider 源需要）：复用后端 java_probe 逻辑会在主进程查询后端
+        const hasJava = (() => {
+            try {
+                const execSync = require('child_process').execSync;
+                const out = execSync('java -version 2>&1', { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+                return /version\s+"[^"]+"/.test(String(out || ''));
+            } catch (e) { return false; }
+        })();
         return {
             ffmpeg: { ready: !!ffmpegPath, downloading: require('./ffmpeg').isEnsuring() },
             mpv: { ready: mpvAvail, path: mpvPath },
             aria2: { ready: !!aria2Path },
             anime4k: { ready: anime4kOk },
+            java: { ready: hasJava },
         };
     });
 
@@ -606,10 +641,34 @@ app.whenReady().then(() => {
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    // 播放入口：mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
+    // 弹幕装载（方案 A）：渲染层拉到弹弹 play 整集弹幕后一次性推给 mpv，转 ASS 并 sub-reload。
+    // 仅播放中有意义；返回装载条数。
+    ipcMain.handle('vpc:load-danmaku', (_e, comments) => {
+        try {
+            if (!mpv.playing) return { ok: false, reason: 'not-playing' };
+            const n = mpv.loadDanmakuBatch(comments);
+            return { ok: true, count: n };
+        } catch (err) { return { ok: false, reason: err.message }; }
+    });
+
+    // 播放入口：以下两种情况都从这里接管——
+    //  a) 已指定外部播放器为主播放器（VLC/PotPlayer/其他）：直接把解析好的首条直链交外部播放器。
+    //     （外部播放器拿不到结束事件，故选 A：只交首集、不起自动连播。）
+    //  b) 否则内置 mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
     ipcMain.handle('vpc:play', async (_e, payload) => {
+        // 外部播放器为主：直接转交，不再走内置 mpv（mpv 缺失时也能用外部播放器起播）
+        const extPrimary = primaryExternalPlayer();
+        if (extPrimary) {
+            const meta = payload.meta || {};
+            const firstUrl = (payload && payload.url) ? String(payload.url) : '';
+            if (!/^(https?|rtmp|rtsp):\/\//i.test(firstUrl)) {
+                return { ok: false, reason: 'bad url', via: 'external' };
+            }
+            const r = launchExternalPlayer(extPrimary, firstUrl, meta.header);
+            return { ...r, viaExternal: true };
+        }
         if (!mpv.isAvailable()) {
-            return { ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器' };
+            return { ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器，或 设置 → 组件状态 指定外部播放器' };
         }
         const meta = payload.meta || {};
         const title = [meta.title, meta.subtitle].filter(Boolean).join(' · ');
@@ -647,7 +706,8 @@ app.whenReady().then(() => {
                     const out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + ext;
                     if (isM3u8) {
                         syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
-                        hls.add({ url: ep.url, out, header: meta.header });
+                        hls.add({ url: ep.url, out, header: meta.header,
+                            concurrency: parseInt(settings.get('dlSplitConcurrency'), 10) || 5 });
                         startDlPoll();
                         r.simulDl = true;
                     } else if (dl.isAvailable()) {
@@ -837,11 +897,13 @@ app.whenReady().then(() => {
                     req = mod.request(str, { method, timeout: timeoutMs }, (res) => {
                         clearTimeout(timer);
                         const code = res.statusCode || 0;
-                        if (method === 'GET') { res.resume(); req.destroy(); done(true); return; } // 任意响应即判活，不拉流
-                        if (code >= 300 && code < 400) { res.resume(); done(true); return; }        // 3xx 视为可用
+                        // 直播流首帧即判活：mpv/ffplay 等播放器都按「有响应即视为可用」处理。
+                        // HEAD/GET 拿到任何 2xx/3xx 都算可用；4xx（403 防盗链等）因可能有
+                        // 伪造头/时间戳要求，一律放行，避免把真实可播频道误判为死链。
+                        if (code >= 200 && code < 400) { res.resume(); done(true); return; }
                         if (code === 403 || code === 405 || code === 501) { res.resume(); done(null); return; } // HEAD 被拒 → 回退 GET
                         res.resume();
-                        done(code >= 200 && code < 500);
+                        done(code >= 400 && code < 500);
                     });
                 } catch (e) { done(null); return; } // 构造失败同样走 GET 兜底
                 timer = setTimeout(() => { req.destroy(); done(null); }, timeoutMs);
@@ -946,6 +1008,14 @@ app.whenReady().then(() => {
             if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
             return { ok: false, reason: 'need-restart', path: r.filePaths[0] }; // 需渲染层确认后再提交
         }
+        if (target === '__default__') {
+            // 恢复默认缓存位置：清除自定义路径，重启后端
+            settings.delete('cacheDir');
+            delete bridge.extraEnv.VPC_CACHE_DIR;
+            bridge.stop();
+            bridge.start();
+            return { ok: true, path: '__default__' };
+        }
         try { fs.mkdirSync(target, { recursive: true }); } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
         settings.set('cacheDir', target);
         bridge.extraEnv.VPC_CACHE_DIR = target;
@@ -1007,9 +1077,69 @@ app.whenReady().then(() => {
         return { ok: true, cleanedBytes };
     });
 
+    // 统一清理主进程侧本地缓存（配合后端 clearCache 一并调用，见渲染层 clearCache）：
+    // mpv 硬盘缓存 + 本地预览图 + 续播记录 + 解析/验证窗口 partition 会话缓存。
+    // 逐目录 try/catch，占用文件跳过；返回释放字节数与各项明细。
+    ipcMain.handle('vpc:clear-app-caches', async () => {
+        const dirSize = (d) => {
+            let total = 0;
+            const walk = (x) => {
+                let ents; try { ents = fs.readdirSync(x, { withFileTypes: true }); } catch (e) { return; }
+                for (const ent of ents) {
+                    const p = path.join(x, ent.name);
+                    try {
+                        if (ent.isDirectory()) walk(p);
+                        else total += fs.statSync(p).size;
+                    } catch (e) { /* ignore */ }
+                }
+            };
+            if (d && fs.existsSync(d)) walk(d);
+            return total;
+        };
+        const rmContents = (d) => {
+            let freed = 0;
+            if (!d || !fs.existsSync(d)) return 0;
+            let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return 0; }
+            for (const ent of ents) {
+                const p = path.join(d, ent.name);
+                try {
+                    const sz = ent.isDirectory() ? dirSize(p) : (fs.statSync(p).size);
+                    fs.rmSync(p, { recursive: true, force: true });
+                    freed += sz;
+                } catch (e) { /* 占用跳过 */ }
+            }
+            return freed;
+        };
+        const ud = app.getPath('userData');
+        let total = 0;
+        const detail = {};
+        // mpv 硬盘缓存（只删缓存模式文件，复用 clearDiskCache）
+        try { const b = clearDiskCache(settings.get('playerCacheDir') || settings.defaultCacheDir()); detail.mpvCache = b; total += b; } catch (e) { /* ignore */ }
+        // 本地视频预览图缓存
+        try { const b = rmContents(path.join(ud, 'local-thumbs')); detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
+        // 解析/验证隐藏窗口的 partition 会话缓存（Chromium 存 userData/Partitions/parse-*）
+        try {
+            const partRoot = path.join(ud, 'Partitions');
+            let freed = 0;
+            if (fs.existsSync(partRoot)) {
+                for (const name of fs.readdirSync(partRoot)) {
+                    if (/^parse-/i.test(name)) freed += rmContents(path.join(partRoot, name));
+                }
+            }
+            // 清各 parse-* session 的 HTTP 缓存（会话仍在用时软清理，失败忽略）
+            try {
+                for (let i = 0; i < 3; i++) {
+                    await session.fromPartition(`parse-${i}`).clearCache().catch(() => {});
+                }
+            } catch (e) { /* ignore */ }
+            detail.parsePartitions = freed; total += freed;
+        } catch (e) { /* ignore */ }
+        return { ok: true, cleanedBytes: total, detail };
+    });
+
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
         // app.exit(0) 不触发 before-quit，须先停 mpv 避免残留后台进程
         if (mpv.playing) mpv.stop();
         app.relaunch();
@@ -1017,20 +1147,36 @@ app.whenReady().then(() => {
         app.exit(0);
         return { ok: true };
     });
-    // 代理设置（2.9）：写入环境变量（后端 requests 继承）+ Electron session 代理（渲染层图片/请求），并重启后端使生效
+    // 代理设置（2.9）：校验 → 写入环境变量（后端 requests 继承）+ Electron session 代理（渲染层图片/请求），并重启后端使生效
     ipcMain.handle('vpc:set-proxy', async (_e, opts) => {
-        const url = String((opts && opts.url) || '').trim();
+        const raw = String((opts && opts.url) || '').trim();
         const enable = !!(opts && opts.enable);
-        settings.set('proxyUrl', url);
+        // 参数校验（仿 Kazumi：启用前必须通过格式校验，非法地址直接拒绝，不落盘）
+        const normalized = formatAndValidateProxyUrl(raw);
+        if (enable && !normalized) {
+            return { ok: false, reason: raw ? '无效的代理地址（示例：127.0.0.1:7890 或 http://127.0.0.1:7890）' : '请填写代理地址' };
+        }
+        const url = enable ? normalized : '';
+        settings.set('proxyUrl', raw);
         settings.set('proxyEnable', enable);
+        invalidateCache();
         try {
             if (enable && url) {
                 process.env.HTTP_PROXY = url;
                 process.env.HTTPS_PROXY = url;
-                await session.defaultSession.setProxy({ proxyRules: url });
+                if (url.startsWith('socks')) {
+                    // Electron session 不支持 socks 直设，显式走系统代理（渲染层直连）；socks 代理作用于后端/下载任务
+                    await session.defaultSession.setProxy({ mode: 'system' });
+                } else {
+                    await session.defaultSession.setProxy({ proxyRules: url });
+                }
             } else {
                 delete process.env.HTTP_PROXY;
                 delete process.env.HTTPS_PROXY;
+                // 关闭代理开关：显式注入 NO_PROXY，让 Python 后端 requests（trust_env）强制直连，
+                // 不再被系统代理（如 Clash 的环回系统代理）接管 —— 否则开关即使关闭，搜索/解析仍可能走代理。
+                process.env.NO_PROXY = '*';
+                process.env.no_proxy = '*';
                 // 显式还原系统代理（T73）：proxyRules:'' 在部分 Electron 版本下不还原，渲染层网络仍走旧代理
                 await session.defaultSession.setProxy({ mode: 'system' });
             }
@@ -1039,21 +1185,235 @@ app.whenReady().then(() => {
         try { bridge.stop(); bridge.start(); } catch (e) { /* 重启失败下次自愈 */ }
         return { ok: true };
     });
+    // 代理连通性测试:走给定代理访问测试 URL（不改变持久化设置）。
+    // 原生实现（不依赖第三方 proxy-agent 包）：
+    //   - http 目标：绝对形式请求行（完整 URL）经代理转发，收到响应即视为链路可用。
+    //   - https 目标：先 CONNECT 建隧道（RFC 7231 §4.3.6），再在隧道内做 TLS 握手 + GET。
+    //     旧实现用 https.request 且请求行带完整 URL → 实际把 TLS ClientHello 发给代理，
+    //     普通 http 代理会直接断开（EPROTO/ECONNRESET），导致 https 测试地址恒失败。
+    //   - socks5 代理：RFC1928 握手（无认证）+ CONNECT 隧道，建通即视为连通。
+    ipcMain.handle('vpc:test-proxy', async (_e, opts) => {
+        const raw = String((opts && opts.proxyUrl) || '').trim();
+        const testUrl = String((opts && opts.url) || '').trim() || 'https://www.google.com/generate_204';
+        if (!raw) return { ok: false, reason: '请填写代理地址' };
+        let parsed;
+        try { parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`); }
+        catch (e) { return { ok: false, reason: '无效的代理地址' }; }
+        const isSocks = /^socks5?$/i.test(parsed.protocol.replace(':', '')) || /^socks5?:\/\//i.test(raw);
+        const host = parsed.hostname;
+        const port = parseInt(parsed.port, 10);
+        if (!host || !port || !Number.isInteger(port) || port < 1 || port > 65535) {
+            return { ok: false, reason: '无效的代理地址（需要 host:port）' };
+        }
+        let target;
+        try { target = new URL(testUrl); } catch (e) { return { ok: false, reason: '无效的测试 URL' }; }
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+            return { ok: false, reason: '仅支持 http/https 测试地址' };
+        }
+        const tHost = target.hostname, tPort = parseInt(target.port, 10) || (target.protocol === 'https:' ? 443 : 80);
+        const startedAt = Date.now();
+        const timeoutMs = 15000;
+        // 友好提示上下文：代理身份 + 测试目标，随结果返回给渲染层展示
+        const proxyLabel = `${isSocks ? 'SOCKS5' : 'HTTP'}代理 ${host}:${port}`;
+        const finish = (ok, reason, extra) => ({
+            ok, reason: reason || undefined, elapsedMs: Date.now() - startedAt,
+            proxy: proxyLabel, testHost: tHost, ...(extra || {}),
+        });
+
+        if (isSocks) {
+            // ---- SOCKS5：握手 + CONNECT 隧道（RFC1928） ----
+            return await new Promise((resolve) => {
+                let sock;
+                const timer = setTimeout(() => { try { sock && sock.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, '超时（15s）')); }, timeoutMs);
+                const fail = (reason) => { clearTimeout(timer); try { sock && sock.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, reason)); };
+                try {
+                    const netMod = require('net');
+                    sock = netMod.connect({ host, port });
+                    sock.setNoDelay(true);
+                    let buf = '';
+                    sock.on('data', (chunk) => {
+                        buf += chunk.toString('latin1');
+                        // 阶段 1：版本选择响应 [VER=5, METHOD]
+                        if (buf.length === 2 && buf[0] === '\u0005') {
+                            if (buf[1] !== '\u0000') { fail('SOCKS5 服务器要求认证（仅支持无认证）'); return; }
+                            buf = '';
+                            const ipv4 = netMod.isIP(tHost) === 4, ipv6 = netMod.isIP(tHost) === 6;
+                            const atyp = ipv6 ? 4 : (ipv4 ? 1 : 3);
+                            let addr;
+                            if (ipv4) addr = Buffer.from(tHost.split('.').map(Number));
+                            else if (ipv6) {
+                                // 展开 IPv6 到 16 字节（支持 :: 缩写）
+                                let p = tHost;
+                                const dc = p.indexOf('::');
+                                if (dc >= 0) {
+                                    const l = dc > 0 ? p.slice(0, dc).split(':') : [];
+                                    const r = dc < p.length - 2 ? p.slice(dc + 2).split(':') : [];
+                                    const mid = Array(8 - l.length - r.length).fill('0');
+                                    p = l.concat(mid, r).join(':');
+                                }
+                                addr = Buffer.from(p.split(':').map((s) => parseInt(s || '0', 16)).flatMap((n) => [(n >> 8) & 0xff, n & 0xff]));
+                            } else {
+                                addr = Buffer.from(tHost, 'utf8');
+                            }
+                            const portBuf = Buffer.from([(tPort >> 8) & 0xff, tPort & 0xff]);
+                            const req = Buffer.concat([Buffer.from([0x05, 0x01, 0x00, atyp]), addr, portBuf]);
+                            sock.write(req);
+                            buf = '';
+                            return;
+                        }
+                        // 阶段 2：CONNECT 响应 [VER, REP, RSV, ATYP...]
+                        if (buf.length >= 4 && buf[0] === '\u0005') {
+                            if (buf[1] !== 0) { fail('SOCKS5 连接被拒绝（REP=' + buf[1] + '）'); return; }
+                            clearTimeout(timer);
+                            try { sock.destroy(); } catch (e) { /* ignore */ }
+                            resolve(finish(true, undefined, { statusCode: 0, viaSocks: true }));
+                            return;
+                        }
+                        // 阶段 1 响应异常（非 0x05 开头）
+                        fail('SOCKS5 响应异常');
+                    });
+                    sock.on('error', (err) => fail(err && err.code ? err.code : (err && err.message) || '连接失败'));
+                    sock.on('close', () => { if (buf.length < 4) fail('连接被关闭'); });
+                    sock.write(Buffer.from([0x05, 0x01, 0x00]));
+                } catch (e) { fail('连接失败：' + ((e && e.message) || e)); }
+            });
+        }
+
+        if (target.protocol === 'https:') {
+            // ---- HTTPS 目标：先 CONNECT 隧道，再在隧道内 TLS 握手 + GET ----
+            return await new Promise((resolve) => {
+                let sock;
+                let timer = setTimeout(() => { try { sock && sock.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, '超时（15s）')); }, timeoutMs);
+                const fail = (reason) => { clearTimeout(timer); try { sock && sock.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, reason)); };
+                try {
+                    const netMod = require('net');
+                    sock = netMod.connect({ host, port });
+                    sock.setNoDelay(true);
+                    let buf = '';
+                    sock.on('data', (chunk) => {
+                        buf += chunk.toString('latin1');
+                        if (!buf.includes('\r\n\r\n')) return;
+                        const statusLine = buf.split('\r\n')[0];
+                        const code = parseInt((statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/) || [])[1], 10);
+                        if (!code) { fail('CONNECT 响应异常'); return; }
+                        if (code < 200 || code >= 300) { fail(`CONNECT 被代理拒绝（HTTP ${code}）`); return; }
+                        // 隧道建立成功：剥掉代理响应头，余下字节属于 TLS 握手，转交 tls 模块；
+                        // 重装超时以覆盖 TLS 握手与 GET 阶段
+                        clearTimeout(timer);
+                        timer = setTimeout(() => { try { sock.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, '超时（15s）')); }, timeoutMs);
+                        sock.removeAllListeners('data');
+                        const tlsMod = require('tls');
+                        const tlsSock = tlsMod.connect({ socket: sock, servername: tHost, ALPNProtocols: ['http/1.1'] }, () => {
+                            const httpMod = require('https');
+                            const req = httpMod.request({
+                                createConnection: () => tlsSock,
+                                method: 'GET',
+                                path: target.pathname + target.search,
+                                headers: {
+                                    Host: target.host,
+                                    'User-Agent': 'YuKi/1.0 proxy-test',
+                                    Accept: '*/*',
+                                },
+                            }, (res) => {
+                                clearTimeout(timer);
+                                res.resume();
+                                resolve(finish(true, undefined, { statusCode: res.statusCode || 0, viaTunnel: true }));
+                            });
+                            req.on('error', (err) => fail(err && err.code ? err.code : (err && err.message) || '隧道内请求失败'));
+                            req.end();
+                        });
+                        tlsSock.on('error', (err) => fail(err && err.code ? err.code : (err && err.message) || 'TLS 握手失败'));
+                    });
+                    sock.on('error', (err) => fail(err && err.code ? err.code : (err && err.message) || '连接失败'));
+                    sock.on('close', () => { if (buf.length < 4) fail('连接被关闭'); });
+                    sock.write(`CONNECT ${tHost}:${tPort} HTTP/1.1\r\nHost: ${tHost}:${tPort}\r\n\r\n`);
+                } catch (e) { fail('连接失败：' + ((e && e.message) || e)); }
+            });
+        }
+
+        // ---- HTTP 目标：绝对形式请求行（完整 URL）经代理转发 ----
+        return await new Promise((resolve) => {
+            let req;
+            let mod;
+            try { mod = require('http'); } catch (e) { resolve(finish(false, '模块加载失败')); return; }
+            const reqOpts = {
+                host, port, method: 'GET',
+                path: testUrl, // 代理模式：完整 URL 放进请求行
+                headers: {
+                    Host: target.host,
+                    'User-Agent': 'YuKi/1.0 proxy-test',
+                    Accept: '*/*',
+                },
+            };
+            const timer = setTimeout(() => { try { req && req.destroy(); } catch (e) { /* ignore */ } resolve(finish(false, '超时（15s）')); }, timeoutMs);
+            try {
+                req = mod.request(reqOpts, (res) => {
+                    clearTimeout(timer);
+                    res.resume();
+                    resolve(finish(true, undefined, { statusCode: res.statusCode || 0 }));
+                });
+            } catch (e) { clearTimeout(timer); resolve(finish(false, '请求构造失败')); return; }
+            req.on('error', (err) => { clearTimeout(timer); resolve(finish(false, err && err.code ? err.code : (err && err.message) || '连接失败')); });
+            req.end();
+        });
+    });
+    // 弹幕凭据：保存弹弹 play AppId/AppSecret，注入后端环境并重启后端生效
+    ipcMain.handle('vpc:set-dandan', async (_e, opts) => {
+        const appid = String((opts && opts.appid) || '').trim();
+        const secret = String((opts && opts.secret) || '').trim();
+        settings.set('dandanAppId', appid);
+        settings.set('dandanAppSecret', secret);
+        if (appid) bridge.extraEnv.DANDANAPI_APPID = appid; else delete bridge.extraEnv.DANDANAPI_APPID;
+        if (secret) bridge.extraEnv.DANDANAPI_KEY = secret; else delete bridge.extraEnv.DANDANAPI_KEY;
+        try { bridge.stop(); bridge.start(); } catch (e) { /* 重启失败下次自愈 */ }
+        return { ok: true };
+    });
     /** 合并 aria2 实时任务 + HLS 任务 + 持久化记录（T46）：
      *  持久化记录仅补「本会话不存在的 gid」（应用重启后 aria2c 丢失 stopped 记录，
-     *  更换下载目录重启引擎同理），避免与实时任务重复。 */
+     *  更换下载目录重启引擎同理），避免与实时任务重复。
+     *  T81：同时恢复进行中（active/waiting/paused）任务，保留原始状态与进度。 */
     function buildDlList(items, hlsItems) {
         const live = [...items, ...hlsItems];
         const liveGids = new Set(live.map((t) => t.gid));
         const restored = dlRecords.all()
             .filter((r) => !liveGids.has(r.gid))
-            .map((r) => ({
-                gid: r.gid, status: r.status === 'error' ? 'error' : 'complete',
-                kind: r.kind, name: r.name, files: r.files || [],
-                total: r.size || 0, done: r.size || 0, percent: 100, speed: 0,
-                connections: '', errorMessage: r.status === 'error' ? (r.errorMessage || '') : '',
-            }));
+            .map((r) => {
+                // 恢复进行中（active/waiting/paused）任务：显示为暂停状态，用户点击继续重新入队
+                if (['active', 'waiting', 'paused'].includes(r.status)) {
+                    return {
+                        gid: r.gid, status: 'paused', kind: r.kind, name: r.name,
+                        files: r.files || [], total: r.size || 0, done: r.done || 0,
+                        percent: r.percent || 0, speed: 0, connections: '',
+                        errorMessage: '', uri: r.uri || '',
+                    };
+                }
+                // 已完成/失败任务：与原逻辑一致
+                return {
+                    gid: r.gid, status: r.status === 'error' ? 'error' : 'complete',
+                    kind: r.kind, name: r.name, files: r.files || [],
+                    total: r.size || 0, done: r.size || 0, percent: 100, speed: 0,
+                    connections: '', errorMessage: r.status === 'error' ? (r.errorMessage || '') : '',
+                };
+            });
         return [...live, ...restored];
+    }
+
+    /** 持久化进行中任务（T81）：重启后恢复未完成的下载卡片。
+     *  同 gid 状态/进度未变时跳过，减少磁盘写入。 */
+    function persistInProgress(items, hlsItems) {
+        const all = [...items, ...hlsItems];
+        const now = Date.now();
+        for (const t of all) {
+            if (!['active', 'waiting', 'paused'].includes(t.status)) continue;
+            const existing = dlRecords.all().find((r) => r.gid === t.gid);
+            if (existing && existing.status === t.status && existing.percent === t.percent && existing.done === t.done) continue;
+            dlRecords.add({
+                gid: t.gid, kind: t.kind || 'aria2', name: t.name,
+                files: t.files || [], size: t.total || 0, done: t.done || 0,
+                percent: t.percent || 0, status: t.status, uri: t.uri || '',
+                completedAt: now,
+            });
+        }
     }
 
     function startDlPoll() {
@@ -1064,6 +1424,7 @@ app.whenReady().then(() => {
                 let items = [];
                 try { items = await dl.listAll(); } catch (e) { /* aria2 未就绪 */ }
                 send('vpc:dl-list', buildDlList(items, hls.list()));
+                persistInProgress(items, hls.list());
             } catch (e) { /* ignore */ }
         })();
         dlTimer = setInterval(async () => {
@@ -1073,6 +1434,8 @@ app.whenReady().then(() => {
                 try { items = await dl.listAll(); } catch (e) { /* 下一轮会重新拉起 aria2c */ }
                 const hlsItems = hls.list();
                 send('vpc:dl-list', buildDlList(items, hlsItems));
+                // 持久化进行中任务（T81）：每轮尝试，但仅状态变化时才写盘，重启后恢复
+                persistInProgress(items, hlsItems);
                 // 空闲自停（T10 泄漏/功耗审计）：无进行中任务时停掉 1s 轮询，下次 add 时重新拉起
                 const busy = items.some((t) => ['active', 'waiting', 'paused'].includes(t.status))
                     || hlsItems.some((t) => t.status === 'active');
@@ -1137,7 +1500,7 @@ app.whenReady().then(() => {
                     return { ok: true, gid };
                 }
                 case 'addHls': {
-                    // m3u8 切片流：ffmpeg 拉流合成单文件（与 aria2 无关，不要求 aria2 就绪）
+                    // m3u8 切片流：分片并发模式（concurrency > 1）或 ffmpeg 顺序拉流（兜底）
                     const uri = String(payload.uri || '').trim();
                     if (!uri) throw new Error('empty uri');
                     syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
@@ -1147,6 +1510,8 @@ app.whenReady().then(() => {
                             url: uri, out: payload.out, header: payload.header,
                             // 广告过滤开关（设置项 hlsAdFilter，默认关；开启时过滤 CUE-OUT/CUE-IN 广告分段）
                             adFilter: payload.adFilter !== undefined ? !!payload.adFilter : settings.get('hlsAdFilter'),
+                            // 分片并发数（设置项 dlSplitConcurrency，默认 5；>1 时走分片并发模式）
+                            concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
                         });
                     } catch (e) {
                         // ffmpeg 首次启动正后台自动下载（约 90MB）：区别于「未安装」，渲染层提示稍后重试
@@ -1183,19 +1548,109 @@ app.whenReady().then(() => {
                     const n = Math.max(1, Math.min(32, parseInt(payload.n, 10) || 5));
                     settings.set('dlSplitConcurrency', n);
                     if (dl.isAvailable()) await dl.setSplit(n);
+                    hls.setConcurrency(n); // 即时更新 HLS 分片并发数（后续新增任务生效）
                     return { ok: true, n };
                 }
                 case 'pause':
                     if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'm3u8 合成任务不支持暂停，可直接删除' };
                     await dl.pause(payload.gid); return { ok: true };
                 case 'unpause':
-                    if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'not-supported' };
-                    await dl.unpause(payload.gid); return { ok: true };
-                case 'remove':
-                    // 同步删除持久化记录（T46），防止重启后「删除的任务又复活」
+                    if (String(payload.gid).startsWith('hls-')) {
+                        // HLS 任务：尝试从持久化记录恢复原始 URL
+                        const rec = dlRecords.all().find((r) => r.gid === payload.gid);
+                        if (rec && rec.uri) {
+                            syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                            try {
+                                const gid = hls.add({
+                                    url: rec.uri, out: rec.name,
+                                    adFilter: settings.get('hlsAdFilter'),
+                                    concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
+                                });
+                                dlRecords.remove(payload.gid);
+                                startDlPoll();
+                                try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                                return { ok: true, gid, resumed: true };
+                            } catch (e) {
+                                if (e && e.message === 'ffmpeg-missing' && ffmpegEnsuring()) return { ok: false, reason: 'ffmpeg-downloading' };
+                                throw e;
+                            }
+                        }
+                        return { ok: false, reason: 'not-supported' };
+                    }
+                    try {
+                        await dl.unpause(payload.gid);
+                        return { ok: true };
+                    } catch (e) {
+                        // 任务可能不在 aria2 中（重启后丢失），尝试从持久化记录恢复
+                        const rec = dlRecords.all().find((r) => r.gid === payload.gid);
+                        if (rec && rec.uri && rec.kind !== 'hls') {
+                            // 磁链不用 out 参数（会干扰多文件 BT 种子），普通 HTTP/HTTPS 带文件名恢复
+                            const isMagnet = /^magnet:/i.test(rec.uri);
+                            const opts = {};
+                            if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
+                            const gid = await dl.addUri(rec.uri, opts);
+                            dlRecords.remove(payload.gid); // 移除旧 gid 记录，新任务会重新持久化
+                            startDlPoll();
+                            // 立即推送新列表，避免旧卡消失后新卡延迟 1s 才出现
+                            try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                            return { ok: true, gid, resumed: true };
+                        }
+                        return { ok: false, reason: 'task not found and cannot resume' };
+                    }
+                case 'remove': {
+                    // 收集文件路径（在移除任务/记录之前取，避免取不到）
+                    const delFiles = new Set();
+                    if (String(payload.gid).startsWith('hls-')) {
+                        const t = hls._tasks.get(payload.gid);
+                        if (t && t.files) t.files.forEach((f) => delFiles.add(f));
+                    } else {
+                        // aria2 任务：从 tellStatus 取文件路径
+                        if (dl.isAvailable()) {
+                            try {
+                                const st = await dl.tellStatus(payload.gid);
+                                if (st && st.files) for (const f of st.files) {
+                                    if (f && f.path && f.path !== '.') {
+                                        delFiles.add(f.path);
+                                        // 同时收集 .aria2 控制文件和临时文件（进行中的任务路径可能为空）
+                                        delFiles.add(f.path + '.aria2');
+                                    }
+                                }
+                                // 进行中的任务 tellStatus 可能不返回完整路径：
+                                // 尝试从 aria2 dir + 文件名构造路径
+                                if (st && st.files && st.files.length && st.dir) {
+                                    for (const f of st.files) {
+                                        if ((!f.path || f.path === '.') && f.uris && f.uris.length) {
+                                            // 从 URL 推断文件名
+                                            try {
+                                                const u = new URL(f.uris[0].uri);
+                                                const name = u.pathname.split('/').pop() || '';
+                                                if (name) {
+                                                    const full = path.join(st.dir, name);
+                                                    delFiles.add(full);
+                                                    delFiles.add(full + '.aria2');
+                                                }
+                                            } catch (e) { /* URL 解析失败忽略 */ }
+                                        }
+                                    }
+                                }
+                            } catch (e) { /* 任务可能已不在 aria2 */ }
+                        }
+                    }
+                    // 兜底：从持久化记录取文件路径
+                    const rec = dlRecords.all().find((r) => r.gid === payload.gid);
+                    if (rec && rec.files) rec.files.forEach((f) => { if (f && f !== '.') delFiles.add(f); });
+                    // 先移除任务（停止写入），再删除文件
                     dlRecords.remove(payload.gid);
-                    if (String(payload.gid).startsWith('hls-')) { hls.remove(payload.gid); return { ok: true }; }
-                    await dl.remove(payload.gid); return { ok: true };
+                    if (String(payload.gid).startsWith('hls-')) { hls.remove(payload.gid); }
+                    else { await dl.remove(payload.gid); }
+                    for (const f of delFiles) {
+                        try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ }
+                    }
+                    // 删除后立即推送刷新列表 + 重启轮询（可能有剩余活跃任务）
+                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    startDlPoll();
+                    return { ok: true };
+                }
                 case 'clearFailed': {
                     // 删失败任务及其未完成产物（aria2 --continue 会残留部分下载的文件）
                     let n = 0;
@@ -1203,26 +1658,44 @@ app.whenReady().then(() => {
                         const stopped = await dl.tellStopped();
                         for (const s of stopped) {
                             if (s.status !== 'error') continue;
-                            const f = s.files && s.files[0] && s.files[0].path;
-                            if (f) { try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ } }
+                            // 删除全部产出文件（非仅第一个）
+                            if (s.files) for (const f of s.files) {
+                                if (f && f.path && f.path !== '.') { try { fs.rmSync(f.path, { force: true }); } catch (e) { /* ignore */ } }
+                            }
                             try { await dl.purge(s.gid); n++; } catch (e) { /* ignore */ }
+                        }
+                    }
+                    // 删除持久化记录中失败任务的文件（重启后从 dlRecords 恢复的错误任务）
+                    for (const r of dlRecords.all()) {
+                        if (r.status === 'error' && r.files) for (const f of r.files) {
+                            if (f && f !== '.') { try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ } }
                         }
                     }
                     n += hls.clearFailed();
                     dlRecords.clearErrors(); // 同步清掉失败记录
+                    // 删除后立即推送刷新列表 + 重启轮询
+                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    startDlPoll();
                     return { ok: true, n };
                 }
                 case 'clear': {
+                    // 清除已完成：仅从列表/记录中移除任务条目，保留磁盘上已下载的文件。
+                    // （失败任务的残留清理仍走 clearFailed；此处只清完成/移除项的列表信息）
                     if (dl.isAvailable() && dl.proc) {
                         const stopped = await dl.tellStopped();
                         for (const s of stopped) {
                             if (['complete', 'error', 'removed'].includes(s.status)) {
+                                // 只从 aria2 停止列表移除记录，不删产出文件
                                 try { await dl.purge(s.gid); } catch (e) { /* ignore */ }
                             }
                         }
                     }
+                    // HLS：仅移除已停止任务的列表记录，保留合成好的成品文件（clearStopped 只清临时分片目录）
                     hls.clearStopped();
-                    dlRecords.clear(); // 同步清掉持久化记录（T46）
+                    dlRecords.clearFinished(); // 清已结束记录，保留进行中任务（T81：未完成卡片不消失）
+                    // 清除后立即推送刷新列表 + 重启轮询
+                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    startDlPoll();
                     return { ok: true };
                 }
                 default: return { ok: false, reason: `unknown action ${action}` };
@@ -1305,6 +1778,7 @@ app.whenReady().then(() => {
             sessionId: (info && typeof info.sessionId === 'number') ? info.sessionId : 0,
             fullscreen: (info && typeof info.fullscreen === 'boolean') ? info.fullscreen : null,
             speed: (info && typeof info.speed === 'number') ? info.speed : null,
+            wallWatched: (info && typeof info.wallWatched === 'number') ? info.wallWatched : null,
             quit: userStopped, // 用户主动关闭（stop() 或 mpv 窗口关闭）：渲染层据此不等待断流重连、不连播
         });
         // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
@@ -1414,6 +1888,19 @@ app.whenReady().then(() => {
     const cacheDir = settings.get('cacheDir');
     if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
     bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
+    // 日志级别 + 定时清空日志：启动时按持久化设置生效（可在设置页调整）
+    setLogLevel(settings.get('logLevel'));
+    (function applyScheduledLogCleanup() {
+        const enabled = settings.get('logAutoCleanup') === true;
+        const days = parseInt(settings.get('logCleanupDays'), 10) || 0;
+        // 每 N 天清空一次：N<=0 或开关关闭则不启动
+        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled);
+    })();
+    // 弹幕（弹弹 play）凭据：设置里保存的 AppId/AppSecret 注入后端环境，供 danmaku_* 签名使用
+    const ddAppId = settings.get('dandanAppId');
+    const ddSecret = settings.get('dandanAppSecret');
+    if (ddAppId) bridge.extraEnv.DANDANAPI_APPID = String(ddAppId);
+    if (ddSecret) bridge.extraEnv.DANDANAPI_KEY = String(ddSecret);
     // 续播位置（mpv watch-later）与默认倍速：读设置注入播放器（可在设置页关闭/调整）
     if (settings.get('resumePos') !== false) {
         mpv.watchLaterDir = path.join(app.getPath('userData'), 'mpv-watch-later');
@@ -1429,10 +1916,23 @@ app.whenReady().then(() => {
     // 视频缓冲缓存（内存/硬盘）：读设置注入播放器（起播时按模式追加 --cache-on-disk 参数）
     applyPlayerCache();
     // 代理（2.9）：启动时按设置写入环境变量，供 Python 后端 requests 继承（重启后端即生效）
+    // 手动代理优先（校验通过才注入）；同时把 settings 源注册给 system-proxy，让下载器/预览等
+    // 在 getProxyUrl() 时能读到手动代理（此前只读系统代理，导致手动代理对 aria2 不生效）
+    setManualProxySource(() => settings);
+    invalidateCache();
     const proxyUrl = settings.get('proxyUrl') || '';
-    if (settings.get('proxyEnable') && proxyUrl) {
-        process.env.HTTP_PROXY = proxyUrl;
-        process.env.HTTPS_PROXY = proxyUrl;
+    if (settings.get('proxyEnable')) {
+        const normalized = formatAndValidateProxyUrl(proxyUrl);
+        if (normalized) {
+            process.env.HTTP_PROXY = normalized;
+            process.env.HTTPS_PROXY = normalized;
+            delete process.env.NO_PROXY;
+            delete process.env.no_proxy;
+        }
+    } else {
+        // 开关关闭：注入 NO_PROXY 使后端 requests 强制直连（不被系统代理接管），与 vpc:set-proxy 关闭分支一致
+        process.env.NO_PROXY = '*';
+        process.env.no_proxy = '*';
     }
     // ffmpeg 内置：启动后台自动补齐（m3u8 下载合成与本地预览图依赖；缺失时静默降级）
     ensureFfmpeg().catch(() => { });
@@ -1487,58 +1987,154 @@ app.whenReady().then(() => {
     });
 
     // ---- 外部播放器 ----
-    ipcMain.handle('vpc:external-player', async (_e, url, opts) => {
-        const header = (opts && opts.header) || {};
-        const title = (opts && opts.title) || '外部播放';
-        // 生成临时 m3u8/mp4 播放列表或直接传 URL
-        // Windows: 用系统默认程序打开；带 Referer 时无法用系统播放器，需用户指定 VLC 路径
-        let extPlayer = settings.get('externalPlayerPath') || '';
-        // 自动探测 PATH 中的 VLC
-        if (!extPlayer) {
-            try {
-                const { execSync } = require('child_process');
-                if (process.platform === 'win32') {
-                    const out = execSync('where vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-                    extPlayer = out.split(/\r?\n/)[0] || '';
-                } else {
-                    const out = execSync('which vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-                    extPlayer = out || '';
-                }
-            } catch (e) { /* PATH 中无 VLC */ }
+
+    /** 按可执行文件名识别播放器类型（决定命令行传参格式：header/标题各家语法不同）。 */
+    function externalPlayerKind(execPath) {
+        const base = String(execPath || '').toLowerCase().replace(/\\/g, '/').split('/').pop();
+        if (/vlc/.test(base)) return 'vlc';
+        if (/potplayer/.test(base)) return 'potplayer';
+        if (/\bmpv/.test(base)) return 'mpv';
+        return 'other';
+    }
+
+    /** 按播放器类型拼 spawn 参数（各家 HTTP header 传参语法不同）。返回 { args, headerSupported }。
+     *  - VLC：--http-header-fields=Referer: x,User-Agent: y（逗号分隔）
+     *  - mpv：--http-header-fields=Referer: x, User-Agent: y（逗号+空格，与内置 mpv-player.js 一致）
+     *  - PotPlayer：/referer="x" /user_agent="y"（斜杠开关，各参数独立，需带引号）
+     *  - 其他：无通用 header 传参，仅 URL（带鉴权直链可能 403） */
+    function buildExternalPlayerArgs(kind, url, header) {
+        const referer = header && (header.Referer || header.referer);
+        const ua = header && (header['User-Agent'] || header.ua);
+        if (kind === 'vlc') {
+            const args = [url];
+            const pairs = [];
+            if (referer) pairs.push(`Referer: ${referer}`);
+            if (ua) pairs.push(`User-Agent: ${ua}`);
+            if (pairs.length) args.push(`--http-header-fields=${pairs.join(',')}`);
+            args.push('--no-video-title-show');
+            return { args, headerSupported: true };
         }
+        if (kind === 'mpv') {
+            const args = [url];
+            const pairs = [];
+            if (referer) pairs.push(`Referer: ${referer}`);
+            if (ua) pairs.push(`User-Agent: ${ua}`);
+            if (pairs.length) args.push(`--http-header-fields=${pairs.join(', ')}`);
+            return { args, headerSupported: true };
+        }
+        if (kind === 'potplayer') {
+            // PotPlayer 官方命令行开关：/referer="..." /user_agent="..."（http(s) 打开时生效）。
+            // 值必须带双引号，因为 Referer/UA 含 :// ? & 空格等特殊字符，不带引号会被解析器截断。
+            const args = [url];
+            if (referer) args.push(`/referer="${referer}"`);
+            if (ua) args.push(`/user_agent="${ua}"`);
+            return { args, headerSupported: true };
+        }
+        // 其他播放器：命令行无通用 header 传参，仅传 URL
+        return { args: [url], headerSupported: false };
+    }
+
+    /** 已指定的外部播放器路径（未指定则尝试自动探测 PATH 中的 VLC）。返回 '' 表示无可用外部播放器。 */
+    function resolveExternalPlayerPath() {
+        let extPlayer = settings.get('externalPlayerPath') || '';
+        if (extPlayer) return extPlayer;
+        try {
+            const { execSync } = require('child_process');
+            if (process.platform === 'win32') {
+                const out = execSync('where vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                extPlayer = out.split(/\r?\n/)[0] || '';
+            } else {
+                const out = execSync('which vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                extPlayer = out || '';
+            }
+        } catch (e) { /* PATH 中无 VLC */ }
+        return extPlayer;
+    }
+
+    /** 用指定外部播放器起播：拼对应 header 参数后 spawn。返回 { ok, via, kind, headerDropped } 或 { ok:false, reason }。 */
+    function launchExternalPlayer(execPath, url, header) {
+        const kind = externalPlayerKind(execPath);
+        const hasHeader = !!(header && (header.Referer || header.referer || header['User-Agent'] || header.ua));
+        const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {});
+        try {
+            const { spawn } = require('child_process');
+            spawn(execPath, args, { detached: true, stdio: 'ignore' }).unref();
+            return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported };
+        } catch (e) { return { ok: false, reason: e.message }; }
+    }
+
+    /** 当前是否以外部播放器为主播放器（已指定且不是 mpv —— mpv 走内置引擎，功能更全）。
+     *  返回外部播放器路径，或 '' 表示走内置 mpv。 */
+    function primaryExternalPlayer() {
+        const p = settings.get('externalPlayerPath') || '';
+        if (!p) return '';
+        return externalPlayerKind(p) === 'mpv' ? '' : p;
+    }
+
+    ipcMain.handle('vpc:external-player', async (_e, url, opts) => {
+        const u = String(url || '').trim();
+        if (!/^(https?|rtmp|rtsp):\/\//i.test(u)) return { ok: false, reason: 'bad url' };
+        const header = (opts && opts.header) || {};
+        const hasHeader = !!(header.Referer || header.referer || header['User-Agent'] || header.ua);
+        const extPlayer = resolveExternalPlayerPath();
         if (!extPlayer) {
-            // 用系统默认程序打开（不带 Referer）
+            // 未指定外部播放器：带鉴权头的直链交系统默认程序会丢 header 大概率 403，明确告知
+            if (hasHeader) return { ok: false, reason: 'need-header-player' };
             try {
-                await shell.openExternal(url);
+                await shell.openExternal(u);
                 return { ok: true, via: 'system-default' };
             } catch (e) { return { ok: false, reason: 'no-external-player' }; }
         }
-        // 用 VLC 打开（支持 Referer via --http-header-fields）
-        const args = [url];
-        if (header.Referer || header['User-Agent']) {
-            const pairs = [];
-            if (header.Referer) pairs.push(`Referer: ${header.Referer}`);
-            if (header['User-Agent']) pairs.push(`User-Agent: ${header['User-Agent']}`);
-            args.push(`--http-header-fields=${pairs.join(',')}`);
-        }
-        args.push(`--no-video-title-show`);
-        try {
-            const { spawn } = require('child_process');
-            spawn(extPlayer, args, { detached: true, stdio: 'ignore' }).unref();
-            return { ok: true, via: extPlayer };
-        } catch (e) { return { ok: false, reason: e.message }; }
+        return launchExternalPlayer(extPlayer, u, header);
     });
 
-    ipcMain.handle('vpc:pick-external-player', async () => {
+    // ---- 统一播放器指定（内置 mpv vs 外部播放器合并入口）----
+
+    /** 统一「指定播放器」：选中 mpv → 作为内置引擎（全功能：弹幕/连播/统计）；
+     *  选中 VLC/PotPlayer/其他 → 作为主播放器（所有起播直接交它，无弹幕/连播/统计）。 */
+    ipcMain.handle('vpc:pick-player', async () => {
         const r = await dialog.showOpenDialog(win, {
-            title: '选择外部播放器（如 VLC/PotPlayer）',
-            filters: [{ name: '可执行文件', extensions: ['exe', 'app', ''] }],
+            title: '选择播放器（mpv 全功能；VLC/PotPlayer 等仅外部播放）',
+            filters: [
+                { name: '可执行文件', extensions: process.platform === 'win32' ? ['exe'] : ['app', ''] },
+                { name: '全部文件', extensions: ['*'] },
+            ],
             properties: ['openFile'],
         });
         if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
         const p = r.filePaths[0];
+        const kind = externalPlayerKind(p);
+        if (kind === 'mpv') {
+            // mpv：校验可用后作为内置引擎；清除外部播放器指定
+            if (!mpv.setCustomPath(p)) return { ok: false, reason: '所选文件不是有效的 mpv 可执行文件' };
+            settings.set('mpvPath', p);
+            settings.set('externalPlayerPath', '');
+            return { ok: true, path: p, kind, mode: 'internal-mpv' };
+        }
+        // 外部播放器作为主播放器：记录路径；不动 mpvPath（内置自动发现仍可作为兜底）
         settings.set('externalPlayerPath', p);
-        return { ok: true, path: p };
+        return { ok: true, path: p, kind, mode: 'external' };
+    });
+
+    /** 当前播放器配置：外部为主则 mode='external'，否则内置 mpv。 */
+    ipcMain.handle('vpc:player-config', () => {
+        const ext = settings.get('externalPlayerPath') || '';
+        if (ext && externalPlayerKind(ext) !== 'mpv') {
+            return { mode: 'external', path: ext, kind: externalPlayerKind(ext) };
+        }
+        return {
+            mode: 'internal-mpv',
+            path: settings.get('mpvPath') || '',
+            available: mpv.isAvailable(),
+        };
+    });
+
+    /** 恢复默认播放器：清除内置 mpv 自定义路径与外部播放器指定，mpv 回到自动发现。 */
+    ipcMain.handle('vpc:clear-player', () => {
+        settings.set('mpvPath', '');
+        settings.set('externalPlayerPath', '');
+        mpv.resetBinary();
+        return { ok: true, available: mpv.isAvailable() };
     });
 
     // ---- 定时关机 ----
@@ -1569,6 +2165,21 @@ app.whenReady().then(() => {
     });
     // 清空日志（当前进程日志句柄继续写新文件）
     ipcMain.handle('vpc:clear-logs', async () => clearLogs(LOG_DIR));
+    // 日志级别 + 定时清空日志：设置页变更后实时生效
+    ipcMain.handle('vpc:set-log-level', (_e, level) => {
+        setLogLevel(level);
+        settings.set('logLevel', String(level || 'INFO').toUpperCase());
+        return { ok: true, level: require('./logger').getLogLevel() };
+    });
+    ipcMain.handle('vpc:set-log-cleanup', (_e, opts) => {
+        const enabled = !!(opts && opts.enabled);
+        const days = Math.max(0, parseInt(opts && opts.days, 10) || 0);
+        settings.set('logAutoCleanup', enabled);
+        settings.set('logCleanupDays', days);
+        // days<=0 或关闭开关时 startScheduledLogCleanup 内部会停掉旧计时器并不启动
+        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled);
+        return { ok: true, enabled, days };
+    });
     // 渲染端错误上报：window.onerror / unhandledrejection 转发进 electron-main.log（redactSecrets 由 writer 负责）
     ipcMain.handle('vpc:log-renderer', (_e, level, message) => {
         const lvl = String(level || 'ERROR').toUpperCase();
@@ -1601,6 +2212,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
     if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
+    stopScheduledLogCleanup();
     mpv.stop();
     dl.stop();
     pushServer.stop();

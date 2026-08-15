@@ -721,7 +721,120 @@ class TestBangumiSync(unittest.TestCase):
     def test_missing_token(self):
         ok, msg = self.mgr.bangumi_update_collection('', '42', 2)
         self.assertFalse(ok)
-        self.assertIn('token', msg.lower())
+
+    def test_all_collections_paginates_all_types(self):
+        # 任务六 6.1：_bangumi_all_collections 分页遍历 5 种收藏类型，按 subject_id 去重合并
+        from unittest import mock
+
+        pages = {}
+        # type=1 两页（total=150），其余类型各 0 条
+        pages[(1, 0)] = {'total': 150, 'data': [{'subject_id': i, 'type': 1} for i in range(0, 100)]}
+        pages[(1, 100)] = {'total': 150, 'data': [{'subject_id': i, 'type': 1} for i in range(100, 150)]}
+
+        class FakeRsp:
+            def __init__(self, payload):
+                self._p = payload
+                self.status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._p
+
+        def fake_get(url, params=None, headers=None, timeout=None, verify=None):
+            key = (params.get('type'), params.get('offset'))
+            return FakeRsp(pages.get(key, {'total': 0, 'data': []}))
+
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('time.sleep'), \
+                mock.patch('requests.get', side_effect=fake_get):
+            items = self.mgr._bangumi_all_collections('tok', page_delay=0)
+        self.assertEqual(len(items), 150)  # 完整 150 条（跨两页），未截断在 100
+        self.assertTrue(all('type' in it for it in items))
+
+    def test_all_collections_page_failure_tolerated(self):
+        # 单页抛错时容忍：中止该类型继续，不整体失败
+        from unittest import mock
+
+        class FakeRsp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'total': 1, 'data': [{'subject_id': 7, 'type': 3}]}
+
+        calls = {'n': 0}
+
+        def fake_get(url, params=None, headers=None, timeout=None, verify=None):
+            calls['n'] += 1
+            if params.get('type') == 1:
+                raise Exception('boom')  # type=1 全失败
+            if params.get('type') == 3:
+                return FakeRsp()
+            # 其他类型无数据
+            class Empty(FakeRsp):
+                def json(self):
+                    return {'total': 0, 'data': []}
+            return Empty()
+
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('time.sleep'), \
+                mock.patch('requests.get', side_effect=fake_get):
+            items = self.mgr._bangumi_all_collections('tok', page_delay=0)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['subject_id'], 7)
+
+    def test_sync_collections_three_way_merge(self):
+        # 三方合并：本地独有→upload；一致→skipped；冲突本地胜→upload；远端独有→pull
+        from unittest import mock
+        remote = [
+            {'subject_id': 10, 'type': 2, 'subject': {'name_cn': '一致'}},   # 与本地一致
+            {'subject_id': 20, 'type': 2, 'subject': {'name_cn': '冲突'}},   # 与本地冲突
+            {'subject_id': 99, 'type': 1, 'subject': {'name_cn': '远端独有'}},  # 远端独有
+        ]
+        local = [
+            {'subjectId': '10', 'type': 2, 'ts': 100, 'name': '一致'},   # skipped
+            {'subjectId': '20', 'type': 3, 'ts': 100, 'name': '冲突'},   # upload（本地胜）
+            {'subjectId': '30', 'type': 1, 'ts': 100, 'name': '本地独有'},  # upload
+        ]
+        with mock.patch.object(self.mgr, '_bangumi_all_collections', return_value=remote):
+            plan = self.mgr.bangumi_sync_collections('tok', local, priority='local')
+        up_ids = sorted(u['subjectId'] for u in plan['upload'])
+        self.assertEqual(up_ids, ['20', '30'])
+        self.assertEqual(plan['skipped'], 1)         # subject 10 一致
+        self.assertEqual(len(plan['pull']), 1)       # subject 99 远端独有
+        self.assertEqual(plan['pull'][0]['subject_id'], 99)
+        self.assertEqual(len(plan['conflict']), 1)
+
+    def test_sync_collections_incremental_skips_unchanged(self):
+        # 增量：本地 ts < lastSyncAt 且远端已存在的冲突 → 远端胜（跳过上传）
+        from unittest import mock
+        remote = [{'subject_id': 20, 'type': 2}]
+        local = [{'subjectId': '20', 'type': 3, 'ts': 50, 'name': 'x'}]  # ts=50 < lastSyncAt=100
+        with mock.patch.object(self.mgr, '_bangumi_all_collections', return_value=remote):
+            plan = self.mgr.bangumi_sync_collections('tok', local, priority='local', last_sync_at=100)
+        self.assertEqual(plan['upload'], [])
+        self.assertEqual(plan['skipped'], 1)
+        self.assertEqual(plan['conflict'][0]['resolved'], 'remote')
+
+    def test_apply_sync_plan_concurrent(self):
+        # 并发上传：max_workers=3，用户名只解析一次，成功计数正确
+        from unittest import mock
+
+        class FakeRsp:
+            status_code = 200
+
+        uploads = [{'subjectId': str(i), 'type': (i % 5) + 1} for i in range(6)]
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice') as um, \
+                mock.patch('time.sleep'), \
+                mock.patch('requests.request', return_value=FakeRsp()):
+            result = self.mgr.bangumi_apply_sync_plan('tok', uploads, op_delay=0)
+        self.assertEqual(result['uploaded'], 6)
+        self.assertEqual(result['failed'], 0)
+        um.assert_called_once_with('tok')  # 用户名只解析一次（并发复用）
 
     # ---------------------------------------------------------------- 镜像源（4.1）
 

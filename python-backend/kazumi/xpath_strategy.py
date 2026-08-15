@@ -21,8 +21,13 @@ class XPathRuleStrategy:
 
     # ---------------------------------------------------------------- 请求构造
 
-    def prepare_search_request(self, config, keyword):
+    def prepare_search_request(self, config, keyword, filters=None):
         query_url = config.search_url.replace('@keyword', keyword)
+        # 可选筛选（任务三 part2）：仅当 searchURL 声明了 @tag/@year/@sort 占位才替换，
+        # 未声明的规则原样保留（占位不存在时 replace 是空操作），实现 opt-in 与优雅降级。
+        filters = filters or {}
+        for key in ('tag', 'year', 'sort'):
+            query_url = query_url.replace('@' + key, str(filters.get(key) or ''))
         if not config.use_post:
             return PreparedRuleRequest(method='GET', url=query_url, include_cookies=True)
         # POST：URL 去 query，query 作为表单 body
