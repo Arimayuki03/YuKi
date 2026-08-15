@@ -799,7 +799,10 @@ async function loadPanCookieFields() {
                 `<div class="pan-cookie-head"><span class="pan-cookie-name">${escHtml(label)}</span>` +
                 `<span class="pan-cookie-state">${has ? '已配置' : '未配置'}</span></div>` +
                 `<div class="tip-line pad0 pan-cookie-hint">${escHtml(hint)}</div>` +
-                `<textarea id="pan_cookie_${key}" class="md-input pan-cookie-input" rows="2"></textarea>` +
+                `<div class="pan-cookie-input-wrap">` +
+                `<textarea id="pan_cookie_${key}" class="md-input pan-cookie-input pan-cookie-masked" rows="2"></textarea>` +
+                `<button type="button" class="pan-cookie-eye" data-for="pan_cookie_${key}" title="显示/隐藏 Cookie">👁</button>` +
+                `</div>` +
                 '</div>');
             $(`#pan_cookie_${key}`).val(_panCookies[key] || '');
         });
@@ -856,6 +859,22 @@ function initPanCookiePanel() {
         $(e.currentTarget).closest('.pan-cookie-item')
             .toggleClass('pan-cookie-filled', has)
             .find('.pan-cookie-state').text(has ? '已配置' : '未配置');
+    });
+    // Cookie 遮蔽显示（与 Bangumi token 一致，默认隐藏文字）：聚焦显示明文便于
+    // 编辑，失焦自动重新遮蔽；右上角眼睛按钮手动切换。焦点转移到眼睛时不触发遮蔽。
+    $('#pan_cookie_fields').on('focusin', 'textarea', (e) => {
+        $(e.currentTarget).removeClass('pan-cookie-masked');
+    });
+    $('#pan_cookie_fields').on('focusout', 'textarea', (e) => {
+        const to = e.relatedTarget;
+        if (to && to.closest && $(to).closest('.pan-cookie-eye').length) return;
+        $(e.currentTarget).addClass('pan-cookie-masked');
+    });
+    $('#pan_cookie_fields').on('click', '.pan-cookie-eye', (e) => {
+        const $t = $('#' + String($(e.currentTarget).data('for') || ''));
+        if (!$t.length) return;
+        if ($t.hasClass('pan-cookie-masked')) $t.removeClass('pan-cookie-masked').trigger('focus');
+        else $t.blur(); // blur → focusout → 重新遮蔽
     });
     $('#pan_cookie_qr').on('click', openQuarkQrLogin);
     $('#pan_qr_refresh').on('click', () => {

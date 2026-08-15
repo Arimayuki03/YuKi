@@ -718,6 +718,19 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:n
 .pan-cookie-hint { color: var(--md-on-surface-variant); font-size: 12px; margin-bottom: 6px; }
 .pan-cookie-input { height: auto !important; min-height: 44px; padding: 8px 12px !important; font-size: 13px !important; line-height: 18px !important; resize: none; scrollbar-width: none; }
 .pan-cookie-input::-webkit-scrollbar { width:0; height:0; display:none; }
+/* Cookie 遮蔽显示（与 Bangumi token 一致，默认隐藏文字）：-webkit-text-security
+   为 Chromium 私有属性，圆点显示；聚焦/眼睛切换时移除该 class 显示明文。
+   输入框右侧留白避免文字压住眼睛按钮 */
+.pan-cookie-input-wrap { position: relative; }
+.pan-cookie-input-wrap .pan-cookie-input { padding-right: 38px !important; }
+.pan-cookie-masked { -webkit-text-security: disc; }
+.pan-cookie-eye {
+    position: absolute; right: 6px; top: 8px;
+    width: 28px; height: 28px; padding: 0; border: none; border-radius: 8px;
+    background: transparent; cursor: pointer; font-size: 14px; line-height: 1;
+    opacity: .55; transition: opacity .15s, background .15s;
+}
+.pan-cookie-eye:hover { opacity: 1; background: var(--md-surface-container-high); }
 /* 每页影片数量（T40）：四项「标签+下拉」两列网格；标签定宽右对齐、
    下拉等宽，非全屏半宽下不再四组挤一行造成字体错位；窄窗折单列 */
 .pagesize-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px 18px; margin-top:8px; max-width:560px; }
