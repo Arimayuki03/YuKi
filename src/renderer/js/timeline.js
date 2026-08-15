@@ -7,11 +7,17 @@
  * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, Kazumi, fitVodTitles */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet */
 
 const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
 const SEASON_YEARS = 20; // 季节索引回溯年数（对齐 Kazumi 时间机器）
+// 番剧时间表（放送星期桶）本地缓存：按季度键落盘，切季度/重进即时上屏后台静默刷新。
+// 本周在播时效性较强（10min），历史季度基本不变（6h）。
+const TIMELINE_CACHE_PREFIX = 'timeline::sched::v1::';
+const TIMELINE_TTL_CURRENT = 10 * 60 * 1000;      // 本周在播 10 分钟
+const TIMELINE_TTL_SEASON = 6 * 60 * 60 * 1000;   // 历史季度 6 小时
+const TIMELINE_COL_TTL = 5 * 60 * 1000;           // Bangumi 账号收藏集合内存缓存 5 分钟（My 同步后作废）
 
 const Timeline = {
     _inited: false,
@@ -26,10 +32,21 @@ const Timeline = {
     _colAvailable: false,
     _colSets: { dropped: new Set(), watched: new Set(), watching: new Set() },
     _filters: { dropped: false, watched: false, onlyWatching: false },
+    // Bangumi 账号收藏集合内存缓存（避免每次进入时间表都分页拉全量；本地收藏仍每次重读合并）
+    _colCache: null,
+    _colCacheToken: '',
+    _colCacheTs: 0,
 
     async init() {
         if (this._inited) return;
         this._inited = true;
+        // 订阅收藏变更（Kazumi CollectController 模式）：详情页/收藏页任何收藏状态变更后，
+        // FavHub.changed 广播，此处重读收藏并重渲染过滤集合。
+        if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
+            this._unsubFav = FavHub.onChanged(() => {
+                if (this._colAvailable && this._inited) this.refreshAfterFavoriteChange();
+            });
+        }
         this._buildSeasonOptions();
         $('#timeline-refresh').on('click', () => this.load());
         $('#timeline-grid').on('click keydown', '.bangumi-card', (e) => {
@@ -71,6 +88,9 @@ const Timeline = {
         });
         // 保存过滤 chip 的原始 title，供禁用/启用态切换还原
         $('#timeline-filters .timeline-filter-chip').each(function () { $(this).attr('data-tip', $(this).attr('title')); });
+        // 先按当前（默认禁用）态即时展示过滤行，避免筛选按钮在收藏数据异步拉取完成前「消失一会」；
+        // _loadColSets 完成后会再调 _setColAvailable 更新为可用态（此前只在异步回调里首次 show，导致延迟出现）。
+        this._setColAvailable(this._colAvailable);
         // 收藏过滤数据（异步，不阻塞首屏）
         this._loadColSets();
         await this.load();
@@ -121,18 +141,84 @@ const Timeline = {
 
     // ---------------------------------------------------------------- 收藏过滤
 
-    /** 拉取 Bangumi 收藏构建过滤集合（需 token；失败/无 token 时禁用过滤）。 */
+    /** 拉取 Bangumi 收藏构建过滤集合（需 token；失败/无 token 时禁用过滤）。
+     *  分页拉全量（API 单页上限 100）。另合并本地收藏（favorites 里带 bangumiId 且 tag 命中的项），
+     *  这样即便未登录 Bangumi 账号、只在本地标记了「在看/看过/抛弃」也能正常筛选（用户反馈的核心问题）。 */
     async _loadColSets() {
+        // Bangumi 账号收藏拉取失败不应连累本地标记（拆成独立 try）
+        let all = [];
+        let token = '';
         try {
-            const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
-            if (!token) { this._setColAvailable(false); return; }
-            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 200 }, '/kazumi/action');
-            const items = (rsp && rsp.items) || [];
-            this._colSets = this._buildColSets(items);
-            this._setColAvailable(true);
-        } catch (e) {
-            this._setColAvailable(false);
-        }
+            token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
+            if (token) {
+                // Bangumi 账号收藏在会话内很少变动（仅 My 同步时）：命中未过期缓存直接复用，
+                // 免去每次进入时间表都分页拉 100-500 条。本地收藏仍每次重读合并（见下方），
+                // 故详情页/收藏页改本地标记后过滤依旧实时生效。缓存在 My 同步后由 invalidateColCache 作废。
+                if (this._colCache && this._colCacheToken === token && Date.now() - this._colCacheTs < TIMELINE_COL_TTL) {
+                    all = this._colCache;
+                } else {
+                    for (let offset = 0; offset < 500; offset += 100) {
+                        const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100, offset }, '/kazumi/action');
+                        const items = (rsp && rsp.items) || [];
+                        all = all.concat(items);
+                        if (items.length < 100) break;
+                    }
+                    this._colCache = all;
+                    this._colCacheToken = token;
+                    this._colCacheTs = Date.now();
+                }
+            }
+        } catch (e) { /* Bangumi 拉取失败时仅用本地集合 */ }
+        this._colSets = this._buildColSets(all);
+        await this._mergeLocalCollections(this._colSets);
+        // 只要有本地标记或 Bangumi 账号任一可用即启用过滤
+        const hasAny = this._colSets.watching.size || this._colSets.watched.size || this._colSets.dropped.size || !!token;
+        this._setColAvailable(!!hasAny);
+        // 收藏集合异步拉取晚于首屏——载入后若有过滤开启则重渲染使其生效
+        if (this._filters.onlyWatching || this._filters.dropped || this._filters.watched) this._renderGrid();
+    },
+
+    /** 进入时间表时重建收藏过滤集合并重渲染（对齐 Kazumi TimelinePage 每次 build 实时读收藏的做法）。
+     *  修复：_colSets 原为首次 init 快照，详情页/收藏页改状态后筛选仍用旧数据。 */
+    async refreshCollections() {
+        await this._loadColSets();
+        this._renderGrid();
+    },
+
+    /** 状态变更后的即时同步（详情页/收藏页删改收藏后调用）：重读本地收藏并重渲染。
+     *  _loadColSets 每次都会重读 favorites 存储，天然拿到最新 tag/bangumiId，无需缓存失效。 */
+    async refreshAfterFavoriteChange() {
+        // 收藏变更（可能含开启自动同步后上传到 Bangumi 账号）：作废账号收藏缓存强制重拉，
+        // 保证过滤集合与账号状态一致；视图普通再进入（refreshCollections）仍走缓存免重复拉。
+        this._colCache = null;
+        await this._loadColSets();
+        if (this._colAvailable) this._renderGrid();
+    },
+
+    /** 作废 Bangumi 账号收藏内存缓存（My 页同步账号收藏后调用，使时间表过滤下次重拉最新）。 */
+    invalidateColCache() {
+        this._colCache = null;
+        this._colCacheToken = '';
+        this._colCacheTs = 0;
+    },
+
+    /** 合并本地收藏（records.js favorites）里带 bangumiId 的项到过滤集合，按 tag 归类。
+     *  tag：watching=在看 seen=看过 dropped=抛弃（与 records.js TAG_ORDER 一致）。 */
+    async _mergeLocalCollections(sets) {
+        try {
+            if (typeof recGet !== 'function') return;
+            const favs = await recGet('favorites');
+            (favs || []).forEach((f) => {
+                if (!f) return;
+                // 本地收藏的 Bangumi subject id：优先 bangumiId，其次 site==='bangumi' 时的 vodId
+                const id = String(f.bangumiId || (String(f.site) === 'bangumi' ? f.vodId : '') || '');
+                if (!id) return;
+                const tag = f.tag || '';
+                if (tag === 'watching') sets.watching.add(id);
+                else if (tag === 'seen') sets.watched.add(id);
+                else if (tag === 'dropped') sets.dropped.add(id);
+            });
+        } catch (e) { /* 本地合并失败不影响 Bangumi 集合 */ }
     },
 
     _setColAvailable(av) {
@@ -144,7 +230,7 @@ const Timeline = {
                 if (tip) $(this).attr('title', tip);
             });
         } else {
-            chips.addClass('disabled').attr('title', '需在「设置 → Kazumi 规则」配置 Bangumi Token 后使用');
+            chips.addClass('disabled').attr('title', '需在详情页标记「在看」或配置 Bangumi Token 后使用');
         }
         $('#timeline-filters').show(); // 始终展示；未可用时置灰并提示如何启用
     },
@@ -169,16 +255,18 @@ const Timeline = {
         return sets;
     },
 
-    /** 按启用的收藏过滤裁剪列表（_colAvailable=false 时原样返回）。 */
+    /** 按启用的收藏过滤裁剪列表（_colAvailable=false 时原样返回）。
+     *  item id 兼容顶层 id 与嵌套 subject.id（与 _buildColSets 取 id 口径一致）。 */
     _applyFilters(list) {
         if (!this._colAvailable) return list;
         const { dropped, watched, watching } = this._colSets;
+        const idOf = (it) => String((it && (it.id || (it.subject && it.subject.id))) || '');
         let out = list;
         if (this._filters.onlyWatching) {
-            out = out.filter((it) => watching.has(String(it.id)));
+            out = out.filter((it) => watching.has(idOf(it)));
         } else {
-            if (this._filters.dropped) out = out.filter((it) => !dropped.has(String(it.id)));
-            if (this._filters.watched) out = out.filter((it) => !watched.has(String(it.id)));
+            if (this._filters.dropped) out = out.filter((it) => !dropped.has(idOf(it)));
+            if (this._filters.watched) out = out.filter((it) => !watched.has(idOf(it)));
         }
         return out;
     },
@@ -205,35 +293,78 @@ const Timeline = {
         else await this._loadSeason(this._season);
     },
 
+    /** 缓存键：本周在播固定 'current'，历史季度按季度键区分。 */
+    _cacheKey() {
+        return TIMELINE_CACHE_PREFIX + (this._season === 'current' ? 'current' : String(this._season));
+    },
+
+    /** 命中未过期缓存立即上屏（返回 true 表示已用缓存渲染）。 */
+    _tryCache() {
+        if (typeof localCacheGet !== 'function') return false;
+        const d = localCacheGet(this._cacheKey());
+        if (!d || !Array.isArray(d.calendar) || !d.calendar.length) return false;
+        this._calendar = d.calendar;
+        this._renderWeekdays();
+        this._renderGrid();
+        return true;
+    },
+
+    /** 写入成功非空的星期桶数据（空结果不缓存）。 */
+    _saveCache(current) {
+        if (typeof localCacheSet !== 'function') return;
+        if (!Array.isArray(this._calendar) || !this._calendar.length) return;
+        const ttl = current ? TIMELINE_TTL_CURRENT : TIMELINE_TTL_SEASON;
+        localCacheSet(this._cacheKey(), { calendar: this._calendar }, ttl);
+    },
+
     async _loadCurrent() {
-        showLoading();
         this._mode = 'current';
+        // 命中缓存即时上屏，后台静默刷新（不弹 loading，不打断已见内容）
+        const hit = this._tryCache();
+        if (!hit) showLoading();
         try {
             const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action');
-            this._calendar = (rsp && rsp.calendar) || [];
-            this._renderWeekdays();
-            this._renderGrid();
+            const cal = (rsp && rsp.calendar) || [];
+            if (cal.length) {
+                this._calendar = cal;
+                this._renderWeekdays();
+                this._renderGrid();
+                this._saveCache(true);
+            } else if (!hit) {
+                this._calendar = cal;
+                this._renderWeekdays();
+                this._renderGrid();
+            }
         } catch (e) {
-            warnToast('时间表载入失败');
+            if (!hit) warnToast('时间表载入失败');
         } finally {
-            hideLoading();
+            if (!hit) hideLoading();
         }
     },
 
     async _loadSeason(key) {
         const range = this._seasonRange(key);
         if (!range) { this._loadCurrent(); return; }
-        showLoading();
         this._mode = 'season';
+        const hit = this._tryCache();
+        if (!hit) showLoading();
         try {
             const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action');
-            this._calendar = (rsp && rsp.calendar) || [];
-            this._renderWeekdays();
-            this._renderGrid();
+            const cal = (rsp && rsp.calendar) || [];
+            if (cal.length) {
+                this._calendar = cal;
+                this._renderWeekdays();
+                this._renderGrid();
+                this._saveCache(false);
+            } else if (!hit) {
+                this._calendar = cal;
+                this._renderWeekdays();
+                this._renderGrid();
+            }
         } catch (e) {
-            warnToast('该季度数据载入失败');
+            if (!hit) warnToast('该季度数据载入失败');
         } finally {
-            hideLoading();
+            if (!hit) hideLoading();
         }
     },
 

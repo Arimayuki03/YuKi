@@ -34,14 +34,15 @@ async function waitBackend() {
     return false;
 }
 
-/** POST /action（表单编码），自动 JSON 解析返回；30s 超时防永久挂起。
- *  path 默认 '/action'，Kazumi 引擎调用传 '/kazumi/action'。 */
-async function doAction(action, kv, path) {
+/** POST /action（表单编码），自动 JSON 解析返回；默认 30s 超时防永久挂起。
+ *  path 默认 '/action'，Kazumi 引擎调用传 '/kazumi/action'；
+ *  timeoutMs 可覆盖超时（源探测等慢操作传 60000）。 */
+async function doAction(action, kv, path, timeoutMs) {
     const rsp = await fetch(apiUrl(path || '/action'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ ...kv, do: action }).toString(),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(timeoutMs || 30000),
     });
     const text = await rsp.text();
     try { return JSON.parse(text); } catch (e) { return text; }
@@ -77,17 +78,21 @@ function truncateTitle(text, max) {
 
 /**
  * 卡片标题「恰好两行」精确截断（T74 白块根因收尾）：
- * CSS -webkit-line-clamp 只隐藏超行文本的显示，超出的行仍参与布局与绘制，
- * 会触发 Chromium 把超行文本画成白色块的绘制缺陷。此函数对单个 .vod-name
- * 精确测量——临时解除 line-clamp（max-height 恒为两行高，故 clientHeight
- * 即两行高度）读 scrollHeight 判溢出；溢出则二分求「加入省略号后仍不超两行」
- * 的最长前缀并改写 textContent。DOM 中不再存在任何超出两行的文字（无超行 →
- * 无白块）；省略号由 JS 显式补 '…'，CSS clamp 因无溢出不会再画第二个。
+ * CSS -webkit-line-clamp 只隐藏超行文本的显示，超出的行仍参与布局与绘制（T74）。
+ * 自 `.vod-name` 改为单行 nowrap+ellipsis（文本仅为一行）后此函数进入宽容模式：
+ * CSS 已保证单行不溢出、由 ellipsis 收尾，函数直接跳过；此处仍按旧逻辑测量
+ * 两行场景（多行容器兜底），仅对「仍存在多行容器」的调用保持兼容。
  */
 function fitVodTitle(el) {
+    if (!el) return;
     const cs = el.style;
+    // 溢出判定容差：.vod-name 高度锁为「padding-top + 2×line-height」，无缓冲。
+    // 合法两行标题的 scrollHeight 常因亚像素行盒取整/字形下缘比 clientHeight 高 1~2px，
+    // 若严格用 > 比较会把两行标题误判为溢出并截断成 '…'（表现为标题没铺满第二行就收缩）。
+    // 2 行与 3 行相差一整个 line-height（≥16px），故取半行容差既排除误判又不漏真溢出。
+    const tol = Math.max(2, Math.floor(parseFloat(getComputedStyle(el).lineHeight) / 2) || 2);
     cs.webkitLineClamp = 'none';
-    const over = el.scrollHeight > el.clientHeight;
+    const over = el.scrollHeight > el.clientHeight + tol;
     cs.webkitLineClamp = '2';
     if (!over) return;
 
@@ -97,7 +102,7 @@ function fitVodTitle(el) {
     const fits = (n) => {
         el.textContent = text.slice(0, n) + '…';
         cs.webkitLineClamp = 'none';
-        const ok = el.scrollHeight <= el.clientHeight;
+        const ok = el.scrollHeight <= el.clientHeight + tol;
         cs.webkitLineClamp = '2';
         return ok;
     };
@@ -225,6 +230,21 @@ function bangumiResizeUrl(url, variant) {
     return u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`);
 }
 
+/** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.lol）；
+ *  非官方域名原样返回（第三图床不换）。 */
+function bangumiMirrorUrl(url) {
+    return String(url || '').replace(/^https?:\/\/lain\.bgm\.tv\//i, 'https://lain.bangumi.lol/');
+}
+
+/** 生成 Bangumi 封面 img：官方 lain.bgm.tv 优先，加载失败自动切镜像 lain.bangumi.lol，再失败落占位图。
+ *  （历史 Kazumi 源封面补拉复用 —— 官方图床被墙/慢时镜像兜底，不留空框。） */
+function bangumiCoverImg(pic, eager) {
+    const first = normalizePic(bangumiResizeUrl(pic, 'card') || pic);
+    if (!first) return vodCoverImg('', eager);
+    const mirror = bangumiMirrorUrl(first);
+    return vodCoverChain(mirror && mirror !== first ? [first, mirror] : [first], eager);
+}
+
 function bangumiCover(imagesOrUrl, size) {
     // 旧缓存：裸 URL 字符串（历史存 large）。detail 保留大图；card/grid 降级到 common 减锯齿。
     if (typeof imagesOrUrl === 'string') {
@@ -337,8 +357,10 @@ function fillMissingCovers(container, isValid, options) {
     const poolKey = String(opts.poolKey || container);
     let pool = _coverFillPools.get(poolKey);
     if (!pool) {
-        pool = { queue: [], busy: 0, limit: 10, seen: new WeakSet(), ios: new Map() };
+        pool = { queue: [], busy: 0, limit: 10, seen: new WeakSet(), ios: new Map(), opts };
         _coverFillPools.set(poolKey, pool);
+    } else {
+        pool.opts = opts; // 刷新回调（历史页回写记录用）
     }
     pool.limit = Math.max(1, Math.min(COVER_FILL_GLOBAL_LIMIT, parseInt(opts.concurrency, 10) || 10));
     const gen = _coverFillGen;
@@ -346,7 +368,11 @@ function fillMissingCovers(container, isValid, options) {
     const cards = box.find('.vod-cover img[data-cover-missing="1"]')
         .closest('.vod-card')
         .filter(function () {
-            return String($(this).data('id') || '') !== '' && !pool.seen.has(this);
+            // 有 vodId 走 detailContent 补拉；Kazumi 源 vodId 恒为空，但可按片名从 Bangumi 拉封面。
+            const $c = $(this);
+            const hasId = String($c.data('id') || '') !== '';
+            const isKazumi = String($c.data('source') || '').startsWith('kazumi:') && String($c.data('name') || '') !== '';
+            return (hasId || isKazumi) && !pool.seen.has(this);
         });
     if (!cards.length) { _coverFillPump(pool); return; }
 
@@ -415,12 +441,15 @@ async function _coverFillOne(pool, item) {
     if (!item.alive() || !document.contains(item.el)) { pool.seen.delete(item.el); return; }
     const site = String(el.data('source') || '');
     const id = String(el.data('id') || '');
-    if (!site || !id) { pool.seen.delete(item.el); return; }
+    const name = String(el.data('name') || '');
+    const isKazumi = site.startsWith('kazumi:');
+    // Kazumi 源无 id、按片名拉 Bangumi 封面；其余源需 site+id 走 detailContent。
+    if ((!isKazumi && (!site || !id)) || (isKazumi && !name)) { pool.seen.delete(item.el); return; }
     let pic = '';
     try {
-        if (String(site).startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getBangumiCover) {
+        if (isKazumi && typeof Kazumi !== 'undefined' && Kazumi.getBangumiCover) {
             // Kazumi 源列表无源封面：按片名从 Bangumi 拉取（内存 + localStorage 缓存去重，T73）
-            pic = normalizePic(await Kazumi.getBangumiCover(String(el.data('name') || '')));
+            pic = normalizePic(await Kazumi.getBangumiCover(name));
         } else {
             const d = await doAction('detailContent', { site, ids: JSON.stringify([id]) });
             const vod = (d && d.list && d.list[0]) || null;
@@ -435,7 +464,7 @@ async function _coverFillOne(pool, item) {
         return;
     }
     // 缓存补拉结果：列表重绘（如搜索切源）可直接复用，避免重复 detailContent
-    const ckey = String(site) + '|' + String(id);
+    const ckey = String(site) + '|' + String(id || name);
     _coverCache.set(ckey, pic);
     if (_coverCache.size > 2000) { // 防无限增长，淘汰最旧
         const oldest = _coverCache.keys().next().value;
@@ -443,10 +472,18 @@ async function _coverFillOne(pool, item) {
     }
     el.removeAttr('data-cover-missing');
     // eager：补上的封面立即加载（此前 lazy 在隐藏/折叠区不触发，切源后看着「加载不出」）
-    el.find('.vod-cover').html(vodCoverImg(pic, true));
+    // Bangumi 封面（lain.bgm.tv）官方优先、镜像兜底；其余源普通 img
+    const html = isKazumi && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic)
+        ? bangumiCoverImg(pic, true)
+        : vodCoverImg(pic, true);
+    el.find('.vod-cover').html(html);
     // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）
     if (String(site).startsWith('kazumi:')) {
         el.find('.vod-cover').prepend(`<div class="kazumi-badge">${escHtml(String(site).slice(7))}</div>`);
+    }
+    // 补拉完成回调：调用方（如历史页）可借此把封面回写记录并持久化
+    if (pool.opts && typeof pool.opts.onOne === 'function') {
+        try { pool.opts.onOne(site, name, pic); } catch (e) { /* 回调失败不影响补拉 */ }
     }
 }
 
@@ -583,6 +620,9 @@ function dispatchEsc() {
     // 详情页封面放大浮层不属于对话框系统，单独关闭
     const cf = document.getElementById('cover-float');
     if (cf && cf.classList.contains('show')) { cf.classList.remove('show'); return; }
+    // 人物详情浮层同样单独关闭
+    const chf = document.getElementById('char-float');
+    if (chf && chf.classList.contains('show')) { chf.classList.remove('show'); return; }
     for (let i = escHandlers.length - 1; i >= 0; i--) {
         try { if (escHandlers[i]() === true) return; } catch (e) { /* ignore */ }
     }
@@ -701,7 +741,7 @@ function toFileUrl(p) {
  * - wallpaperUrl → body 铺图，dim 控制内容遮罩强度。
  * 传入部分字段即可，未传字段沿用上次值。
  */
-const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true };
+const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true, glass: false };
 
 // ---- 自定义主题色：由单个基色推导 Material 浅色/深色两套变量 ----
 
@@ -800,6 +840,8 @@ function applySkin(opts) {
     const el = document.documentElement;
     // 禁用动画：全局关掉 transition/animation
     el.classList.toggle('no-anim', _skin.animEnabled === false);
+    // 毛玻璃效果：卡片/面板/侧栏启用 backdrop-filter 模糊，透出下层内容
+    el.classList.toggle('glass-on', _skin.glass === true);
     // 自定义主题色优先于内置预设；无自定义时才落 data-color
     if (_skin.customColor) {
         delete el.dataset.color;
@@ -809,9 +851,13 @@ function applySkin(opts) {
         if (_skin.theme) el.dataset.color = _skin.theme;
         else delete el.dataset.color;
     }
-    // 界面缩放：数值百分比写 html 内联 zoom（100 恢复）
+    // 界面缩放：改用 Electron 页面级缩放（webFrame.setZoomFactor）替代 CSS zoom。
+    // 根因：CSS zoom 施加在 <html> 上会破坏 unicode-range 子集化 webfont 的 @font-face
+    // 匹配，导致 MiSans 回退系统字体（"设置字体大小后 MiSans 失效"的 bug）。
+    // 页面级缩放在 CSS 字体匹配之上生效，等比缩放整个 UI 且不影响字体匹配。
     const fsPct = _fontSizePct(_skin.fontSize);
-    el.style.zoom = fsPct === 100 ? '' : (fsPct / 100);
+    el.style.zoom = ''; // 清除历史遗留的 CSS zoom
+    if (window.vpc && window.vpc.setZoomFactor) window.vpc.setZoomFactor(fsPct / 100);
     // 字体大小：数值百分比仅缩放文字
     _applyTextScale(_fontSizePct(_skin.textSize));
     // 自定义文字颜色：覆写主文字变量；恢复默认时移除行内覆写

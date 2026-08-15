@@ -28,6 +28,27 @@ const ROOT = (() => {
 })();
 const WIN = process.platform === 'win32';
 
+// 磁链/BT 公共 tracker 列表：磁链只有 info-hash，须先从 DHT/tracker/PEX 找到 peer 拿 metadata
+// 才能开始下载。仅靠 DHT 在很多网络环境（UDP 被限）下连不通，导致进度长期卡 0%。
+// 补一批稳定的公共 tracker（含 udp/http/wss）作为 DHT 之外的 peer 发现途径，显著提高磁链成功率。
+const BT_TRACKERS = [
+    'udp://tracker.opentrackr.org:1337/announce',
+    'udp://open.tracker.cl:1337/announce',
+    'udp://open.demonii.com:1337/announce',
+    'udp://tracker.torrent.eu.org:451/announce',
+    'udp://exodus.desync.com:6969/announce',
+    'udp://tracker.openbittorrent.com:6969/announce',
+    'udp://explodie.org:6969/announce',
+    'udp://tracker.dler.org:6969/announce',
+    'udp://opentracker.i2p.rocks:6969/announce',
+    'http://tracker.openbittorrent.com:80/announce',
+    'https://tracker.tamersunion.org:443/announce',
+    'udp://tracker.tiny-vps.com:6969/announce',
+    'udp://tracker.moeking.me:6969/announce',
+    'udp://tracker1.bt.moack.co.kr:80/announce',
+    'udp://tracker.bittor.pw:1337/announce',
+];
+
 function findAria2() {
     const exe = WIN ? 'aria2c.exe' : 'aria2c';
     const vendor = path.join(ROOT, 'vendor', 'aria2', exe);
@@ -58,6 +79,10 @@ class Downloader extends EventEmitter {
         this._reqId = 0;
         this._ready = null;          // start 的 Promise
         this._notified = new Set();  // 已通知完成的 gid
+        // 启动失败诊断信息（exit/spawn error/stderr 尾部），供 _waitReady 抛出时附带
+        this._exitCode = null;
+        this._spawnError = '';
+        this._stderrBuf = '';
         // EventEmitter 约定：'error' 无监听器会抛异常，兜底 noop
         this.on('error', () => { });
     }
@@ -67,13 +92,26 @@ class Downloader extends EventEmitter {
     /** 惰性启动 aria2c 并等 RPC 就绪（重复调用复用）。 */
     start(dir, concurrency, split) {
         if (this._ready) return this._ready;
+        // 二进制探测在构造时做过一次，但用户可能后来才补上/删除 vendor；
+        // 每次启动重新解析并校验存在，避免拿着失效路径 spawn 失败后误报 rpc not ready。
+        if (!this.binary || !fs.existsSync(this.binary)) {
+            this.binary = findAria2();
+        }
         if (!this.binary) return Promise.reject(new Error('aria2-missing'));
-        this.dir = dir || path.join(os.homedir(), 'Downloads');
+        // 优先用系统默认下载目录（尊重 Windows 注册表自定义路径），而非硬编码 ~/Downloads
+        const { app } = require('electron');
+        this.dir = dir || app.getPath('downloads') || path.join(os.homedir(), 'Downloads');
         if (concurrency) this.concurrency = Math.max(1, Math.min(10, concurrency | 0));
         if (split) this.split = Math.max(1, Math.min(32, split | 0));
         fs.mkdirSync(this.dir, { recursive: true });
         this.port = 10000 + Math.floor(Math.random() * 20000);
         this.secret = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        // BT/DHT 监听端口必须落在 aria2 校验范围 1024-65535：aria2c 1.37.0 对
+        // --dht-listen-port=0 直接报 errorCode=28（"must be between 1024 and 65535"）
+        // 并提前退出，导致 RPC 永远不就绪。DHT 默认区间 6881-6999 常与其他 BT
+        // 客户端冲突，故取 16881-17880 随机单端口；--listen-port(TCP) 与
+        // --dht-listen-port(UDP) 共用该端口，避免两个监听口各自冲突。
+        this.btListenPort = 16881 + Math.floor(Math.random() * 1000);
 
         const args = [
             '--enable-rpc', `--rpc-secret=${this.secret}`,
@@ -83,14 +121,62 @@ class Downloader extends EventEmitter {
             `--split=${this.split}`, `--max-connection-per-server=${this.split}`,
             '--continue=true', '--file-allocation=none',
             '--bt-stop-timeout=300',
+            '--enable-dht=true',
+            `--listen-port=${this.btListenPort}`,
+            `--dht-listen-port=${this.btListenPort}`,
+            '--bt-metadata-only=false', '--bt-load-saved-metadata=true',
+            '--follow-torrent=true', '--follow-metalink=true',
+            // 磁链提速：DHT 之外补公共 tracker + 开启 PEX（peer 交换），
+            // 多路发现 peer 才能拉到 metadata 并开始实际下载，避免仅靠 DHT 卡 0%。
+            `--bt-tracker=${BT_TRACKERS.join(',')}`,
+            '--enable-peer-exchange=true',
+            '--bt-max-peers=0',                 // 0 = 不限 peer 数，尽量多连
+            '--bt-request-peer-speed-limit=0',  // 不因单 peer 慢而限速整体
+            '--dht-entry-point=router.bittorrent.com:6881',
+            '--dht-entry-point6=router.bittorrent.com:6881',
+            '--enable-dht6=true',
+            '--bt-enable-lpd=true',             // 本地 peer 发现（局域网种子）
+            // 降噪 + RPC 稳定性：stdio 虽为 'ignore'，但过量日志仍可能拖慢首次就绪；
+            // rpc-max-request-size 提升大 metalink/torrent 请求体上限，避免边界请求被拒。
+            '--quiet', '--console-log-level=error',
+            '--rpc-max-request-size=2M',
         ];
         // 代理不在此烘焙进 CLI：用户可能随时开关系统代理，而 CLI 传入的代理
         // 无法经 RPC changeGlobalOption 清除；改为 addUri/addTorrent/addMetalink
         // 任务级注入（见 _proxyOpts），添加时取实时值，代理失效不影响新任务。
-        this.proc = spawn(this.binary, args, { stdio: 'ignore' });
-        this.proc.on('exit', () => { this.proc = null; this._ready = null; });
+        // stdio 设为 pipe 以捕获 stderr：aria2c 启动失败（端口占用/参数错/损坏）
+        // 时 stderr 含真实原因，原 'ignore' 会丢失导致只报笼统的 rpc not ready。
+        this.proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        // 重置上次启动的残留诊断信息（exit code / spawn error / stderr）
+        this._exitCode = null;
+        this._spawnError = '';
+        this._stderrBuf = '';
+        // 收集 stderr 尾部（裁剪到 500 字符避免占用过多内存），用于错误诊断
+        this._stderrBuf = '';
+        this.proc.stderr.on('data', (chunk) => {
+            const text = chunk.toString('utf8');
+            this._stderrBuf = (this._stderrBuf + text).slice(-500);
+        });
+        // 捕获退出码：aria2c --enable-rpc 正常不该退出；记录 code 便于区分
+        // 正常退出（0，理论不出现）与错误退出（非 0，如端口占用/参数错）。
+        this.proc.on('exit', (code) => {
+            if (code) { try { console.error(`[aria2] exited code=${code}`); } catch (e) { /* ignore */ } }
+            this._exitCode = code;
+            this.proc = null;
+            this._ready = null;
+        });
+        // spawn 失败（权限/损坏/被杀软拦截）会触发 'error' 而非 'exit'；
+        // 未监听会作为未捕获异常崩主进程，且 _waitReady 只会空转到超时误报 rpc not ready。
+        // 记录真实错误信息供 _waitReady 在抛出时附带，便于用户定位（如路径无效/被拦截）。
+        this.proc.on('error', (err) => {
+            this._spawnError = err && err.message ? err.message : String(err);
+            this.proc = null;
+            this._ready = null;
+        });
 
-        this._ready = this._waitReady(80).catch((e) => {
+        // 1s 初始延迟 + 200 次 × 200ms = ~41s：慢机/首次启动（AV 扫描、DHT 初始化）
+        // RPC 起得晚，需宽松窗口。proc 若中途死掉，_waitReady 会提前跳出而非空等满时长。
+        this._ready = this._waitReady(200).catch((e) => {
             this._ready = null;
             this.stop();
             throw e;
@@ -99,11 +185,30 @@ class Downloader extends EventEmitter {
     }
 
     async _waitReady(attempts) {
+        // 首次探测前给足初始化时间：AV 扫描 / DHT 监听 / RPC socket bind 均需窗口，
+        // 过早的 getVersion() 会撞上未 bind 的端口而无谓失败并竞态误判进程死亡。
+        await new Promise((r) => setTimeout(r, 1000));
         for (let i = 0; i < attempts; i++) {
+            // 进程已退出（spawn error / 立即崩溃）：继续轮询无意义，立即抛出真实原因。
+            if (!this.proc) {
+                // 拼接真实诊断信息：spawn 错误 > 退出码 > stderr 尾部 > 默认提示
+                const parts = ['aria2 process exited before rpc ready'];
+                if (this._spawnError) parts.push(`spawn error: ${this._spawnError}`);
+                if (this._exitCode !== undefined && this._exitCode !== null) parts.push(`exit code=${this._exitCode}`);
+                if (this._stderrBuf && this._stderrBuf.trim()) {
+                    parts.push(`stderr: ${this._stderrBuf.trim().split('\n').slice(-3).join(' | ')}`);
+                }
+                throw new Error(parts.join(' · '));
+            }
             try { await this.getVersion(); return true; } catch (e) { /* 未就绪 */ }
-            await new Promise((r) => setTimeout(r, 100));
+            await new Promise((r) => setTimeout(r, 200));
         }
-        throw new Error('aria2 rpc not ready');
+        // 超时仍未就绪：附 stderr 尾部帮助定位（如端口冲突 / 防火墙拦截）
+        const parts = ['aria2 rpc not ready'];
+        if (this._stderrBuf && this._stderrBuf.trim()) {
+            parts.push(`stderr: ${this._stderrBuf.trim().split('\n').slice(-3).join(' | ')}`);
+        }
+        throw new Error(parts.join(' · '));
     }
 
     stop() {
@@ -112,6 +217,10 @@ class Downloader extends EventEmitter {
             this.proc = null;
         }
         this._ready = null;
+        // 重置诊断信息，避免下次启动误带上一次的残留状态
+        this._exitCode = null;
+        this._spawnError = '';
+        this._stderrBuf = '';
     }
 
     // ------------------------------------------------------------ JSON-RPC
@@ -169,7 +278,14 @@ class Downloader extends EventEmitter {
         }
         return this.split;
     }
-    addUri(urls, opts = {}) { return this._rpc('addUri', [[].concat(urls), this._proxyOpts(opts)]); }
+    addUri(urls, opts = {}) {
+        const list = [].concat(urls);
+        // 磁链任务级补 tracker：全局 --bt-tracker 对经 RPC 新增的磁链不总是生效，
+        // 显式在任务 options 里带上 bt-tracker，确保每个磁链都有 DHT 之外的 peer 来源。
+        const isMagnet = list.some((u) => /^magnet:/i.test(String(u)));
+        const finalOpts = isMagnet ? { 'bt-tracker': BT_TRACKERS.join(','), ...opts } : opts;
+        return this._rpc('addUri', [list, this._proxyOpts(finalOpts)]);
+    }
     addTorrent(b64, opts = {}) { return this._rpc('addTorrent', [b64, [], this._proxyOpts(opts)]); }
     addMetalink(b64, opts = {}) { return this._rpc('addMetalink', [b64, this._proxyOpts(opts)]); }
     pause(gid) { return this._rpc('pause', [gid]); }
@@ -200,9 +316,16 @@ class Downloader extends EventEmitter {
         let name = '';
         if (s.bittorrent && s.bittorrent.info && s.bittorrent.info.name) name = s.bittorrent.info.name;
         const first = s.files && s.files[0];
+        let uri = '';
         if (!name && first) {
             if (first.path) name = path.basename(first.path.replace(/[\\/]+$/, ''));
             else if (first.uris && first.uris[0]) name = decodeURIComponent(first.uris[0].uri.split('?')[0].split('/').pop() || first.uris[0].uri);
+        }
+        // 提取原始 URI（供持久化后恢复下载用；非 BT 用 uris[0].uri，BT 取 infoHash）
+        if (first && first.uris && first.uris[0]) {
+            uri = first.uris[0].uri;
+        } else if (s.bittorrent && s.bittorrent.info && s.bittorrent.info.infoHash) {
+            uri = 'magnet:?xt=urn:btih:' + s.bittorrent.info.infoHash.toUpperCase();
         }
         return {
             gid: s.gid,
@@ -214,6 +337,7 @@ class Downloader extends EventEmitter {
             connections: s.numSeeders !== undefined ? `${s.connections || 0}/${s.numSeeders}` : (s.connections || ''),
             errorMessage: s.errorMessage || '',
             files: (s.files || []).map((f) => f.path).filter(Boolean),
+            uri, // 原始 URI，用于重启后恢复下载
         };
     }
 

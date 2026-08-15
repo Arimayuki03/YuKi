@@ -10,7 +10,11 @@
  * 我的收藏：复用 records.js makeRecordView 工厂（容器 #my-panel-favorites）。
  * 埋点在 player.js _recordWatch（mpv 退出时累计）。
  */
-/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi */
+/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel */
+
+// Bangumi 账号收藏本地持久缓存（cache.js）：切页/重启即时上屏，只在收藏状态变动或手动同步时刷新。
+// 无 TTL（0=永久）——账号收藏仅由「本地收藏变更(FavHub)/同步按钮」触发失效，不靠时间过期。
+const MY_BGMCOL_KEY = 'my::bgmcol::v1';
 
 const My = {
     _inited: false,
@@ -24,32 +28,76 @@ const My = {
         // 把 Bangumi 收藏合并进收藏网格（1.2/2.2）：_extra 在渲染时追加到本地收藏后统一展示/筛选
         this._favorites._extra = () => this._getBangumiItems();
         this._favorites.init();
+        // 订阅收藏变更（Kazumi CollectController.loadCollectibles 模式）：
+        // 详情页/收藏页任何收藏状态变更后，FavHub.changed 广播，此处失效并强制重拉 Bangumi 收藏持久缓存，
+        // 再按需重渲染。持久缓存平时不靠时间过期，只在此处（收藏状态变动）与同步按钮处刷新。
+        if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
+            this._unsubFav = FavHub.onChanged(async () => {
+                this._bgmCache = null;                     // 失效内存缓存
+                if (typeof localCacheDel === 'function') { try { localCacheDel(MY_BGMCOL_KEY); } catch (e) { /* ignore */ } }
+                await this._getBangumiItems(true);         // 强制重拉并回写持久缓存（收藏状态已更新）
+                if (typeof App === 'undefined' || App.currentView !== 'my') return;
+                if (this._tab === 'favorites' && this._favorites) this._favorites.render();
+                else if (this._tab === 'stats') this.render(); // 统计页「我的收藏」部数同步刷新
+            });
+        }
         $('#view-my').on('click', '[data-my-tab]', (e) => this.selectTab(String($(e.currentTarget).data('my-tab') || 'stats')));
         // 同步 Bangumi 按钮：先把本地可匹配收藏单向上传到账号，再拉取/合并远端收藏重渲染网格
         $('#my-favorites-bgm-sync').on('click', async () => {
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
             if (!token) { warnToast('请先在 设置 → Kazumi 规则 → Bangumi 同步 保存 Token'); return; }
-            // 上传本地收藏（匹配 → set 收藏类型 → 回写 bangumiId），单条失败不中断
+            // 弹出进度对话框（仿 Kazumi _BangumiSyncProgressDialog）
+            My._openSyncProgress();
+            // 上传本地收藏（匹配 → set 收藏类型 → 回写 bangumiId），单条失败不中断；onProgress 驱动进度条
             let up = null;
             if (typeof Kazumi !== 'undefined' && Kazumi.uploadFavoritesToBangumi) {
-                try { up = await Kazumi.uploadFavoritesToBangumi(); } catch (e) { up = null; }
+                try {
+                    up = await Kazumi.uploadFavoritesToBangumi((done, total) => My._updateSyncProgress(done, total, '上传本地收藏'));
+                } catch (e) { up = null; }
             }
+            My._updateSyncProgress(0, 0, '拉取 Bangumi 收藏');
             this._bgmCache = null; // 失效缓存，强制重拉
+            // 同步改变了 Bangumi 账号收藏：作废时间表的账号收藏缓存，下次进入时间表重拉最新过滤集合
+            if (typeof Timeline !== 'undefined' && Timeline.invalidateColCache) Timeline.invalidateColCache();
             await this._getBangumiItems(true);
             if (this._favorites) await this._favorites.render();
+            My._closeSyncProgress();
             if (up) warnToast(`已同步 Bangumi：上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}`);
             else warnToast('已同步 Bangumi 收藏');
+        });
+        // 清空播放统计：确认后重置 watchStats 并刷新统计页
+        $('#my-stats-clear').on('click', async () => {
+            if (!await confirmDialog('清空全部播放统计数据？此操作不可撤销。', { okText: '清空' })) return;
+            try {
+                await window.vpc.settingsSet('watchStats', { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {}, bySite: {} });
+                this._renderStats(null, []);
+                warnToast('已清空播放统计');
+            } catch (e) { warnToast('清空失败'); }
         });
     },
 
     /** Bangumi 收藏（合并进收藏网格用）：拉取当前用户收藏，映射为收藏条目（site='bangumi'、tag 对应状态）。
-     *  60s 缓存；force 时强制重拉。无 Token/失败返回空数组（不影响本地收藏展示）。 */
+     *  持久缓存（localStorage）：切页/重启即时上屏，不靠时间过期——只在收藏状态变动(FavHub)或
+     *  点同步按钮时 force 重拉。force 之外命中缓存直接返回，避免每次进页面都等网络（加载慢/统计页收藏显示不出）。
+     *  无 Token/失败返回空数组（不影响本地收藏展示）。 */
     async _getBangumiItems(force) {
+        // 内存缓存优先（同一会话内多次渲染复用，最快）
+        if (!force && Array.isArray(this._bgmCache)) return this._bgmCache;
+        // 持久缓存命中：即时返回并回填内存；不触发网络（数据由收藏变更/同步显式刷新）
+        if (!force && typeof localCacheGet === 'function') {
+            try {
+                const cached = localCacheGet(MY_BGMCOL_KEY);
+                if (Array.isArray(cached)) { this._bgmCache = cached; this._bgmCacheTs = Date.now(); return cached; }
+            } catch (e) { /* ignore */ }
+        }
         try {
-            if (!force && this._bgmCache && Date.now() - this._bgmCacheTs < 60000) return this._bgmCache;
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
-            if (!token) { this._bgmCache = []; this._bgmCacheTs = Date.now(); return []; }
-            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100 }, '/kazumi/action');
+            if (!token) {
+                this._bgmCache = []; this._bgmCacheTs = Date.now();
+                this._saveBgmCol([]);
+                return [];
+            }
+            const rsp = await doAction('kazumiBangumiCollections', { token, all: 1 }, '/kazumi/action');
             const items = (rsp && rsp.items) || [];
             // Bangumi 收藏 type：1想看 2看过 3在看 4搁置 5抛弃
             const typeToTag = { 1: 'want', 2: 'seen', 3: 'watching', 4: 'hold', 5: 'dropped' };
@@ -71,10 +119,22 @@ const My = {
             });
             this._bgmCache = mapped;
             this._bgmCacheTs = Date.now();
+            this._saveBgmCol(mapped);
             return mapped;
         } catch (e) {
-            return this._bgmCache || [];
+            // 网络失败时优先返回内存/持久缓存，避免收藏网格与统计页部数空白
+            if (Array.isArray(this._bgmCache)) return this._bgmCache;
+            if (typeof localCacheGet === 'function') {
+                try { const c = localCacheGet(MY_BGMCOL_KEY); if (Array.isArray(c)) return c; } catch (e2) { /* ignore */ }
+            }
+            return [];
         }
+    },
+
+    /** 写 Bangumi 账号收藏持久缓存（无 TTL，仅显式失效）。 */
+    _saveBgmCol(list) {
+        if (typeof localCacheSet !== 'function' || !Array.isArray(list)) return;
+        try { localCacheSet(MY_BGMCOL_KEY, list, 0); } catch (e) { /* 缓存失败忽略 */ }
     },
 
     async enter(tab) {
@@ -97,6 +157,8 @@ const My = {
         const s = (await window.vpc.settingsGet()) || {};
         if (this._tab === 'stats') {
             this._renderStats(s.watchStats || null, Array.isArray(s.history) ? s.history : []);
+            // 我的收藏分类部数（本地 favorites + Bangumi 收藏合并计数）：仿 Kazumi _CollectHero
+            await this._renderCollections(Array.isArray(s.favorites) ? s.favorites : []);
         } else {
             // 收藏页签：渲染本地收藏 + 合并的 Bangumi 收藏（_favorites._extra）
             await this._favorites.enter();
@@ -133,6 +195,53 @@ const My = {
         this._renderWeekday(daily);
         this._renderSource(stats, history);
         this._renderTop(stats);
+    },
+
+    /** 我的收藏分类部数（看在看/想看/看过/抛弃/搁置 各多少部）。
+     *  本地 favorites（tag 字段）+ Bangumi 收藏（type 1-5）合并计数，按 Bangumi 标签语义展示。
+     *  自身重复条目（同一 bangumiId 本地与远端各有一条）按 bangumiId 去重，避免双计。 */
+    async _renderCollections(localFavs) {
+        const order = [
+            { tag: 'watching', label: '在看' },
+            { tag: 'want', label: '想看' },
+            { tag: 'seen', label: '看过' },
+            { tag: 'dropped', label: '抛弃' },
+            { tag: 'hold', label: '搁置' },
+        ];
+        const counts = { watching: 0, want: 0, seen: 0, dropped: 0, hold: 0 };
+        const seen = new Set(); // 按 bangumiId 去重
+        // 本地收藏
+        try {
+            (localFavs || []).forEach((f) => {
+                if (!f) return;
+                const tag = (f.tag === undefined || f.tag === null) ? 'want' : f.tag;
+                if (counts[tag] === undefined) return;
+                const k = f.bangumiId ? 'bgm:' + f.bangumiId : ('loc:' + (f.uid || (f.site + '|' + f.vodId)));
+                if (seen.has(k)) return;
+                seen.add(k);
+                counts[tag] += 1;
+            });
+        } catch (e) { /* ignore */ }
+        // 远端 Bangumi 收藏（合并计数，按 subject_id 去重）
+        try {
+            const bgm = await this._getBangumiItems();
+            const typeToTag = { 1: 'want', 2: 'seen', 3: 'watching', 4: 'hold', 5: 'dropped' };
+            (bgm || []).forEach((it) => {
+                const tag = typeToTag[it.tag] || it.tag;
+                if (counts[tag] === undefined) return;
+                const k = 'bgm:' + it.vodId;
+                if (seen.has(k)) return;
+                seen.add(k);
+                counts[tag] += 1;
+            });
+        } catch (e) { /* 远端失败不影响本地计数 */ }
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        $('#my-stats-collections').html(
+            `<div class="my-stats-coll-total">合计 <strong>${total}</strong> 部</div>` +
+            `<div class="my-stats-coll-grid">${order.map((o) =>
+                `<div class="my-stats-coll-box" data-tag="${escHtml(o.tag)}" title="${escHtml(o.label)}"><span class="my-stats-coll-num">${counts[o.tag]}</span><span class="my-stats-coll-lb">${escHtml(o.label)}</span></div>`
+            ).join('')}</div>`
+        );
     },
 
     /** 按星期分布（近 30 天，数据源 daily）：把每日时长按星期几聚合成 7 根柱。 */
@@ -175,7 +284,7 @@ const My = {
         }
         $('#my-stats-source-tip').text(`分来源统计（${scope}·时长）`);
         const rows = Object.keys(agg).map((k) => ({ label: k, value: agg[k] }))
-            .sort((a, b) => b.value - a.value).slice(0, 8);
+            .sort((a, b) => b.value - a.value).slice(0, 10);
         this._renderRankList('#my-stats-source', rows, (v) => this._fmtDur(v));
     },
 
@@ -193,7 +302,7 @@ const My = {
             if (name.length > merged[norm].label.length) merged[norm].label = name;
         });
         const rows = Object.keys(merged).map((k) => merged[k])
-            .sort((a, b) => b.value - a.value).slice(0, 8);
+            .sort((a, b) => b.value - a.value).slice(0, 10);
         this._renderRankList('#my-stats-top', rows, (v) => `${v} 次`);
     },
 
@@ -226,5 +335,31 @@ const My = {
         if (h > 0) return `${h} 小时 ${m} 分`;
         if (m > 0) return `${m} 分钟`;
         return `${s} 秒`;
+    },
+
+    // ---------------------------------------------- Bangumi 同步进度对话框
+    /** 打开同步进度对话框（仿 Kazumi _BangumiSyncProgressDialog）。 */
+    _openSyncProgress() {
+        try {
+            $('#bgm-sync-progress-text').text('准备同步 Bangumi 状态…');
+            $('#bgmSyncProgressDialog .ss-fill').css('width', '0%');
+            $('#bgm-sync-progress-count').text('');
+            openDialog('bgmSyncProgressDialog');
+        } catch (e) { /* ignore */ }
+    },
+    /** 更新同步进度（done/total 来自 uploadFavoritesToBangumi 的 onProgress 回调）。 */
+    _updateSyncProgress(done, total, text) {
+        try {
+            if (text) $('#bgm-sync-progress-text').text(text);
+            const t = Math.max(0, Number(total) || 0);
+            const d = Math.max(0, Number(done) || 0);
+            const pct = t > 0 ? Math.min(100, Math.round(d / t * 100)) : 0;
+            $('#bgmSyncProgressDialog .ss-fill').css('width', pct + '%');
+            $('#bgm-sync-progress-count').text(t > 0 ? `${d} / ${t}` : '');
+        } catch (e) { /* ignore */ }
+    },
+    /** 关闭同步进度对话框。 */
+    _closeSyncProgress() {
+        try { closeDialog('bgmSyncProgressDialog'); } catch (e) { /* ignore */ }
     },
 };

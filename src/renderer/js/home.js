@@ -5,10 +5,19 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, renderStatusBar */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, renderStatusBar, localCacheGet, localCacheSet */
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
+// 站点列表 / 首页分类(class) 本地缓存：冷启动先用缓存即时渲染源下拉与分类标签，后台再拉网络刷新。
+// 站点列表变动不频繁（配置载入才变），分类结构基本稳定，故用较宽 TTL；数据以网络结果为准（命中仅提前上屏）。
+const SITES_CACHE_KEY = 'home::sites::v1';
+const SITES_CACHE_TTL = 30 * 60 * 1000;              // 站点列表 30 分钟
+const HOME_CLASS_CACHE_PREFIX = 'home::class::v1::'; // + site → 该源分类标签列表
+const HOME_CLASS_CACHE_TTL = 30 * 60 * 1000;         // 首页分类 30 分钟
+// 首页「全部」feed 持久化缓存：冷启动网络返回前先以旧内容上屏（TTL 30 分钟）
+const HOME_FEED_CACHE_PREFIX = 'home::feed::v1::';   // + site → { ts, pagecount, items[] }
+const HOME_FEED_CACHE_TTL = 30 * 60 * 1000;
 
 const Home = {
     sites: [],
@@ -31,6 +40,7 @@ const Home = {
     searchWord: '',
     _pageCache: null,   // 懒初始化 Map：key site|tid → { pagecount, pages: Map<pg, list> }
     _catWin: new Map(), // 分类源页合并窗口：key site|tid → { items, seen, sourcePg, total, perPage }（T75 多源页合并填满每页条数）
+    _homeCacheBooted: false, // 首页 feed 持久化缓存只引导一次（网络返回后以最新覆盖）
     _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
     _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
@@ -76,7 +86,41 @@ const Home = {
             Detail.open(this.site, el.data('id'), el.data('name'));
         });
         this._loadPersistedEmptyClasses(); // T60：载入持久化空分类结果，首屏即隐藏空分类（无闪现）
+        this._prerenderFromCache();        // 冷启动即时上屏：网络返回前先用缓存渲染源下拉 + 分类标签
         await this.loadSites();
+    },
+
+    /** 冷启动即时上屏：用本地缓存的站点列表 + 当前源分类标签预渲染，避免等 /sites & homeContent 网络。
+     *  仅在尚无数据时填充；loadSites/loadHome 网络返回后会以最新结果覆盖（缓存只提前呈现骨架）。 */
+    _prerenderFromCache() {
+        if (typeof localCacheGet !== 'function') return;
+        try {
+            const sites = localCacheGet(SITES_CACHE_KEY);
+            if (Array.isArray(sites) && sites.length && !this._allSites.length) {
+                this._allSites = sites;
+                this.sites = sites.slice();
+                if (!this.site || !this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
+                this._renderSiteSelect();
+                $('#site-select').val(this.site);
+                const cls = this._loadClassCache(this.site);
+                if (Array.isArray(cls) && cls.length) { this.classes = cls; this.renderClass(''); }
+            }
+        } catch (e) { /* 预渲染失败不影响正常网络加载 */ }
+    },
+
+    /** 读取某源缓存的分类标签列表（未命中/过期返回 null）。 */
+    _loadClassCache(site) {
+        if (typeof localCacheGet !== 'function' || !site) return null;
+        try {
+            const cls = localCacheGet(HOME_CLASS_CACHE_PREFIX + site);
+            return Array.isArray(cls) ? cls : null;
+        } catch (e) { return null; }
+    },
+
+    /** 写入某源分类标签缓存（空列表不缓存，避免异常源污染下次预渲染）。 */
+    _saveClassCache(site, classes) {
+        if (typeof localCacheSet !== 'function' || !site || !Array.isArray(classes) || !classes.length) return;
+        try { localCacheSet(HOME_CLASS_CACHE_PREFIX + site, classes, HOME_CLASS_CACHE_TTL); } catch (e) { /* 缓存失败忽略 */ }
     },
 
     async loadSites() {
@@ -87,6 +131,15 @@ const Home = {
             const st = await getJson('/sites');
             all = (st && st.sites) || [];
         } catch (e) { all = []; }
+        // 网络成功且非空时刷新站点列表缓存（空结果不覆盖，防后端瞬时异常清掉可用缓存）
+        if (all.length && typeof localCacheSet === 'function') {
+            try { localCacheSet(SITES_CACHE_KEY, all, SITES_CACHE_TTL); } catch (e) { /* 缓存失败忽略 */ }
+        }
+        // 网络失败（all 空）时：若已有缓存预渲染的站点，保留其展示，不重置探测/屏蔽、不清空页面
+        // （否则冷启动预渲染 + 瞬时网络异常会误清 blockedSites 并显示「尚未载入配置」）。
+        if (!all.length && this._allSites.length) {
+            return;
+        }
         // 源集合变更（配置自动重载后 key 集不同）：旧探测/屏蔽记录不再适用，
         // 重置后重新探测，否则新配置的源永远不会被筛选（T25）
         const sig = all.map((s) => s.key).join('|');
@@ -229,18 +282,23 @@ const Home = {
                 probed[site.key] = 1;
                 let ok = false;
                 try {
-                    const d = await doAction('homeContent', { site: site.key, filter: 'false' });
-                    if (((d && d.list) || []).length) ok = true;
-                    else {
-                        // T40：任一分类有资源即不屏蔽（此前只查首个分类，
-                        // 首个分类恰好为空会误屏蔽）；逐个试到出结果为止
+                    const d = await doAction('homeContent', { site: site.key, filter: 'false' }, null, 60000);
+                    // T40 放宽：首页推荐位有内容，或配置了分类结构（class 非空）即视为可用。
+                    // 分类探测易受站点临时故障/蜘蛛内部错误误伤（如 Bili 系分类接口风控），
+                    // 不再仅因分类为空或出错就自动屏蔽；失效源由用户手动屏蔽或换源。
+                    const hasList = ((d && d.list) || []).length > 0;
+                    const hasClass = Array.isArray(d && d.class) && d.class.length > 0;
+                    if (hasList || hasClass) {
+                        ok = true;
+                    } else {
+                        // 无 list 且无 class：逐个分类再确认（兼容依赖分类内容的源）
                         const cls = (d && d.class) || [];
                         for (let i = 0; i < cls.length && !ok; i++) {
                             const tid = String(cls[i].type_id != null ? cls[i].type_id : '');
                             try {
                                 const c = await doAction('categoryContent', {
                                     site: site.key, tid, pg: '1', filter: 'false', extend: '{}',
-                                });
+                                }, null, 60000);
                                 if (((c && c.list) || []).length) ok = true;
                             } catch (e) { /* 该分类出错跳过，继续看其他分类 */ }
                         }
@@ -295,12 +353,25 @@ const Home = {
         $('#home-pager').empty();
         showLoading();
         try {
-            const data = await doAction('homeContent', { site: this.site, filter: 'false' });
-            this.classes = (data && data.class) || [];
+            // 冷启动即时上屏：先用缓存的分类标签渲染（避免空标签栏闪现），网络返回后以最新结果覆盖
+            const cachedCls = this._loadClassCache(this.site);
+            if (cachedCls && cachedCls.length && !this.classes.length) {
+                this.classes = cachedCls;
+                this.renderClass('');
+            }
+            // 首屏并行：homeContent（分类+推荐位）与「全部」feed 同时发起，
+            // feed 先返回时先渲染，分类返回后再刷新分类栏（T77 并行提速）
+            const [data, feedItems] = await Promise.all([
+                doAction('homeContent', { site: this.site, filter: 'false' }),
+                this._fetchHomeFeed(this.page, size),
+            ]);
+            if (token !== this._loadToken) return;
+            if (data && Array.isArray(data.class)) {
+                this.classes = data.class;
+                this._saveClassCache(this.site, this.classes);
+            }
             this.renderClass('');
             // 内容：源总览 feed（合并源页填满每页条数）
-            const feedItems = await this._fetchHomeFeed(this.page, size);
-            if (token !== this._loadToken) return;
             if (this.page === 1 && !feedItems.length) {
                 // 源无「全部」feed：回退自适应首页（推荐位 + 分类铺满）
                 this._homeList = ((data && data.list) || []).slice();
@@ -328,8 +399,20 @@ const Home = {
     /**
      * T76：「全部」总览 feed：合并多个 homeVideoContent 源页，取当前页 [ (pg-1)*size, pg*size )。
      * 复用 _catWin 合并窗口（key `site|__all__`），翻页只补拉缺失源页；总页数 = ceil(源总量/每页条数)。
+     * 冷启动（无合并窗口且在首页第 1 页）时优先重建本地持久化 feed 缓存，网络返回前即可上屏。
      */
     async _fetchHomeFeed(pg, size) {
+        // 冷启动加速：仅当首次进入、无内存窗口时，尝试用本地持久化缓存用旧 feed 先渲染
+        if (pg === 1 && !this._catWin.has(this.site + '|__all__') && !this._homeCacheBooted) {
+            const boot = this._cacheHomeGet(this.site);
+            if (boot && boot.items.length) {
+                this._homeList = boot.items.slice(0, size);
+                if (boot.pagecount > 0) this.pagecount = boot.pagecount;
+                this.renderGrid(this._homeList);
+                this.renderPager();
+            }
+            this._homeCacheBooted = true; // 只引导一次（网络返回后以最新覆盖）
+        }
         const win = this._catWinGet(this.site, '__all__');
         const need = pg * size; // 累计需覆盖到该页末尾
         let guard = 0;
@@ -348,7 +431,7 @@ const Home = {
                 }
             });
             win.sourcePg += 1;
-            if (!added) { /* 该页全是重复：继续下一页（guard 兜底） */ }
+            if (!added) { break; /* 全是重复，已拉空 */ }
         }
         this._homeList = win.items.slice((pg - 1) * size, pg * size);
         if (win.total > 0) {
@@ -359,7 +442,25 @@ const Home = {
             this.pagecount = Math.max(this.pagecount || 1, pg + 1); // 未知总量：暂允试下一页
         }
         this._cachePut(this.site, '__all__', pg, this._homeList, this.pagecount);
+        // 持久化首页 feed 缓存（仅第 1 页、有内容时写入，下次冷启动直接上屏）
+        this._cacheHomePut(this.site, this._homeList, this.pagecount);
         return this._homeList;
+    },
+
+    /** 本地持久化首页 feed（key: home::feed::v1::<site>，TTL 30min）：冷启动网络返回前先呈现旧内容。 */
+    _cacheHomeGet(site) {
+        try {
+            if (typeof localCacheGet !== 'function') return null;
+            const d = localCacheGet(HOME_FEED_CACHE_PREFIX + site);
+            if (!d || !Array.isArray(d.items) || !d.items.length) return null;
+            return d;
+        } catch (e) { return null; }
+    },
+    _cacheHomePut(site, items, pagecount) {
+        try {
+            if (typeof localCacheSet !== 'function' || !site || !Array.isArray(items) || !items.length) return;
+            localCacheSet(HOME_FEED_CACHE_PREFIX + site, { ts: Date.now(), pagecount, items: items.slice(0, 60) }, HOME_FEED_CACHE_TTL);
+        } catch (e) { /* 缓存失败忽略 */ }
     },
 
     /** 铺满首页的目标卡片数（T39：跟随「首页每页条数」设置，默认 20）。 */
@@ -454,7 +555,7 @@ const Home = {
             // 命中缓存：立即上屏，后台静默刷新（内容变化才重渲染）
             if (cached.pagecount > 0) this.pagecount = cached.pagecount;
             this._catItems = cached.list;
-            this.renderGrid(this._catItems);
+            this.renderGrid(this._catItems, this._catError);
             this.renderPager();
             $('#view-home').scrollTop(0);
             this._refreshCatPage(token, tid, this.page, size);
@@ -464,7 +565,7 @@ const Home = {
         try {
             await this._fetchCat(tid, this.page, size);
             if (token !== this._loadToken) return;
-            this.renderGrid(this._catItems);
+            this.renderGrid(this._catItems, this._catError);
             this.renderPager();
             // 切页后回到顶部
             $('#view-home').scrollTop(0);
@@ -490,11 +591,13 @@ const Home = {
         const win = this._catWinGet(this.site, tid);
         const need = pg * size; // 累计需覆盖到的条数
         let guard = 0;
+        this._catError = '';
         while (win.items.length < need && guard++ < 200) {
             const data = await doAction('categoryContent', {
                 site: this.site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
             });
             const list = (data && data.list) || [];
+            if (data && data.error) this._catError = data.error; // jar 蜘蛛调用失败原因（后端附加）
             if (!list.length) break; // 源已拉空
             if (data && data.total > 0) win.total = data.total;
             const pc = parseInt(data && data.pagecount, 10);
@@ -507,7 +610,7 @@ const Home = {
                 }
             });
             win.sourcePg += 1;
-            if (!added) { /* 该页全是重复：继续拉下一页（guard 兜底防死循环） */ }
+            if (!added) { break; /* 全是重复，已拉空 */ }
         }
         this._catItems = win.items.slice((pg - 1) * size, pg * size);
         let pagecount;
@@ -529,7 +632,7 @@ const Home = {
             this._catWinDelete(this.site, tid); // 丢弃合并窗口，重新拉取最新
             await this._fetchCat(tid, pg, size);
             if (token !== this._loadToken || this.mode !== 'category' || this.tid !== tid || this.page !== pg) return;
-            if (JSON.stringify(this._catItems.map((v) => v.vod_id)) !== before) this.renderGrid(this._catItems);
+            if (JSON.stringify(this._catItems.map((v) => v.vod_id)) !== before) this.renderGrid(this._catItems, this._catError);
             this.renderPager();
         } catch (e) { /* 刷新失败不影响缓存展示 */ }
     },
@@ -630,6 +733,7 @@ const Home = {
         const wd = String($('#home-search').val() || '').trim();
         if (!wd) { if (this.mode === 'search') this.loadHome(); return; }
         if (!this.site) return;
+        const freshSearch = this.mode !== 'search' || this.searchWord !== wd; // 从其他模式进入/换词 = 新一轮搜索
         this.mode = 'search';
         this.searchWord = wd;
         this.page = pg || 1;
@@ -644,7 +748,28 @@ const Home = {
             const pc = parseInt(data && data.pagecount, 10);
             if (pc > 0) this.pagecount = pc;
             else if (!raw.length) this.pagecount = Math.max(1, this.page - 1);
-            else this.pagecount = Math.max(this.pagecount || 1, this.page + 1);
+            else {
+                // 源不返回 pagecount（CMS/多数 jar 源）：以「本页是否出现新条目」判断能否继续翻页。
+                // 伪分页源每页返回同一批结果时页码立即停止增长，避免分页器页码无限增加；
+                // 换词/换源/重新搜索时重置已见记录。
+                const key = this.site + '|' + wd;
+                if (freshSearch || !this._searchSeen || this._searchSeen.key !== key) {
+                    this._searchSeen = { key, ids: new Set(), maxFresh: 0 };
+                    this.pagecount = 1; // 新一轮搜索丢弃旧页码，防残留巨值
+                }
+                const ids = this._searchSeen.ids;
+                let added = 0;
+                raw.forEach((v) => {
+                    if (v && v.vod_id != null && !ids.has(v.vod_id)) { ids.add(v.vod_id); added++; }
+                });
+                if (added) {
+                    if (this.page > this._searchSeen.maxFresh) this._searchSeen.maxFresh = this.page;
+                    this.pagecount = Math.max(this.pagecount || 1, this.page + 1);
+                } else {
+                    // 无新增：页码钉在「最后有内容的页 + 1」，不随当前页增长，回看也不回缩
+                    this.pagecount = Math.max(this.pagecount || 1, this._searchSeen.maxFresh + 1);
+                }
+            }
             const list = raw.slice(0, size);
             if (list.length) this.renderGrid(list);
             else $('#home-grid').html(`<div class="tip-line">当前源未找到与「${escHtml(wd)}」相关的内容</div>`);
@@ -816,9 +941,13 @@ const Home = {
         try { localStorage.removeItem('vpc_home_empty_classes'); } catch (e) { /* ignore */ }
     },
 
-    renderGrid(list) {
+    renderGrid(list, error) {
         const grid = $('#home-grid').empty();
-        if (!list.length) { grid.html('<div class="tip-line">暂无内容</div>'); return; }
+        if (!list.length) {
+            const why = error ? `（${String(error).slice(0, 100)}）` : '';
+            grid.html(`<div class="tip-line">暂无内容${why}</div>`);
+            return;
+        }
         // T65：拼串一次性写入，替代逐条 append（减少 N 次 DOM 重排）
         grid.html(list.map((v) => vodCard(v, this.site)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）

@@ -7,7 +7,7 @@
  * 标签筛选仿 Kazumi PopularPage：下拉菜单选择预设标签，选定后服务端拉取该标签番剧。
  * 卡片复用 common.js bangumiCard；点击进二级详情页（Kazumi.openBangumiInfoPage）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, escHtml, Kazumi, fitVodTitles */
+/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const POPULAR_TAGS = [
@@ -16,7 +16,9 @@ const POPULAR_TAGS = [
 ];
 
 // 推荐（热门番组）数据本地缓存：切推荐页即时显示、无首次网络等待；标签页不缓存
-const POPULAR_CACHE_KEY = 'popular_cache';
+// 迁移到 cache.js TTL 层（版本键防旧结构污染）：命中未过期缓存立即上屏，30min 后视为陈旧强制刷新。
+const POPULAR_CACHE_KEY = 'popular::trends::v2';
+const POPULAR_CACHE_TTL = 30 * 60 * 1000; // 30 分钟
 
 const Popular = {
     _inited: false,
@@ -120,6 +122,12 @@ const Popular = {
 
     _loadCache() {
         try {
+            // 优先 cache.js TTL 层（自带过期），不可用时回退裸 localStorage（兼容测试沙箱）
+            if (typeof localCacheGet === 'function') {
+                const d = localCacheGet(POPULAR_CACHE_KEY);
+                if (!d || !Array.isArray(d.items) || !d.items.length) return null;
+                return d;
+            }
             const raw = localStorage.getItem(POPULAR_CACHE_KEY);
             if (!raw) return null;
             const d = JSON.parse(raw);
@@ -130,12 +138,14 @@ const Popular = {
 
     _saveCache() {
         if (this._tag !== '') return; // 仅缓存热门番组（推荐页落地视图），标签视图不覆盖
+        if (!this._items.length) return; // 只缓存成功非空结果，绝不缓存空/错误
+        const payload = { ts: Date.now(), total: this._total, items: this._items };
         try {
-            localStorage.setItem(POPULAR_CACHE_KEY, JSON.stringify({
-                ts: Date.now(),
-                total: this._total,
-                items: this._items,
-            }));
+            if (typeof localCacheSet === 'function') {
+                localCacheSet(POPULAR_CACHE_KEY, payload, POPULAR_CACHE_TTL);
+                return;
+            }
+            localStorage.setItem(POPULAR_CACHE_KEY, JSON.stringify(payload));
         } catch (e) { /* 缓存失败忽略 */ }
     },
 
@@ -167,7 +177,8 @@ const Popular = {
         renderPagerBox($('#popular-pager'), {
             page: this._page,
             pagecount,
-            onJump: (pg) => this.load(pg),
+            // 翻页后滚回视图顶部（与首页 loadCategory 一致）
+            onJump: (pg) => { $('#view-popular').scrollTop(0); this.load(pg); },
         });
     },
 };

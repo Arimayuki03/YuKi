@@ -87,6 +87,14 @@ class DlRecordStore {
         this._save();
     }
 
+    /** 仅清除已结束（complete/error/removed）的记录，保留进行中任务（T81）。 */
+    clearFinished() {
+        this._ensureLoaded();
+        const before = this._records.length;
+        this._records = this._records.filter((r) => ['active', 'waiting', 'paused'].includes(r.status));
+        if (this._records.length !== before) this._save();
+    }
+
     /** 删除全部失败记录（清空失败任务时调用，残留文件另由调用方删除）。 */
     clearErrors() {
         this._ensureLoaded();

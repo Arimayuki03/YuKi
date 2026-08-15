@@ -38,6 +38,7 @@ function loadKazumi(extra = {}) {
 }
 
 // 构造一个受控 Kazumi：token 固定、收藏表内存化、getBangumiMatch/setBangumiCollection 可编排。
+// 新 pipeline：uploadFavoritesToBangumi → kazumiBangumiSync（merge plan）→ kazumiBangumiSyncApply（concurrent upload）
 function makeHarness(favorites, opts = {}) {
     let saved = null;
     const setCalls = [];
@@ -45,18 +46,33 @@ function makeHarness(favorites, opts = {}) {
         recGet: async () => favorites.map((f) => ({ ...f })),
         recSet: async (key, list) => { saved = list; },
         window: { vpc: { settingsGet: async () => ({ bangumiToken: 'tok', bangumiImmediateSyncToastEnable: false }) } },
-        doAction: async () => ({ code: 200 }),
+        doAction: async (action, params) => {
+            if (action === 'kazumiBangumiSync') {
+                const localFavs = JSON.parse((params && params.favorites) || '[]');
+                const upload = localFavs.filter((f) => !(opts.skip && opts.skip.has(f.subjectId))).map((f) => ({
+                    subjectId: f.subjectId, type: f.type,
+                }));
+                const skipped = localFavs.length - upload.length;
+                return { code: 200, plan: { upload, pull: [], conflict: [], skipped } };
+            }
+            if (action === 'kazumiBangumiSyncApply') {
+                const uploads = JSON.parse((params && params.uploads) || '[]');
+                let uploaded = 0, failed = 0;
+                for (const u of uploads) {
+                    setCalls.push({ id: u.subjectId, type: u.type });
+                    if (opts.fail && opts.fail.has(Number(u.subjectId))) failed++;
+                    else if (opts.throwOn && opts.throwOn.has(Number(u.subjectId))) { failed++; setCalls.pop(); }
+                    else uploaded++;
+                }
+                return { code: 200, result: { uploaded, failed } };
+            }
+            return { code: 200 };
+        },
     });
     kazumi._getBangumiToken = async () => 'tok';
     // getBangumiMatch：按片名给出匹配 id（opts.match: name -> id，缺省 0 = 匹配不到）
     kazumi.getBangumiMatch = async (name) => ({ id: (opts.match && opts.match[name]) || 0, cover: '' });
-    // setBangumiCollection：记录调用，按 opts.fail（subjectId 集合）模拟失败
-    kazumi.setBangumiCollection = async (id, type) => {
-        setCalls.push({ id, type });
-        if (opts.fail && opts.fail.has(Number(id))) return false;
-        if (opts.throwOn && opts.throwOn.has(Number(id))) throw new Error('boom');
-        return true;
-    };
+    kazumi.setBangumiCollection = async (id, type) => { setCalls.push({ id, type }); return true; };
     return { kazumi, setCalls, getSaved: () => saved };
 }
 
@@ -83,7 +99,7 @@ test('uploadFavoritesToBangumi 按 tag set 正确 type 并跳过 bangumi 自身�
     assert.equal(r.uploaded, 2);
     assert.equal(r.skipped, 0);
     assert.equal(r.failed, 0);
-    assert.deepEqual(setCalls.sort((x, y) => x.id - y.id), [{ id: 101, type: 1 }, { id: 202, type: 3 }]);
+    assert.deepEqual(setCalls.sort((x, y) => Number(x.id) - Number(y.id)), [{ id: '101', type: 1 }, { id: '202', type: 3 }]);
 });
 
 test('匹配不到 subject 的条目计入 skipped 且不调用 set', async () => {
@@ -96,7 +112,7 @@ test('匹配不到 subject 的条目计入 skipped 且不调用 set', async () =
     assert.equal(r.uploaded, 1);
     assert.equal(r.skipped, 1);
     assert.equal(setCalls.length, 1);
-    assert.deepEqual(setCalls[0], { id: 55, type: 2 });
+    assert.deepEqual(setCalls[0], { id: "55", type: 2 });
 });
 
 test('已有 bangumiId 直接使用，不再调用 getBangumiMatch', async () => {
@@ -107,7 +123,7 @@ test('已有 bangumiId 直接使用，不再调用 getBangumiMatch', async () =>
     const r = await kazumi.uploadFavoritesToBangumi();
     assert.equal(matchCalled, false);
     assert.equal(r.uploaded, 1);
-    assert.deepEqual(setCalls[0], { id: 900, type: 4 });
+    assert.deepEqual(setCalls[0], { id: "900", type: 4 });
 });
 
 test('新解析的 subject id 回写到收藏项 bangumiId', async () => {

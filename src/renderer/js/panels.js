@@ -7,7 +7,7 @@
  * 缓存清理前先展示占用大小；本地文件管理逻辑保持不变。
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
-/* global $, doAction, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading,
+/* global $, doAction, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
@@ -30,27 +30,38 @@ function ensureLocalPanel() {
 
 // ---------------------------------------------------------------- 源配置
 
-/** 载入配置（名称固定 config）：URL 或 JSON 均可；异步任务轮询 configTask。 */
+/** 载入配置（名称固定 config）：URL 或 JSON 均可；异步任务轮询 configTask。
+ *  长时间（多仓库扫描可达分钟级）仅显示非阻塞进度条，不遮挡 UI，用户可继续操作。 */
 async function setting() {
     const text = $('#setting_text').val().trim();
     if (!text) { warnToast('请输入配置地址或 JSON'); return; }
-    showLoading();
+    warnToast('正在载入配置…');
     let rsp;
     try {
         rsp = await doAction('setting', { text, name: 'config' });
     } catch (e) {
-        hideLoading();
         warnToast('请求失败');
         return;
     }
     // 后端异步加载（code:202）：轮询 configTask 直到 done/error（最长 5 分钟）
     if (rsp && rsp.code === 202) {
+        // 用进度条指示器替换阻塞 loading（T82 统一样式）
+        let barEl = $('#config-loading-bar');
+        if (!barEl.length) {
+            $('#setting_text').closest('.tool-card').append('<div id="config-loading-bar" class="tip-line" style="margin-top:8px;"></div>');
+            barEl = $('#config-loading-bar');
+        }
+        renderStatusBar(barEl, { text: '正在载入配置…', recv: 0, total: 0 });
+        barEl.show();
         for (let i = 0; i < 150; i++) {
             await new Promise((r) => setTimeout(r, 2000));
             let task = null;
             try { task = await doAction('configTask', {}); } catch (e) { continue; }
-            if (!task || task.status === 'loading') continue;
-            hideLoading();
+            if (!task || task.status === 'loading') {
+                renderStatusBar(barEl, { text: '正在载入配置…', recv: i + 1 });
+                continue;
+            }
+            barEl.hide();
             if (task.status === 'done' && task.summary) {
                 applyConfigResult(task.summary, text);
             } else {
@@ -58,11 +69,11 @@ async function setting() {
             }
             return;
         }
-        hideLoading();
+        barEl.hide();
         warnToast('配置仍在载入中，请稍后切换站点查看结果');
         return;
     }
-    hideLoading();
+    // 同步完成
     if (rsp && rsp.code === 200 && rsp.summary) {
         applyConfigResult(rsp.summary, text);
     } else if (rsp && rsp.code === 409) {
@@ -76,8 +87,11 @@ async function setting() {
 /** 根据加载摘要提示并（成功时）持久化 URL + 刷新站点列表。 */
 function applyConfigResult(sm, text) {
     if (sm.sites > 0) {
-        warnToast(`配置已载入：${sm.sites} 个站点、${sm.parses} 个解析` +
-            (sm.skipped && sm.skipped.length ? `（跳过 ${sm.skipped.length} 个）` : ''));
+        const parts = [`已载入 ${sm.sites} 个站点、${sm.parses} 个解析`];
+        if (sm.skipped && sm.skipped.length) parts.push(`跳过 ${sm.skipped.length} 个`);
+        const jarN = sm.jarSites || 0;
+        if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
+        warnToast(parts.join('、'));
         // 成功才持久化，下次启动自动重载；并记入历史源
         if (/^https?:\/\//i.test(text.trim())) {
             window.vpc.settingsSet('lastConfigUrl', text.trim());
@@ -86,7 +100,8 @@ function applyConfigResult(sm, text) {
         if (typeof Home !== 'undefined' && Home.loadSites) Home.loadSites();
         if (typeof Live !== 'undefined' && Live.load) Live.load();
     } else {
-        warnToast('载入 0 个站点：此配置可能仅含 TVBox jar 型源（csp_XXX）或 drpy 源，PC 侧仅支持 Python/JS 爬虫源');
+        const hint = '此配置可能仅含 drpy 源或需 JRE 的 jar 源（csp_XXX，请在设置→扩展安装 Java 运行环境）。若你粘贴的是直播源（.txt/.m3u），请改到「设置→源设置→直播源」添加。';
+        warnToast(`载入 0 个站点：${hint}`);
     }
 }
 
@@ -156,16 +171,34 @@ async function refreshCacheSize() {
 
 async function clearCache() {
     // T40：清理前二次确认
-    if (!await confirmDialog('清理影片缓存？缓存清理后再次浏览会重新拉取。', { okText: '清理' })) return;
+    if (!await confirmDialog('清理缓存？将清除影片爬虫缓存、下载临时文件、本地预览图、mpv 硬盘缓存与解析会话缓存。已载入的源与已下载文件不受影响。', { okText: '清理' })) return;
+    showLoading();
+    let backendBytes = 0, backendMsg = '', appBytes = 0, ok = false;
     try {
         const r = await doAction('clearCache', {});
-        if (r && r.code === 200) {
-            warnToast(`缓存已清理，释放 ${fmtSize(r.bytes || 0)}（${r.msg || '完成'}）`);
-            refreshCacheSize();
-        } else {
-            warnToast('缓存清理失败');
-        }
-    } catch (e) { warnToast('缓存清理失败'); }
+        if (r && r.code === 200) { ok = true; backendBytes = r.bytes || 0; backendMsg = r.msg || ''; }
+    } catch (e) { /* 后端清理失败下面统一提示 */ }
+    // 统一清理主进程侧本地缓存（mpv 缓存 / 预览图 / 解析窗口 partition）
+    try {
+        const r2 = await window.vpc.clearAppCaches();
+        if (r2 && r2.ok) { ok = true; appBytes = r2.cleanedBytes || 0; }
+    } catch (e) { /* 主进程清理失败不影响后端结果提示 */ }
+    // 任务十一：清理渲染层本地持久化缓存（vpc_cache:: 命名空间：推荐榜单/时间表等）
+    try { if (typeof localCacheClearAll === 'function') localCacheClearAll(); } catch (e) { /* ignore */ }
+    // 顺带清理旧版独立缓存键（Bangumi 封面匹配 / 首页空分类探测 / 旧推荐缓存）
+    try {
+        localStorage.removeItem('kazumi_bgm_cover');
+        localStorage.removeItem('vpc_home_empty_classes');
+        localStorage.removeItem('popular_cache');
+    } catch (e) { /* ignore */ }
+    hideLoading();
+    if (ok) {
+        const total = backendBytes + appBytes;
+        warnToast(`缓存已清理，释放 ${fmtSize(total)}${backendMsg ? '（' + backendMsg + '）' : ''}`);
+        refreshCacheSize();
+    } else {
+        warnToast('缓存清理失败');
+    }
 }
 
 // ---------------------------------------------------------------- 设置：直播源
@@ -362,7 +395,7 @@ function loadLocalThumbs() {
             img.src = 'file:///' + String(r.path).replace(/\\/g, '/');
             img.alt = '';
             ph.replaceWith(img);
-        }).catch(() => { });
+        });
     });
 }
 
@@ -393,7 +426,27 @@ function pushFile(yes) {
     if (yes !== 1) return;
     // 本地媒体直接交给主进程 mpv 播放
     window.vpc.filePush(currentFile).then((r) => {
-        if (r && r.ok) warnToast('已在 mpv 窗口播放');
+        if (r && r.ok) {
+            warnToast('已在 mpv 窗口播放');
+            // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
+            try {
+                const rel = String(currentFile || '');
+                const name = rel.split(/[\\/]/).pop() || rel || '本地文件';
+                if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
+                    Records.recordPlay({
+                        site: 'local',
+                        siteName: '本地文件',
+                        vodId: rel,
+                        name: name,
+                        pic: '',
+                        remarks: '本地文件',
+                        episode: '',
+                        seconds: 0,
+                        totalEps: 0,
+                    }).catch(() => { /* 历史记录失败不影响播放 */ });
+                }
+            } catch (e) { /* ignore */ }
+        }
         else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
         else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
         else warnToast('播放失败');
@@ -717,9 +770,150 @@ async function saveHotkeys() {
     if (window.vpc.updateHotkeys) window.vpc.updateHotkeys();
 }
 
+// ---------------------------------------------------------------- 网盘 Cookie（JAR 网盘源播放，T-jar-cookie）
+
+const PAN_COOKIE_ORDER = ['quark', 'uc', 'tianyi', 'baidu', 'p123', 'xunlei'];
+const PAN_COOKIE_HINT = {
+    quark: '夸克网盘 · 扫码登录或粘贴 Cookie（pan.quark.cn）',
+    uc: 'UC 网盘 · 粘贴 Cookie（drive.uc.cn）',
+    tianyi: '天翼云盘 · 粘贴 Cookie（cloud.189.cn）',
+    baidu: '百度网盘 · 粘贴 Cookie（pan.baidu.com，需含 BDUSS）',
+    p123: '123 云盘 · 粘贴 Cookie（www.123pan.com）',
+    xunlei: '迅雷云盘 · 粘贴 Cookie（pan.xunlei.com）',
+};
+let _panCookies = {};
+
+/** 读取后端保存的网盘 Cookie 并渲染输入框（后端不支持时静默）。 */
+async function loadPanCookieFields() {
+    try {
+        const r = await doAction('panCookie', { act: 'get' });
+        _panCookies = (r && r.cookies) || {};
+        const names = (r && r.names) || {};
+        const box = $('#pan_cookie_fields').empty();
+        PAN_COOKIE_ORDER.forEach((key) => {
+            const label = (names && names[key]) || key;
+            const hint = PAN_COOKIE_HINT[key] || '';
+            const has = !!(_panCookies[key] || '').trim();
+            box.append(
+                `<div class="pan-cookie-item ${has ? 'pan-cookie-filled' : ''}">` +
+                `<div class="pan-cookie-head"><span class="pan-cookie-name">${escHtml(label)}</span>` +
+                `<span class="pan-cookie-state">${has ? '已配置' : '未配置'}</span></div>` +
+                `<div class="tip-line pad0 pan-cookie-hint">${escHtml(hint)}</div>` +
+                `<textarea id="pan_cookie_${key}" class="md-input pan-cookie-input" rows="2"></textarea>` +
+                '</div>');
+            $(`#pan_cookie_${key}`).val(_panCookies[key] || '');
+        });
+    } catch (e) { /* 后端不支持时静默 */ }
+}
+
+/** 收集输入框内容并保存到后端；空值清空对应项。 */
+async function savePanCookies() {
+    const cookies = {};
+    PAN_COOKIE_ORDER.forEach((key) => {
+        const v = $(`#pan_cookie_${key}`).val().trim();
+        if (v) cookies[key] = v;
+    });
+    try {
+        const r = await doAction('panCookie', { act: 'set', cookies: JSON.stringify(cookies) });
+        if (r && r.code === 200) {
+            const n = Object.keys(cookies).length;
+            _panCookies = cookies;
+            await loadPanCookieFields(); // 重建输入框，按最新状态刷新「已配置/未配置」徽标
+            const warns = Array.isArray(r.warnings) ? r.warnings : [];
+            const status = $('#pan_cookie_status');
+            if (warns.length) {
+                status.html(`<span style="color:var(--md-error)">已保存 ${n} 项，但有以下问题：</span><br>` +
+                    warns.map((w) => '⚠ ' + escHtml(w)).join('<br>'));
+                warnToast(`已保存 ${n} 项，但有 ${warns.length} 个警告（见下方提示）`);
+            } else {
+                status.text(n ? `已保存 ${n} 项网盘 Cookie；保存后重新进入网盘影片的播放即可生效` : '已清空全部网盘 Cookie')
+                    .css('color', 'var(--md-primary)');
+                warnToast(n ? `已保存 ${n} 项网盘 Cookie` : '已清空网盘 Cookie');
+            }
+        } else {
+            $('#pan_cookie_status').text('保存失败').css('color', 'var(--md-error)');
+            warnToast('保存失败');
+        }
+    } catch (e) {
+        $('#pan_cookie_status').text('保存失败：' + (e && e.message ? e.message : e)).css('color', 'var(--md-error)');
+        warnToast('保存失败');
+    }
+}
+
+function initPanCookiePanel() {
+    loadPanCookieFields();
+    $('#pan_cookie_save').on('click', savePanCookies);
+    $('#pan_cookie_clear').on('click', async () => {
+        if (!await confirmDialog('确定清空全部网盘 Cookie？清空后需重新登录或粘贴才能播放网盘源影片。', { okText: '清空' })) return;
+        PAN_COOKIE_ORDER.forEach((k) => $(`#pan_cookie_${k}`).val(''));
+        savePanCookies();
+    });
+    // 输入内容变化时实时刷新「已配置/未配置」徽标
+    $('#pan_cookie_fields').on('input', 'textarea', (e) => {
+        const key = String(e.currentTarget.id || '').replace('pan_cookie_', '');
+        if (!key) return;
+        const has = !!String(e.currentTarget.value || '').trim();
+        $(e.currentTarget).closest('.pan-cookie-item')
+            .toggleClass('pan-cookie-filled', has)
+            .find('.pan-cookie-state').text(has ? '已配置' : '未配置');
+    });
+    $('#pan_cookie_qr').on('click', openQuarkQrLogin);
+    $('#pan_qr_refresh').on('click', () => {
+        // 取消/失败后重试：关闭旧窗口（如有）并重新打开
+        _panQrClosed = true;
+        try { window.vpc.panQrCancel(); } catch (e) { /* ignore */ }
+        setTimeout(() => openQuarkQrLogin(), 200);
+    });
+    $('#pan_qr_close').on('click', () => {
+        _panQrClosed = true;
+        try { window.vpc.panQrCancel(); } catch (e) { /* ignore */ }
+        closeDialog('panQrDialog');
+    });
+}
+
+// ---------------------------------------------------------------- 夸克扫码登录
+
+let _panQrClosed = false;
+
+/** 打开夸克扫码登录：弹出官方登录窗口 → 等待登录 → 自动保存 Cookie。 */
+async function openQuarkQrLogin() {
+    _panQrClosed = false;
+    $('#pan_qr_img').html('<span style="color:var(--md-outline);font-size:13px;">正在打开登录窗口…</span>');
+    $('#pan_qr_tip').text('正在打开夸克官方登录页面，请在弹出的窗口中用「夸克 App」扫码登录…')
+        .css('color', '');
+    $('#pan_qr_refresh').hide();
+    openDialog('panQrDialog');
+    let res = null;
+    try {
+        // 官方页面方案：主进程开官方落地页窗口，官方 JS 完成登录后收割完整 Cookie
+        res = await window.vpc.panQrLogin();
+    } catch (e) { /* 下方统一处理 */ }
+    if (_panQrClosed) return;
+    if (res && res.ok && res.cookies) {
+        $('#pan_qr_tip').text('登录成功，正在保存 Cookie…').css('color', 'var(--md-primary)');
+        // 保存到后端（quark 项）并刷新输入框
+        try {
+            await doAction('panCookie', { act: 'set', cookies: JSON.stringify({ quark: res.cookies }) });
+        } catch (e) { /* 保存失败提示见下 */ }
+        await loadPanCookieFields();
+        $('#pan_cookie_status').text('夸克扫码登录成功，Cookie 已自动保存').css('color', 'var(--md-primary)');
+        $('#pan_qr_tip').text('登录成功，Cookie 已自动保存').css('color', 'var(--md-primary)');
+        setTimeout(() => closeDialog('panQrDialog'), 1200);
+    } else {
+        $('#pan_qr_tip').text(String((res && res.message) || '登录取消'))
+            .css('color', 'var(--md-error)');
+    }
+}
+
+function stopQuarkQrTimers() { /* 官方窗口方案无需前端定时器 */ }
+
 function initSettingsPanel() {
     // 设置一级菜单（T12）：点大类只显示对应二级详情卡片；记忆上次分类
     const showSetCat = (cat) => {
+        // 先回顶再切换分类：分类卡片高度差异大，容器行高随之变化，
+        // 若在滚动中途切换，吸顶导航的 sticky 行程会突变导致按钮列表上下跳动。
+        // 先滚回顶部让导航处于文档流顶部，行高变化即无位移。
+        $('#view-settings').scrollTop(0);
         $('#settings-nav .settings-nav-item').removeClass('active')
             .filter(`[data-cat="${cat}"]`).addClass('active');
         $('#view-settings .tool-card[data-setcat]').each(function () {
@@ -736,7 +930,8 @@ function initSettingsPanel() {
     // 播放设置：载入持久化值，改动即存
     window.vpc.settingsGet().then((s) => {
         s = s || {};
-        if (s.settingsCat) showSetCat(s.settingsCat);
+        // 分类重新划分后旧记忆值（cache/asset）可能失效：仅在分类仍存在时恢复，否则回退外观
+        if (s.settingsCat && $(`#view-settings .tool-card[data-setcat="${String(s.settingsCat).replace(/"/g, '')}"]`).length) showSetCat(s.settingsCat);
         if (s.playerVolume) $('#set_volume').val(s.playerVolume);
         // 上次配置回填 + 历史源列表
         if (s.lastConfigUrl) $('#setting_text').val(s.lastConfigUrl);
@@ -759,7 +954,9 @@ function initSettingsPanel() {
             $('#set_textcolor_pick').val(s.textColor);
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
+        $('#set_system_titlebar').prop('checked', s.systemTitleBar === true);
         $('#set_anim').prop('checked', s.animEnabled !== false); // 界面动画（T73：改为与 MiSans 一致的开关）
+        $('#set_glass').prop('checked', s.glass === true); // 毛玻璃效果（默认关）
         // 每页条数（T39：首页/搜索/收藏/历史各自一项；首页兼容旧键 listPageSize）
         if (s.pageSizeHome || s.listPageSize) $('#set_pagesize_home').val(s.pageSizeHome || s.listPageSize);
         if (s.pageSizeSearch) $('#set_pagesize_search').val(s.pageSizeSearch);
@@ -772,10 +969,13 @@ function initSettingsPanel() {
         $('#set_speed').val(String(s.playerSpeed || '1'));
         if (s.playerAlang) $('#set_alang').val(s.playerAlang);
         if (s.playerSlang) $('#set_slang').val(s.playerSlang);
-        $('#set_autonext').prop('checked', s.autoNext !== false);
-        $('#set_resumepos').prop('checked', s.resumePos !== false);
-        $('#set_bgplay').prop('checked', s.bgPlay !== false);
-        $('#set_simuldl').prop('checked', !!s.simulDownload); // 边下边播（默认关）
+         $('#set_autonext').prop('checked', s.autoNext !== false);
+         $('#set_resumepos').prop('checked', s.resumePos !== false);
+         $('#set_bgplay').prop('checked', s.bgPlay !== false);
+         if (s.watchStatsEnabled !== false) $('#set_watchstats').prop('checked', true);
+         else $('#set_watchstats').prop('checked', false);
+         $('#set_simuldl').prop('checked', !!s.simulDownload); // 边下边播（默认关）
+        $('#set_danmaku').prop('checked', !!s.danmakuEnable); // 自动加载弹幕（默认关）
         $('#set_hls_adfilter').prop('checked', !!s.hlsAdFilter); // m3u8 广告过滤（默认关）
         $('#set_anime4k').prop('checked', !!s.anime4k);
         // 系统：关闭行为 / 隐身模式 / 缓存位置
@@ -789,11 +989,15 @@ function initSettingsPanel() {
         $('#set_catvod_bgm_match').prop('checked', s.catvodBgmMatch === true);
         // 系统：网络代理
         $('#set_proxy_url').val(s.proxyUrl || '');
-        $('#set_proxy_enable').prop('checked', !!s.proxyEnable);
+        // 代理开关严格按持久化值回填（proxyEnable === true 才开），避免旧版本/脏数据下误显示为开
+        $('#set_proxy_enable').prop('checked', s.proxyEnable === true);
+        // 系统：代理连通性测试：回填上次测试 URL
+        $('#set_proxy_test_url').val(s.proxyTestUrl || '');
+        // 系统：日志级别 + 定时清空日志
+        $('#set_log_level').val(String(s.logLevel || 'INFO'));
+        $('#set_log_autocleanup').prop('checked', s.logAutoCleanup === true);
+        $('#set_log_cleanup_days').val(s.logCleanupDays ? String(s.logCleanupDays) : '');
         refreshCacheDirLine(s.cacheDir);
-        // mpv 视频缓冲缓存：模式 + 目录展示（目录未设置时显示默认路径）
-        $('#set_cache_mode').val(s.playerCacheMode === 'disk' ? 'disk' : 'memory');
-        refreshMpvCacheDirLine(s.playerCacheDir);
         // 下载：目录展示（读持久化值，不拉起 aria2）+ 并发数回填
         refreshDlDirLine(s.dlDir);
         $('#set_dl_concurrency').val(String(s.dlConcurrency || '3'));
@@ -952,10 +1156,19 @@ function initSettingsPanel() {
     $('#set_bgplay').on('change', function () {
         window.vpc.settingsSet('bgPlay', this.checked);
     });
+    $('#set_watchstats').on('change', function () {
+        window.vpc.settingsSet('watchStatsEnabled', this.checked);
+        warnToast(this.checked ? '已开启观看统计' : '已关闭观看统计（已有数据保留）');
+    });
     // 边下边播：仅持久化，主进程起播时读取（无需通知，下次起播即生效）
     $('#set_simuldl').on('change', function () {
         window.vpc.settingsSet('simulDownload', this.checked);
         warnToast(this.checked ? '已开启边下边播（下次起播生效）' : '已关闭边下边播');
+    });
+    // 自动加载弹幕：仅持久化，播放时 player.js 读取（下次起播生效）
+    $('#set_danmaku').on('change', function () {
+        window.vpc.settingsSet('danmakuEnable', this.checked);
+        warnToast(this.checked ? '已开启自动加载弹幕（下次起播生效）' : '已关闭自动加载弹幕');
     });
     // m3u8 广告过滤：仅持久化，addHls 时主进程读取（下一个任务生效）
     $('#set_hls_adfilter').on('change', function () {
@@ -990,6 +1203,12 @@ function initSettingsPanel() {
         window.vpc.settingsSet('animEnabled', on);
         applySkin({ animEnabled: on });
     });
+    // 毛玻璃效果开关：卡片/面板背景启用 backdrop-filter 模糊，透出下层内容
+    $('#set_glass').on('change', function () {
+        const on = this.checked;
+        window.vpc.settingsSet('glass', on);
+        applySkin({ glass: on });
+    });
     // 每页影片数量（T39：首页/搜索/收藏/历史各自持久化，作废渲染层缓存，下次进列表页生效）
     [['#set_pagesize_home', 'pageSizeHome'], ['#set_pagesize_search', 'pageSizeSearch'],
      ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory'],
@@ -1022,15 +1241,54 @@ function initSettingsPanel() {
     $('#set_catvod_bgm_match').on('change', function () {
         window.vpc.settingsSet('catvodBgmMatch', this.checked);
     });
-    // 网络代理：保存并应用（重启后端使 Python requests 生效）
+    // 网络代理：保存并应用（先连通性测试，通过才启用 —— 仿 Kazumi proxyConfigured 门；重启后端使 Python requests 生效）
     $('#set_proxy_save').on('click', async () => {
         const url = $('#set_proxy_url').val().trim();
         const enable = $('#set_proxy_enable').prop('checked');
         if (enable && !url) { warnToast('请填写代理地址'); return; }
+        if (enable) {
+            // 开启前先走连通性测试：失败则不启用（避免保存一个不可用代理，与 Kazumi 一致）
+            const testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
+            $('#set_proxy_test_result').text('测试中…').css('color', 'var(--md-on-surface-variant)');
+            let r;
+            try { r = await window.vpc.testProxy({ proxyUrl: url, url: testUrl }); } catch (e) { r = null; }
+            if (!r || !r.ok) {
+                $('#set_proxy_test_result').text('启用失败：' + ((r && r.reason) || '连通性测试未通过')).css('color', 'var(--md-error)');
+                $('#set_proxy_enable').prop('checked', false);
+                warnToast('代理连通性测试未通过，未启用');
+                return;
+            }
+            $('#set_proxy_test_result').text(`✓ 连通 · ${r.elapsedMs}ms`).css('color', 'var(--md-primary)');
+        }
         try {
             const r = await window.vpc.setProxy({ url, enable });
-            warnToast(r && r.ok ? '代理已保存并应用（后端已重启）' : '保存失败');
+            warnToast(r && r.ok ? '代理已保存并应用（后端已重启）' : (r && r.reason ? `保存失败：${r.reason}` : '保存失败'));
         } catch (e) { warnToast('保存失败'); }
+    });
+    // 代理连通性测试：用「代理地址」走一次 HEAD；结果就地显示并记测试 URL
+    $('#set_proxy_test').on('click', async () => {
+        const proxyUrl = $('#set_proxy_url').val().trim();
+        let testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
+        if (!proxyUrl) { warnToast('请先填写代理地址'); return; }
+        $('#set_proxy_test_result').text('测试中…');
+        window.vpc.settingsSet('proxyTestUrl', testUrl);
+        try {
+            const r = await window.vpc.testProxy({ proxyUrl, url: testUrl });
+            if (r && r.ok) {
+                const sc = r.statusCode || 0;
+                const via = r.viaSocks ? 'SOCKS5 隧道' : (r.viaTunnel ? 'HTTPS 隧道' : 'HTTP 转发');
+                // 任何 2xx/3xx（含 302 跳转）都说明代理链路可用（代理已把请求转发出去并拿到响应）
+                const okConn = sc >= 200 && sc < 400;
+                const statusDesc = sc === 204 ? '204 无内容' : sc === 302 ? '302 跳转' : `HTTP ${sc}`;
+                const head = `${okConn ? '✓ 连通' : '⚠ 返回 ' + sc} · ${r.elapsedMs}ms`;
+                const detail = `${r.proxy || '代理'} → ${r.testHost || testUrl}（${via}，${statusDesc}）`;
+                $('#set_proxy_test_result').text(`${head}\n${detail}`).css('color', okConn ? 'var(--md-primary)' : 'var(--md-error)').attr('title', detail);
+            } else {
+                $('#set_proxy_test_result').text(`✗ 未连通（${(r && r.proxy) || '代理'}）\n${(r && r.reason) || '未知原因'}`).css('color', 'var(--md-error)');
+            }
+        } catch (e) {
+            $('#set_proxy_test_result').text('测试请求失败').css('color', 'var(--md-error)');
+        }
     });
     // 隐身模式（不记历史）
     $('#set_incognito').on('change', function () {
@@ -1040,48 +1298,17 @@ function initSettingsPanel() {
     });
     // 缓存位置：选目录 → 确认后重启后端生效
     $('#cache_dir_pick').on('click', pickCacheDir);
-    // mpv 视频缓冲缓存模式：切内存自动清硬盘缓存；切磁盘沿用已记忆目录（下次起播生效）
-    $('#set_cache_mode').on('change', async function () {
-        const mode = this.value === 'disk' ? 'disk' : 'memory';
-        let r;
-        try { r = await window.vpc.setPlayerCache(mode, ''); } catch (e) { r = null; }
-        if (r && r.ok) {
-            refreshMpvCacheDirLine(r.dir);
-            warnToast(r.cleanedBytes > 0
-                ? (mode === 'memory' ? `已切换为内存缓冲，清理硬盘缓存 ${fmtSize(r.cleanedBytes)}` : `已切换为硬盘缓冲，清理旧缓存 ${fmtSize(r.cleanedBytes)}`)
-                : (mode === 'memory' ? '已切换为内存缓冲（下次起播生效）' : '已切换为硬盘缓冲（下次起播生效）'));
-        } else {
-            warnToast('切换失败：' + ((r && r.reason) || '未知错误'));
-        }
-    });
-    // 更换 mpv 硬盘缓存目录：选目录 → 确认 → 提交（旧目录残留自动清理）
-    $('#set_cache_dir_pick').on('click', async () => {
-        let r;
-        try { r = await window.vpc.pickFolder(); } catch (e) { return; }
-        if (!r || !r.ok) return; // 取消静默
-        const dir = r.path;
-        if (!await confirmDialog(`将 mpv 硬盘缓存目录改为：\n${dir}\n\n原目录残留的 mpv 缓存会被清理（新目录内容不受影响）。继续？`)) return;
-        const r2 = await window.vpc.setPlayerCache('disk', dir);
-        if (r2 && r2.ok) {
-            $('#set_cache_mode').val('disk');
-            refreshMpvCacheDirLine(r2.dir);
-            warnToast(r2.cleanedBytes > 0
-                ? `已更换缓存目录，清理旧缓存 ${fmtSize(r2.cleanedBytes)}（下次起播生效）`
-                : '已更换缓存目录（下次起播生效）');
-        } else {
-            warnToast('更换失败：' + ((r2 && r2.reason) || '未知错误'));
-        }
-    });
-    // 清空 mpv 硬盘缓存（不改变模式/目录；占用中的文件跳过）
-    $('#set_cache_clear').on('click', async () => {
-        if (!await confirmDialog('将清空 mpv 硬盘缓存目录中的缓存文件。\n正在播放中的缓存文件可能被跳过。继续？')) return;
-        let r;
-        try { r = await window.vpc.clearPlayerCache(); } catch (e) { r = null; }
-        if (r && r.ok) {
-            warnToast(r.cleanedBytes > 0 ? `硬盘缓存已清空，释放 ${fmtSize(r.cleanedBytes)}` : '硬盘缓存目录已是空的');
-        } else {
-            warnToast('清理失败：' + ((r && r.reason) || '未知错误'));
-        }
+    // 缓存位置：恢复默认
+    $('#cache_dir_reset').on('click', async () => {
+        try {
+            const r = await window.vpc.pickCacheDir('__default__');
+            if (r && r.ok) {
+                $('#cache_dir_line').text('缓存位置：默认');
+                warnToast('已恢复默认缓存位置（后端已重启）');
+            } else if (r && r.reason && r.reason !== 'cancelled') {
+                warnToast(`恢复失败：${r.reason}`);
+            }
+        } catch (e) { warnToast('恢复失败'); }
     });
     // 下载目录：主进程弹目录选择框，持久化并重启下载引擎
     $('#set_dl_dir_pick').on('click', async () => {
@@ -1125,6 +1352,13 @@ function initSettingsPanel() {
     });
     $('#set_wallpaper').on('click', chooseWallpaper);
     $('#clear_wallpaper').on('click', clearWallpaper);
+    // 网盘 Cookie（JAR 网盘源播放）
+    initPanCookiePanel();
+    // 系统标题栏开关：保存设置后提示重启
+    $('#set_system_titlebar').on('change', async function () {
+        await window.vpc.settingsSet('systemTitleBar', this.checked);
+        warnToast(this.checked ? '已开启系统标题栏，重启后生效' : '已关闭系统标题栏（无边框模式），重启后生效');
+    });
     // 屏蔽源：查看列表（key 映射为可读源名，取不到时回退 key）
     $('#blocked_view').on('click', async () => {
         try {
@@ -1145,6 +1379,7 @@ function initSettingsPanel() {
     });
     // 屏蔽源：恢复并重新探测
     $('#blocked_restore').on('click', async () => {
+        if (!await confirmDialog('确定恢复全部被屏蔽的源？恢复后这些源会重新加入源列表，并触发一次重新探测。', { okText: '恢复' })) return;
         try {
             await window.vpc.settingsSet('blockedSites', []);
             await window.vpc.settingsSet('probedSites', []);
@@ -1155,26 +1390,27 @@ function initSettingsPanel() {
     });
     $('#cache_clear').on('click', clearCache);
     refreshCacheSize();
-    // 资产就绪状态（ffmpeg / mpv / aria2 / Anime4K）
-    refreshAssetStatus();
-    $('#asset-refresh').on('click', refreshAssetStatus);
-    // 自定义 mpv 播放器路径：选择本地安装的 mpv.exe 替代内置版本
-    refreshMpvPathLine();
-    $('#pick_mpv_path').on('click', async () => {
-        const r = await window.vpc.pickMpv();
+    // 资产就绪状态（ffmpeg / mpv / aria2 / Anime4K），启动时静默加载不弹通知
+    refreshAssetStatus(true);
+    $('#asset-refresh').on('click', () => refreshAssetStatus(false));
+    // 统一播放器指定：mpv → 内置全功能；VLC/PotPlayer → 作为主播放器（无 mpv 也能播）
+    refreshPlayerLine();
+    $('#pick_player').on('click', async () => {
+        const r = await window.vpc.pickPlayer();
         if (r && r.ok) {
-            warnToast(`已指定 mpv: ${r.path.slice(-40)}`);
-            refreshMpvPathLine();
+            if (r.mode === 'internal-mpv') warnToast('已指定 mpv（内置全功能：弹幕/连播/统计）');
+            else warnToast(`已指定 ${r.kind || '外部'} 播放器作主播放器（无弹幕/连播/统计）`);
+            refreshPlayerLine();
             refreshAssetStatus();
         } else if (r && r.reason !== 'cancelled') {
             warnToast('指定失败：' + r.reason);
         }
     });
-    $('#clear_mpv_path').on('click', async () => {
-        const r = await window.vpc.clearMpvPath();
+    $('#clear_player').on('click', async () => {
+        const r = await window.vpc.clearPlayer();
         if (r && r.ok) {
-            warnToast(r.available ? '已恢复为自动发现 mpv' : '已清除自定义路径，但未检测到 mpv（请安装或重新指定）');
-            refreshMpvPathLine();
+            warnToast(r.available ? '已恢复为自动发现 mpv' : '已恢复默认，但未检测到 mpv（可点「下载内置播放器」或重新指定）');
+            refreshPlayerLine();
             refreshAssetStatus();
         }
     });
@@ -1188,12 +1424,12 @@ function initSettingsPanel() {
             const r = await window.vpc.downloadMpv();
             if (r && r.ok) {
                 warnToast(r.already ? '内置播放器已就绪' : '内置播放器安装完成，现在可以播放视频了');
-                refreshMpvPathLine();
+                refreshPlayerLine();
                 refreshAssetStatus();
             } else if (r && r.reason === 'downloading') {
                 warnToast('下载已在进行中，请稍候…');
             } else {
-                warnToast('下载失败：' + ((r && r.reason) || '未知错误') + '（可改用「指定播放器路径」选择本机 mpv.exe）');
+                warnToast('下载失败：' + ((r && r.reason) || '未知错误') + '（可改用「指定播放器」选择本机 mpv.exe，或指定 VLC/PotPlayer 作主播放器）');
             }
         } catch (e) {
             warnToast('下载失败：' + (e.message || '未知错误'));
@@ -1203,9 +1439,9 @@ function initSettingsPanel() {
     });
     // mpv 异步启动失败（安装时取消内置播放器后文件缺失、损坏、无权限）：友好提示而非静默
     window.vpc.onPlayerSpawnError(() => {
-        warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或点「下载内置播放器」');
+        warnToast('未检测到播放器，请在 设置 → 组件状态 指定 mpv.exe，或点「下载内置播放器」');
         refreshAssetStatus();
-        refreshMpvPathLine();
+        refreshPlayerLine();
     });
     // 局域网推送到达 → 提示（mpv 已由主进程直接接管播放）
     window.vpc.onPushReceived((info) => {
@@ -1251,8 +1487,36 @@ function initSettingsPanel() {
             await loadLogPage();
         } catch (e) { warnToast('清空日志失败'); }
     });
+    // 日志级别：立即生效并持久化（DEBUG 会显著增加磁盘写入，提示用户）
+    $('#set_log_level').on('change', async function () {
+        const level = String(this.value || 'INFO').toUpperCase();
+        try {
+            const r = await window.vpc.setLogLevel(level);
+            warnToast(`日志级别已设为 ${(r && r.level) || level}（新日志立即按此级别过滤）`);
+        } catch (e) { warnToast('保存日志级别失败'); }
+    });
+    // 定时清空日志开关 + 周期：立即生效并持久化
+    $('#set_log_autocleanup').on('change', async function () {
+        const enabled = this.checked;
+        let days = parseInt($('#set_log_cleanup_days').val(), 10) || 0;
+        if (enabled && days <= 0) { days = 7; $('#set_log_cleanup_days').val('7'); }
+        try {
+            await window.vpc.setLogCleanup({ enabled, days });
+            warnToast(enabled ? `已开启定时清空日志（每 ${days} 天一次）` : '已关闭定时清空日志');
+        } catch (e) { warnToast('保存定时清空设置失败'); }
+    });
+    $('#set_log_cleanup_days').on('change', async function () {
+        let days = Math.max(1, Math.min(90, parseInt(this.value, 10) || 7));
+        this.value = String(days);
+        const enabled = $('#set_log_autocleanup').prop('checked');
+        try {
+            await window.vpc.setLogCleanup({ enabled, days });
+            if (enabled) warnToast(`清理周期已设为 ${days} 天`);
+        } catch (e) { warnToast('保存清理周期失败'); }
+    });
     async function loadLogPage() {
-        $('#log-viewer-body').html('<div class="tip-line">载入中…</div>');
+        // 切换来源/翻页不先清空，避免闪一次「载入中…」空白（仅首次为空时占位）
+        if (!$('#log-viewer-body .log-line').length) $('#log-viewer-body').html('<div class="tip-line">载入中…</div>');
         try {
             const r = await window.vpc.getLogs(_logPage, 50, _logSource);
             if (!r || !r.ok) { $('#log-viewer-body').html('<div class="tip-line">无日志</div>'); return; }
@@ -1270,7 +1534,7 @@ function initSettingsPanel() {
                 sel.val(_logSource);
             }
             $('#log-page-info').text(`第 ${_logPage} / ${pages} 页 · 共 ${total} 行`);
-            const html = (r.logs || []).map(l => `<div style="border-bottom:1px solid var(--md-outline-variant);padding:2px 4px;"><span style="color:var(--md-on-surface-variant)">[${l.file}]</span> ${escHtml(l.line)}</div>`).join('');
+            const html = (r.logs || []).map(l => `<div class="log-line"><span class="log-line-file">[${escHtml(l.file)}]</span><span class="log-line-text">${escHtml(l.line)}</span></div>`).join('');
             $('#log-viewer-body').html(html || '<div class="tip-line">无日志</div>');
         } catch (e) { $('#log-viewer-body').html('<div class="tip-line">日志载入失败</div>'); }
     }
@@ -1308,8 +1572,10 @@ async function playDirectLink() {
     // rtmp/rtsp 与媒体直链无需解析
     if (/^(rtmp:|rtsp:)/i.test(url) || /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i.test(url.split('?')[0])) {
         const r = await window.vpc.playUrl(url, { title: '直链播放' });
-        if (r && r.ok) { regSession(r); warnToast('已在 mpv 窗口播放'); }
-        else warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
+        if (r && r.ok) {
+            if (r.viaExternal) warnToast('已交外部播放器播放');
+            else { regSession(r); warnToast('已在 mpv 窗口播放'); }
+        } else warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
         return;
     }
     showLoading();
@@ -1325,7 +1591,11 @@ async function playDirectLink() {
     hideLoading();
     if (resolved && resolved.ok) {
         const r = await window.vpc.playUrl(resolved.url, { title: '直链播放', header: resolved.header });
-        if (r && r.ok) { regSession(r); warnToast('已在 mpv 窗口播放'); return; }
+        if (r && r.ok) {
+            if (r.viaExternal) warnToast('已交外部播放器播放');
+            else { regSession(r); warnToast('已在 mpv 窗口播放'); }
+            return;
+        }
     }
     warnToast('未能解析该链接，请确认链接有效');
 }
@@ -1355,13 +1625,6 @@ function refreshCacheDirLine(dir) {
     const el = $('#cache_dir_line');
     if (dir) el.text(`缓存位置：${dir}`).attr('title', dir);
     else el.text('缓存位置：默认（用户目录下 .video-pc）').attr('title', '');
-}
-
-/** mpv 硬盘缓存目录展示行（未设置时显示默认路径）。 */
-function refreshMpvCacheDirLine(dir) {
-    const el = $('#mpv_cache_dir_line');
-    if (dir) el.text(`mpv 缓存目录：${dir}`).attr('title', dir);
-    else el.text('mpv 缓存目录：默认（用户目录下 mpv-cache）').attr('title', '');
 }
 
 /** 下载目录展示行（设置页「下载」卡片）。 */
@@ -1400,11 +1663,16 @@ function updateBlockedLine(s) {
 
 /** 资产就绪状态：查询主进程各二进制（ffmpeg/mpv/aria2/Anime4K）是否有
  *  效，渲染为就绪/下载中/缺失图标行。首次进入设置页自动刷新，也可手动刷新。 */
-async function refreshAssetStatus() {
-    const box = $('#asset-status-list').html('<div class="tip-line">查询中…</div>');
+async function refreshAssetStatus(silent) {
+    const box = $('#asset-status-list');
+    // 不立即清空旧内容，避免刷新时闪烁；仅在无内容时显示查询中
+    if (!box.children().length) box.html('<div class="tip-line">查询中…</div>');
     let status;
-    try { status = await window.vpc.assetStatus(); } catch (e) {
+    try {
+        status = await window.vpc.assetStatus();
+    } catch (e) {
         box.html('<div class="tip-line" style="color:var(--md-error)">查询失败</div>');
+        warnToast('扩展状态查询失败');
         return;
     }
     if (!status) { box.html('<div class="tip-line">暂无扩展信息</div>'); return; }
@@ -1414,6 +1682,7 @@ async function refreshAssetStatus() {
         { key: 'mpv', label: 'mpv 播放器（视频播放引擎）', s: status.mpv },
         { key: 'aria2', label: 'aria2 下载引擎（多线程下载）', s: status.aria2 },
         { key: 'anime4k', label: 'Anime4K 着色器（动漫实时超分）', s: status.anime4k },
+        { key: 'java', label: 'Java 运行环境（JAR 影视源解析引擎）', s: status.java || {} },
     ];
     const rows = items.map(({ key, label, s }) => {
         let icon, cls, hint;
@@ -1432,30 +1701,47 @@ async function refreshAssetStatus() {
             <span class="asset-hint">${escHtml(hint)}</span>
         </div>`;
     }).join('');
-    box.html(rows);
+box.html(rows);
+    // 手动点击刷新时弹出消息通知；启动初始化（silent=true）静默跳过
+    if (!silent) {
+        const summary = items.map(({ label, s }) => {
+            const name = label.replace(/（.*）$/, '');
+            if (s.ready) return `${name} ✔`;
+            if (s.downloading) return `${name} ⏳`;
+            return `${name} ✘`;
+        }).join('、');
+        warnToast(`扩展状态已刷新：${summary}`);
+    }
     // 播放器缺失时高亮「下载内置播放器」按钮，就绪则隐藏（避免误导用户重复下载）
     const dlBtn = $('#download_mpv');
     if (status.mpv && status.mpv.ready) dlBtn.hide();
     else dlBtn.show();
 }
 
-/** 自定义 mpv 路径显示行：自动发现 vs 手动指定。 */
-async function refreshMpvPathLine() {
-    const line = $('#mpv_path_line');
-    const clearBtn = $('#clear_mpv_path');
+/** 播放器状态行：统一显示内置 mpv 与外部播放器配置。HTML 已含「播放器：」前缀，此处只填值。 */
+async function refreshPlayerLine() {
+    const line = $('#player_line');
+    const clearBtn = $('#clear_player');
+    if (!line.length) return;
+    const kindLabel = { vlc: 'VLC', potplayer: 'PotPlayer', mpv: 'mpv', other: '其他' };
     try {
-        const info = await window.vpc.mpvPath();
-        if (info.customPath) {
-            line.text(`mpv 路径：${info.customPath}`);
-            line.attr('title', info.customPath);
+        const cfg = await window.vpc.playerConfig();
+        if (cfg.mode === 'external') {
+            const label = kindLabel[cfg.kind] || '外部';
+            line.text(`${label} · ${cfg.path}（外部模式，无弹幕/连播/统计）`);
+            line.attr('title', cfg.path);
+            clearBtn.show();
+        } else if (cfg.path) {
+            line.text(`mpv · ${cfg.path}（内置全功能）`);
+            line.attr('title', cfg.path);
             clearBtn.show();
         } else {
-            line.text(info.available ? 'mpv 路径：自动发现（内置 / PATH）' : 'mpv 路径：未找到（请安装或指定路径）');
+            line.text(cfg.available ? 'mpv（内置自动发现，就绪）' : 'mpv（未找到，请安装或指定播放器）');
             line.removeAttr('title');
             clearBtn.hide();
         }
     } catch (e) {
-        line.text('mpv 路径：查询失败');
+        line.text('查询失败');
         clearBtn.hide();
     }
 }

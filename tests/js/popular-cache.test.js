@@ -56,7 +56,7 @@ function resetPop(ctx) {
 test('Popular.enter：命中本地缓存立即上屏并后台静默刷新', async () => {
     const ctx = loadPopular();
     const P = resetPop(ctx);
-    ctx.__ls.setItem('popular_cache', JSON.stringify({ items: [{ id: 'c1', name: '缓存番' }], total: 1 }));
+    ctx.__ls.setItem('popular::trends::v2', JSON.stringify({ items: [{ id: 'c1', name: '缓存番' }], total: 1 }));
     let trendsCalls = 0;
     ctx.doAction = async (action, kv, path) => {
         if (action === 'kazumiBangumiTrends') {
@@ -73,7 +73,7 @@ test('Popular.enter：命中本地缓存立即上屏并后台静默刷新', asyn
     await p;
     assert.equal(trendsCalls, 1, '后台静默刷新拉取 trends');
     assert.equal(P._items[0].id, 'n1', '刷新后更新为新数据');
-    const cached = JSON.parse(ctx.__ls.getItem('popular_cache'));
+    const cached = JSON.parse(ctx.__ls.getItem('popular::trends::v2'));
     assert.equal(cached.items[0].id, 'n1', '缓存同步更新');
 });
 
@@ -91,7 +91,7 @@ test('Popular.enter：无缓存时等待网络加载并写缓存', async () => {
     await P.enter();
     assert.equal(trendsCalls, 1);
     assert.equal(P._items[0].id, 'n1');
-    const cached = JSON.parse(ctx.__ls.getItem('popular_cache'));
+    const cached = JSON.parse(ctx.__ls.getItem('popular::trends::v2'));
     assert.equal(cached.items[0].id, 'n1', '热门番组加载后写缓存');
 });
 
@@ -126,8 +126,8 @@ test('Popular：标签视图不覆盖热门番组缓存，热门番组才写缓�
     P._items = [{ id: 't1', name: '标签番' }];
     P._total = 1;
     P._saveCache();
-    assert.equal(ctx.__ls.getItem('popular_cache'), null, '标签视图不写缓存');
+    assert.equal(ctx.__ls.getItem('popular::trends::v2'), null, '标签视图不写缓存');
     P._tag = '';
     P._saveCache();
-    assert.ok(ctx.__ls.getItem('popular_cache'), '热门番组写缓存');
+    assert.ok(ctx.__ls.getItem('popular::trends::v2'), '热门番组写缓存');
 });

@@ -586,3 +586,90 @@ test('持久化：损坏数据按空处理（重新探测）', () => {
     H._loadPersistedEmptyClasses();
     assert.equal(H._emptyCls.s || undefined, undefined, '损坏数据忽略');
 });
+
+// ---------------------------------------------------------------- 源搜索分页器（T## 页码无限增长修复）
+
+/** 搜索态测试环境：可注入搜索词与 doAction，渲染方法桩掉。 */
+function searchEnv(doActionImpl) {
+    const ctx = loadHome();
+    const H = home(ctx);
+    let word = '';
+    ctx.$ = (sel) => ({
+        on() { return this; }, off() { return this; }, empty() { return this; },
+        html() {}, val() { return word; }, removeClass() { return this; },
+    });
+    H.renderGrid = () => {};
+    H.renderPager = () => {};
+    ctx.doAction = doActionImpl;
+    ctx.__setWord = (w) => { word = w; };
+    return ctx;
+}
+
+test('searchCurrent：源返回 pagecount 时直接采用（不叠加增长）', async () => {
+    const ctx = searchEnv(async () => ({ pagecount: 9, list: makeItems('x-', 20) }));
+    const H = ctx.__Home;
+    ctx.__setWord('海贼王');
+    await H.searchCurrent(1);
+    assert.equal(H.pagecount, 9, 'pagecount 有效则直接用源值');
+    await H.searchCurrent(2);
+    assert.equal(H.pagecount, 9, '翻页后仍用源值，不因 Math.max 增长');
+});
+
+test('searchCurrent：伪分页源（每页同一批结果、无 pagecount）页码不无限增长', async () => {
+    const ctx = searchEnv(async () => ({ list: makeItems('same-', 20) }));
+    const H = ctx.__Home;
+    ctx.__setWord('海贼王');
+    await H.searchCurrent(1);
+    assert.equal(H.pagecount, 2, '第一页有新条目：允试下一页');
+    await H.searchCurrent(2);
+    assert.equal(H.pagecount, 2, '第二页全是重复：页码停止增长');
+    await H.searchCurrent(3);
+    await H.searchCurrent(4);
+    assert.equal(H.pagecount, 2, '继续翻页页码保持 2，不再无限增加');
+});
+
+test('searchCurrent：真实分页源无 pagecount 但每页有新条目 → 页码随内容增长', async () => {
+    const ctx = searchEnv(async (a, kv) => ({ list: makeItems('p' + kv.pg + '-', 20) }));
+    const H = ctx.__Home;
+    ctx.__setWord('海贼王');
+    await H.searchCurrent(1);
+    assert.equal(H.pagecount, 2);
+    await H.searchCurrent(2);
+    assert.equal(H.pagecount, 3, '每页都有新内容时仍允许继续翻页');
+    await H.searchCurrent(3);
+    assert.equal(H.pagecount, 4);
+    // 回看已访问页：全部重复 → 页码钉住不回缩
+    await H.searchCurrent(2);
+    assert.equal(H.pagecount, 4, '回看旧页页码不回缩');
+});
+
+test('searchCurrent：空结果页回退页码（max(1, page-1)）', async () => {
+    const ctx = searchEnv(async (a, kv) => (parseInt(kv.pg, 10) === 1 ? { list: makeItems('a-', 20) } : { list: [] }));
+    const H = ctx.__Home;
+    ctx.__setWord('海贼王');
+    await H.searchCurrent(1);
+    assert.equal(H.pagecount, 2);
+    await H.searchCurrent(2);
+    assert.equal(H.pagecount, 1, '第 2 页为空：页码回退到 1');
+});
+
+test('searchCurrent：换词/重搜重置已见记录与残留页码', async () => {
+    const ctx = searchEnv(async (a, kv) => ({ list: makeItems('a-', 20) }));
+    const H = ctx.__Home;
+    ctx.__setWord('海贼王');
+    await H.searchCurrent(1);
+    await H.searchCurrent(2); // 全部已见，页码停在 2
+    assert.equal(H.pagecount, 2);
+    // 模拟残留巨值 + 重新输入同一词搜索（从 home 模式进入 = 新一轮）
+    H.pagecount = 50;
+    H.mode = 'home';
+    await H.searchCurrent(1);
+    assert.equal(H.pagecount, 2, '重搜丢弃残留巨值，从新第一页重新推算');
+    assert.equal(H._searchSeen.key, 's|海贼王');
+    assert.equal(H._searchSeen.ids.size, 20, '重搜后已见记录重置');
+    // 换词同样重置
+    ctx.__setWord('另一部');
+    await H.searchCurrent(1);
+    assert.equal(H._searchSeen.key, 's|另一部', '换词按 site|word 隔离已见记录');
+    assert.equal(H._searchSeen.ids.size, 20);
+});

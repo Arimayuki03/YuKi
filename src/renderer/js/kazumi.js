@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -25,6 +25,13 @@ const Kazumi = {
         if (this._inited) return;
         this._inited = true;
         this._loadBgmMatchCache(); // 搜索页 Kazumi 结果封面缓存（name → Bangumi 匹配）
+        // 启动时按设置自动同步 Bangumi 收藏（开关默认关；后端就绪后异步执行，不阻塞首屏）
+        (async () => {
+            try {
+                const s = (await window.vpc.settingsGet()) || {};
+                if (s.bangumiAutoSyncOnStart === true) this.syncBangumiNow().catch(() => { /* 启动自动同步失败静默 */ });
+            } catch (e) { /* 读设置失败不阻塞 */ }
+        })();
         $('#kazumi_bgm_cover_clear').on('click', () => this.clearBangumiCoverCache());
         $('#kazumi_rule_add').on('click', () => this.importRule());
         $('#kazumi_rule_paste').on('click', () => this.importFromClipboard());
@@ -33,6 +40,11 @@ const Kazumi = {
         $('#kazumi_rule_editor').on('click', () => this.openEditorDialog());
         $('#kazumi_rule_check').on('click', () => this.checkValidity());
         $('#kazumi_rule_update').on('click', () => this.batchUpdate());
+        // 启动时自动检查规则更新（开关默认关）
+        $('#set_kazumi_autoupdate').on('change', function () {
+            window.vpc.settingsSet('kazumiAutoUpdateOnStart', this.checked);
+            warnToast(this.checked ? '已开启启动时自动检查规则更新' : '已关闭启动时自动检查规则更新');
+        });
         $('#kazumi_cookie_view').on('click', () => this.viewCookies());
         $('#kazumi_cookie_clear').on('click', () => this.clearCookies());
         // Bangumi 同步（需 token）
@@ -41,6 +53,27 @@ const Kazumi = {
         $('#bangumi_sync_now').on('click', () => this.syncBangumiNow());
         $('#bangumi_sync_priority').on('change', function () { window.vpc.settingsSet('bangumiSyncPriority', this.value); });
         $('#bangumi_immediate_toast').on('change', function () { window.vpc.settingsSet('bangumiImmediateSyncToastEnable', this.checked); });
+        // Bangumi 自动同步开关：收藏状态变动 / 启动时
+        $('#set_bangumi_autosync_status').on('change', function () {
+            window.vpc.settingsSet('bangumiAutoSyncStatus', this.checked);
+            warnToast(this.checked ? '已开启收藏状态自动同步到 Bangumi' : '已关闭收藏状态自动同步');
+        });
+        $('#set_bangumi_autosync_on_start').on('change', function () {
+            window.vpc.settingsSet('bangumiAutoSyncOnStart', this.checked);
+            warnToast(this.checked ? '已开启启动时自动同步 Bangumi 收藏' : '已关闭启动时自动同步');
+        });
+        // 弹幕（弹弹 play）凭据：回填 + 保存（保存后主进程重启后端注入环境变量）
+        this._prefillDandan();
+        $('#set_dandan_save').on('click', async () => {
+            const appid = $('#set_dandan_appid').val().trim();
+            const secret = $('#set_dandan_secret').val().trim();
+            await window.vpc.settingsSet('dandanAppId', appid);
+            await window.vpc.settingsSet('dandanAppSecret', secret);
+            try {
+                if (window.vpc.setDandan) { await window.vpc.setDandan({ appid, secret }); warnToast('弹幕凭据已保存，后端重启中…'); }
+                else warnToast('弹幕凭据已保存');
+            } catch (e) { warnToast('保存失败'); }
+        });
         // 选源弹窗关闭时清理 SSE 流与状态（T74：避免关闭后连接挂到 done）
         $('#kazumiSourceDialog').on('click', '.md-dialog-btn', () => {
             this._closeDlgStream();
@@ -48,12 +81,15 @@ const Kazumi = {
         });
         // T71：详情页图片点击放大（复用 detail.js cover-float 全屏浮层，滚轮缩放）
         $('#detail-body').on('click', 'img', (e) => {
+            // 角色卡头像点击应打开人物详情（由 detail.js 处理），不触发封面放大
+            if ($(e.currentTarget).closest('.detail-char-card').length) return;
             const src = $(e.currentTarget).attr('src');
             if (src && typeof Detail !== 'undefined' && Detail._openCoverFloat) Detail._openCoverFloat(src);
         });
         this._prefillBangumiToken();
         this._prefillWebdav();
         this._prefillMirror();
+        this._prefillKazumiAutoUpdate();
         // 镜像开关（4.1）：变更即应用并持久化
         $('#set_bangumi_mirror').on('change', function () {
             const on = this.checked;
@@ -524,6 +560,17 @@ const Kazumi = {
             const s = (await window.vpc.settingsGet()) || {};
             if (s.bangumiSyncPriority !== undefined && s.bangumiSyncPriority !== null) $('#bangumi_sync_priority').val(String(s.bangumiSyncPriority));
             $('#bangumi_immediate_toast').prop('checked', s.bangumiImmediateSyncToastEnable !== false);
+            $('#set_bangumi_autosync_status').prop('checked', s.bangumiAutoSyncStatus === true);
+            $('#set_bangumi_autosync_on_start').prop('checked', s.bangumiAutoSyncOnStart === true);
+        } catch (e) { /* 读取失败不阻塞 */ }
+    },
+
+    /** 回填弹弹 play 弹幕凭据到设置页。 */
+    async _prefillDandan() {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            if (s.dandanAppId) $('#set_dandan_appid').val(s.dandanAppId);
+            if (s.dandanAppSecret) $('#set_dandan_secret').val(s.dandanAppSecret);
         } catch (e) { /* 读取失败不阻塞 */ }
     },
 
@@ -551,6 +598,25 @@ const Kazumi = {
                     bangumi: s.enableBangumiProxy ? '1' : '0',
                     git: s.enableGitProxy ? '1' : '0',
                 }, '/kazumi/action').catch(() => { });
+            }
+        } catch (e) { /* 读取失败不阻塞 */ }
+    },
+
+    /** 回填启动时自动检查规则更新开关，并在开启时启动一次后台批量更新。 */
+    async _prefillKazumiAutoUpdate() {
+        try {
+            const s = (await window.vpc.settingsGet()) || {};
+            $('#set_kazumi_autoupdate').prop('checked', s.kazumiAutoUpdateOnStart === true);
+            // 启动时自动检查更新（开关开启 + 本次会话尚未执行过）
+            if (s.kazumiAutoUpdateOnStart === true && !this._autoUpdateStarted) {
+                this._autoUpdateStarted = true;
+                // 静默触发批量更新：不弹确认框，直接后台拉取并更新
+                doAction('kazumiBatchUpdate', {}, '/kazumi/action').then((rsp) => {
+                    if (!rsp || !rsp.started) return; // 已有任务在跑则跳过
+                    this._pollTask('kazumiUpdateStatus', () => {
+                        this.refreshRuleList();
+                    }, '启动检查更新');
+                }).catch(() => { /* 启动检查失败静默 */ });
             }
         } catch (e) { /* 读取失败不阻塞 */ }
     },
@@ -621,20 +687,40 @@ const Kazumi = {
     },
 
     /**
+     * 收藏状态变动自动同步（单条，后台静默）：
+     * 由 Records.toggleFavorite / Records.setFavTag 在开关「收藏状态变动自动同步」开启时调用。
+     * 思路与 uploadFavoritesToBangumi 单条一致：拿 bangumiId 或按片名匹配 → setBangumiCollection。
+     * @param {object} f 收藏项 {tag, name, bangumiId, site, ...}
+     */
+    async _autoSyncFavItem(f) {
+        if (!f || f.site === 'bangumi' || !f.name) return;
+        const token = await this._getBangumiToken();
+        if (!token) return; // 无 Token 静默跳过（设置页有显式提示）
+        const type = this._favTagToBangumiType[f.tag || 'want'] || 1;
+        let subjectId = Number(f.bangumiId) || 0;
+        if (!subjectId) {
+            const m = await this.getBangumiMatch(f.name);
+            subjectId = (m && Number(m.id)) || 0;
+        }
+        if (!subjectId) return; // 匹配不到 Bangumi subject，静默跳过
+        await this.setBangumiCollection(subjectId, type);
+    },
+
+    /**
      * 批量把聚合源/本地收藏单向上传到 Bangumi 账号（仅新增/更新，绝不删除）。
      *
-     * 取 favorites 中 site !== 'bangumi' 的项，逐条串行上传：
-     *   1. subject id 优先取已回写的 bangumiId，否则按片名取首个 Bangumi 匹配（getBangumiMatch）；
-     *   2. tag 经 _favTagToBangumiType 映射为 Bangumi 收藏类型（1-5），无 tag 视同「想看」；
-     *   3. 调 setBangumiCollection 幂等 set（不读远端集合——远端硬上限 100 无分页，>100 会截断，
-     *      按本地 tag 直接 set 更稳；也天然避免误判「已存在」）；
-     *   4. 解析到的 id 回写该收藏项 bangumiId，重复同步不再重算匹配。
+     * 任务六 6.1（Kazumi 同步管线）：
+     *   1. 渲染端先把每条本地收藏解析出 Bangumi subjectId（优先 bangumiId，否则按片名 getBangumiMatch）
+     *      与收藏类型（_favTagToBangumiType 1-5）、ts；无法解析 id 的计入 skipped；
+     *   2. 一次调 kazumiBangumiSync：后端分页拉远端【全量】收藏做三方合并，返回 plan
+     *      {upload,pull,conflict,skipped}——已同步一致 / 未改动的冲突在后端去重，天然增量；
+     *   3. 调 kazumiBangumiSyncApply：后端 ThreadPoolExecutor(max_workers=3) + 250ms/请求 限速并发上传；
+     *   4. 解析到的 id 统一回写各收藏项 bangumiId，重复同步免重算匹配。
      *
-     * 串行原因：后端每条 update 都会重置用户名缓存并最多尝试 8 种组合（plugin_manager.py:863-884），
-     * 无法在渲染端缓存用户名，故只能串行并接受延迟；大批量收藏会较慢，属预期。
-     * 单条失败（匹配不到 / set 失败 / 抛错）不中断整批。
+     * 相比旧串行逐条 set（每条重置用户名缓存 + 8 组合兜底），本管线：远端只拉一次、上传有界并发、
+     * 用户名只解析一次，大批量收藏显著提速。单条失败不中断整批。
      *
-     * @param onProgress 可选 (done, total) => void，用于 UI 进度展示。
+     * @param onProgress 可选 (done, total) => void，用于 UI 进度展示（契约不变）。
      * @returns {Promise<{uploaded:number, skipped:number, failed:number, total:number}|null>} 无 Token 返回 null。
      */
     async uploadFavoritesToBangumi(onProgress) {
@@ -644,36 +730,30 @@ const Kazumi = {
         try { favorites = await recGet('favorites'); } catch (e) { favorites = []; }
         const targets = (favorites || []).filter((f) => f && f.site !== 'bangumi' && f.name);
         const total = targets.length;
-        let uploaded = 0, skipped = 0, failed = 0;
-        const idWriteback = new Map(); // uid → bangumiId：结束后统一回写，避免逐条读写整表
-        this._bgmBatchActive = true;
-        try {
-            for (let i = 0; i < targets.length; i++) {
-                const f = targets[i];
-                try {
-                    const type = this._favTagToBangumiType[f.tag || 'want'] || 1;
-                    let subjectId = Number(f.bangumiId) || 0;
-                    if (!subjectId) {
-                        const m = await this.getBangumiMatch(f.name);
-                        subjectId = (m && Number(m.id)) || 0;
-                    }
-                    if (!subjectId) {
-                        skipped++; // 匹配不到 Bangumi subject，跳过
-                    } else if (await this.setBangumiCollection(subjectId, type)) {
-                        uploaded++;
-                        if (f.uid && String(f.bangumiId || '') !== String(subjectId)) idWriteback.set(f.uid, String(subjectId));
-                    } else {
-                        failed++;
-                    }
-                } catch (e) {
-                    failed++; // 单条异常不中断整批
+        if (!total) return { uploaded: 0, skipped: 0, failed: 0, total: 0 };
+        // 阶段 A：解析每条收藏的 subjectId + type（进度用于「匹配」阶段），无法匹配计 skipped
+        const localFavs = [];
+        const idWriteback = new Map(); // uid → bangumiId：结束后统一回写
+        let resolveSkipped = 0;
+        for (let i = 0; i < targets.length; i++) {
+            const f = targets[i];
+            try {
+                const type = this._favTagToBangumiType[f.tag || 'want'] || 1;
+                let subjectId = Number(f.bangumiId) || 0;
+                if (!subjectId) {
+                    const m = await this.getBangumiMatch(f.name);
+                    subjectId = (m && Number(m.id)) || 0;
                 }
-                if (typeof onProgress === 'function') { try { onProgress(i + 1, total); } catch (e) { /* 进度回调错误忽略 */ } }
-            }
-        } finally {
-            this._bgmBatchActive = false;
+                if (subjectId) {
+                    localFavs.push({ subjectId: String(subjectId), type, ts: Number(f.ts) || 0, name: f.name });
+                    if (f.uid && String(f.bangumiId || '') !== String(subjectId)) idWriteback.set(f.uid, String(subjectId));
+                } else {
+                    resolveSkipped++; // 匹配不到 Bangumi subject
+                }
+            } catch (e) { resolveSkipped++; }
+            if (typeof onProgress === 'function') { try { onProgress(i + 1, total); } catch (e) { /* ignore */ } }
         }
-        // 统一回写 bangumiId：重读最新收藏按 uid 匹配，避免覆盖同步期间的其他改动
+        // 统一回写 bangumiId（重读最新表按 uid 匹配，避免覆盖同步期间其他改动）
         if (idWriteback.size) {
             try {
                 const list = await recGet('favorites');
@@ -685,27 +765,69 @@ const Kazumi = {
                     }
                 });
                 if (changed) await recSet('favorites', list);
-            } catch (e) { /* 回写失败不影响上传结果 */ }
+            } catch (e) { /* 回写失败不影响上传 */ }
         }
-        return { uploaded, skipped, failed, total };
+        // 阶段 B：一次调后端生成三方合并计划（远端全量分页拉取在后端完成）
+        let plan = null;
+        try {
+            const rsp = await doAction('kazumiBangumiSync', {
+                token, favorites: JSON.stringify(localFavs), priority: 'local',
+            }, '/kazumi/action');
+            plan = (rsp && rsp.plan) || null;
+        } catch (e) { plan = null; }
+        if (!plan) return { uploaded: 0, skipped: resolveSkipped, failed: localFavs.length, total };
+        const uploads = plan.upload || [];
+        const planSkipped = Number(plan.skipped) || 0;
+        if (!uploads.length) {
+            return { uploaded: 0, skipped: resolveSkipped + planSkipped, failed: 0, total };
+        }
+        // 阶段 C：并发上传（后端 max_workers=3 + 限速）。进度切到「上传」阶段。
+        if (typeof onProgress === 'function') { try { onProgress(0, uploads.length); } catch (e) { /* ignore */ } }
+        let uploaded = 0, failed = 0;
+        try {
+            const rsp = await doAction('kazumiBangumiSyncApply', {
+                token, uploads: JSON.stringify(uploads),
+            }, '/kazumi/action');
+            const result = (rsp && rsp.result) || {};
+            uploaded = Number(result.uploaded) || 0;
+            failed = Number(result.failed) || 0;
+        } catch (e) { failed = uploads.length; }
+        if (typeof onProgress === 'function') { try { onProgress(uploads.length, uploads.length); } catch (e) { /* ignore */ } }
+        return { uploaded, skipped: resolveSkipped + planSkipped, failed, total };
     },
 
-    /** 立即同步：拉取 Bangumi 收藏并刷新「我的收藏」合并网格（复用 My 的缓存刷新）。 */
+    /** 立即同步：拉取 Bangumi 收藏并刷新「我的收藏」合并网格（复用 My 的缓存刷新）。
+     *  弹出进度对话框：先上传本地收藏（带 onProgress），再拉取远端，全过程可见进度。 */
     async syncBangumiNow() {
         const token = await this._getBangumiToken();
         if (!token) { warnToast('请先保存 Bangumi Token'); return; }
-        showLoading();
+        // 弹出进度对话框（仿 Kazumi _BangumiSyncProgressDialog）
+        if (typeof My !== 'undefined' && My._openSyncProgress) My._openSyncProgress();
+        else showLoading();
         try {
-            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100 }, '/kazumi/action');
+            // 阶段 1：上传本地可匹配收藏（带 onProgress 进度回调）
+            let up = null;
+            if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(0, 0, '上传本地收藏');
+            try {
+                up = await this.uploadFavoritesToBangumi((done, total) => {
+                    if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(done, total, '上传本地收藏');
+                });
+            } catch (e) { up = null; }
+            // 阶段 2：拉取 Bangumi 远端【全量】收藏（all=1 分页，>100 也完整）
+            if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(0, 0, '拉取 Bangumi 收藏');
+            const rsp = await doAction('kazumiBangumiCollections', { token, all: 1 }, '/kazumi/action');
             const n = ((rsp && rsp.items) || []).length;
-            hideLoading();
             if (typeof My !== 'undefined' && My) {
                 My._bgmCache = null;
                 if (My._favorites) await My._favorites.render();
             }
-            warnToast(`已同步 Bangumi 收藏（${n} 条）`);
+            if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
+            else hideLoading();
+            const upMsg = up ? `上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}` : '';
+            warnToast(`已同步 Bangumi 收藏（${n} 条）${upMsg ? '；' + upMsg : ''}`);
         } catch (e) {
-            hideLoading();
+            if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
+            else hideLoading();
             warnToast('同步失败');
         }
     },
@@ -878,10 +1000,12 @@ const Kazumi = {
     },
 
     /** 清空 Bangumi 匹配缓存（内存 + localStorage；设置页按钮，封面匹配错误时手动重置）。 */
-    clearBangumiCoverCache() {
+    async clearBangumiCoverCache() {
+        if (!await confirmDialog('确定清空 Bangumi 封面缓存？清空后需重新搜索才会重新拉取封面。', { okText: '清空' })) return;
         this._bgmMatchCache = new Map();
         this._bgmMatchInflight.clear();
         try { localStorage.removeItem('kazumi_bgm_cover'); } catch (e) { /* ignore */ }
+        warnToast('已清空 Bangumi 封面缓存，重新搜索即刷新');
     },
 
     /** 同步取已缓存 Bangumi 匹配（渲染/点击复用，避免重复搜索）；未命中或空匹配返回 null。 */
@@ -948,23 +1072,19 @@ const Kazumi = {
         this._saveBgmMatchCache();
     },
 
-    /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。 */
-    _bgmInfoCache: new Map(),
+    /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。
+     *  迁移到 localStorage 持久缓存（cache.js），重启仍即时上屏；纳入设置页「清理缓存」。 */
+    _bgmInfoCacheKey(subjectId) { return 'detail::bgminfo::v1::' + String(subjectId); },
     async bangumiInfo(subjectId) {
         const key = String(subjectId);
-        if (key) {
-            const hit = this._bgmInfoCache.get(key);
-            if (hit && Date.now() - hit.ts < 30 * 60 * 1000) return hit.info;
+        if (key && typeof localCacheGet === 'function') {
+            try { const hit = localCacheGet(this._bgmInfoCacheKey(key)); if (hit) return hit; } catch (e) { /* ignore */ }
         }
         try {
             const rsp = await doAction('kazumiBangumiInfo', { id: subjectId }, '/kazumi/action');
             const info = (rsp && rsp.info) || null;
-            if (info && key) {
-                this._bgmInfoCache.set(key, { ts: Date.now(), info });
-                if (this._bgmInfoCache.size > 100) { // 防无限增长，淘汰最旧
-                    const oldest = this._bgmInfoCache.keys().next().value;
-                    this._bgmInfoCache.delete(oldest);
-                }
+            if (info && key && typeof localCacheSet === 'function') {
+                try { localCacheSet(this._bgmInfoCacheKey(key), info, 30 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
             }
             return info;
         } catch (e) {
@@ -992,13 +1112,59 @@ const Kazumi = {
         }
     },
 
-    /** Bangumi 单个角色详情。 */
+    /** Bangumi 单个角色详情。localStorage 持久缓存（cache.js）30 分钟：角色详情浮层重复打开免重拉。 */
     async bangumiCharacter(characterId) {
+        const key = String(characterId);
+        if (key && typeof localCacheGet === 'function') {
+            try { const hit = localCacheGet('detail::char::v1::' + key); if (hit) return hit; } catch (e) { /* ignore */ }
+        }
         try {
             const rsp = await doAction('kazumiBangumiCharacter', { id: characterId }, '/kazumi/action');
-            return (rsp && rsp.info) || null;
+            const info = (rsp && rsp.info) || null;
+            if (info && key && typeof localCacheSet === 'function') {
+                try { localCacheSet('detail::char::v1::' + key, info, 30 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
+            }
+            return info;
         } catch (e) {
             return null;
+        }
+    },
+
+    /** Bangumi 番剧评论（吐槽）。归一化为数组：next.bgm /p1 返回 {data:[...],total} 或直接数组，
+     *  统一取 data；字段 {user:{nickname}, comment, updatedAt} → 保留原样交前端渲染。 */
+    async bangumiComments(subjectId, limit, offset) {
+        try {
+            const rsp = await doAction('kazumiBangumiComments', { id: subjectId, limit: limit || 20, offset: offset || 0 }, '/kazumi/action');
+            const c = (rsp && rsp.comments);
+            if (Array.isArray(c)) return c;
+            if (c && Array.isArray(c.data)) return c.data;
+            if (c && Array.isArray(c.list)) return c.list;
+            return [];
+        } catch (e) {
+            return [];
+        }
+    },
+
+    /** Bangumi 角色吐槽。归一化为数组（同 bangumiComments）；字段 {user:{nickname}, content, createdAt}。
+     *  localStorage 持久缓存（cache.js）30 分钟：角色详情浮层「吐槽」页签重复打开免重拉。 */
+    async bangumiCharacterComments(characterId) {
+        const key = String(characterId);
+        if (key && typeof localCacheGet === 'function') {
+            try { const hit = localCacheGet('detail::charcmt::v1::' + key); if (Array.isArray(hit)) return hit; } catch (e) { /* ignore */ }
+        }
+        try {
+            const rsp = await doAction('kazumiBangumiCharacterComments', { id: characterId }, '/kazumi/action');
+            const c = (rsp && rsp.comments);
+            let list = [];
+            if (Array.isArray(c)) list = c;
+            else if (c && Array.isArray(c.data)) list = c.data;
+            else if (c && Array.isArray(c.list)) list = c.list;
+            if (list.length && key && typeof localCacheSet === 'function') {
+                try { localCacheSet('detail::charcmt::v1::' + key, list, 30 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
+            }
+            return list;
+        } catch (e) {
+            return [];
         }
     },
 
@@ -1007,16 +1173,6 @@ const Kazumi = {
         try {
             const rsp = await doAction('kazumiBangumiStaff', { id: subjectId }, '/kazumi/action');
             return (rsp && rsp.staff) || [];
-        } catch (e) {
-            return [];
-        }
-    },
-
-    /** Bangumi 番剧评论。 */
-    async bangumiComments(subjectId, limit, offset) {
-        try {
-            const rsp = await doAction('kazumiBangumiComments', { id: subjectId, limit: limit || 20, offset: offset || 0 }, '/kazumi/action');
-            return (rsp && rsp.comments) || [];
         } catch (e) {
             return [];
         }
@@ -1043,10 +1199,14 @@ const Kazumi = {
      * @param site  来源标识（kazumi:规则名 或 CatVod site key）
      * @param src    Kazumi 搜索结果链接（kazumi: 前缀时作为默认选中，直接解析该源）
      */
-    async openSourceDialog(title, site, src) {
+    async openSourceDialog(title, site, src, opts) {
         if (!this.hasEnabledRules()) { warnToast('尚未启用任何 Kazumi 规则'); return; }
         const token = ++this._dlgToken;
-        $('#kazumi-dialog-title').text('选择播放源');
+        // 下载模式：从 Bangumi 分集多选下载而来，选定源+线路后按集号批量下载而非播放
+        this._dlDownloadMode = (opts && Array.isArray(opts.downloadEpisodes) && opts.downloadEpisodes.length)
+            ? { episodes: opts.downloadEpisodes.map(String), indexes: Array.isArray(opts.downloadIndexes) ? opts.downloadIndexes.slice() : null, title: opts.downloadTitle || title }
+            : null;
+        $('#kazumi-dialog-title').text(this._dlDownloadMode ? '选择下载源' : '选择播放源');
         openDialog('kazumiSourceDialog');
 
         // 来自搜索结果（kazumi: 前缀）→ 直接解析该源剧集
@@ -1365,7 +1525,7 @@ const Kazumi = {
             const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
             const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
             const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${info.id}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
-                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${escHtml(bangumiMirrorUrl(cover))}';}else{this.style.display='none'}">` : ''}
                 <div class="kazumi-bangumi-info">
                     <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
                     <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
@@ -1414,6 +1574,21 @@ const Kazumi = {
         }
     },
 
+    // ---------------------------------------------------------------- Bangumi 标签精确筛选（任务四 4.2）
+
+    /**
+     * 详情页标签点击入口：按 Bangumi 标签精确筛选番剧。
+     * 跳转到搜索页「Bangumi」页签并以 tag: 过滤搜索（与搜索功能物理联动，任务四 4.2）。
+     * @param {string} tagName 标签名（如「治愈」「原创」）
+     */
+    async openBangumiTagResult(tagName) {
+        const tag = String(tagName || '').trim();
+        if (!tag) return;
+        if (typeof BangumiSearch !== 'undefined' && BangumiSearch.openWithTag) {
+            BangumiSearch.openWithTag(tag);
+        }
+    },
+
     /** 渲染 Bangumi 完整详情到弹窗容器 #kazumi-dialog-body（选源弹窗内「查看详情」预览用；正式入口为统一详情页）。 */
     async _renderBangumiDetail(info, token, $box) {
         const box = $box || $('#kazumi-dialog-body');
@@ -1446,7 +1621,7 @@ const Kazumi = {
         let html = `<div class="bangumi-info-card" style="margin-bottom:16px;">
             <div class="bangumi-info-title">${escHtml(name)}</div>
             <div class="bangumi-info-row">
-                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="this.style.display='none'"></div>` : ''}
+                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${escHtml(bangumiMirrorUrl(cover))}';}else{this.style.display='none'}"></div>` : ''}
                 <div class="bangumi-info-meta">
                     <div class="bi-label">放送开始</div>
                     <div class="bi-value">${escHtml(airDate || '—')}</div>
@@ -1512,14 +1687,12 @@ const Kazumi = {
                 this._applyBangumiColState(id);
             }
         });
-        // 标签点击：跳搜索页按标签搜索
+        // 标签点击：按 Bangumi 标签精确筛选番剧（非关键词搜索，任务四 4.2）
         box.on('click', '.kazumi-tag', (e) => {
             if (token !== this._dlgToken) return;
             const tag = String($(e.currentTarget).data('tag') || '');
             if (!tag) return;
-            if (typeof App !== 'undefined' && App.showView) App.showView('search');
-            $('#search-keyword').val(tag);
-            if (typeof Search !== 'undefined' && Search.run) Search.run();
+            if (this.openBangumiTagResult) this.openBangumiTagResult(tag);
         });
         // 默认载入分集
         await this._loadBangumiTab(info.id, 'episodes', token, $content);
@@ -1574,7 +1747,7 @@ const Kazumi = {
                       + list.map((c) => `<div class="kazumi-detail-char" data-char-id="${escHtml(c.id)}" tabindex="0">
                         <img class="kazumi-detail-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
                         <div class="kazumi-detail-char-info">
-                            <div class="kazumi-detail-char-name">${escHtml(c.name || '')}</div>
+                            <div class="kazumi-detail-char-name">${escHtml(c.name_cn || c.name || '')}</div>
                             <div class="kazumi-detail-char-role">${escHtml(c.role_name || '')}</div>
                         </div>
                         <span class="kazumi-detail-char-more">详情 ›</span>
@@ -1589,11 +1762,23 @@ const Kazumi = {
             } else if (tab === 'staff') {
                 const list = await this.bangumiStaff(subjectId);
                 if (token !== this._dlgToken) return;
-                box.html(list.length
-                    ? list.map((s) => `<div class="kazumi-detail-staff">
-                        <span class="kazumi-detail-staff-name">${escHtml(s.name || '')}</span>
+                // 按制作职位重要性从左到右排序（稳定排序：同权重保留接口原有顺序）。
+                const sorted = (typeof Detail !== 'undefined' && Detail._staffJobRank)
+                    ? list.map((s, i) => ({ s, i, rank: Detail._staffJobRank(s.jobs || s.relation) }))
+                        .sort((a, b) => (a.rank - b.rank) || (a.i - b.i)).map((x) => x.s)
+                    : list;
+                box.html(sorted.length
+                    ? sorted.map((s) => {
+                        // 中文名优先显示，原名作为副标题（若不同）。
+                        const cn = s.name_cn || (typeof Detail !== 'undefined' && Detail._pickCharNameCn ? Detail._pickCharNameCn({ infobox: s.infobox }) : '') || '';
+                        const orig = s.name || '';
+                        const mainName = cn || orig;
+                        const subName = (cn && orig && cn !== orig) ? orig : '';
+                        return `<div class="kazumi-detail-staff">
+                        <span class="kazumi-detail-staff-name">${escHtml(mainName)}${subName ? ` <span class="kazumi-detail-staff-subname">${escHtml(subName)}</span>` : ''}</span>
                         <span class="kazumi-detail-staff-job">${escHtml((s.jobs || []).join(' / '))}</span>
-                    </div>`).join('')
+                    </div>`;
+                    }).join('')
                     : '<div class="tip-line">暂无制作人员信息</div>');
             } else if (tab === 'comments') {
                 const list = await this.bangumiComments(subjectId, 20, 0);
@@ -1630,10 +1815,14 @@ const Kazumi = {
             if (token !== this._dlgToken) return;
             if (!info) { box.html('<div class="tip-line">角色详情载入失败</div>'); return; }
             const img = bangumiCover(info.images, 'card');   // 角色详情图（T75）
+            // 角色中文名：Bangumi 角色接口无独立 name_cn，通常嵌在 infobox 别名项里，提取展示。
+            const charNameCn = (typeof Detail !== 'undefined' && Detail._pickCharNameCn) ? Detail._pickCharNameCn(info) : '';
+            // 基本信息：名称类字段（简体中文名 → 第二中文名 → 日文名 → 别名…）排到最前，其余跟随
+            const infoStr = (typeof Detail !== 'undefined' && Detail._buildCharInfoStr)
+                ? Detail._buildCharInfoStr(info) : '';
             const metaBits = [
                 info.blood_type ? '血型 ' + info.blood_type : '',
                 info.birth_month ? `${info.birth_month}月${info.birth_day || ''}日` : '',
-                info.gender ? '性别 ' + info.gender : '',
                 info.height ? '身高 ' + info.height + 'cm' : '',
                 info.weight ? '体重 ' + info.weight + 'kg' : '',
             ].filter(Boolean).join(' · ');
@@ -1641,8 +1830,10 @@ const Kazumi = {
                 <button class="md-btn md-btn-sm md-btn-tonal kazumi-char-back">← 返回角色列表</button>
                 ${img ? `<img class="kazumi-char-img" src="${escHtml(img)}" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
                 <div class="kazumi-char-name">${escHtml(info.name || '')}</div>
+                ${charNameCn && charNameCn !== (info.name || '') ? `<div class="kazumi-char-name-cn">${escHtml(charNameCn)}</div>` : ''}
                 <div class="kazumi-char-meta">${escHtml(metaBits)}</div>
-                ${info.summary ? `<div class="kazumi-char-summary">${escHtml(typeof stripHtml === 'function' ? stripHtml(info.summary) : info.summary)}</div>` : ''}
+                ${infoStr ? `<div class="detail-section-heading">基本信息</div><div class="kazumi-char-summary">${escHtml(infoStr)}</div>` : ''}
+                ${info.summary ? `<div class="detail-section-heading">角色简介</div><div class="kazumi-char-summary">${escHtml(typeof stripHtml === 'function' ? stripHtml(info.summary) : info.summary)}</div>` : ''}
             </div>`);
             box.find('.kazumi-char-back').on('click', async () => {
                 if (token !== this._dlgToken) return;
@@ -1684,6 +1875,7 @@ const Kazumi = {
                 const name = (road.identifier || [])[ei] || `第${ei + 1}集`;
                 return `<button class="ep-btn kazumi-ep-btn" data-plugin="${escHtml(pluginName)}" data-url="${escHtml(url)}" data-name="${escHtml(name)}" data-flag="${escHtml(road.name)}">
                     <span class="ep-name">${escHtml(name)}</span>
+                    <span class="ep-dl-one kazumi-ep-dl" data-url="${escHtml(url)}" data-name="${escHtml(name)}" data-flag="${escHtml(road.name)}" title="下载本集">⬇</span>
                 </button>`;
             }).join('');
             html += `<div class="kazumi-road-group">
@@ -1692,12 +1884,32 @@ const Kazumi = {
             </div>`;
         });
         box.html(html);
+        // 下载模式（Bangumi 分集多选下载而来）：置顶提示，点任意线路 = 从该线路批量下载所有勾选集。
+        if (this._dlDownloadMode) {
+            const dm = this._dlDownloadMode;
+            $('<div class="kazumi-dl-mode-bar tip-line">已进入下载模式：点击任意线路的任意集，即从该线路批量下载已勾选的 '
+                + dm.episodes.length + ' 集（第 ' + escHtml(dm.episodes.join('、')) + ' 集）。</div>')
+                .insertAfter(box.find('.kazumi-road-toolbar'));
+        }
         // 返回选源列表（保留已搜到的状态）
         box.find('.kazumi-road-back').on('click', () => {
             if (token !== this._dlgToken) return;
             this._backToSources();
         });
-        // 绑定点击：播放剧集
+        // 下载本集：从当前 Kazumi 源解析真实直链后加入下载队列（阻止冒泡避免触发播放）
+        // 下载模式下点击 ⬇ 也应批量下载勾选集（而非只下载本集），与点击集主体行为一致
+        box.find('.kazumi-ep-dl').on('click', (e) => {
+            e.stopPropagation();
+            if (token !== this._dlgToken) return;
+            const el = $(e.currentTarget);
+            if (this._dlDownloadMode) {
+                const road = roads.find((r) => r.name === String(el.data('flag') || ''));
+                this._downloadKazumiEpisodesFromRoad(pluginName, road, this._dlDownloadMode);
+                return;
+            }
+            this._downloadKazumiEp(pluginName, String(el.data('url') || ''), String(el.data('name') || ''), title);
+        });
+        // 绑定点击：下载模式=从该线路批量下载所有勾选集，否则播放剧集
         box.find('.kazumi-ep-btn').on('click', (e) => {
             if (token !== this._dlgToken) return;
             const el = $(e.currentTarget);
@@ -1705,8 +1917,13 @@ const Kazumi = {
             const url = String(el.data('url') || '');
             const name = String(el.data('name') || '');
             const flag = String(el.data('flag') || '');
-            // 组装连播 episodes（glm5.2 播放链路）
             const road = roads.find((r) => r.name === flag);
+            if (this._dlDownloadMode) {
+                // 从当前线路按勾选集号批量下载（修复此前只下载点击那一集的 bug）
+                this._downloadKazumiEpisodesFromRoad(pluginName, road, this._dlDownloadMode);
+                return;
+            }
+            // 组装连播 episodes（glm5.2 播放链路）
             const episodes = road ? (road.data || []).map((u, i) => ({ name: (road.identifier || [])[i] || `第${i + 1}集`, url: u })) : [{ name, url }];
             const epIndex = episodes.findIndex((ep) => ep.url === url);
             closeDialog('kazumiSourceDialog');
@@ -1720,34 +1937,123 @@ const Kazumi = {
             warnToast(`弹幕功能开发中：${name}`);
         });
     },
+
+    /** 从指定线路按勾选集批量下载（Bangumi 分集多选下载）：优先按 0 基下标定位（downloadIndexes），
+     *  退回按集号文本匹配 identifier。修复此前只下载点击那一集、或集号匹配不到只下 1 集的 bug。 */
+    async _downloadKazumiEpisodesFromRoad(pluginName, road, dlMode) {
+        if (!road || !road.data || !road.data.length) { warnToast('该线路无可下载的集'); return; }
+        const title = (dlMode && dlMode.title) || '';
+        const idents = road.identifier || [];
+        const targets = [];
+        const usedUrls = new Set();
+        // 首选：按下标直接取（Bangumi 分集顺序与线路集顺序通常一致，最可靠）
+        if (dlMode && Array.isArray(dlMode.indexes) && dlMode.indexes.length) {
+            dlMode.indexes.forEach((i) => {
+                if (i >= 0 && i < road.data.length) {
+                    const u = road.data[i];
+                    if (!usedUrls.has(u)) { usedUrls.add(u); targets.push({ url: u, name: idents[i] || `第${i + 1}集` }); }
+                }
+            });
+        }
+        // 补充：按下标未匹配到全部时，按集号文本匹配 identifier 的数字补齐缺失的集
+        if (dlMode && dlMode.episodes && dlMode.episodes.length && targets.length < dlMode.episodes.length) {
+            const wantNos = new Set((dlMode.episodes || []).map((x) => String(x)));
+            (road.data || []).forEach((u, i) => {
+                if (usedUrls.has(u)) return;
+                const ident = String(idents[i] || '');
+                const m = ident.match(/\d+/);
+                const identNo = m ? m[0] : '';
+                if (wantNos.has(identNo) || wantNos.has(String(i + 1))) {
+                    usedUrls.add(u);
+                    targets.push({ url: u, name: ident || `第${i + 1}集` });
+                }
+            });
+        }
+        if (!targets.length) { warnToast('未能在该线路匹配到勾选的集'); return; }
+        closeDialog('kazumiSourceDialog');
+        this._dlDownloadMode = null;
+        warnToast(`开始解析并下载 ${targets.length} 集…`);
+        let ok = 0, fail = 0;
+        for (const t of targets) {
+            const r = await this._downloadKazumiEp(pluginName, t.url, t.name, title, true);
+            if (r) ok++; else fail++;
+        }
+        warnToast(`下载已加入 ${ok} 集${fail ? `，${fail} 集失败` : ''}，可在“下载”页查看`);
+    },
+
+    /** 下载 Kazumi 源单集：解析真实直链后交下载引擎（m3u8 走 addHls 合成 mp4）。
+     *  silent=true 时不弹单条 toast（批量下载用）；返回是否成功加入下载。 */
+    async _downloadKazumiEp(pluginName, url, name, title, silent) {
+        if (!pluginName || !url) { if (!silent) warnToast('下载参数缺失'); return false; }
+        if (!silent) showLoading();
+        try {
+            const rsp = await doAction('kazumiResolve', { pluginName, url }, '/kazumi/action');
+            const data = (rsp && typeof rsp === 'object') ? rsp : {};
+            const pageUrl = data.pageUrl || url;
+            const header = {};
+            if (data.userAgent) header['User-Agent'] = data.userAgent;
+            if (data.referer) header['Referer'] = data.referer;
+            const legacy = !!data.useLegacyParser;
+            let resolved = null;
+            try {
+                const cap = await window.vpc.captureDirect(pageUrl, legacy);
+                if (cap && cap.ok) resolved = { url: cap.url, header: { ...header, ...(cap.header || {}) } };
+            } catch (e) { /* 抓取异常 */ }
+            if (!silent) hideLoading();
+            if (!resolved || !resolved.url) { if (!silent) warnToast(`「${name}」未解析到可下载地址`); return false; }
+            const clean = resolved.url.split('?')[0];
+            const isM3u8 = /\.m3u8(\?|#|$)/i.test(clean);
+            // 无法从 URL 识别扩展名时默认 .mp4（多数流媒体直链无标准后缀）
+            const ext = isM3u8 ? '.mp4' : (clean.match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0] || '.mp4';
+            const out = `${title || '视频'} - ${name}${ext}`;
+            const res = await window.vpc.download.control(isM3u8 ? 'addHls' : 'add', { uri: resolved.url, out, header: resolved.header });
+            if (res && res.ok) { if (!silent) warnToast(`已加入下载「${name}」，可在“下载”页查看`); return true; }
+            if (!silent) {
+                if (res && res.reason === 'ffmpeg-downloading') warnToast('ffmpeg 正在后台下载，完成后重试即可');
+                else if (res && res.reason === 'ffmpeg-missing') warnToast('ffmpeg 未就绪，m3u8 暂无法合成');
+                else warnToast('加入下载失败');
+            }
+            return false;
+        } catch (e) {
+            if (!silent) { hideLoading(); warnToast('下载解析失败'); }
+            return false;
+        }
+    },
 };
 
 // ---------------------------------------------------------------- 弹幕（弹弹 play）
 
-/** 弹幕开关与加载（播放 Kazumi 源时自动调用）。 */
+/** 弹幕加载（方案 A）：按片名+集数从弹弹 play 拉整集弹幕，转推给 mpv（ASS + sub-reload）。
+ *  返回装载条数；匹配不到/失败返回 0。episode 为集序号（从 1 起）。 */
 Kazumi.loadDanmaku = async function (title, episode) {
     try {
         // 步骤 1：搜索 DanDanBangumiID
         const searchRsp = await doAction('kazumiDanmakuSearch', { title }, '/kazumi/action');
         const animes = (searchRsp && searchRsp.results) || [];
-        if (!animes.length) { console.log('[kazumi] danmaku: no match for', title); return; }
+        if (!animes.length) { console.log('[kazumi] danmaku: no match for', title); return 0; }
         // 取相似度最高的结果
         const best = animes[0];
         const bangumiId = best.animeId || best.bangumiId || 0;
-        if (!bangumiId) return;
+        if (!bangumiId) return 0;
         // 步骤 2：获取分集弹幕 ID
-        const epRsp = await doAction('kazumiDanmakuEpisode', { bangumiId, episode }, '/kazumi/action');
+        const epRsp = await doAction('kazumiDanmakuEpisode', { bangumiId, episode: episode || 1 }, '/kazumi/action');
         const episodeId = (epRsp && epRsp.episodeId) || 0;
-        if (!episodeId) return;
+        if (!episodeId) return 0;
         // 步骤 3：拉取弹幕
         const commentsRsp = await doAction('kazumiDanmakuComments', { episodeId }, '/kazumi/action');
         const comments = (commentsRsp && commentsRsp.comments) || [];
-        console.log('[kazumi] danmaku loaded:', comments.length, 'comments for', title, 'ep', episode);
-        // TODO：渲染弹幕（需弹幕渲染引擎，当前 mpv 独立窗口无法直接渲染）
-        return comments;
+        if (!comments.length) { console.log('[kazumi] danmaku: 0 comments for', title, 'ep', episode); return 0; }
+        // 步骤 4：转 ASS 推给 mpv（方案 A：起播后一次性装载整集弹幕）
+        let count = 0;
+        if (window.vpc && window.vpc.loadDanmaku) {
+            const r = await window.vpc.loadDanmaku(comments);
+            count = (r && r.ok) ? (r.count || 0) : 0;
+        }
+        console.log('[kazumi] danmaku loaded:', count, 'of', comments.length, 'for', title, 'ep', episode);
+        return count;
     } catch (e) {
         console.warn('[kazumi] danmaku load failed:', e);
-        return [];
+        return 0;
     }
 };
 

@@ -65,10 +65,11 @@ const Live = {
                 fallbackUrls: urls.slice(1),
             }).then((r) => {
                 if (r && r.ok) warnToast(`正在播放：${ch.name}`);
-                else if (r && r.reason === 'mpv-missing') warnToast('mpv 未安装：node scripts/download-binaries.js mpv');
-                else if (r && r.reason === 'resolve-failed') warnToast('频道地址解析失败，换条线路试试');
-                else warnToast(`播放失败${r && r.reason ? `（${r.reason}）` : ''}`);
-            }).catch(() => warnToast('播放失败'));
+                else if (r && r.reason === 'mpv-missing') warnToast('直播播放失败：mpv 未安装（node scripts/download-binaries.js mpv）');
+                else if (r && r.reason === 'resolve-failed') warnToast('直播播放失败：频道地址解析失败，换条线路试试');
+                else if (r && r.reason === 'empty playlist') warnToast('直播播放失败：频道地址无效');
+                else warnToast(`直播播放失败${r && r.reason ? `（${r.reason}）` : ''}`);
+            }).catch(() => warnToast('直播播放失败：未知错误'));
         });
         // 备用线路切换提示（主进程检测到首播未开播时自动重试）
         if (window.vpc.onPlayRetry) {

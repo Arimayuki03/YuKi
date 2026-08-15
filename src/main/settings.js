@@ -36,6 +36,10 @@ class Settings {
         return value;
     }
 
+    delete(key) {
+        if (key in this._data) { delete this._data[key]; this._flush(); }
+    }
+
     _flush() {
         try {
             fs.mkdirSync(path.dirname(this.file), { recursive: true });

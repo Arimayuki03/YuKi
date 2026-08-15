@@ -9,9 +9,11 @@
     <link rel="stylesheet" href="css/ui.css">
     <script src="js/jquery.min.js" defer></script>
     <script src="js/common.js" defer></script>
+    <script src="js/cache.js" defer></script>
     <script src="js/panels.js" defer></script>
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
+    <script src="js/bangumi-search.js" defer></script>
     <script src="js/detail.js" defer></script>
     <script src="js/kazumi.js" defer></script>
     <script src="js/timeline.js" defer></script>
@@ -27,6 +29,14 @@
 
 <body>
     <div id="app">
+        <!-- 顶部拖拽带（无边框模式下横跨内容区顶部，可拖动移动窗口） -->
+        <div id="top-drag-strip"></div>
+        <!-- 窗口控制栏（无边框模式下可拖拽 + 最小化/最大化/关闭按钮） -->
+        <div id="win-controls">
+            <button id="win-min" class="win-btn" title="最小化"><svg viewBox="0 0 24 24"><path d="M6 11h12v2H6z"/></svg></button>
+            <button id="win-max" class="win-btn" title="最大化/还原"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6z"/></svg></button>
+            <button id="win-close" class="win-btn win-close" title="关闭"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+        </div>
         <!-- 主导航（桌面布局） -->
         <nav id="main-nav">
             <div class="main-nav-item active" data-view="home">
@@ -40,6 +50,10 @@
             <div class="main-nav-item" data-view="popular">
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M13.5 0.67s0.74 2.65 0.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l0.03-0.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5 0.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-0.36 3.6-1.21 4.62-2.58 0.39 1.29 0.59 2.65 0.59 4.04 0 2.65-2.15 4.8-4.8 4.8z"/></svg>
                 <span>推荐</span>
+            </div>
+            <div class="main-nav-item" data-view="timeline">
+                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+                <span>时间表</span>
             </div>
             <div class="main-nav-item" data-view="live">
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
@@ -69,10 +83,6 @@
                 <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>
                 <span>设置</span>
             </div>
-            <div class="main-nav-item" data-view="timeline">
-                <svg class="mn-icon" viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
-                <span>时间表</span>
-            </div>
             <button id="nav-collapse" class="nav-collapse-btn" title="收缩/展开侧栏">
                 <svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
             </button>
@@ -98,13 +108,14 @@
                 <div class="class-tabs" id="search-tabs" style="margin-bottom:12px;">
                     <span class="class-tab active" data-stab="aggregate">聚合搜索</span>
                     <span class="class-tab" data-stab="kazumi">Kazumi 源</span>
+                    <span class="class-tab" data-stab="bangumi">Bangumi</span>
                     <span class="class-tab" data-stab="image">以图搜番</span>
                 </div>
                 <!-- 聚合搜索 / Kazumi 源 共用搜索栏 -->
                 <div class="search-bar" id="search-bar-agg">
                     <input id="search-keyword" class="md-input" type="text" placeholder="输入关键字，多源聚合搜索…" />
                     <button id="search-go" class="md-btn md-btn-filled">搜索</button>
-                </div>
+                    </div>
                 <!-- 以图搜番 输入区 -->
                 <div id="image-search-panel" style="display:none">
                     <div class="search-bar">
@@ -114,6 +125,18 @@
                         <input id="image-search-file" type="file" accept="image/*" style="display:none" />
                     </div>
                     <div id="image-search-preview" class="tip-line pad0" style="margin-top:8px;display:none;"></div>
+                </div>
+                <!-- Bangumi 搜索 输入区（关键词 + 筛选工作台，复刻 Kazumi SearchPage） -->
+                <div id="bangumi-search-panel" style="display:none">
+                    <div class="search-bar">
+                        <input id="bgm-search-keyword" class="md-input" type="text" placeholder="搜索 Bangumi 番剧，支持 tag: sort: season: 等语法…" />
+                        <button id="bgm-search-filter-btn" class="md-btn md-btn-tonal" title="筛选条件">筛选</button>
+                        <button id="bgm-search-go" class="md-btn md-btn-filled">搜索</button>
+                    </div>
+                    <div id="bgm-search-chips" class="class-tabs" style="display:none;margin-bottom:8px;"></div>
+                    <div id="bgm-search-status" class="tip-line pad0" style="display:none;margin-bottom:8px;"></div>
+                    <div id="bgm-search-results"></div>
+                    <div id="bgm-search-pager" class="pager"></div>
                 </div>
                 <div id="search-filters" class="class-tabs" style="display:none"></div>
                 <div id="search-status" class="search-status" style="display:none"></div>
@@ -174,14 +197,14 @@
                     <label class="rec-checkall" id="view-favorites-checkall-wrap" style="display:none"><input type="checkbox" id="view-favorites-checkall">全选</label>
                     <button id="view-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                     <button id="view-favorites-tagwant" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记想看</button>
-                    <button id="view-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记已看</button>
+                    <button id="view-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记看过</button>
                     <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                 </div>
                 <div class="rec-bar">
                     <div id="view-favorites-tags" class="rec-tags">
                         <span class="class-tab active" data-tag="">全部</span>
                         <span class="class-tab" data-tag="want">想看</span>
-                        <span class="class-tab" data-tag="seen">已看</span>
+                        <span class="class-tab" data-tag="seen">看过</span>
                     </div>
                 </div>
                 <div id="view-favorites-grid" class="vod-grid"></div>
@@ -215,14 +238,19 @@
                             <div class="my-stat-box"><div class="my-stat-value" id="my-stat-titles">0</div><div class="my-stat-label">观看部数</div></div>
                             <div class="my-stat-box"><div class="my-stat-value" id="my-stat-week">0</div><div class="my-stat-label">近 30 天时长</div></div>
                         </div>
+                        <div class="tip-line pad0" style="margin-top:14px;">我的收藏</div>
+                        <div id="my-stats-collections" class="my-stats-collections"></div>
                         <div class="tip-line pad0" style="margin-top:12px;">近 7 天观看时长</div>
                         <div id="my-stats-daily" class="my-bar-chart"></div>
                         <div class="tip-line pad0" style="margin-top:14px;">按星期分布（近 30 天）</div>
                         <div id="my-stats-weekday" class="my-bar-chart"></div>
-                        <div class="tip-line pad0" style="margin-top:14px;" id="my-stats-source-tip">分来源统计（累计时长）</div>
+                        <div class="tip-line pad0" style="margin-top:14px;" id="my-stats-source-tip">来源统计</div>
                         <div id="my-stats-source" class="my-rank-list"></div>
-                        <div class="tip-line pad0" style="margin-top:14px;">最常观看（按观看次数）</div>
+                        <div class="tip-line pad0" style="margin-top:14px;">最常观看</div>
                         <div id="my-stats-top" class="my-rank-list"></div>
+                        <div style="margin-top:16px;">
+                            <button id="my-stats-clear" class="md-btn md-btn-sm md-btn-danger-tonal" title="清空全部观看统计数据">清空播放统计</button>
+                        </div>
                     </div>
                 </div>
                 <div id="my-panel-favorites" class="my-panel" style="display:none">
@@ -234,7 +262,7 @@
                             <label id="my-favorites-checkall-wrap" class="md-check-wrap" style="display:none"><input id="my-favorites-checkall" type="checkbox"> 全选</label>
                             <button id="my-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                             <button id="my-favorites-tagwant" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记想看</button>
-                            <button id="my-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记已看</button>
+                            <button id="my-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记看过</button>
                             <button id="my-favorites-tagwatching" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记在看</button>
                             <button id="my-favorites-taghold" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记搁置</button>
                             <button id="my-favorites-tagdropped" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记抛弃</button>
@@ -244,7 +272,7 @@
                             <div id="my-favorites-tags" class="rec-tags">
                                 <span class="class-tab active" data-tag="">全部</span>
                                 <span class="class-tab" data-tag="want">想看</span>
-                                <span class="class-tab" data-tag="seen">已看</span>
+                                <span class="class-tab" data-tag="seen">看过</span>
                                 <span class="class-tab" data-tag="watching">在看</span>
                                 <span class="class-tab" data-tag="hold">搁置</span>
                                 <span class="class-tab" data-tag="dropped">抛弃</span>
@@ -260,7 +288,6 @@
             <section id="view-direct" class="view">
                 <div class="tool-card direct-card">
                     <div class="tool-card-title">直链播放</div>
-                    <div class="tip-line pad0">粘贴视频直链（m3u8/mp4/flv 等）或分享页链接，自动解析并播放。</div>
                     <div class="md-field">
                         <input id="direct_play_url" class="md-input" type="text" placeholder="视频链接（http/https/rtmp）…" />
                     </div>
@@ -279,11 +306,10 @@
                 <div class="downloads-wrap">
                     <div class="tool-card">
                         <div class="tool-card-title">下载管理</div>
-                        <div class="tip-line pad0">粘贴 HTTP / 磁力链接后点「新建下载」添加；m3u8 自动走切片合成通道。</div>
                         <div class="search-bar">
                             <input id="dl-uri" class="md-input" type="text" placeholder="视频链接（http/https/magnet:…），回车添加" />
                         </div>
-                        <div class="wall-row" style="margin-top:8px;">
+                        <div class="wall-row" style="margin-top:12px;">
                             <button id="dl-add" class="md-btn md-btn-filled">新建下载</button>
                             <button id="dl-add-file" class="md-btn md-btn-tonal">种子文件</button>
                             <button id="dl-open-dir" class="md-btn md-btn-tonal">打开下载目录</button>
@@ -305,12 +331,12 @@
                         <div id="tool-local" class="tool-panel active">
                             <div class="tool-card">
                                 <div class="tool-card-title">本地文件</div>
-                                <div class="tip-line pad0">管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹。</div>
                                 <div class="tip-line pad0 info-tip">
                                     <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                                    <div class="info-body"><span class="info-label">使用说明（点开查看）</span>
+                                    <div class="info-body"><span class="info-label">说明</span>
                                         <div class="info-detail local-desc">
-                                            <p>· 仅展示文件夹与视频/音频文件；单击视频/音频直接交 mpv 播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
+                                            <p>· 管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹</p>
+                                            <p>· 仅展示文件夹与视频/音频文件；单击视频/音频调用播放器播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
                                             <p>· 「上传文件」：把本机其他位置的视频复制到当前目录（会弹窗选文件）。</p>
                                             <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
                                             <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
@@ -345,16 +371,17 @@
                         <span class="settings-nav-item" data-cat="play">播放</span>
                         <span class="settings-nav-item" data-cat="hotkey">快捷键</span>
                         <span class="settings-nav-item" data-cat="download">下载</span>
-                        <span class="settings-nav-item" data-cat="cache">缓存</span>
-                        <span class="settings-nav-item" data-cat="asset">扩展</span>
+                        <span class="settings-nav-item" data-cat="storage">缓存</span>
                         <span class="settings-nav-item" data-cat="source">源设置</span>
                         <span class="settings-nav-item" data-cat="kazumi">Kazumi 规则</span>
+                        <span class="settings-nav-item" data-cat="sync">同步</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
                         <span class="settings-nav-item" data-cat="about">关于</span>
                     </div>
                     <div class="settings-grid">
                     <div class="tool-card" data-setcat="appearance">
                         <div class="tool-card-title">外观</div>
+                        <div class="set-group">主题</div>
                         <div class="tip-line pad0">主题色</div>
                         <div class="color-row">
                             <select id="set_theme" class="md-select">
@@ -368,23 +395,27 @@
                             <input id="set_theme_pick" class="color-pick" type="color" value="#1e6c45" title="自定义主题颜色">
                             <button id="set_theme_clear" class="md-btn md-btn-tonal">恢复</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">字体颜色</div>
+                        <div class="tip-line pad0" >字体颜色</div>
                         <div class="color-row">
                             <select id="set_textcolor" class="md-select">
-                                <option value="">默认（跟随主题）</option>
+                                <option value="">默认</option>
                                 <option value="#000000">纯黑（高对比）</option>
                                 <option value="#FFFFFF">纯白（适合深色背景）</option>
                             </select>
                             <input id="set_textcolor_pick" class="color-pick" type="color" value="#304c3a" title="自定义字体颜色">
                             <button id="set_textcolor_clear" class="md-btn md-btn-tonal">恢复</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">明暗模式</div>
+                        <div class="tip-line pad0" >明暗模式</div>
                         <select id="set_colormode" class="md-select">
                             <option value="auto">跟随系统</option>
-                            <option value="light">强制浅色</option>
-                            <option value="dark">强制深色</option>
+                            <option value="light">浅色</option>
+                            <option value="dark">深色</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="调整整体大小">界面缩放</div>
+                        <div class="set-group">界面</div>
+                        <label class="md-switch" title="界面字体使用内置 MiSans；关闭则回退系统字体"><input type="checkbox" id="set_use_misans" checked><span class="md-switch-track"></span><span class="md-switch-label">MiSans 界面字体</span></label>
+                        <label class="md-switch" title="界面动画（视图切换/卡片悬停等过渡动效）"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画</span></label>
+                        <label class="md-switch" title="使用操作系统原生标题栏；关闭则使用无边框窗口"><input type="checkbox" id="set_system_titlebar"><span class="md-switch-track"></span><span class="md-switch-label">系统标题栏</span></label>
+                        <div class="tip-line pad0" title="调整整体大小">界面缩放</div>
                         <select id="set_fontsize" class="md-select">
                             <option value="80">较小（80%）</option>
                             <option value="90">小（90%）</option>
@@ -393,7 +424,7 @@
                             <option value="125">较大（125%）</option>
                             <option value="150">特大（150%）</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="仅调整文字大小">字体大小</div>
+                        <div class="tip-line pad0"  title="仅调整文字大小">字体大小</div>
                         <select id="set_textsize" class="md-select">
                             <option value="80">较小（80%）</option>
                             <option value="90">小（90%）</option>
@@ -402,7 +433,8 @@
                             <option value="125">较大（125%）</option>
                             <option value="150">特大（150%）</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">背景</div>
+                        <div class="set-group">背景</div>
+                        <label class="md-switch" title="卡片/面板背景启用毛玻璃模糊，透出下层内容（关闭则为实心遮罩）"><input type="checkbox" id="set_glass"><span class="md-switch-track"></span><span class="md-switch-label">毛玻璃效果</span></label>
                         <div class="wall-row">
                             <select id="set_walldim" class="md-select">
                                 <option value="">遮罩强度 · 标准</option>
@@ -414,13 +446,14 @@
                             <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
                             <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除背景</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">每页影片数量</div>
+                        <div class="set-group">列表</div>
+                        <div class="tip-line pad0">每页影片数量</div>
                         <div class="pagesize-grid">
                             <div class="pagesize-cell">
                                 <span class="tip-line pad0">首页</span>
                                 <select id="set_pagesize_home" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -432,7 +465,7 @@
                                 <span class="tip-line pad0">搜索</span>
                                 <select id="set_pagesize_search" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -444,7 +477,7 @@
                                 <span class="tip-line pad0">收藏</span>
                                 <select id="set_pagesize_fav" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -456,7 +489,7 @@
                                 <span class="tip-line pad0">历史</span>
                                 <select id="set_pagesize_history" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -468,7 +501,7 @@
                                 <span class="tip-line pad0">直播</span>
                                 <select id="set_pagesize_live" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -480,27 +513,26 @@
                                 <span class="tip-line pad0">推荐</span>
                                 <select id="set_pagesize_popular" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 条</option>
+                                    <option value="16">16 个</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
                                 </select>
                             </div>
                         </div>
-                        <label class="md-switch" style="margin-top:12px;" title="界面字体使用内置 MiSans；关闭则回退系统字体"><input type="checkbox" id="set_use_misans" checked><span class="md-switch-track"></span><span class="md-switch-label">MiSans 界面字体</span></label>
-                        <label class="md-switch" style="margin-top:12px;" title="界面动画（视图切换/卡片悬停等过渡动效）"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画</span></label>
                     </div>
                     <div class="tool-card" data-setcat="play">
                         <div class="tool-card-title">播放</div>
+                        <div class="set-group">基础</div>
                         <div class="tip-line pad0" title="0 = 不设定，100 = 最大">预设音量</div>
                         <div class="md-field short-num">
                             <input id="set_volume" class="md-input" type="number" min="0" max="100" placeholder="0" />
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="起播时生效，播放中可用 [ ] 调整">默认倍速</div>
+                        <div class="tip-line pad0"  title="起播时生效，播放中可用 [ ] 调整">默认倍速</div>
                         <select id="set_speed" class="md-select">
                             <option value="0.5">0.5 倍</option>
                             <option value="0.75">0.75 倍</option>
-                            <option value="1" selected>1.0 倍（标准）</option>
+                            <option value="1" selected>1.0 倍</option>
                             <option value="1.25">1.25 倍</option>
                             <option value="1.5">1.5 倍</option>
                             <option value="2">2.0 倍</option>
@@ -509,22 +541,27 @@
                         <label class="md-switch" title="一集播完自动播下一集"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播</span></label>
                         <label class="md-switch" title="下次播放同一影片自动跳转上次位置"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置</span></label>
                         <label class="md-switch" title="关闭窗口时不停止正在播放的影片"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放</span></label>
+                        <div class="set-group">行为</div>
+                        <label class="md-switch" title="开启后记录播放时长和次数统计（我的页面展示）"><input type="checkbox" id="set_watchstats" checked><span class="md-switch-track"></span><span class="md-switch-label">观看统计</span></label>
                         <label class="md-switch" title="播放时自动把当前集下载到下载目录"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
+                        <label class="md-switch" title="播放时自动加载弹弹 play 弹幕到 mpv（按片名+集数匹配，匹配不到则跳过）"><input type="checkbox" id="set_danmaku"><span class="md-switch-track"></span><span class="md-switch-label">自动加载弹幕</span></label>
                         <label class="md-switch" title="不记录播放历史"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式</span></label>
                         <label class="md-switch" title="m3u8 合成下载时跳过 CUE-OUT/CUE-IN 广告分段（实验性，个别源可能误判）"><input type="checkbox" id="set_hls_adfilter"><span class="md-switch-track"></span><span class="md-switch-label">m3u8 广告过滤</span></label>
+                        <div class="set-group">画质</div>
                         <label class="md-switch" title="实时升频锐化，适合动漫；着色器首次启动时自动下载"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分</span></label>
-                        <div class="tip-line pad0" style="margin-top:6px;" title="开启超分后选择，下次起播生效">Anime4K 档位</div>
+                        <div class="tip-line pad0"  title="开启超分后选择，下次起播生效">Anime4K 档位</div>
                         <select id="set_anime4k_mode" class="md-select">
-                            <option value="a" selected>均衡（Mode A · 默认）</option>
+                            <option value="a" selected>均衡（Mode A）</option>
                             <option value="aa">细节增强（Mode A+A · 低清片源）</option>
                             <option value="restore">仅修复（不升频 · 高清片源）</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="多音轨/多字幕时优先选择，下次起播生效">音轨 / 字幕语言</div>
+                        <div class="set-group">语言</div>
+                        <div class="tip-line pad0" title="多音轨/多字幕时优先选择，下次起播生效">音轨 / 字幕语言</div>
                         <div class="hotkey-grid">
                             <div>
                                 <div class="tip-line pad0">音轨语言</div>
                                 <select id="set_alang" class="md-select">
-                                    <option value="" selected>自动（默认）</option>
+                                    <option value="" selected>自动</option>
                                     <option value="zh">中文</option>
                                     <option value="yue">粤语</option>
                                     <option value="jpn">日语</option>
@@ -535,7 +572,7 @@
                             <div>
                                 <div class="tip-line pad0">字幕语言</div>
                                 <select id="set_slang" class="md-select">
-                                    <option value="" selected>自动（默认）</option>
+                                    <option value="" selected>自动</option>
                                     <option value="zh">中文</option>
                                     <option value="jpn">日语</option>
                                     <option value="eng">英语</option>
@@ -545,7 +582,7 @@
                         </div>
                         </div>
                     <div class="tool-card" data-setcat="hotkey">
-                        <div class="tool-card-title">快捷键（mpv）</div>
+                        <div class="tool-card-title">快捷键</div>
                         <div class="tip-line pad0" title="保存后下次起播生效">按键步长</div>
                         <div class="hotkey-grid">
                             <div>
@@ -567,28 +604,28 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="点击键位后按下新键即可修改，保存后下次起播生效">键位自定义</div>
+                        <div class="tip-line pad0"  title="点击键位后按下新键即可修改，保存后下次起播生效">键位自定义</div>
                         <div id="hotkey_rows"></div>
                         <div class="wall-row">
                             <button id="hotkey_reset" class="md-btn md-btn-tonal">恢复默认键位</button>
                             <button id="hotkey_screenshot_dir" class="md-btn md-btn-tonal">打开截图目录</button>
                         </div>
-                        <div class="tip-line pad0">截图默认保存到「图片/video-pc」目录。</div>
                     </div>
                     <div class="tool-card" data-setcat="download">
                         <div class="tool-card-title">下载</div>
-                        <div class="tip-line pad0" id="set_dl_dir_line">下载目录：默认（系统下载目录）</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">更换目录会重启下载引擎</div>
+                                <div class="info-detail">进行中任务会中断，但支持断点续传。</div>
+                                <div class="info-detail">下载目录：默认（系统下载目录）</div>
+                            </div>
+                        </div>
                         <div class="wall-row">
                             <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
                             <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
                         </div>
-                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">更换目录会重启下载引擎</span>
-                                <div class="info-detail">进行中任务会中断，但支持断点续传。</div>
-                            </div>
-                        </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">并发任务数</div>
+                        <div class="tip-line pad0" >并发任务数</div>
                         <select id="set_dl_concurrency" class="md-select">
                             <option value="1">1 个</option>
                             <option value="2">2 个</option>
@@ -596,7 +633,7 @@
                             <option value="5">5 个</option>
                             <option value="8">8 个</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;" title="单个文件的分片/每服务器连接数">分片并发数</div>
+                        <div class="tip-line pad0"  title="单个文件的分片/每服务器连接数">分片并发数</div>
                         <select id="set_dl_split" class="md-select">
                             <option value="1">1 个</option>
                             <option value="2">2 个</option>
@@ -606,63 +643,50 @@
                             <option value="16">16 个</option>
                         </select>
                     </div>
-                    <div class="tool-card" data-setcat="cache">
-                        <div class="tool-card-title">缓存与播放缓存</div>
-                        <!-- 应用缓存（爬虫/下载临时文件） -->
-                        <div class="tip-line pad0" id="cache_size_line">当前缓存占用：统计中…</div>
-                        <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
-                        <div class="tip-line pad0 info-tip" style="margin-top:10px;">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">清理范围</span>
-                                <div class="info-detail">爬虫缓存、JS 本地存储与下载临时文件；不影响已载入的源与下载好的文件。</div>
-                            </div>
-                        </div>
-                        <div class="tip-line pad0" id="cache_dir_line" style="margin-top:12px;">缓存位置：默认</div>
-                        <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
-                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">更换位置会重启后端</span>
-                                <div class="info-detail">旧目录里的缓存不会自动迁移。</div>
-                            </div>
-                        </div>
-                        <hr style="border:none;border-top:1px solid var(--md-outline-variant);margin:16px 0;" />
-                        <!-- mpv 播放缓存 -->
+                    <!-- 应用缓存（爬虫/下载临时文件） -->
+                    <div class="tool-card" data-setcat="storage">
+                        <div class="tool-card-title">应用缓存</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">视频缓冲位置</span>
-                                <div class="info-detail">内存不落盘（默认，内存占用高）；硬盘适合大文件/低内存机器，缓冲写入指定目录。</div>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">
+                                    <div class="tip-line pad0" id="cache_dir_line" style="margin-top:12px;">缓存位置：默认</div>
+                                </div>
+                                <div class="info-detail">更换位置会重启后端。</div>
+                                <div class="info-detail">旧目录里的缓存不会自动迁移。</div>
+                                <div class="info-detail">清理范围:爬虫缓存、JS 本地存储与下载临时文件；不影响已载入的源与下载好的文件。</div>
                             </div>
                         </div>
-                        <select id="set_cache_mode" class="md-select">
-                            <option value="memory" selected>内存（默认，缓冲不写盘）</option>
-                            <option value="disk">硬盘（写入缓存目录）</option>
-                        </select>
-                        <div class="tip-line pad0" id="mpv_cache_dir_line" style="margin-top:12px;">mpv 缓存目录：默认（用户目录下 mpv-cache）</div>
                         <div class="wall-row">
-                            <button id="set_cache_dir_pick" class="md-btn md-btn-tonal">更换缓存目录</button>
-                            <button id="set_cache_clear" class="md-btn md-btn-tonal">清空硬盘缓存</button>
-                        </div>
-                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">切换目录自动清理旧缓存</span>
-                                <div class="info-detail">更换目录会清理旧目录残留的 mpv 缓存；切换回内存也会清空硬盘缓存（正在播放中的缓存文件可能被跳过）。</div>
-                            </div>
+                            <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
+                            <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
+                            <button id="cache_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认缓存位置">恢复默认位置</button>
                         </div>
                     </div>
                     <!-- Cookie 持久化（PluginCookieManager，T46） -->
-                    <div class="tool-card" data-setcat="cache">
+                    <div class="tool-card" data-setcat="storage">
                         <div class="tool-card-title">Cookie 管理</div>
-                        <div class="tip-line pad0" id="kazumi_cookie_line">验证/解析会话产生的 Cookie 会持久化，规则引擎请求自动带上，避免重启后重新验证。</div>
-                        <div class="wall-row" style="margin-top:8px;">
+                        <div class="tip-line pad0 info-tip" >
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail" id="kazumi_cookie_line">验证/解析会话产生的 Cookie 会持久化，规则引擎请求自动带上，避免重启后重新验证。</div>
+                            </div>
+                        </div>
+                        <div class="wall-row">
                             <button id="kazumi_cookie_view" class="md-btn md-btn-tonal">查看 Cookie</button>
                             <button id="kazumi_cookie_clear" class="md-btn md-btn-tonal">清除 Cookie</button>
                         </div>
                     </div>
                     <!-- Bangumi 封面缓存（搜索页 Kazumi 结果封面，T73） -->
-                    <div class="tool-card" data-setcat="cache">
+                    <div class="tool-card" data-setcat="storage">
                         <div class="tool-card-title">Bangumi 封面缓存</div>
-                        <div class="tip-line pad0">搜索页 Kazumi 源结果封面按片名从 Bangumi 拉取并缓存（内存 + 本机 localStorage），同片名只查一次；匹配错误时点下方清空，重新搜索即刷新。</div>
-                        <div class="wall-row" style="margin-top:8px;">
+                        <div class="tip-line pad0 info-tip" >
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">封面按片名从 Bangumi 拉取并缓存（内存 + 本机 localStorage），同片名只查一次；匹配错误时可点下方清空。</div>
+                            </div>
+                        </div>
+                        <div class="wall-row">
                             <button id="kazumi_bgm_cover_clear" class="md-btn md-btn-tonal">清空封面缓存</button>
                         </div>
                     </div>
@@ -670,7 +694,7 @@
                         <div class="tool-card-title">载入视频源</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">支持配置地址或 JSON</span>
+                            <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；需解析的影片链接会在播放时自动解析载入。</div>
                             </div>
                         </div>
@@ -681,14 +705,19 @@
                     </div>
                     <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">视频历史源</div>
-                        <div class="tip-line pad0">成功载入的配置会自动记录；点击条目重新载入，点 ✕ 删除。</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">成功载入的配置会自动记录；点击条目重新载入，点 ✕ 删除。</div>
+                            </div>
+                        </div>
                         <div id="config_history" class="history-list"></div>
                     </div>
                     <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">直播源</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">支持 txt / m3u 与 TVBox 式配置</span>
+                            <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取 lives）；配置里自带的直播源会自动载入。添加成功的直播源记录在下方「直播历史源」板块。</div>
                             </div>
                         </div>
@@ -699,12 +728,63 @@
                     </div>
                     <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">直播历史源</div>
-                        <div class="tip-line pad0">添加成功的自定义直播源会自动记录；点 ✕ 删除，删除后直播页同步更新。</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">添加成功的自定义直播源会自动记录；点 ✕ 删除，删除后直播页同步更新。</div>
+                            </div>
+                        </div>
                         <div id="live_src_list" class="history-list"></div>
                     </div>
                     <div class="tool-card" data-setcat="source">
+                        <div class="tool-card-title">网盘账号</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">夸克 / UC / 百度等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致。
+                                    <br><b>夸克网盘</b>：点「夸克扫码登录」用夸克 App 扫码，登录后自动保存，无需手动复制。
+                                    <br><b>其他网盘</b>：浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 →
+                                    点任意请求 → 「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）→ 粘贴到对应输入框保存。
+                                    <br>注意：只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效。
+                                    <br>未配置 Cookie 时，网盘源详情页照常显示，但播放会快速失败并提示原因。</div>
+                            </div>
+                        </div>
+                        <div id="pan_cookie_fields"></div>
+                        <div class="wall-row" style="margin-top:10px;">
+                            <button id="pan_cookie_qr" class="md-btn md-btn-filled">夸克扫码登录</button>
+                            <button id="pan_cookie_save" class="md-btn md-btn-tonal">保存网盘 Cookie</button>
+                            <button id="pan_cookie_clear" class="md-btn md-btn-tonal">清空全部</button>
+                        </div>
+                        <div id="pan_cookie_status" class="tip-line" style="margin-top:8px;"></div>
+                    </div>
+                    <div id="panQrDialog" class="md-dialog-overlay" style="display:none;">
+                        <div class="md-dialog" style="width:380px;text-align:center;padding:20px;">
+                            <div class="md-dialog-title" style="text-align:center;">夸克网盘扫码登录</div>
+                            <div class="md-dialog-body" style="padding:4px 0 8px;">
+                                <div id="pan_qr_img" style="margin:0 auto 10px;width:260px;height:120px;
+                                    display:flex;align-items:center;justify-content:center;
+                                    border:1px solid var(--md-outline);border-radius:8px;
+                                    background:#fff;overflow:hidden;">
+                                    <span style="color:var(--md-outline);font-size:13px;">正在打开登录窗口…</span>
+                                </div>
+                                <div id="pan_qr_tip" class="tip-line pad0" style="text-align:center;">
+                                    正在打开夸克官方登录页面，请在弹出的窗口中用「夸克 App」扫码登录。
+                                </div>
+                            </div>
+                            <div class="md-dialog-actions" style="justify-content:center;">
+                                <button id="pan_qr_refresh" class="md-dialog-btn" style="display:none;">重新登录</button>
+                                <button id="pan_qr_close" class="md-dialog-btn">关闭</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">屏蔽源</div>
-                        <div class="tip-line pad0" id="blocked_line">自动屏蔽探测后无内容的源，避免下拉里出现空源。</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail" id="blocked_line">自动屏蔽探测后无内容的源，避免下拉里出现空源。</div>
+                            </div>
+                        </div>
                         <div class="wall-row">
                             <button id="blocked_view" class="md-btn md-btn-tonal">查看屏蔽源</button>
                             <button id="blocked_restore" class="md-btn md-btn-tonal">恢复被屏蔽的源并重新探测</button>
@@ -715,7 +795,7 @@
                         <div class="tool-card-title">导入 Kazumi 规则</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">规则格式</span>
+                            <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">粘贴 Kazumi 规则 JSON（api 小于等于 8）或 kazumi:// 分享链接；规则用于补充 CatVod 源不足时的番剧搜索与播放。</div>
                             </div>
                         </div>
@@ -732,40 +812,32 @@
                     </div>
                     <div class="tool-card" data-setcat="kazumi">
                         <div class="tool-card-title">已安装规则（<span id="kazumi_rule_count">0</span>）</div>
-                        <div class="tip-line pad0">启用后可在详情页「Kazumi 规则源」与聚合搜索中使用；禁用后不再出现。</div>
-                        <div class="wall-row" style="margin-top:8px;">
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">启用后可在详情页「Kazumi 规则源」与聚合搜索中使用；禁用后不再出现。</div>
+                            </div>
+                        </div>
+                        <label class="md-switch"  title="启动应用时自动检查已安装规则的更新，有更新则后台批量更新"><input type="checkbox" id="set_kazumi_autoupdate"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动检查规则更新</span></label>
+                        <div class="wall-row" >
                             <button id="kazumi_rule_check" class="md-btn md-btn-tonal">检测有效性</button>
                             <button id="kazumi_rule_update" class="md-btn md-btn-tonal">批量更新</button>
                         </div>
-                        <div class="search-status" id="kazumi_rule_task" style="display:none;margin-top:6px;"></div>
-                        <div id="kazumi_rule_list" class="history-list" style="margin-top:8px;"></div>
-                    </div>
-                    <!-- Kazumi 镜像源选择（4.1，仿 Kazumi enableBangumiProxy / enableGitProxy） -->
-                    <div class="tool-card" data-setcat="kazumi">
-                        <div class="tool-card-title">镜像源</div>
-                        <div class="tip-line pad0 info-tip">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">网络不可达时使用</span>
-                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索/时间表/榜单/详情/角色/收藏同步等）走全域名反代 api.bangumi.lol / next.bangumi.lol（对应 api.bgm.tv / next.bgm.tv，免签名）。规则仓库镜像用于规则更新拉取。</div>
-                            </div>
-                        </div>
-                        <label class="md-switch" style="margin-top:8px;" title="Bangumi 接口走全域名反代 api.bangumi.lol / next.bangumi.lol"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
-                        <label class="md-switch" style="margin-top:8px;" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
+                        <div class="search-status" id="kazumi_rule_task" style="display:none;"></div>
+                        <div id="kazumi_rule_list" class="history-list" ></div>
                     </div>
                     <!-- WebDAV 同步（kimi UI，3.2 对齐 Kazumi：主开关 + 历史/收藏子开关 + 保存/测试） -->
-                    <div class="tool-card" data-setcat="kazumi">
+                    <div class="tool-card" data-setcat="sync">
                         <div class="tool-card-title">WebDAV 同步</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">跨设备同步</span>
+                            <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">将收藏、历史与 Kazumi 规则同步到 WebDAV 服务器（如坚果云、Nextcloud）；恢复时会覆盖本地数据。子开关控制哪些数据参与同步。</div>
                             </div>
                         </div>
-                        <label class="md-switch" style="margin-top:8px;" title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
-                        <div class="hotkey-grid" style="margin-top:8px;">
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
-                        </div>
+                        <label class="md-switch"  title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
+                        <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
+                        <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
                         <div class="md-field"><input id="webdav_url" class="md-input" placeholder="WebDAV 地址（如 https://dav.jianguoyun.com/dav/）" /></div>
                         <div class="md-field"><input id="webdav_username" class="md-input" placeholder="用户名" /></div>
                         <div class="md-field"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /></div>
@@ -776,39 +848,40 @@
                         </div>
                     </div>
                     <!-- Bangumi 同步（需 token，T46） -->
-                    <div class="tool-card" data-setcat="kazumi">
+                    <div class="tool-card" data-setcat="sync">
                         <div class="tool-card-title">Bangumi 同步</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">获取 token</span>
+                            <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">前往 Bangumi「设置 → 开发」页创建 Access Token，粘贴后点保存；用于把详情页的番剧收藏/追番同步到你的 Bangumi 账号。token 仅保存在本机设置中。</div>
                             </div>
                         </div>
-                        <label class="md-switch" style="margin-top:12px;" title="打开 CatVod（非 Kazumi）影片详情时按片名自动匹配 Bangumi 数据（评分/吐槽/角色/收藏同步等）；关闭则仅显示源自身信息"><input type="checkbox" id="set_catvod_bgm_match"><span class="md-switch-track"></span><span class="md-switch-label">详情页自动匹配 Bangumi 数据</span></label>
-                        <div class="md-field" style="margin-top:8px;"><input id="bangumi_token" class="md-input" type="password" placeholder="Bangumi Access Token（sk/ey 开头）" /></div>
-                        <a id="bangumi_token_link" href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener" style="font-size:12px;color:var(--md-primary);text-decoration:none;">获取 Bangumi Access Token →</a>
-                        <div class="wall-row" style="margin-top:8px;">
-                            <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
-                            <button id="bangumi_test" class="md-btn md-btn-tonal">测试连接</button>
-                            <button id="bangumi_sync_now" class="md-btn md-btn-tonal" title="拉取 Bangumi 收藏并刷新「我的收藏」">立即同步</button>
-                        </div>
-                        <div class="tip-line pad0" id="bangumi_status" style="margin-top:8px;display:none;"></div>
-                        <div class="hotkey-grid" style="margin-top:8px;">
+                        <label class="md-switch"  title="即时同步时是否弹出提示"><input type="checkbox" id="bangumi_immediate_toast"><span class="md-switch-track"></span><span class="md-switch-label">即时同步提示</span></label>
+                        <label class="md-switch"  title="收藏变动（在看/想看/看过/抛弃/搁置）时自动上传到 Bangumi，无需手动点立即同步"><input type="checkbox" id="set_bangumi_autosync_status"><span class="md-switch-track"></span><span class="md-switch-label">收藏状态变动自动同步</span></label>
+                        <label class="md-switch"  title="启动时自动拉取一次 Bangumi 收藏，与本地合并（仅合并未冲突项）"><input type="checkbox" id="set_bangumi_autosync_on_start"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动同步收藏</span></label>
+                        <label class="md-switch"  title="打开 CatVod（非 Kazumi）影片详情时按片名自动匹配 Bangumi 数据（评分/吐槽/角色/收藏同步等）；关闭则仅显示源自身信息"><input type="checkbox" id="set_catvod_bgm_match"><span class="md-switch-track"></span><span class="md-switch-label">非 Kazumi 源详情页自动匹配 Bangumi 数据</span></label>
+                        <div class="hotkey-grid" >
                             <div>
                                 <div class="tip-line pad0">同步优先级</div>
-                                <select id="bangumi_sync_priority" class="md-select">
+                                <select id="bangumi_sync_priority" class="md-select" >
                                     <option value="0">本地优先</option>
                                     <option value="1">Bangumi 优先</option>
                                 </select>
                             </div>
-                            <div>
-                                <label class="md-switch" style="margin-top:12px;" title="即时同步时是否弹出提示"><input type="checkbox" id="bangumi_immediate_toast"><span class="md-switch-track"></span><span class="md-switch-label">即时同步提示</span></label>
-                            </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:8px;">Bangumi 追番收藏已整合到「我的 → 我的收藏」查看。</div>
+                        <div class="md-field" ><input id="bangumi_token" class="md-input" type="password" placeholder="Bangumi Access Token（sk/ey 开头）" /></div>
+                        <a id="bangumi_token_link" href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener" style="font-size:12px;color:var(--md-primary);text-decoration:none;">获取 Bangumi Access Token →</a>
+                        <div class="wall-row" >
+                            <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
+                            <button id="bangumi_test" class="md-btn md-btn-tonal">测试连接</button>
+                            <button id="bangumi_sync_now" class="md-btn md-btn-tonal" title="拉取 Bangumi 收藏并刷新「我的收藏」">立即同步</button>
+                        </div>
+                        <div class="tip-line pad0" id="bangumi_status" style="display:none;"></div>
                     </div>
                     <div class="tool-card" data-setcat="system">
                         <div class="tool-card-title">系统</div>
+                        <div class="set-group">启动与退出</div>
+                        <label class="md-switch" title="关闭应用内错误提示（载入/播放等失败的 toast）"><input type="checkbox" id="set_error_toast"><span class="md-switch-track"></span><span class="md-switch-label">应用内错误提示</span></label>
                         <div class="tip-line pad0">启动进入页面</div>
                         <select id="set_startup_view" class="md-select">
                             <option value="home">首页</option>
@@ -818,81 +891,119 @@
                             <option value="my">我的</option>
                             <option value="history">历史</option>
                         </select>
-                        <label class="md-switch" style="margin-top:12px;" title="关闭应用内错误提示（载入/播放等失败的 toast）"><input type="checkbox" id="set_error_toast"><span class="md-switch-track"></span><span class="md-switch-label">应用内错误提示</span></label>
-                        <div class="tip-line pad0" style="margin-top:12px;">关闭主窗口时</div>
+                        <div class="tip-line pad0" >关闭主窗口时</div>
                         <select id="set_closeaction" class="md-select">
                             <option value="tray" selected>缩小至托盘（后台继续）</option>
                             <option value="exit">直接退出</option>
                             <option value="ask">每次询问</option>
                         </select>
-                        <div class="tip-line pad0" style="margin-top:12px;">网络代理（HTTP/SOCKS）</div>
-                        <div class="md-field">
-                            <input id="set_proxy_url" class="md-input" type="text" placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
+                        <div class="set-group">网络</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索/时间表/榜单/详情/角色/收藏同步等）走全域名反代 api.bangumi.lol / next.bangumi.lol（对应 api.bgm.tv / next.bgm.tv，免签名）。规则仓库镜像用于规则更新拉取。</div>
+                            </div>
                         </div>
                         <div class="wall-row">
                             <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
-                            <button id="set_proxy_save" class="md-btn md-btn-tonal">保存代理</button>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:12px;">定时关机</div>
-                        <div class="md-field" style="margin-top:8px;">
+                        <label class="md-switch" title="Bangumi 接口走全域名反代 api.bangumi.lol / next.bangumi.lol"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
+                        <label class="md-switch" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
+                        <div class="tip-line pad0">网络代理</div>
+                        <div class="md-field">
+                            <input id="set_proxy_url" class="md-input" type="text" placeholder="如 http://127.0.0.1:7897" />
+                        </div>
+                        <div class="md-field" >
+                            <input id="set_proxy_test_url" class="md-input" type="text" placeholder="https://www.google.com/generate_204" />
+                        </div>
+                        <div class="wall-row" >
+                            <button id="set_proxy_test" class="md-btn md-btn-tonal">测试代理</button>
+                            <button id="set_proxy_save" class="md-btn md-btn-tonal">保存代理</button>
+                            <span id="set_proxy_test_result" class="tip-line pad0" style="font-size:12px;"></span>
+                        </div>
+                        <div class="set-group">定时关机</div>
+                        <div class="md-field" >
                             <input id="set_shutdown_minutes" class="md-input" type="number" min="0" max="600" placeholder="定时关机（分钟，0=取消）" />
                         </div>
-                        <button id="set_shutdown_set" class="md-btn md-btn-tonal">设定定时关机</button>
-                        <div class="wall-row" style="margin-top:12px;">
-                            <button id="log-viewer-open" class="md-btn md-btn-tonal">查看应用日志</button>
+                        <div class="wall-row">
+                            <button id="set_shutdown_set" class="md-btn md-btn-tonal">设定定时关机</button>
                         </div>
-                        <button id="set_reset" class="md-btn md-btn-danger-tonal">恢复默认设置</button>
+                        <div class="set-group">日志</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">日志存于 ~/.video-pc/logs，单文件 5 MiB，保留 5 份历史。</div>
+                            </div>
+                        </div>
+                        <label class="md-switch" title="按周期自动清空日志目录，避免长期运行堆积"><input type="checkbox" id="set_log_autocleanup"><span class="md-switch-track"></span><span class="md-switch-label">定时清空日志</span></label>
+                        <div class="tip-line pad0">日志级别</div>
+                        <select id="set_log_level" class="md-select" title="低于此级别的日志不写入文件">
+                            <option value="DEBUG">DEBUG（全部记录，仅排查问题时开启）</option>
+                            <option value="INFO" selected>INFO（默认，仅记录信息及以上）</option>
+                            <option value="WARN">WARN（仅警告及以上）</option>
+                            <option value="ERROR">ERROR（仅错误）</option>
+                        </select>
+                        <div class="md-field" >
+                            <input id="set_log_cleanup_days" class="md-input" type="number" min="1" max="90" placeholder="清理周期（天，默认 7）" />
+                        </div>
+                        <div class="wall-row" >
+                            <button id="log-viewer-open" class="md-btn md-btn-tonal">查看应用日志</button>
+                            <button id="set_reset" class="md-btn md-btn-danger-tonal">恢复默认设置</button>
+                        </div>
                     </div>
                     <div class="tool-card about-card" data-setcat="about">
                         <svg class="about-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 8.64L15.27 12 10 15.36V8.64zM12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>
                         <div class="about-name">YuKi</div>
                         <div class="about-version">版本 <span id="about-version">0.1.0</span></div>
-                        <div class="about-desc">基于 CatVod 架构重构的 PC 桌面端影视聚合应用，整合 Kazumi 规则引擎与 Bangumi 元数据。</div>
+                        <div class="about-desc">面向 PC 桌面的影视聚合应用：聚合 TVBox 系配置源（CMS / JS / JAR），整合 Kazumi 规则引擎、Bangumi 元数据、网盘影视源与本地播放。</div>
                     </div>
                     <div class="tool-card" data-setcat="about">
                         <div class="tool-card-title">技术栈</div>
                         <div class="about-stack">
                             <span class="about-chip">Electron 31</span><span class="about-chip">原生 HTML/CSS/JavaScript</span>
                             <span class="about-chip">Python 3 · FastAPI</span>
+                            <span class="about-chip">JDK · JAR 蜘蛛</span>
+                            <span class="about-chip">quickjs-ng</span>
                             <span class="about-chip">mpv</span><span class="about-chip">aria2c</span>
-                            <span class="about-chip">ffmpeg</span><span class="about-chip">quickjs-ng</span>
+                            <span class="about-chip">ffmpeg</span>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="about">
                         <div class="tool-card-title">致谢</div>
                         <div class="about-credits">
+                            <div class="about-credit"><b>TVBox / CatVod</b> — 影视聚合架构与站点配置生态</div>
+                            <div class="about-credit"><b>Kazumi</b> — XPath/API 规则引擎与规则商店</div>
+                            <div class="about-credit"><b>Bangumi</b> — 番剧元数据 / 时间表 / 榜单</div>
                             <div class="about-credit"><b>mpv</b> — 播放器内核（独立窗口）</div>
                             <div class="about-credit"><b>aria2c</b> — 多协议下载引擎</div>
                             <div class="about-credit"><b>ffmpeg</b> — m3u8 合成与缩略图抓帧</div>
                             <div class="about-credit"><b>Anime4K</b> — 动漫实时超分着色器</div>
-                            <div class="about-credit"><b>Bangumi</b> — 番剧元数据 / 时间表 / 榜单</div>
-                            <div class="about-credit"><b>弹弹 play</b> — 弹幕数据源</div>
                             <div class="about-credit"><b>trace.moe</b> — 以图搜番</div>
-                            <div class="about-credit"><b>Kazumi</b> — XPath/API 规则引擎与规则商店</div>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="about">
                         <div class="tool-card-title">系统信息</div>
                         <div class="about-sysinfo" id="about-sysinfo"></div>
                     </div>
-                    <div class="tool-card" data-setcat="asset">
-                        <div class="tool-card-title">扩展状态</div>
-                        <div class="tip-line pad0">应用依赖的本地组件（播放器 / 下载引擎等）就绪情况。</div>
-                        <div id="asset-status-list" class="asset-status-list" style="margin-top:10px;">
+                    <div class="tool-card" data-setcat="system">
+                        <div class="tool-card-title">组件状态</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">应用依赖的本地组件（播放器 / 下载引擎等）就绪情况。</div>
+                                <div class="info-detail">缺失播放器时可点「下载内置播放器」一键补装 mpv，或「指定播放器」选择本机已装的 mpv/VLC/PotPlayer；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
+                                <div class="info-detail">播放器：<span id="player_line">mpv（自动发现）</span></div>
+                                <div class="info-detail" style="color:var(--md-secondary);font-size:0.85em">外部播放器模式（VLC/PotPlayer）下弹幕、自动连播、观看统计不生效。</div>
+                            </div>
+                        </div>
+                        <div id="asset-status-list" class="asset-status-list" >
                             <div class="tip-line">查询中…</div>
                         </div>
-                        <button id="asset-refresh" class="md-btn md-btn-tonal" style="margin-top:10px;">刷新状态</button>
-                        <div class="tip-line pad0" style="margin-top:8px;" id="mpv_path_line">mpv 路径：自动发现</div>
-                        <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;">
-                            <button id="pick_mpv_path" class="md-btn md-btn-tonal">指定播放器路径</button>
-                            <button id="clear_mpv_path" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
+                        <div class="wall-row">
+                            <button id="asset-refresh" class="md-btn md-btn-tonal">刷新状态</button>
+                            <button id="pick_player" class="md-btn md-btn-tonal">指定播放器</button>
+                            <button id="clear_player" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
                             <button id="download_mpv" class="md-btn md-btn-filled" style="display:none;">下载内置播放器</button>
-                        </div>
-                        <div class="tip-line pad0 info-tip" style="margin-top:6px;">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">扩展安装方式</span>
-                                <div class="info-detail">缺失播放器时可点上方「下载内置播放器」一键补装 mpv，或「指定播放器路径」选择本机已装的 mpv.exe；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
-                            </div>
                         </div>
                     </div>
                     </div>
@@ -918,6 +1029,7 @@
             <div class="md-dialog-actions">
                 <button id="player-close" class="md-dialog-btn">关闭</button>
                 <button id="player-copy" class="md-dialog-btn">复制地址</button>
+                <button id="player-external" class="md-dialog-btn">外部播放器</button>
                 <button id="player-preview" class="md-dialog-btn">预览</button>
             </div>
         </div>
@@ -1046,19 +1158,20 @@
     <div id="logViewerDialog" class="md-dialog-overlay">
         <div class="md-dialog md-dialog-wide">
             <div class="md-dialog-title">应用日志</div>
-            <div class="md-dialog-body" id="log-viewer-body" style="max-height:55vh;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.6;">
+            <div class="md-dialog-body log-viewer-body" id="log-viewer-body">
                 <div class="tip-line">载入中…</div>
             </div>
-            <div class="md-dialog-body" style="display:flex;gap:8px;align-items:center;padding-top:0;">
-                <select id="log-source" class="md-select" title="按日志文件筛选"><option value="">全部日志</option></select>
-                <button id="log-prev" class="md-btn md-btn-tonal md-btn-sm">上一页</button>
-                <span id="log-page-info" class="tip-line"></span>
-                <button id="log-next" class="md-btn md-btn-tonal md-btn-sm">下一页</button>
-                <span style="flex:1"></span>
-                <button id="log-clear" class="md-btn md-btn-sm md-btn-danger-tonal" title="清空应用日志">清空日志</button>
-            </div>
-            <div class="md-dialog-actions">
-                <button onclick="closeDialog('logViewerDialog')" class="md-dialog-btn">关闭</button>
+            <div class="log-viewer-toolbar">
+                <div class="log-toolbar-left">
+                    <select id="log-source" class="md-select md-select-sm" title="按日志文件筛选"><option value="">全部日志</option></select>
+                    <span id="log-page-info" class="tip-line pad0"></span>
+                </div>
+                <div class="log-toolbar-right">
+                    <button id="log-prev" class="md-btn md-btn-tonal md-btn-sm">上一页</button>
+                    <button id="log-next" class="md-btn md-btn-tonal md-btn-sm">下一页</button>
+                    <button id="log-clear" class="md-btn md-btn-sm md-btn-danger-tonal" title="清空应用日志">清空日志</button>
+                    <button onclick="closeDialog('logViewerDialog')" class="md-btn md-btn-sm">关闭</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1105,6 +1218,116 @@
             </div>
             <div class="md-dialog-actions">
                 <button onclick="closeDialog('kazumiSourceDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Bangumi 搜索筛选工作台（复刻 Kazumi _SearchWorkbenchSheet） -->
+    <div id="bangumiFilterDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title">筛选条件</div>
+            <div class="md-dialog-body" id="bangumi-filter-body" style="max-height:64vh;overflow-y:auto;">
+                <div class="bgm-filter-section">
+                    <div class="bgm-filter-heading">排序</div>
+                    <div class="class-tabs">
+                        <span class="class-tab bgm-sort-seg active" data-sort="heat">热度</span>
+                        <span class="class-tab bgm-sort-seg" data-sort="rank">排名</span>
+                        <span class="class-tab bgm-sort-seg" data-sort="score">评分</span>
+                        <span class="class-tab bgm-sort-seg" data-sort="match">匹配</span>
+                    </div>
+                </div>
+                <div class="bgm-filter-section">
+                    <div class="bgm-filter-heading">标签</div>
+                    <div class="tip-line pad0" style="margin-bottom:6px;">选择多个标签时，优先寻找同时包含这些标签的番剧。</div>
+                    <div class="class-tabs" id="bgm-tag-presets">
+                        <span class="class-tab bgm-tag-chip" data-tag="日常">日常</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="原创">原创</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="校园">校园</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="搞笑">搞笑</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="奇幻">奇幻</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="百合">百合</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="恋爱">恋爱</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="悬疑">悬疑</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="热血">热血</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="后宫">后宫</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="机战">机战</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="轻改">轻改</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="偶像">偶像</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="治愈">治愈</span>
+                        <span class="class-tab bgm-tag-chip" data-tag="异世界">异世界</span>
+                    </div>
+                    <div class="search-bar" style="margin-top:8px;">
+                        <input id="bgm-tag-custom" class="md-input" type="text" placeholder="自定义标签" />
+                        <button id="bgm-tag-custom-add" class="md-btn md-btn-tonal">添加</button>
+                    </div>
+                    <div id="bgm-draft-tags" class="class-tabs" style="display:none;margin-top:8px;"></div>
+                </div>
+                <div class="bgm-filter-section">
+                    <div class="bgm-filter-heading">季度与日期</div>
+                    <select id="bgm-season-select" class="md-select" style="width:100%;margin-bottom:8px;">
+                        <option value="">不限季度</option>
+                    </select>
+                    <div class="search-bar">
+                        <input id="bgm-date-start" class="md-input" type="date" title="起始日期" />
+                        <span class="tip-line pad0">至</span>
+                        <input id="bgm-date-end" class="md-input" type="date" title="结束日期" />
+                    </div>
+                </div>
+                <div class="bgm-filter-section">
+                    <div class="bgm-filter-heading">数值范围</div>
+                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-score-toggle"> 启用评分范围</label>
+                    <div id="bgm-score-range-row" style="display:none;margin:6px 0 12px;">
+                        <div class="search-bar">
+                            <input id="bgm-score-min" class="md-input" type="number" min="0" max="10" step="0.5" style="width:100px;" />
+                            <span class="tip-line pad0">-</span>
+                            <input id="bgm-score-max" class="md-input" type="number" min="0" max="10" step="0.5" style="width:100px;" />
+                            <span class="tip-line pad0" id="bgm-score-vals"></span>
+                        </div>
+                    </div>
+                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-rank-toggle"> 启用排名范围</label>
+                    <div id="bgm-rank-range-row" style="display:none;margin-top:6px;">
+                        <div class="search-bar">
+                            <input id="bgm-rank-min" class="md-input" type="number" min="1" max="10000" step="1" style="width:100px;" />
+                            <span class="tip-line pad0">-</span>
+                            <input id="bgm-rank-max" class="md-input" type="number" min="1" max="10000" step="1" style="width:100px;" />
+                            <span class="tip-line pad0" id="bgm-rank-vals"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="bgm-filter-section">
+                    <div class="bgm-filter-heading">星期</div>
+                    <div class="class-tabs">
+                        <span class="class-tab bgm-weekday-chip" data-weekday="1">周1</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="2">周2</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="3">周3</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="4">周4</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="5">周5</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="6">周6</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="7">周7</span>
+                    </div>
+                </div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="bgm-filter-reset" class="md-dialog-btn">重置</button>
+                <button id="bgm-filter-apply" class="md-dialog-btn" style="background:var(--md-primary);color:var(--md-on-primary);">应用</button>
+                <button onclick="closeDialog('bangumiFilterDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Bangumi 同步进度条（仿 Kazumi _BangumiSyncProgressDialog） -->
+    <div id="bgmSyncProgressDialog" class="md-dialog-overlay">
+        <div class="md-dialog" style="max-width:460px;">
+            <div class="md-dialog-title">同步 Bangumi</div>
+            <div class="md-dialog-body">
+                <div id="bgm-sync-progress-text" class="tip-line pad0" style="margin-bottom:12px;">准备同步 Bangumi 状态…</div>
+                <div class="search-status" style="display:flex; gap:10px; align-items:center;">
+                    <div class="ss-bar"><span class="ss-fill" style="width:0%"></span></div>
+                    <span class="ss-count" id="bgm-sync-progress-count"></span>
+                </div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="bgm-sync-progress-close" class="md-dialog-btn">关闭</button>
             </div>
         </div>
     </div>

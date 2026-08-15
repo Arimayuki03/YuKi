@@ -124,7 +124,7 @@ test('recCard：历史卡显示 集名 · 时长 · 时间（T73，不再显示�
     assert.match(html, /20 分钟/); // 1200s = 20 分钟
 });
 
-test('recCard：Bangumi 条目带来源徽标/状态标签且无本地删除/勾选/编辑按钮', () => {
+test('recCard：Bangumi 条目带来源徽标/状态标签，可勾选批量标记但无删除/编辑按钮', () => {
     const ctx = loadRecords({});
     const html = ctx.__recCard(
         { site: 'bangumi', vodId: '123', name: '番剧 E', tag: 'watching', bangumi: true },
@@ -133,7 +133,8 @@ test('recCard：Bangumi 条目带来源徽标/状态标签且无本地删除/勾
     assert.match(html, />Bangumi</);      // 来源徽标
     assert.match(html, />在看</);          // 状态标签（watching）
     assert.doesNotMatch(html, /rec-del/);
-    assert.doesNotMatch(html, /rec-check/);
+    assert.match(html, /rec-check/);       // Bangumi 条目现支持勾选（多选标记状态，同步账号）
+    assert.match(html, /data-bgm="1"/);    // 带 Bangumi 标识供批量标记识别
     assert.doesNotMatch(html, /rec-edit/);
 });
 
@@ -145,7 +146,7 @@ test('recCard：本地条目保留删除/编辑/勾选按钮与状态标签', ()
     assert.match(html, /rec-del/);
     assert.match(html, /rec-check/);
     assert.match(html, /rec-edit/);
-    assert.match(html, />已看</);
+    assert.match(html, />看过</);
 });
 
 // ---------------------------------------------------------------- 标签模型（2.2）

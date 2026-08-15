@@ -29,6 +29,13 @@ function isMediaUrl(u) {
     try { return MEDIA_EXT.test(new URL(u).pathname); } catch (e) { return false; }
 }
 
+/** 仅 http(s) 才允许交给隐藏窗口 loadURL；其余（畸形拼接如 demohttps://、
+ *  或 intent://、magnet: 等非法/自定义 scheme）会被 Chromium 移交操作系统，
+ *  弹出「用什么应用打开此链接」系统弹窗（T：解析视频弹 demohttps 系统弹窗根因）。 */
+function isLoadableUrl(u) {
+    return /^https?:\/\//i.test(String(u || ''));
+}
+
 /** 注入页面的轮询脚本：收集 <video>/<audio> 的媒体直链（含 <source> 子元素）。
  *  覆盖 webRequest 未命中的场景（如资源经 XHR/fetch 拉取、resourceType 非 media）。 */
 const JS_POLL_VIDEO = `(() => {
@@ -161,8 +168,9 @@ class ParseWindow {
             const r = await this._tryJson(p, targetUrl);
             if (r) return r;
         }
-        // iframe 型逐个尝试
+        // iframe 型逐个尝试（跳过拼出畸形 scheme 的解析接口，防系统「打开方式」弹窗）
         for (const p of list.filter((x) => parseInt(x.type, 10) !== 1)) {
+            if (!isLoadableUrl(p.url + targetUrl)) continue;
             const r = await this._tryIframe(p, targetUrl, IFRAME_TIMEOUT, legacy);
             if (r) return r;
         }
@@ -202,6 +210,7 @@ class ParseWindow {
      * 同 key（legacy|url）并发调用经 AsyncSingleFlight 去重，只开一个窗口、共享结果。
      */
     captureDirect(url, timeout = IFRAME_TIMEOUT, legacy) {
+        if (!isLoadableUrl(url)) return Promise.resolve(null);
         const key = `${legacy ? 'L' : 'N'}|${url}`;
         return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout, legacy }));
     }
@@ -228,6 +237,12 @@ class ParseWindow {
             const ses = win.webContents.session;
             // R5：隐藏窗口反复加载失败会累积 Electron 内部 did-stop-loading 监听器，放开上限抑制告警
             win.webContents.setMaxListeners(0);
+            // 协议守卫：解析页里的跳转/新窗若是非 http(s) scheme（如广告跳 intent://、
+            // 或畸形 demohttps://），Chromium 会移交系统 → 弹「打开方式」。一律拦截在窗口内。
+            win.webContents.on('will-navigate', (ev, navUrl) => {
+                if (!isLoadableUrl(navUrl)) { try { ev.preventDefault(); } catch (e) { /* ignore */ } }
+            });
+            win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
             let settled = false;
             let initialLoadDone = false;  // 首个页面是否已成功加载（did-fail-load 快速失败判定用）
             let jsPoll = null;      // 视频元素轮询（非 legacy）
@@ -312,8 +327,8 @@ class ParseWindow {
                                 finish({ ok: true, url: src, header: {}, via: `${via}·iframe` });
                                 return;
                             }
-                            // 非媒体页：跟随一次（防环 + 限深）
-                            if (/^https?:\/\//i.test(src) && src !== url && !followed.has(src) && depth < MAX_DEPTH) {
+                            // 非媒体页：跟随一次（防环 + 限深 + 仅 http(s)，畸形 scheme 不交系统）
+                            if (isLoadableUrl(src) && src !== url && !followed.has(src) && depth < MAX_DEPTH) {
                                 followed.add(src);
                                 depth++;
                                 win.loadURL(src).catch(() => { /* 跟随失败等超时 */ });
@@ -389,7 +404,11 @@ class ParseWindow {
             win.webContents.on('did-finish-load', () => {
                 ses.cookies.get({}).then((cookies) => this._pushCookies(cookies)).catch(() => { });
             });
-            win.loadURL(url).catch(() => done(true));
+            // loadURL 在验证页发生跳转/重定向时会以 ERR_ABORTED 拒绝——这是正常导航，
+            // 不能据此关闭窗口（否则用户还没填验证码窗口就自动消失）。仅记录，等用户手动关闭或超时。
+            win.loadURL(url).catch((e) => {
+                console.warn('[parse] captcha loadURL rejected (可能为跳转，忽略):', e && e.message);
+            });
         }));
     }
 }

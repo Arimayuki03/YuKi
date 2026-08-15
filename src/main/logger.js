@@ -11,12 +11,52 @@ const util = require('util');
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_BACKUPS = 5;
 
+// 日志等级权重：低于设定级别的日志不写入文件（DEBUG=10/INFO=20/WARN=30/ERROR=40）。
+const LEVEL_WEIGHT = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 };
+// 当前生效的日志级别（运行时可由 settings.logLevel 调整；默认 INFO：DEBUG 不落盘）。
+let _currentLogLevel = LEVEL_WEIGHT.INFO;
+
+/** 设置当前日志级别（'DEBUG'|'INFO'|'WARN'|'ERROR'），不区分大小写；未知值回退 INFO。 */
+function setLogLevel(level) {
+    const k = String(level || 'INFO').toUpperCase();
+    _currentLogLevel = LEVEL_WEIGHT[k] != null ? LEVEL_WEIGHT[k] : LEVEL_WEIGHT.INFO;
+}
+function getLogLevel() {
+    const v = _currentLogLevel;
+    return Object.keys(LEVEL_WEIGHT).find((k) => LEVEL_WEIGHT[k] === v) || 'INFO';
+}
+
 // 所有活动写入器（含主进程 electron-main 与 Python 控制台）——外部清空日志后统一重置大小，避免轮转计算漂移。
 const _activeWriters = new Set();
+
+// 定时清空日志的计时器引用（由 startScheduledLogCleanup 管理）。
+let _cleanupTimer = null;
+
+/** 启动定时清空日志：每 intervalMs 毫秒清空一次日志目录。
+ *  intervalMs <= 0 或重复调用时先清掉旧计时器。enabled=false 时不启动。 */
+function startScheduledLogCleanup(logDir, intervalMs, enabled) {
+    if (_cleanupTimer) { clearInterval(_cleanupTimer); _cleanupTimer = null; }
+    if (!enabled || !intervalMs || intervalMs <= 0) return;
+    _cleanupTimer = setInterval(() => {
+        try { clearLogs(logDir); } catch (e) { /* 定时清空失败不阻断 */ }
+    }, intervalMs);
+}
+
+/** 停止定时清空日志（退出/设置变更时调用）。 */
+function stopScheduledLogCleanup() {
+    if (_cleanupTimer) { clearInterval(_cleanupTimer); _cleanupTimer = null; }
+}
 
 /** 去掉轮转备份后缀（如 electron-main.log.2 → electron-main.log），用于按“来源”归组与过滤。 */
 function baseSource(name) {
     return String(name).replace(/\.\d+$/, '');
+}
+
+/** 当前级别是否应落盘（DEBUG=10/INFO=20/WARN=30/ERROR=40）。
+ * 低于当前级别的日志直接丢弃，不进入轮转写入器。 */
+function shouldLog(level) {
+    const w = LEVEL_WEIGHT[String(level || 'INFO').toUpperCase()];
+    return w == null ? true : w >= _currentLogLevel;
 }
 
 function redactSecrets(value) {
@@ -73,10 +113,13 @@ class RotatingLogWriter {
 
     write(level, ...args) {
         try {
+            const lvl = String(level || 'INFO').toUpperCase();
+            // 级别过滤：低于当前日志级别的直接丢弃，不写入文件（不占轮转配额）
+            if (LEVEL_WEIGHT[lvl] != null && LEVEL_WEIGHT[lvl] < _currentLogLevel) return;
             const message = redactSecrets(args.map(formatArg).join(' '));
             const lines = message.split(/\r?\n/);
             const stamp = new Date().toISOString();
-            const text = lines.map((line) => `${stamp} [${String(level || 'INFO').toUpperCase()}] ${line}`).join('\n') + '\n';
+            const text = lines.map((line) => `${stamp} [${lvl}] ${line}`).join('\n') + '\n';
             const bytes = Buffer.byteLength(text, 'utf8');
             this._rotate(bytes);
             fs.appendFileSync(this.file, text, 'utf8');
@@ -142,7 +185,9 @@ function readRecentLogs(logDir, page, pageSize, source) {
 }
 
 /** 清空日志目录下的所有日志文件（当前进程日志句柄仍会继续写入新文件）。
- *  返回真实删除数量与无法删除的文件名列表，并重置活动写入器的大小，避免轮转漂移。 */
+ *  返回真实删除数量与无法删除的文件名列表，并重置活动写入器的大小，避免轮转漂移。
+ *  Windows 下 Python 后端以 RotatingFileHandler 持有 python-backend.log 句柄，
+ *  rmSync 和 truncateSync 可能均失败——此时改用 open('r+') + ftruncate 截断内容。 */
 function clearLogs(logDir) {
     let removed = 0;
     const failed = [];
@@ -155,7 +200,21 @@ function clearLogs(logDir) {
                 // 确认已删除（rmSync 无 force 时被占用会抛错，此处再核一次）。
                 if (fs.existsSync(full)) { failed.push(name); } else { removed++; }
             } catch (e) {
-                failed.push(name);
+                // Windows 下被其他进程（如 Python 后端 python-backend.log）持有句柄的文件无法删除，
+                // 退而清空内容（truncate 到 0 字节）：句柄仍有效，后续追加从头写。视为成功清空。
+                let cleared = false;
+                try {
+                    fs.truncateSync(full, 0);
+                    cleared = true;
+                } catch (e2) {
+                    // truncateSync 也失败时（文件以独占模式打开），尝试 open + ftruncate 截断
+                    try {
+                        const fd = fs.openSync(full, 'r+');
+                        try { fs.ftruncateSync(fd, 0); cleared = true; } finally { fs.closeSync(fd); }
+                    } catch (e3) { /* open 也失败，确实无法清空 */ }
+                }
+                if (cleared) removed++;
+                else failed.push(name);
             }
         }
     } catch (e) { /* 目录不存在视为空 */ }
@@ -169,9 +228,14 @@ function clearLogs(logDir) {
 module.exports = {
     DEFAULT_MAX_BYTES,
     DEFAULT_BACKUPS,
+    LEVEL_WEIGHT,
     RotatingLogWriter,
     installConsoleLogger,
     readRecentLogs,
     clearLogs,
     redactSecrets,
+    setLogLevel,
+    getLogLevel,
+    startScheduledLogCleanup,
+    stopScheduledLogCleanup,
 };

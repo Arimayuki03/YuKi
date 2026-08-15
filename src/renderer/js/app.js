@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
 
 const App = {
     currentView: 'home',
@@ -13,8 +13,21 @@ const App = {
     // 视图导航历史栈：鼠标侧键后退弹栈、前进走重做栈（仅视图级，不含弹窗）
     _navStack: [],
     _navForward: [],
+    // 页级缓存（任务十一）：只读浏览视图在 TTL 内再次切入时跳过 enter 网络重拉。
+    // 仅收录只读视图（home/popular/timeline/my-统计）；history/收藏/下载等反映用户操作的视图绝不缓存。
+    _cacheableViews: { home: 60000, popular: 60000, timeline: 60000 },
+    _viewLoadedAt: {}, // name → 上次 enter 完成时间戳
 
-    /** opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）。 */
+    /** 该视图是否在 TTL 内已加载过（可跳过 enter 重拉）。 */
+    _viewFresh(name) {
+        const ttl = this._cacheableViews[name];
+        if (!ttl) return false;
+        const at = this._viewLoadedAt[name] || 0;
+        return at > 0 && (Date.now() - at) < ttl;
+    },
+
+    /** opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）。
+     *  opts.refresh === true 时强制重拉（忽略页级缓存 TTL）。 */
     showView(name, opts) {
         // 旧收藏路由并入「我的」收藏页签（左侧独立收藏入口已移除）
         let myTab = null;
@@ -24,15 +37,24 @@ const App = {
         $(`.main-nav-item[data-view="${name}"]`).addClass('active');
         $('.view').removeClass('active');
         $(`#view-${name}`).addClass('active');
-        if (name === 'home' && typeof Home !== 'undefined' && Home.onViewShown) Home.onViewShown(); // T80：设置里改过每页条数，回来自动按新条数重载
+        // 页级缓存：可缓存的只读视图在 TTL 内再次切入 → 跳过 enter 网络重拉（refresh=true 强制刷新）
+        const forceRefresh = !!(opts && opts.refresh);
+        const skipEnter = !forceRefresh && this._cacheableViews[name] && this._viewFresh(name);
+        if (name === 'home' && typeof Home !== 'undefined' && Home.onViewShown && !skipEnter) { Home.onViewShown(); this._viewLoadedAt.home = Date.now(); } // T80：设置里改过每页条数，回来自动按新条数重载
         if (name === 'search') Search.focus();
         if (name === 'downloads') Downloads.enter();
         if (name === 'live') Live.enter();
         if (name === 'history') HistoryView.enter();
         if (name === 'my') My.enter(myTab);
         if (name === 'tools') ensureLocalPanel(); // T28：本地文件独立板块，首次进入懒加载
-        if (name === 'timeline') Timeline.init(); // 番剧时间表（Bangumi）
-        if (name === 'popular') Popular.enter(); // Kazumi 首页推荐（Bangumi 趋势，T62）
+        if (name === 'timeline') {
+            const firstTl = (typeof Timeline !== 'undefined') && !Timeline._inited; // init() 首次会自行 load()，避免重复拉取
+            Timeline.init();
+            Timeline.refreshCollections(); // 每次进入重建收藏过滤集合（仅本地，无日历网络）
+            if (!firstTl && !skipEnter) Timeline.load(); // 再次切入且已过期 → 刷新日历（TTL 内则跳过）
+            this._viewLoadedAt.timeline = Date.now();
+        } // 番剧时间表（Bangumi）
+        if (name === 'popular' && !skipEnter) { Popular.enter(); this._viewLoadedAt.popular = Date.now(); } // Kazumi 首页推荐（Bangumi 趋势，T62）
         if (!opts || opts.push !== false) {
             if (this._navStack[this._navStack.length - 1] !== name) {
                 this._navStack.push(name);
@@ -110,11 +132,13 @@ const App = {
         });
     },
 
-    /** 回到顶部：监听各视图滚动（scroll 不冒泡，直接绑定），超一屏显示悬浮按钮。 */
+    /** 回到顶部：监听各视图滚动（scroll 不冒泡，直接绑定），超一屏显示悬浮按钮。
+     *  顶部固定条为常驻显示（不再随滚动隐藏），这里只需确保其 .visible 类存在。 */
     initBackTop() {
         const btn = document.getElementById('back-top');
         $('.view').on('scroll', function () {
-            btn.classList.toggle('show', this.scrollTop > 400);
+            const st = this.scrollTop;
+            btn.classList.toggle('show', st > 400);
         });
         btn.addEventListener('click', () => {
             const v = document.querySelector('.view.active');
@@ -168,6 +192,7 @@ $(async function bootstrap() {
             dim: s.wallpaperDim || '',
             animEnabled: s.animEnabled !== false,
             wallpaperUrl: s.wallpaper ? toFileUrl(s.wallpaper) : '',
+            glass: s.glass === true,
         });
         // 侧栏收缩状态恢复
         if (s.navCollapsed) document.body.classList.add('nav-collapsed');
@@ -199,9 +224,20 @@ $(async function bootstrap() {
     // 鼠标侧键前进/后退：主进程 app-command 转发 + 渲染层 mousedown 兜底（双通道去重）
     if (window.vpc.onMouseNav) window.vpc.onMouseNav((p) => App.mouseNav(p && p.dir));
     App.initMouseButtons();
+    // 无边框模式：窗口控制按钮 + body 标记
+    (async () => {
+        try {
+            const s = await window.vpc.settingsGet();
+            if (s && s.systemTitleBar !== true) document.body.classList.add('frameless');
+        } catch (e) { /* 默认无边框 */ document.body.classList.add('frameless'); }
+        if (window.vpc.winMinimize) $('#win-min').on('click', () => window.vpc.winMinimize());
+        if (window.vpc.winMaximize) $('#win-max').on('click', () => window.vpc.winMaximize());
+        if (window.vpc.winClose) $('#win-close').on('click', () => window.vpc.winClose());
+    })();
     Player.init();
     Detail.init();
     Search.init();
+    if (typeof BangumiSearch !== 'undefined' && BangumiSearch.init) BangumiSearch.init();
     Live.init();
     // Kazumi 规则引擎前端模块（kimi UI，glm5.2 后端端点）
     if (typeof Kazumi !== 'undefined' && Kazumi.init) Kazumi.init();

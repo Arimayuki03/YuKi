@@ -92,10 +92,11 @@ const Downloads = {
     },
 
     async clearDone() {
-        // T33：删除类操作统一二次确认（仅移除列表记录，已下载文件不受影响）
-        if (!await confirmDialog('清除所有已完成任务？已下载的文件不会被删除。', { okText: '清除' })) return;
+        // 仅从列表移除已完成任务，保留磁盘上已下载的文件
+        if (!await confirmDialog('清除所有已完成任务？仅移除下载列表记录，已下载的文件会保留。', { okText: '清除' })) return;
         const r = await window.vpc.download.control('clear', {});
         if (!r.ok) warnToast(`清除失败：${r.reason}`);
+        else warnToast('已清除完成列表（文件已保留）');
     },
 
     /** 删除全部失败任务及其未完成产物（会删磁盘上的残留文件，先确认）。 */
@@ -114,9 +115,10 @@ const Downloads = {
         const act = btn.getAttribute('data-act');
         const task = this._tasks.find((t) => t.gid === gid);
         if (act === 'play') return this.play(task);
-        if (act === 'remove' && !await confirmDialog('删除该下载任务？已下载的文件不会被删除。', { okText: '删除' })) return;
+        if (act === 'remove' && !await confirmDialog('删除该下载任务？已下载的文件也会被删除。', { okText: '删除' })) return;
         window.vpc.download.control(act, { gid }).then((r) => {
             if (!r.ok) warnToast(`操作失败：${r.reason}`);
+            else if (r.resumed) warnToast('已恢复下载（任务已重新加入队列）');
         });
     },
 
@@ -125,11 +127,29 @@ const Downloads = {
         const video = task.files.find((f) => VIDEO_EXTS.includes('.' + f.split('.').pop().toLowerCase()));
         if (!video) { warnToast('输出文件中没有可播放的视频'); return; }
         const r = await window.vpc.download.play(video);
+        if (!r) { warnToast('播放失败'); return; }
         if (!r.ok) {
             warnToast(r.reason === 'mpv-missing' ? 'mpv 未安装：node scripts/download-binaries.js mpv' : `播放失败：${r.reason}`);
-        } else {
-            warnToast('已在 mpv 窗口播放');
+            return;
         }
+        warnToast('已在 mpv 窗口播放');
+        // 记入历史记录（下载文件播放）：取文件名作为标题，来源标记「下载文件」
+        try {
+            const name = String(video).split(/[\\/]/).pop() || video || '下载视频';
+            if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
+                Records.recordPlay({
+                    site: 'download',
+                    siteName: '下载文件',
+                    vodId: video,
+                    name: name,
+                    pic: '',
+                    remarks: '下载文件',
+                    episode: '',
+                    seconds: 0,
+                    totalEps: 0,
+                }).catch(() => { /* 历史记录失败不影响播放 */ });
+            }
+        } catch (e) { /* ignore */ }
     },
 
     // ------------------------------------------------------------ 渲染
@@ -190,7 +210,7 @@ const Downloads = {
             // ffmpeg 合成任务不支持暂停
             btns = isHls ? '' : `<button class="md-btn md-btn-tonal" data-act="pause" data-gid="${t.gid}">暂停</button>`;
         } else if (t.status === 'paused') {
-            btns = `<button class="md-btn md-btn-tonal" data-act="unpause" data-gid="${t.gid}">继续</button>`;
+            btns = isHls ? '' : `<button class="md-btn md-btn-tonal" data-act="unpause" data-gid="${t.gid}">继续</button>`;
         } else if (t.status === 'complete') {
             btns = `<button class="md-btn md-btn-tonal" data-act="play" data-gid="${t.gid}">▶ 播放</button>`;
         }

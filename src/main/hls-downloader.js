@@ -1,10 +1,12 @@
 /**
- * hls-downloader.js — m3u8 切片流下载（ffmpeg -c copy 自动合成单文件）
+ * hls-downloader.js — m3u8 切片流下载（分片并发 + ffmpeg 合并 / ffmpeg 顺序拉流兜底）
  *
  * aria2 无法处理 HLS 切片流，此处独立管理任务：
- * - add({url, out, header})：先抓播放列表估总时长（进度用），再 spawn ffmpeg
- *   拉流合成到下载目录（临时名保留真实扩展名，完成后 rename 为终名）；
- * - AES-128 加密流由 ffmpeg 自动解密（KEY 随播放列表内嵌）；
+ * - add({url, out, header, concurrency})：concurrency > 1 时走分片并发模式
+ *   （解析 m3u8 → 并行拉取各 .ts/.m4s 分片 → ffmpeg concat 合并），
+ *   concurrency <= 1 或加密流/解析失败时回退 ffmpeg 顺序拉流模式；
+ * - AES-128 加密流（含 #EXT-X-KEY）自动回退 ffmpeg 模式（ffmpeg 自动解密）；
+ * - 广告过滤（adFilter）复用 filterAdSegments，在解析阶段过滤广告分片；
  * - 任务状态结构与 aria2 flatten 对齐（kind:'hls' 供渲染层区分），
  *   由主进程 1s 轮询合并推送；完成/失败经 EventEmitter 通知。
  */
@@ -107,30 +109,43 @@ class HlsDownloader extends EventEmitter {
     constructor() {
         super();
         this.dir = '';
+        this.concurrency = 5; // 分片并发数（设置页可调，index.js 传入）
         this._tasks = new Map(); // gid → task
         this.on('error', () => { }); // EventEmitter 兜底
     }
 
     setDir(dir) { this.dir = dir || path.join(os.homedir(), 'Downloads'); }
+    setConcurrency(n) { this.concurrency = Math.max(1, Math.min(32, n | 0)); }
 
     /** 新增任务；返回 gid。ffmpeg 缺失抛 Error('ffmpeg-missing')。
-     *  adFilter=true 时先抓播放列表过滤广告分段（CUE-OUT/CUE-IN + 广告路径特征），
-     *  重写为本地临时 m3u8 再交 ffmpeg；无广告或过滤失败则走原始地址。 */
-    add({ url, out, header, adFilter }) {
+     *  concurrency > 1 时走分片并发模式（解析 m3u8 → 并行拉取分片 → ffmpeg 合并）；
+     *  concurrency <= 1 或加密流/解析失败时回退 ffmpeg 顺序拉流模式。
+     *  adFilter=true 时先过滤广告分段（CUE-OUT/CUE-IN + 广告路径特征）。 */
+    add({ url, out, header, adFilter, concurrency }) {
         const bin = findFfmpeg();
         if (!bin) throw new Error('ffmpeg-missing');
         const gid = `hls-${++_seq}-${Date.now().toString(36)}`;
         fs.mkdirSync(this.dir, { recursive: true });
         const name = (out || 'video.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 150);
         const dest = path.join(this.dir, name);
+        const conc = Math.max(1, Math.min(32, parseInt(concurrency, 10) || 1));
         const task = {
             gid, kind: 'hls', name, url, header: header || null,
             status: 'active', percent: 0, done: 0, total: 0, speed: 0,
             errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false,
             adFilter: !!adFilter, _adTemp: null, _input: null,
+            _mode: 'ffmpeg', // 'concurrent' | 'ffmpeg'（分片并发 / ffmpeg 顺序拉流）
+            _segsDir: dest + '.segs', // 分片临时目录
+            _segments: null, _totalSegs: 0, _downloaded: 0, _segBytes: 0,
+            _speedTimer: null, _speedLastBytes: 0, _speedLastTs: 0,
         };
         this._tasks.set(gid, task);
-        this._run(task);
+        if (conc > 1) {
+            task._mode = 'concurrent';
+            this._runConcurrent(task, conc);
+        } else {
+            this._run(task);
+        }
         return gid;
     }
 
@@ -180,6 +195,205 @@ class HlsDownloader extends EventEmitter {
         if (t && t._adTemp) {
             try { fs.rmSync(t._adTemp, { force: true }); } catch (e) { /* ignore */ }
             t._adTemp = null;
+        }
+    }
+
+    /** 清理分片临时目录（任务结束/删除/失败时）。 */
+    _cleanSegsDir(t) {
+        if (t && t._segsDir) {
+            try { fs.rmSync(t._segsDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        }
+        if (t && t._speedTimer) { clearInterval(t._speedTimer); t._speedTimer = null; }
+    }
+
+    // ===== 分片并发模式 =====
+
+    /** 解析 m3u8 播放列表，提取分片 URL 列表。返回 {segments, isEncrypted, totalDuration}。
+     *  master 播放列表自动选最高码率变体；广告过滤复用 filterAdSegments。 */
+    async _parsePlaylist(url, header, adFilter) {
+        const headers = { 'User-Agent': 'Mozilla/5.0', ...(header || {}) };
+        let plUrl = url;
+        let text = await (await proxyFetch(plUrl, { headers, signal: AbortSignal.timeout(15000), redirect: 'follow' })).text();
+        // master 播放列表 → 选最高码率变体
+        if (text.includes('#EXT-X-STREAM-INF')) {
+            let best = null, bestBw = -1;
+            const lines = text.split(/\r?\n/);
+            for (let i = 0; i < lines.length; i++) {
+                const m = lines[i].match(/^#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/);
+                if (m && lines[i + 1] && !lines[i + 1].startsWith('#')) {
+                    const bw = parseInt(m[1], 10);
+                    if (bw > bestBw) { bestBw = bw; best = lines[i + 1].trim(); }
+                }
+            }
+            if (!best) throw new Error('no variant in master playlist');
+            plUrl = new URL(best, url).href;
+            text = await (await proxyFetch(plUrl, { headers, signal: AbortSignal.timeout(15000), redirect: 'follow' })).text();
+        }
+        // 广告过滤
+        if (adFilter) {
+            const { filtered, removed } = filterAdSegments(text, plUrl);
+            if (removed > 0) text = filtered;
+        }
+        // 解析分片
+        const segments = [];
+        let isEncrypted = false;
+        let totalDuration = 0;
+        let pendingInf = null;
+        const abs = (uri) => { try { return new URL(uri, plUrl).href; } catch (e) { return uri; } };
+        for (const raw of text.split(/\r?\n/)) {
+            const line = raw.trim();
+            if (!line) continue;
+            if (/^#EXT-X-KEY:/i.test(line)) { isEncrypted = true; continue; }
+            if (/^#EXTINF:([\d.]+)/.test(line)) {
+                const m = line.match(/^#EXTINF:([\d.]+)/);
+                pendingInf = m ? parseFloat(m[1]) : 0;
+                continue;
+            }
+            if (line.startsWith('#')) continue;
+            // 分片 URL
+            const segUrl = abs(line);
+            segments.push({ url: segUrl, index: segments.length, duration: pendingInf || 0 });
+            totalDuration += pendingInf || 0;
+            pendingInf = null;
+        }
+        if (!segments.length) throw new Error('no segments in playlist');
+        return { segments, isEncrypted, totalDuration };
+    }
+
+    /** 并发池下载分片到临时目录。单分片失败重试 2 次。 */
+    async _downloadSegments(task, segments, concurrency) {
+        const segsDir = task._segsDir;
+        fs.mkdirSync(segsDir, { recursive: true });
+        task._totalSegs = segments.length;
+        task._downloaded = 0;
+        task._segBytes = 0;
+        const headers = { 'User-Agent': 'Mozilla/5.0', ...(task.header || {}) };
+        // 速度计算定时器（1s 采样）
+        task._speedLastBytes = 0;
+        task._speedLastTs = Date.now();
+        task._speedTimer = setInterval(() => {
+            const now = Date.now();
+            const elapsed = (now - task._speedLastTs) / 1000;
+            if (elapsed > 0) {
+                task.speed = Math.max(0, (task._segBytes - task._speedLastBytes) / elapsed);
+                task._speedLastBytes = task._segBytes;
+                task._speedLastTs = now;
+            }
+        }, 1000);
+        // 并发池
+        let idx = 0;
+        let failed = false; // 任一 worker 失败即置位，其余 worker 检测后退出
+        const downloadOne = async () => {
+            while (idx < segments.length) {
+                if (task.status === 'removed' || failed) return;
+                const seg = segments[idx++];
+                const segFile = path.join(segsDir, `seg-${String(seg.index).padStart(6, '0')}.ts`);
+                let ok = false;
+                for (let retry = 0; retry < 3 && !ok; retry++) {
+                    if (task.status === 'removed' || failed) return;
+                    try {
+                        const resp = await proxyFetch(seg.url, { headers, signal: AbortSignal.timeout(30000), redirect: 'follow' });
+                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                        const buf = Buffer.from(await resp.arrayBuffer());
+                        if (task.status === 'removed' || failed) return; // 下载期间被取消
+                        fs.writeFileSync(segFile, buf);
+                        task._segBytes += buf.length;
+                        ok = true;
+                    } catch (e) {
+                        if (task.status === 'removed' || failed) return;
+                        if (retry < 2) await new Promise((r) => setTimeout(r, 1000 * (retry + 1)));
+                        else { failed = true; throw new Error(`分片 ${seg.index + 1} 下载失败: ${e.message}`); }
+                    }
+                }
+                task._downloaded++;
+                task.percent = Math.min(99, Math.round(task._downloaded / task._totalSegs * 1000) / 10);
+            }
+        };
+        const workers = Array.from({ length: Math.min(concurrency, segments.length) }, () => downloadOne());
+        await Promise.all(workers);
+        // 下载完毕后立即停止速度定时器（合并阶段不再有下载速度）
+        if (task._speedTimer) { clearInterval(task._speedTimer); task._speedTimer = null; }
+        task.speed = 0;
+    }
+
+    /** 用 ffmpeg concat demuxer 合并分片为最终文件。withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */
+    async _concatSegments(task, segments, withBsf = true) {
+        const segsDir = task._segsDir;
+        const part = task._dest + '.incomplete' + path.extname(task._dest);
+        // 生成 concat 列表文件（ffmpeg concat demuxer 要求正斜杠路径，Windows 反斜杠会被当转义符）
+        const listFile = path.join(segsDir, 'concat.txt');
+        const lines = segments.map((seg) => {
+            const segFile = path.join(segsDir, `seg-${String(seg.index).padStart(6, '0')}.ts`);
+            const p = segFile.split(path.sep).join('/').replace(/'/g, "'\\''");
+            return `file '${p}'`;
+        });
+        fs.writeFileSync(listFile, lines.join('\n'), 'utf8');
+        // spawn ffmpeg 合并
+        return new Promise((resolve, reject) => {
+            const args = ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy'];
+            if (withBsf) args.push('-bsf:a', 'aac_adtstoasc');
+            args.push(part);
+            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+            task._proc = proc;
+            let errBuf = '';
+            proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
+            proc.on('exit', (code) => {
+                task._proc = null;
+                if (code === 0 && fs.existsSync(part)) {
+                    try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
+                    fs.renameSync(part, task._dest);
+                    resolve();
+                } else if (withBsf) {
+                    // aac_adtstoasc 对 fMP4/m4s 流会失败，去掉 bsf 重试
+                    this._concatSegments(task, segments, false).then(resolve, reject);
+                } else {
+                    reject(new Error(`ffmpeg 合并失败 (code=${code}): ${errBuf.slice(-500)}`));
+                }
+            });
+            proc.on('error', () => { task._proc = null; reject(new Error('ffmpeg 启动失败')); });
+        });
+    }
+
+    /** 分片并发模式主流程：解析 → 下载 → 合并 → 清理。加密流/解析失败时回退 ffmpeg 模式。 */
+    async _runConcurrent(task, concurrency) {
+        try {
+            // 1. 解析播放列表
+            const { segments, isEncrypted, totalDuration } = await this._parsePlaylist(task.url, task.header, task.adFilter);
+            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            // 加密流回退 ffmpeg 模式（JS 层解密复杂且易出错，ffmpeg 自动解密）
+            if (isEncrypted) {
+                console.log(`[hls] ${task.name}: 加密流，回退 ffmpeg 模式`);
+                task._mode = 'ffmpeg';
+                task.duration = totalDuration;
+                this._cleanSegsDir(task);
+                this._spawn(task, true);
+                return;
+            }
+            task._segments = segments;
+            task.duration = totalDuration;
+            console.log(`[hls] ${task.name}: 分片并发模式，${segments.length} 个分片，并发 ${concurrency}`);
+            // 2. 并发下载分片
+            await this._downloadSegments(task, segments, concurrency);
+            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            // 3. 合并分片
+            await this._concatSegments(task, segments);
+            if (task.status === 'removed') { this._cleanSegsDir(task); this._cleanAdTemp(task); return; }
+            // 4. 成功
+            task.status = 'complete';
+            task.percent = 100;
+            task.speed = 0;
+            this._cleanSegsDir(task);
+            this._cleanAdTemp(task);
+            this.emit('completed', this._flatten(task));
+        } catch (e) {
+            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            console.warn(`[hls] ${task.name}: 分片并发失败，回退 ffmpeg 模式: ${e.message}`);
+            // 清理分片临时目录
+            this._cleanSegsDir(task);
+            task._mode = 'ffmpeg';
+            // 回退 ffmpeg 模式（不走 adFilter 二次解析，直接用原始 URL）
+            task.adFilter = false;
+            this._spawn(task, true);
         }
     }
 
@@ -272,6 +486,7 @@ class HlsDownloader extends EventEmitter {
         if (t._proc) { try { t._proc.kill(); } catch (e) { /* ignore */ } }
         t.status = 'removed';
         this._cleanAdTemp(t);
+        this._cleanSegsDir(t);
         this._tasks.delete(gid);
         try { fs.rmSync(t._dest + '.incomplete' + path.extname(t._dest), { force: true }); } catch (e) { /* ignore */ }
         // 历史版本临时名，旧残留顺带清理
@@ -283,6 +498,7 @@ class HlsDownloader extends EventEmitter {
         for (const [gid, t] of this._tasks) {
             if (['complete', 'error', 'removed'].includes(t.status)) {
                 this._cleanAdTemp(t);
+                this._cleanSegsDir(t);
                 this._tasks.delete(gid);
             }
         }
@@ -294,6 +510,7 @@ class HlsDownloader extends EventEmitter {
         for (const [gid, t] of this._tasks) {
             if (t.status !== 'error') continue;
             this._cleanAdTemp(t);
+            this._cleanSegsDir(t);
             this._tasks.delete(gid);
             try { fs.rmSync(t._dest + '.incomplete' + path.extname(t._dest), { force: true }); } catch (e) { /* ignore */ }
             try { fs.rmSync(t._dest + '.part', { force: true }); } catch (e) { /* ignore */ }
@@ -303,11 +520,14 @@ class HlsDownloader extends EventEmitter {
     }
 
     _flatten(t) {
+        const total = t._mode === 'concurrent' ? (t._totalSegs || 0) : 0;
+        const done = t._mode === 'concurrent' ? (t._downloaded || 0) : 0;
         return {
             gid: t.gid, kind: 'hls', status: t.status, name: t.name,
-            total: 0, done: 0, percent: t.percent,
-            speed: t.status === 'active' && Number.isFinite(t.speed) && t.speed > 0 ? t.speed : 0, connections: '',
+            total, done, percent: t.percent,
+            speed: t.status === 'active' && Number.isFinite(t.speed) && t.speed > 0 ? t.speed : 0, connections: t._mode === 'concurrent' ? `${done}/${total}` : '',
             errorMessage: t.errorMessage, files: t.files,
+            uri: t.url || '', // 原始 URL，用于重启后恢复下载
         };
     }
 

@@ -6,7 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, Detail, renderPagerBox, pageSizeOf, fitVodTitles */
+/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle */
 
 async function recGet(key) {
     try {
@@ -22,7 +22,38 @@ async function recGet(key) {
 
 async function recSet(key, list) {
     try { await window.vpc.settingsSet(key, list); } catch (e) { /* 保存失败不影响主流程 */ }
+    // 收藏变更后统一通知订阅者（Kazumi CollectController.loadCollectibles 的集中刷新模式）：
+    // 所有消费者（详情页收藏按钮、我的收藏页、时间表）只需订阅一次即可自动刷新，
+    // 避免在每个点击处理程序里重复手写缓存失效 + 重渲染。
+    if (key === 'favorites' && typeof FavHub !== 'undefined' && FavHub.changed) {
+        FavHub.changed({ key });
+    }
 }
+
+// ---------------------------------------------------------------- 收藏事件中心
+// 仿 Kazumi CollectController：任何收藏写入（toggleFavorite/setFavTag/批量标记/删除）
+// 都经 recSet → FavHub.changed 广播给所有订阅者。消费者订阅后自行重渲染，
+// 不再需要在 detail.js 的各个点击处理程序里手写 My._bgmCache=null / render() / Timeline.refresh。
+// 命名为 FavHub 避免与下方 Favorites 视图对象（makeRecordView 产物）冲突。
+const FavHub = {
+    _subs: [],
+    /** 订阅收藏变更事件，返回取消订阅函数。callback 同步派发，不 await。 */
+    onChanged(callback) {
+        if (typeof callback !== 'function') return () => { };
+        this._subs.push(callback);
+        return () => {
+            const i = this._subs.indexOf(callback);
+            if (i >= 0) this._subs.splice(i, 1);
+        };
+    },
+    /** 触发收藏变更事件（meta 可选：{ key, site, vodId }）。同步派发，按订阅顺序调用。 */
+    changed(meta) {
+        const subs = this._subs.slice();
+        for (let i = 0; i < subs.length; i++) {
+            try { subs[i](meta || {}); } catch (e) { /* 单个订阅者失败不阻断其他 */ }
+        }
+    },
+};
 
 // 记录唯一标识：site+vodId 对历史不唯一（同源多集、Kazumi 源 vodId 恒为空），
 // 增删改一律按 uid 匹配。创建记录时生成，旧数据按 ts 回填（见 ensureRecUids）。
@@ -98,6 +129,7 @@ const Records = {
             ts: now, kind: 'play',
             playCount: 1, lastPlayTs: now,
             lastEpisode: v.episode || '', lastDuration: Math.round(v.seconds || 0),
+            totalEps: v.totalEps || 0,   // 该源总集数，历史卡「共 N 集」显示用
         };
         const key = String(v.name || '').trim().toLowerCase();
         list = list.filter((x) => String(x.name || '').trim().toLowerCase() !== key || x.kind === 'play');
@@ -111,7 +143,7 @@ const Records = {
         return list.some((x) => String(x.site) === String(site) && String(x.vodId) === String(vodId));
     },
 
-    /** 切换收藏状态，返回 true=已收藏。第三方源收藏时自动匹配 Bangumi 元数据。 */
+    /** 切换收藏状态，返回 true=已收藏。第三方源仅匹配 Bangumi ID（时间表筛选用），不替换封面/片名。 */
     async toggleFavorite(v) {
         let list = await recGet('favorites');
         const idx = list.findIndex((x) => String(x.site) === String(v.site) && String(x.vodId) === String(v.vodId));
@@ -120,19 +152,14 @@ const Records = {
             list.splice(idx, 1);
         } else {
             let entry = { uid: genUid(), site: v.site, siteName: v.siteName || '', vodId: v.vodId, name: v.name || '', pic: v.pic || '', remarks: v.remarks || '', tag: 'want', ts: Date.now() };
-            // 第三方源尝试匹配 Bangumi 元数据
-            if (v.name && typeof Kazumi !== 'undefined' && Kazumi.bangumiSearch) {
+            // 第三方源仅匹配 Bangumi ID 供时间表筛选用，不替换封面/片名
+            if (v.bangumiId) {
+                entry.bangumiId = String(v.bangumiId);
+            } else if (v.name && typeof Kazumi !== 'undefined' && Kazumi.bangumiSearch) {
                 try {
                     const bgmResults = await Kazumi.bangumiSearch(v.name);
                     if (bgmResults && bgmResults.length && bgmResults[0].id) {
-                        const info = await Kazumi.bangumiInfo(bgmResults[0].id);
-                        if (info) {
-                            const cover = bangumiCover(info.images, 'card');   // 收藏网格卡封面（T75）
-                            entry.pic = cover || entry.pic;
-                            entry.name = info.name_cn || info.name || entry.name;
-                            entry.bangumiId = String(info.id || '');
-                            entry.siteName = 'Bangumi · ' + (entry.siteName || '');
-                        }
+                        entry.bangumiId = String(bgmResults[0].id);
                     }
                 } catch (e) { /* Bangumi 匹配失败不影响收藏 */ }
             }
@@ -141,6 +168,16 @@ const Records = {
             if (list.length > 200) list = list.slice(0, 200);
         }
         await recSet('favorites', list);
+        FavHub.changed({ site: v.site, vodId: v.vodId, bangumiId: v.bangumiId });
+        // 收藏状态变动自动同步到 Bangumi（开关默认关）：仅新加入收藏时触发单条上传
+        if (added && v.site !== 'bangumi') {
+            try {
+                const s = (await window.vpc.settingsGet()) || {};
+                if (s.bangumiAutoSyncStatus === true && typeof Kazumi !== 'undefined' && Kazumi._autoSyncFavItem) {
+                    Kazumi._autoSyncFavItem(entry).catch(() => { /* 后台失败不阻塞 UI */ });
+                }
+            } catch (e) { /* 设置读取失败不影响收藏 */ }
+        }
         return added;
     },
 
@@ -158,12 +195,25 @@ const Records = {
         let it = list.find((x) => String(x.site) === String(v.site) && String(x.vodId) === String(v.vodId));
         if (!it) {
             it = { uid: genUid(), site: v.site, siteName: v.siteName || '', vodId: v.vodId, name: v.name || '', pic: v.pic || '', remarks: v.remarks || '', tag, ts: Date.now() };
+            if (v.bangumiId) it.bangumiId = String(v.bangumiId);
             list.unshift(it);
             if (list.length > 200) list = list.slice(0, 200);
         } else {
             it.tag = tag;
+            // 回填 bangumiId（旧记录可能缺少该字段，时间表「只显示在看」筛选依赖它）
+            if (!it.bangumiId && v.bangumiId) it.bangumiId = String(v.bangumiId);
         }
         await recSet('favorites', list);
+        FavHub.changed({ site: v.site, vodId: v.vodId, bangumiId: v.bangumiId });
+        // 收藏标签变动自动同步到 Bangumi（开关默认关）：仅标签变化时触发单条上传
+        if (v.site !== 'bangumi') {
+            try {
+                const s = (await window.vpc.settingsGet()) || {};
+                if (s.bangumiAutoSyncStatus === true && typeof Kazumi !== 'undefined' && Kazumi._autoSyncFavItem) {
+                    Kazumi._autoSyncFavItem(it).catch(() => { /* 后台失败不阻塞 UI */ });
+                }
+            } catch (e) { /* 设置读取失败不影响收藏 */ }
+        }
     },
 };
 
@@ -172,7 +222,7 @@ function normTag(t) { return (t === undefined || t === null) ? 'want' : t; }
 
 // 收藏状态标签：''=无/未标记，want=想看，watching=在看，seen=已看(看过)，hold=搁置，dropped=抛弃。
 // 与 Bangumi 收藏类型 1想看/2看过/3在看/4搁置/5抛弃 对应（见 my.js 合并逻辑）。
-const TAG_LABEL = { want: '想看', watching: '在看', seen: '已看', hold: '搁置', dropped: '抛弃' };
+const TAG_LABEL = { want: '想看', watching: '在看', seen: '看过', hold: '搁置', dropped: '抛弃' };
 const TAG_ORDER = ['want', 'watching', 'seen', 'hold', 'dropped']; // 标签循环切换顺序（→ 循环回 ''）
 
 /** 标签 → 展示文案（未知标签回退「想看」）。 */
@@ -198,7 +248,7 @@ function fmtTime(ts) {
  *  历史卡按次记录（T73）：每次播放一条，显示 集名 · 时长 · 播放时间，不再显示「已播 N 集」。
  *  Kazumi 源历史卡无源封面：复用 Bangumi 封面缓存，未命中占位图标 data-cover-missing 供 fillMissingCovers 补拉。
  *  Bangumi 条目（v.bangumi）：无移除/编辑/勾选按钮，来源徽标显示「Bangumi」，点击进 Bangumi 二级详情页。 */
-function recCard(v, editable, withTags) {
+function recCard(v, editable, withTags, playCountByName) {
     const isBgm = !!v.bangumi;
     const tag = isBgm ? (v.tag || '') : normTag(v.tag);
     const progress = v.progress;
@@ -212,17 +262,41 @@ function recCard(v, editable, withTags) {
     if (!pic && String(v.site || '').startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
         pic = Kazumi.getCachedBangumiCover(v.name) || '';
     }
+    // T76：Bangumi 封面（官方 lain.bgm.tv）官方优先、镜像 lain.bangumi.lol 兜底；其余源普通 img
+    const isBgmCover2 = pic && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic);
+    const coverHtml = isBgmCover2 ? bangumiCoverImg(pic) : vodCoverImg(pic);
+    // 本地文件（site='local'）：vodId 存的是相对路径，异步抓帧后替换占位图
+    const isLocal = String(v.site || '') === 'local' && !pic;
     // 历史卡播放信息（T73）：播放卡显示 集名 · 时长 · 播放时间；浏览卡只显示打开时间
     const isPlay = v.kind === 'play' || (v.playCount || 0) > 0;
+    // 集数信息行：按同名播放卡计数（去重）计算已看集数
+    const epTotal = v.totalEps || (progress && progress.totalEps) || 0;
+    const nameKey = String(v.name || '').trim().toLowerCase();
+    const watchedCount = (playCountByName && nameKey && playCountByName[nameKey]) || 0;
+    // 文字顺序：集名 → 已看N集 → 总共N集 → 播放时间（用户要求，修复重复显示）
+    const epNameLine = isPlay && v.lastEpisode
+        ? `<div class="rec-epline" title="${escHtml(String(v.lastEpisode))}">${escHtml(String(v.lastEpisode).slice(0, 20))}</div>`
+        : '';
+    const epCountLine = isPlay
+        ? (() => {
+            const bits = [];
+            if (watchedCount > 0) bits.push(`已看 ${watchedCount} 集`);
+            if (epTotal) bits.push(`共 ${epTotal} 集`);
+            return bits.length ? `<div class="rec-epline">${bits.join(' · ')}</div>` : '';
+        })()
+        : '';
     const playInfo = isPlay
-        ? `<div class="rec-playinfo" title="${fmtTime(v.ts)}${v.lastDuration ? ' 播放时长 ' + fmtDur(v.lastDuration) : ''}">${[v.lastEpisode ? escHtml(String(v.lastEpisode).slice(0, 14)) : '', v.lastDuration ? fmtDur(v.lastDuration) : '', fmtTime(v.ts)].filter(Boolean).join(' · ')}</div>`
+        ? `<div class="rec-playinfo" title="${fmtTime(v.ts)}${v.lastDuration ? ' 播放时长 ' + fmtDur(v.lastDuration) : ''}">${[v.lastDuration ? '播放 ' + fmtDur(v.lastDuration) : '', fmtTime(v.ts)].filter(Boolean).join(' · ')}</div>`
         : (v.ts ? `<div class="rec-playinfo" title="${fmtTime(v.ts)}">${fmtTime(v.ts)}</div>` : '');
     const uid = escHtml(v.uid || '');
-    const check = isBgm ? '' : `<span class="rec-check" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="勾选后可批量删除"></span>`;
+    // Bangumi 条目也可勾选（多选标记状态，同步到账号）；带 data-bgm 标识与 subject id
+    const check = isBgm
+        ? `<span class="rec-check" data-bgm="1" data-id="${escHtml(v.vodId)}" data-tag="${escHtml(v.tag || '')}" title="勾选后可批量标记状态"></span>`
+        : `<span class="rec-check" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="勾选后可批量删除"></span>`;
     const tagBadge = withTags && tag
         ? (isBgm
             ? `<span class="rec-tag rec-tag-static" data-site="bangumi" title="Bangumi 收藏状态（在详情页修改）">${tagLabel(tag)}</span>`
-            : `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→在看→已看→搁置→抛弃→取消">${tagLabel(tag)}</span>`)
+            : `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→在看→看过→搁置→抛弃→取消">${tagLabel(tag)}</span>`)
         : '';
     const del = isBgm ? '' : `<button class="rec-del" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>`;
     const edit = (editable && !isBgm) ? `<button class="rec-edit" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : '';
@@ -234,12 +308,49 @@ function recCard(v, editable, withTags) {
         ${tagBadge}
         ${del}
         ${edit}
-        <div class="vod-cover">${vodCoverImg(pic)}${srcBadge}</div>
+        <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${srcBadge}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
-        <div class="vod-remarks">${escHtml(v.remarks || '')}</div>
+        ${isPlay ? '' : `<div class="vod-remarks">${escHtml(v.remarks || '')}</div>`}
+        ${epNameLine}
+        ${epCountLine}
         ${playInfo}
         ${progressHtml}
     </div>`;
+}
+
+// 本地文件历史卡：异步抓帧封面（任务八/11.2）。data-local-path 存的是本地媒体相对路径；
+// 经主进程 vpc:file-thumb（ffmpeg 截帧 -> userData/local-thumbs 缓存）取回帧图，替换 .vod-cover 内占位图。
+// 结果按 path 记忆缓存（同会话内重复渲染不重复抓帧）；失败/未就绪保持占位图兜底。
+const _localCoverCache = new Map(); // path -> promise<{ok,path}>
+function fillLocalCovers(grid) {
+    if (!grid || !grid.length) return;
+    if (!window.vpc || typeof window.vpc.fileThumb !== 'function') return;
+    grid.find('.vod-cover[data-local-path]').each(function () {
+        const el = this;
+        const rel = el.getAttribute('data-local-path');
+        if (!rel) return;
+        const url = _localCoverCache.get(rel) || window.vpc.fileThumb(rel).then((r) => {
+            if (!r || !r.ok || !r.path) return null;
+            const u = 'file:///' + String(r.path).replace(/\\/g, '/');
+            return { ok: true, url: u, rel };
+        }).catch(() => null);
+        _localCoverCache.set(rel, url);
+        Promise.resolve(url).then((r) => {
+            if (!r || !r.ok || !el.isConnected || el.getAttribute('data-local-path') !== rel) return;
+            const img = el.querySelector('img');
+            if (!img) return;
+            img.src = r.url;
+            img.classList.remove('cover-ph'); // 移除占位样式（若存在）
+            img.style.objectFit = 'cover';
+            img.style.width = '100%';
+            img.style.height = '100%';
+        });
+    });
+    // 防 Map 无限增长：上限 500 条
+    if (_localCoverCache.size > 500) {
+        const oldest = _localCoverCache.keys().next().value;
+        _localCoverCache.delete(oldest);
+    }
 }
 
 // ---- 编辑记录（改显示标题）：两视图共用一个对话框 ----
@@ -320,10 +431,35 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) Kazumi.openBangumiInfoPage(id);
                         return;
                     }
-                    // Kazumi 源记录：走规则引擎选源弹窗（对齐 search.js），需番剧源页 URL（kazumiSrc）
+                    // Kazumi 源记录：历史里点击进 Bangumi 二级详情页（按片名匹配 subject）；
+                    // 收藏里维持规则引擎选源弹窗（对齐 search.js），需番剧源页 URL（kazumiSrc）
                     const source = String(el.data('source') || el.data('site') || '');
                     if (source.startsWith('kazumi:')) {
                         const name = String(el.data('name') || '');
+                        if (storeKey === 'history') {
+                            (async () => {
+                                if (typeof Kazumi === 'undefined') { warnToast('Kazumi 引擎不可用'); return; }
+                                let id = 0;
+                                try {
+                                    const m = Kazumi.getCachedBangumiMatch ? Kazumi.getCachedBangumiMatch(name) : null;
+                                    id = (m && m.id) || 0;
+                                    if (!id && Kazumi.getBangumiMatch) {
+                                        showLoading();
+                                        const mm = await Kazumi.getBangumiMatch(name);
+                                        hideLoading();
+                                        id = (mm && mm.id) || 0;
+                                    }
+                                } catch (e) { hideLoading(); }
+                                if (id && Kazumi.openBangumiInfoPage) Kazumi.openBangumiInfoPage(id);
+                                else {
+                                    // 匹配不到 Bangumi 时回退选源弹窗
+                                    const srcUrl = String(el.data('kazumi-src') || '');
+                                    if (Kazumi.openSourceDialog) Kazumi.openSourceDialog(name, source, srcUrl);
+                                    else warnToast('未匹配到 Bangumi 番剧');
+                                }
+                            })();
+                            return;
+                        }
                         const srcUrl = String(el.data('kazumi-src') || '');
                         if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) Kazumi.openSourceDialog(name, source, srcUrl);
                         else warnToast('Kazumi 引擎不可用');
@@ -385,6 +521,18 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
 
         async render() {
             let list = await recGet(storeKey);
+            // Kazumi 源封面回填：历史/收藏记录 pic 为空但 Bangumi 缓存有封面时，
+            // 把封面写回记录并持久化（重启后不再空白；补拉成功后也会回写，见 persistRecordCover）
+            let coverBackfilled = false;
+            list.forEach((v) => {
+                if (!v || v.pic || !String(v.site || '').startsWith('kazumi:')) return;
+                if (typeof Kazumi === 'undefined' || !Kazumi.getCachedBangumiCover) return;
+                try {
+                    const c = Kazumi.getCachedBangumiCover(v.name || '');
+                    if (c) { v.pic = c; coverBackfilled = true; }
+                } catch (e) { /* 单条回填失败跳过 */ }
+            });
+            if (coverBackfilled) await recSet(storeKey, list);
             // 合并外部条目（Bangumi 收藏）：追加到本地收藏后，统一参与搜索/标签/分页
             if (this._extra) {
                 try {
@@ -408,18 +556,51 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
             const slice = list.slice((this._page - 1) * size, this._page * size);
+            // 统计每个片名的播放集数（历史卡显示「已看 N 集」用）：按片名小写归一化，
+            // 对同名多条播放记录按集名去重计数（同集反复看只算 1 集）。
+            const playCountByName = {};
+            if (storeKey === 'history') {
+                const seenEps = new Map(); // nameKey -> Set<集名>
+                list.forEach((v) => {
+                    if (!v || v.kind !== 'play') return;
+                    const k = String(v.name || '').trim().toLowerCase();
+                    if (!k) return;
+                    const ep = String(v.lastEpisode || v.remarks || '').trim();
+                    if (!seenEps.has(k)) seenEps.set(k, new Set());
+                    const s = seenEps.get(k);
+                    // 有集名按集名去重计数；无集名的播放记录按条数计（无法区分集）
+                    if (ep) { if (!s.has(ep)) { s.add(ep); playCountByName[k] = (playCountByName[k] || 0) + 1; } }
+                    else playCountByName[k] = (playCountByName[k] || 0) + 1;
+                });
+            }
             // T65：拼串一次性写入，替代逐条 append（减少 DOM 重排）
-            grid.html(slice.map((v) => recCard(v, editable, withTags)).join(''));
+            grid.html(slice.map((v) => recCard(v, editable, withTags, playCountByName)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
-            // 缺封面后台补拉（T73：历史/收藏 Kazumi 卡按片名从 Bangumi 拉封面并缓存，其余走 detailContent）
+            // 本地文件卡：异步抓帧封面（ffmpeg 截帧，替代占位图；失败/未就绪保持占位图）
+            if (typeof fillLocalCovers === 'function') fillLocalCovers(grid);
+            // 缺封面后台补拉（T73：历史/收藏 Kazumi 卡按片名从 Bangumi 拉封面并缓存，其余走 detailContent；
+            // 补拉成功后回写记录 pic 并持久化 → 重启后封面仍在）
             if (typeof fillMissingCovers === 'function') {
-                fillMissingCovers(`#${viewName}-grid`, null, { concurrency: 4, poolKey: 'rec-' + storeKey });
+                fillMissingCovers(`#${viewName}-grid`, null, {
+                    concurrency: 4, poolKey: 'rec-' + storeKey,
+                    onOne: (site, name, pic) => {
+                        if (!String(site).startsWith('kazumi:') || !name || !pic) return;
+                        const target = list.find((v) => v && !v.pic && String(v.site || '') === site && v.name === name);
+                        if (target) { target.pic = pic; recSet(storeKey, list).catch(() => { }); }
+                    },
+                });
             }
             renderPagerBox($(`#${viewName}-pager`), {
                 page: this._page,
                 pagecount,
-                onJump: (pg) => { this._page = pg; this.render(); },
+                // 翻页后滚回所在视图顶部（history/favorites 视图自身即 .view；
+                // 「我的」页收藏容器嵌在 #view-my 内，closest('.view') 统一定位滚动容器）
+                onJump: (pg) => {
+                    this._page = pg;
+                    this.render();
+                    $(root).closest('.view').scrollTop(0);
+                },
             });
             this._syncSelBar();
         },
@@ -434,6 +615,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             it.tag = (i >= 0) ? TAG_ORDER[(i + 1) % TAG_ORDER.length] : 'want';
             await recSet(storeKey, list);
             await this.render();
+            // 标签变更后同步刷新时间表过滤集合
+            if (typeof Timeline !== 'undefined' && Timeline.refreshAfterFavoriteChange) {
+                Timeline.refreshAfterFavoriteChange();
+            }
             warnToast(it.tag ? `已标记为${tagLabel(it.tag)}` : '已取消状态标记');
         },
 
@@ -465,23 +650,50 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             if (withTags) $(`#${viewName}-checkall`).prop('checked', total > 0 && n === total);
         },
 
-        /** 批量标记勾选项想看/已看（仅收藏，T40）。 */
+        /** 批量标记勾选项（本地收藏改 tag；Bangumi 条目同步到账号，T：bangumi 多选标记）。 */
         async tagChecked(tag) {
-            const keys = {};
+            const localKeys = {};
+            const bgmIds = [];
             $(`#${viewName}-grid .rec-check.checked`).each(function () {
-                keys[String($(this).data('uid'))] = 1;
+                const $c = $(this);
+                if (String($c.data('bgm') || '') === '1') {
+                    const id = String($c.data('id') || '');
+                    if (id) bgmIds.push(id);
+                } else {
+                    localKeys[String($c.data('uid'))] = 1;
+                }
             });
-            const n = Object.keys(keys).length;
-            if (!n) { warnToast('请先勾选要标记的条目'); return; }
-            const list = await recGet(storeKey);
-            list.forEach((x) => {
-                if (keys[String(x.uid)]) x.tag = tag;
-            });
-            await recSet(storeKey, list);
+            const nLocal = Object.keys(localKeys).length;
+            const nBgm = bgmIds.length;
+            if (!nLocal && !nBgm) { warnToast('请先勾选要标记的条目'); return; }
+            // 本地收藏改标签
+            if (nLocal) {
+                const list = await recGet(storeKey);
+                list.forEach((x) => { if (localKeys[String(x.uid)]) x.tag = tag; });
+                await recSet(storeKey, list);
+            }
+            // Bangumi 条目同步到账号（tag → 收藏类型）
+            let bgmOk = 0, bgmFail = 0;
+            if (nBgm && typeof Kazumi !== 'undefined' && Kazumi.setBangumiCollection) {
+                const type = (Kazumi._favTagToBangumiType && Kazumi._favTagToBangumiType[tag]) || 0;
+                if (type) {
+                    Kazumi._bgmBatchActive = true;
+                    for (const id of bgmIds) {
+                        try { if (await Kazumi.setBangumiCollection(id, type)) bgmOk++; else bgmFail++; }
+                        catch (e) { bgmFail++; }
+                    }
+                    Kazumi._bgmBatchActive = false;
+                    // Bangumi 收藏缓存失效由 Favorites.changed → My 订阅统一处理
+                }
+            }
             this._selectMode = false;
             this._syncSelToolbar();
             await this.render();
-            warnToast(`已将 ${n} 条标记为${tagLabel(tag)}`);
+            // 收藏状态变更已由 recSet → Favorites.changed 统一广播给详情页/我的收藏/时间表
+            const bits = [];
+            if (nLocal) bits.push(`${nLocal} 条本地`);
+            if (nBgm) bits.push(`${bgmOk} 条 Bangumi${bgmFail ? `（${bgmFail} 失败）` : ''}`);
+            warnToast(`已将 ${bits.join(' + ')} 标记为${tagLabel(tag)}`);
         },
 
         /** 观看进度追踪：更新收藏条目的观看进度（仅收藏）。按 site|vodId 定位（条目级身份）。 */
@@ -501,14 +713,17 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             return it ? it.progress : null;
         },
 
-        /** 批量删除勾选项。 */
+        /** 批量删除勾选项（仅本地条目；Bangumi 条目不参与删除，跳过）。 */
         async removeChecked() {
             const keys = {};
             $(`#${viewName}-grid .rec-check.checked`).each(function () {
-                keys[String($(this).data('uid'))] = 1;
+                const $c = $(this);
+                if (String($c.data('bgm') || '') === '1') return; // Bangumi 条目不删
+                const uid = String($c.data('uid') || '');
+                if (uid) keys[uid] = 1;
             });
             const n = Object.keys(keys).length;
-            if (!n) { warnToast('请先勾选要删除的条目'); return; }
+            if (!n) { warnToast('请先勾选要删除的本地条目（Bangumi 条目不支持删除）'); return; }
             if (!await confirmDialog(`删除勾选的 ${n} 条记录？`, { okText: '删除' })) return;
             let list = await recGet(storeKey);
             list = list.filter((x) => !keys[String(x.uid)]);

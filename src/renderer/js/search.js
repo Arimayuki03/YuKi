@@ -9,7 +9,7 @@
  * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog */
 
 const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
@@ -34,20 +34,28 @@ const Search = {
         $('#search-keyword').on('keydown', (e) => {
             if (e.key === 'Enter') { e.target.blur(); this.run(); }
         });
-        // 页签切换（2.3）：聚合 / Kazumi 源 / 以图搜番
+        // 页签切换（2.3）：聚合 / Kazumi 源 / Bangumi / 以图搜番
         $('#search-tabs').on('click', '.class-tab', (e) => {
             const el = $(e.currentTarget);
             $('#search-tabs .class-tab').removeClass('active');
             el.addClass('active');
             this._stab = String(el.data('stab') || 'aggregate');
             const isImage = this._stab === 'image';
-            $('#search-bar-agg').toggle(!isImage);
+            const isBangumi = this._stab === 'bangumi';
+            const isAgg = !isImage && !isBangumi;
+            $('#search-bar-agg').toggle(isAgg);
             $('#image-search-panel').toggle(isImage);
             $('#image-search-results').toggle(isImage);
-            $('#search-filters, #search-results').toggle(!isImage);
+            $('#bangumi-search-panel').toggle(isBangumi);
+            $('#search-filters, #search-results').toggle(isAgg);
             // T83：#search-status 只在有进行中的搜索状态时才随页签显示，避免切页签凭空出现并常驻
-            $('#search-status').toggle(!isImage && this._statusShown);
-            if (!isImage) $('#search-keyword').trigger('focus');
+            $('#search-status').toggle(isAgg && this._statusShown);
+            if (isBangumi && typeof BangumiSearch !== 'undefined') {
+                BangumiSearch.init();
+                $('#bgm-search-keyword').trigger('focus');
+            } else if (isAgg) {
+                $('#search-keyword').trigger('focus');
+            }
         });
         this._initImageSearch();
         $('#search-results').on('click', '.vod-card', (e) => {
@@ -450,11 +458,13 @@ const Search = {
         const cards = slice.map((v) => {
             // Kazumi 结果无源封面：命中 Bangumi 封面缓存直接显示，未命中用占位图并标
             // data-cover-missing，由 fillMissingCovers 后台按片名从 Bangumi 拉取补上（T73）。
+            // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.bangumi.lol（T76）。
             if (String(grp.src).startsWith('kazumi:')) {
                 let cover = '';
                 if (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) cover = Kazumi.getCachedBangumiCover(v.name) || '';
+                const coverHtml = cover ? bangumiCoverImg(cover, true) : vodCoverImg('', true);
                 return `<div class="vod-card kazumi-card" data-id="${escHtml(v.src)}" data-name="${escHtml(v.name)}" data-source="${escHtml(grp.src)}" tabindex="0">
-                    <div class="vod-cover"><div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div>${vodCoverImg(cover, true)}</div>
+                    <div class="vod-cover"><div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div>${coverHtml}</div>
                     <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
                     <div class="vod-remarks">Kazumi 规则源</div>
                 </div>`;

@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('node:vm');
 
-function loadPlayer(settings) {
+function loadPlayer(settings, extras = {}) {
     const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/player.js'), 'utf8');
     const jqueryStub = () => ({
         on() { return this; },
@@ -35,11 +35,40 @@ function loadPlayer(settings) {
             },
         },
     };
+    // 注入可选的全局 mock（Records / Kazumi / Detail 等）
+    if (extras.Records) context.Records = extras.Records;
+    if (extras.Kazumi) context.Kazumi = extras.Kazumi;
+    if (extras.Detail) context.Detail = extras.Detail;
     context.globalThis = context;
     vm.createContext(context);
     vm.runInContext(`${source}\n;globalThis.__testPlayer = Player;`, context, { filename: 'player.js' });
     return context.__testPlayer;
 }
+
+test('观看时长以真实墙钟 wallWatched 计，拖进度条不虚增', async () => {
+    const settings = {};
+    const player = loadPlayer(settings);
+    player._curMeta = { site: 'site-a', vodId: 'vod-a', title: '影片 W', subtitle: '第 1 集' };
+    player._rememberSession({ ok: true, sessionId: 111 });
+    // 用户只看了 20s 但把进度条拖到了 pos=100（duration 120）：时长应记 20（wallWatched），不是 100
+    player._recordWatch({ sessionId: 111, pos: 100, duration: 120, wallWatched: 20 });
+    await player._watchWrite;
+    assert.equal(settings.watchStats.totalSeconds, 20);
+    assert.equal(settings.watchStats.sessionCount, 1);
+    // 最近观看 percent 仍按进度位置（pos/duration）
+    assert.equal(settings.recentWatches[0].percent, 83);
+});
+
+test('wallWatched<15s 的短播被过滤（拖了进度条也不计）', async () => {
+    const settings = {};
+    const player = loadPlayer(settings);
+    player._curMeta = { title: '影片 X' };
+    player._rememberSession({ ok: true, sessionId: 112 });
+    // 起播即关：真实只看 3s，即便拖动 pos=90 也不计入
+    player._recordWatch({ sessionId: 112, pos: 90, duration: 100, wallWatched: 3 });
+    await player._watchWrite;
+    assert.equal(settings.watchStats, undefined);
+});
 
 test('观看统计按 sessionId 使用起播时元信息并串行保存', async () => {
     const settings = {};
@@ -214,4 +243,29 @@ test('_awaitTimeout：解析 IPC 挂起时超时返回 null（loading 不会卡�
     // 正常 promise 不受影响
     const ok = await player._awaitTimeout(Promise.resolve({ ok: true }), 60);
     assert.deepEqual(ok, { ok: true });
+});
+
+test('Kazumi 源播放退出后写入历史记录（recordPlay 被调用，含 site/kazumiSrc/episode）', async () => {
+    const settings = {};
+    const recorded = [];
+    const Records = {
+        recordPlay: async (v) => { recorded.push(v); },
+    };
+    const player = loadPlayer(settings, { Records });
+    // 模拟 Kazumi 源起播元信息
+    player._curMeta = {
+        site: 'kazumi:测试规则', title: '海贼王', subtitle: '第 1 集',
+        vodId: '', kazumiSrc: 'https://src.example.com/ep1', totalEps: 12,
+    };
+    player._rememberSession({ ok: true, sessionId: 1001 });
+    // 播放 120s 后退出
+    player._recordWatch({ sessionId: 1001, pos: 110, duration: 120, wallWatched: 120 });
+    await player._watchWrite;
+    assert.equal(recorded.length, 1, 'recordPlay 应被调用 1 次');
+    assert.equal(recorded[0].site, 'kazumi:测试规则');
+    assert.equal(recorded[0].name, '海贼王');
+    assert.equal(recorded[0].episode, '第 1 集');
+    assert.equal(recorded[0].seconds, 120);
+    assert.equal(recorded[0].totalEps, 12);
+    assert.equal(recorded[0].kazumiSrc, 'https://src.example.com/ep1');
 });
