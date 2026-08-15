@@ -168,9 +168,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 return
-            thread_n = 4
+            thread_n = 32
             try:
-                thread_n = int(q.get('thread', ['4'])[0])
+                thread_n = int(q.get('thread', ['32'])[0])
             except ValueError:
                 pass
             # Cookie：请求头自带（mpv --http-header-fields）优先，否则用已配置的网盘 Cookie
