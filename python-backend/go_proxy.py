@@ -20,6 +20,7 @@ import http.server
 import logging
 import queue
 import threading
+import time
 import urllib.parse
 
 import requests
@@ -96,29 +97,34 @@ class _SegStream:
         s = self.range_start + i * seg
         e = min(self.range_start + (i + 1) * seg - 1, self.range_end)
         q = self._queues[i]
-        try:
-            r = _fetch(self.url, self.headers, s, e)
+        # 段下载失败（403 风控 / 5xx / 网络抖动）重试 3 次，退避后仍失败才中断流，
+        # 避免单次瞬时失败直接打断播放（mpv 缓存耗尽即卡顿）。
+        last_err = None
+        for attempt in range(3):
+            if self._cancel.is_set():
+                return
             try:
-                if r.status_code not in (200, 206):
-                    q.put(RuntimeError('段 %d HTTP %d' % (i, r.status_code)))
-                    return
-                for chunk in r.iter_content(SEG_CHUNK):
-                    if self._cancel.is_set():
+                r = _fetch(self.url, self.headers, s, e)
+                try:
+                    if r.status_code in (200, 206):
+                        for chunk in r.iter_content(SEG_CHUNK):
+                            if self._cancel.is_set():
+                                return
+                            if not chunk:
+                                continue
+                            q.put(chunk)  # 满则阻塞（背压）
+                        q.put(None)  # 段结束哨兵
                         return
-                    if not chunk:
-                        continue
-                    q.put(chunk)  # 满则阻塞（背压）
-            finally:
-                r.close()
-        except Exception as ex:
-            if not self._cancel.is_set():
-                q.put(RuntimeError('%s' % str(ex)[:100]))
-            return
-        finally:
-            try:
-                q.put(None)  # 段结束哨兵
-            except queue.Full:
-                pass
+                    last_err = RuntimeError('段 %d HTTP %d' % (i, r.status_code))
+                    logger.warning('go-proxy 段 %d/%d HTTP %d（重试 %d/3）', i, self.n, r.status_code, attempt + 1)
+                finally:
+                    r.close()
+            except Exception as ex:
+                last_err = RuntimeError('%s' % str(ex)[:100])
+            time.sleep(0.3 * (attempt + 1))  # 0.3s / 0.6s / 0.9s 退避
+        if not self._cancel.is_set():
+            logger.warning('go-proxy 段 %d/%d 下载失败，中断流: %s', i, self.n, last_err)
+            q.put(last_err)
 
     def start(self):
         for i in range(self.n):

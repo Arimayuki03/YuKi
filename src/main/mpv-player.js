@@ -180,10 +180,18 @@ class MpvPlayer extends EventEmitter {
         if (this.subLang) args.push(`--slang=${this.subLang}`);
         // Anime4K 实时超分（动漫向）：着色器链完整存在才注入，缺文件静默跳过
         if (this.anime4kShaders) args.push(`--glsl-shaders=${this.anime4kShaders}`);
-        // 视频缓冲落盘（设置页可切内存/硬盘）：缓存模式写进磁盘而非内存，
-        // 目录不存在则创建（mpv 也会自建，提前建好便于「清空硬盘缓存」定位）。
-        // 注意 mpv v0.41 的目录选项是 --demuxer-cache-dir（--cache-dir 不是合法选项）。
-        if (this.cacheMode === 'disk' && this.cacheDir) {
+        // 视频缓冲：网络流（含网盘 go-proxy 分段实时转发流）统一加大预缓冲，
+        // 抗 CDN/转发抖动；本地文件不需要。硬盘缓存模式（设置页可切）另加
+        // --cache-on-disk 落盘。注意 mpv v0.41 的目录选项是 --demuxer-cache-dir
+        // （--cache-dir 不是合法选项）。
+        const isNet = /^https?:\/\//i.test(String(episodes[0].url || ''));
+        if (isNet) {
+            args.push('--cache=yes', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=20');
+            if (this.cacheMode === 'disk' && this.cacheDir) {
+                try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
+                args.push('--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
+            }
+        } else if (this.cacheMode === 'disk' && this.cacheDir) {
             try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
             args.push('--cache=yes', '--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
         }
