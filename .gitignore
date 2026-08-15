@@ -14,3 +14,16 @@ tmp_spiders/
 .DS_Store
 session-logs/
 mpv-shot*.jpg
+
+# 网盘蜘蛛运行时状态（含 cookie 敏感文件，禁止入库）
+FM/
+python-backend/FM/
+# 本地工具/编排器配置
+.omo/
+.zcode/
+ha-orchestrator.config*.json
+analysis-tmp/
+# jar-runner 构建产物（源码与 stubs 入库，二进制由 build.py 生成）
+python-backend/jar-runner/runner.jar
+python-backend/jar-runner/test-spider.jar
+python-backend/jar-runner/test-build/
