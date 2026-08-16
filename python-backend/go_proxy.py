@@ -30,12 +30,16 @@ import requests
 logger = logging.getLogger('vpc.goproxy')
 
 # FongMi 蜘蛛期望的本地代理协议：
-# - 端口：蜘蛛启动时自动扫描 9978-10000（GET /proxy?do=ck 返回 "ok" 即命中）；
-#   另有部分模板硬编码 127.0.0.1:1314（F.a 播放转发）。
-# - do=ck：健康检查；do=pan：网盘（夸克/UC）分享文件取流；
-#   ?url=<encoded>：通用下载转发（分段并发）。
+# - 端口：不同 jar 蜘蛛把 127.0.0.1:<port> 硬编码进字节码，跨 jar 差异很大：
+#   fm-jvm.jar（夸克盘社/百度）硬编码 unexported 7944；ea3f 4K 网盘、欧歌等
+#   硬编码 9978；另有 1314（播放转发模板）。为覆盖全部 jar，必须**同时监听**
+#   这些端口。否则某个 jar 生成的播放 URL 指向它硬编码的端口但无人监听 →
+#   播放失败（本次"夸克不能播"即因 7944 被移除导致）。
+# - do=ck：健康检查（部分蜘蛛启动时扫描端口，GET /proxy?do=ck 返回 ok 即命中）。
+# - do=pan：网盘（夸克/UC）分享文件取流；?url=<encoded>：通用下载转发（分段并发）。
 PORT = 9978
-EXTRA_PORTS = [1314]  # 兼容 jar 硬编码的 1314 播放转发模板
+# 覆盖各 jar 硬编码的播放/代理端口：7944(FM网盘)、1314(播放转发模板)、9978(主)
+EXTRA_PORTS = [7944, 1314]
 BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
 # 并发上限：与官方 thread=32 一致；32 连接即可跑满带宽
