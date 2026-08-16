@@ -167,6 +167,37 @@ class JarBridge:
         return JarBridge._ensure_jvm_compatible(dest, md5)
 
     @staticmethod
+    def apply_jar_patches(jar_path):
+        """应用已知 jar 字节码补丁（如蜘蛛失效 CSS 选择器修复），返回实际应加载的 jar 路径。
+
+        补丁产出 `xxx.patched.jar`（不动源文件，避免与运行中 JVM 的句柄冲突）；
+        patched 文件存在且不早于源文件时直接复用。无补丁命中时返回原路径。
+        """
+        try:
+            from jar_patch import SELECTOR_PATCHES, patch_jar
+            if not SELECTOR_PATCHES or not jar_path or not os.path.isfile(jar_path):
+                return jar_path
+            try:
+                import zipfile
+                with zipfile.ZipFile(jar_path) as z:
+                    names = set(z.namelist())
+            except Exception:
+                return jar_path
+            if not any(p in names for p in SELECTOR_PATCHES):
+                return jar_path
+            patched_path = (jar_path[:-4] + '.patched.jar') if jar_path.lower().endswith('.jar') else (jar_path + '.patched.jar')
+            if os.path.isfile(patched_path) and os.path.getmtime(patched_path) >= os.path.getmtime(jar_path):
+                return patched_path
+            changed = patch_jar(jar_path, patched_path, SELECTOR_PATCHES)
+            if not changed:
+                return jar_path
+            logger.info('jar patches applied to %s: %s', os.path.basename(jar_path), changed)
+            return patched_path
+        except Exception as e:
+            logger.warning('jar patch failed for %s: %s', jar_path, e)
+            return jar_path
+
+    @staticmethod
     def _ensure_jvm_compatible(jar_path, md5=''):
         """检查 jar 是否含 DEX；如果是，转为 JVM .class jar 并缓存。"""
         if not os.path.isfile(jar_path):
@@ -178,14 +209,14 @@ class JarBridge:
                 names = z.namelist()
                 has_dex = any(n.endswith('.dex') for n in names)
                 if not has_dex:
-                    return jar_path  # 已经是标准 JVM jar
+                    return JarBridge.apply_jar_patches(jar_path)  # 已经是标准 JVM jar
         except Exception:
             return jar_path
         # 需要转换：jvm 缓存路径 = 原路径去掉 .jar 加 -jvm.jar
         base = jar_path.rsplit('.', 1)[0]
         jvm_path = base + '-jvm.jar'
         if os.path.isfile(jvm_path):
-            return jvm_path
+            return JarBridge.apply_jar_patches(jvm_path)
         # 用 dex2jar 转换
         d2j_jar = DEX2JAR_JAR
         if not os.path.isfile(d2j_jar):
@@ -197,7 +228,7 @@ class JarBridge:
                 main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
             else:
                 logger.warning('dex2jar not found at %s, skipping DEX conversion', d2j_jar)
-                return jar_path
+                return JarBridge.apply_jar_patches(jar_path)
         else:
             cp = [d2j_jar]
             # 加上 lib 下其他 jar（依赖）
@@ -211,20 +242,20 @@ class JarBridge:
         java_bin = java_probe.find_java()
         if not java_bin:
             logger.warning('no java runtime for dex2jar, skipping DEX conversion')
-            return jar_path
+            return JarBridge.apply_jar_patches(jar_path)
         classpath = os.pathsep.join(cp)
         cmd = [java_bin, '-cp', classpath, main_class, '-o', jvm_path, jar_path]
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=120)
             if r.returncode != 0:
                 logger.warning('dex2jar failed: %s', r.stderr.decode('utf-8', 'replace')[:200])
-                return jar_path
+                return JarBridge.apply_jar_patches(jar_path)
             if os.path.isfile(jvm_path):
                 logger.info('dex2jar ok: %s -> %s', os.path.basename(jar_path), os.path.basename(jvm_path))
-                return jvm_path
+                return JarBridge.apply_jar_patches(jvm_path)
         except Exception as e:
             logger.warning('dex2jar exception: %s', e)
-        return jar_path
+        return JarBridge.apply_jar_patches(jar_path)
 
     @staticmethod
     def map_class_name(jar_path, api_class_name):
@@ -295,8 +326,8 @@ class JarBridge:
                 self._last_error = f'jar not found: {self.jar_path}'
                 return False
 
-            # 判断是否为 DEX 转换后的 jar（需要 dexdeps）
-            needs_deps = '-jvm.jar' in self.jar_path.lower()
+            # 判断是否为 DEX 转换后的 jar（需要 dexdeps；含补丁产物 -jvm.patched.jar）
+            needs_deps = '-jvm' in self.jar_path.lower()
             if needs_deps and os.path.isdir(DEXDEPS_DIR):
                 deps = [os.path.join(DEXDEPS_DIR, f) for f in os.listdir(DEXDEPS_DIR) if f.endswith('.jar')]
                 if deps:
