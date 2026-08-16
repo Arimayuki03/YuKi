@@ -8,6 +8,7 @@ JarSpider 在每次调用 JVM 桥时附带该配置，SpiderRunner 注入蜘蛛�
 """
 import json
 import os
+import threading
 import time
 
 import hoststate
@@ -23,6 +24,20 @@ _PROVIDER_NAMES = {
 }
 
 _cache = {'mtime': 0.0, 'data': {}}
+# 保存串行化：避免并发 os.replace 同一目标在 Windows 上互抛建议锁
+_SAVE_LOCK = threading.Lock()
+
+
+def _os_replace_retry(src, dst, attempts=4):
+    """Windows 下目标被并发读/替换时 os.replace 可能短暂 Access Denied，重试。"""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)
 
 
 def _path():
@@ -90,12 +105,21 @@ def save_pan_cookies(cookies):
     for k, v in cleaned.items():
         warnings.extend(validate_pan_cookie(k, v))
     p = _path()
+    # 临时文件名带 pid + 线程 id：同进程并发保存时各自独立，避免互相抢句柄
+    tmp = '%s.tmp%d-%d' % (p, os.getpid(), threading.get_ident())
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(cleaned, f, ensure_ascii=False, indent=2)
+        with _SAVE_LOCK:
+            # 原子替换（M-28）：避免写一半时被并发读取到残缺 JSON
+            _os_replace_retry(tmp, p)
         _cache['mtime'] = os.path.getmtime(p)
         _cache['data'] = cleaned
     except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         raise RuntimeError(f'网盘 Cookie 保存失败: {e}')
     return cleaned, warnings

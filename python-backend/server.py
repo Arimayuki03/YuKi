@@ -23,6 +23,7 @@ import hashlib
 from logging.handlers import RotatingFileHandler
 import re
 import threading
+import urllib.parse
 
 # 抑制 urllib3 InsecureRequestWarning（PC 端大量 verify=False 请求）
 try:
@@ -42,6 +43,7 @@ if _JS_ENGINE_DIR not in sys.path:
 import compat  # noqa: F401  # SourceFileLoader.load_module 兼容层（3.12+）
 import hoststate
 
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI, Request, Response, Query, Form
@@ -75,6 +77,10 @@ kazumi_cookies = None
 # Phase 4 弹幕队列：面板 do=danmaku 入队；主进程播放器轮询 /danmaku?do=poll 取走
 _danmaku_queue = []
 _danmaku_clock = time.time()
+# 弹幕队列并发保护（L-14）：入队/取走为 swap 语义，需锁内原子交换
+_danmaku_lock = threading.Lock()
+# 弹幕队列上限：超出丢最旧，防内存无限增长
+_DANMAKU_QUEUE_MAX = 5000
 
 # 配置加载异步任务（多仓扫描可达分钟级，不能阻塞 /action 请求）
 _config_task = {'status': 'idle', 'summary': None, 'msg': ''}
@@ -83,6 +89,14 @@ _config_task = {'status': 'idle', 'summary': None, 'msg': ''}
 # 换线路又切回原线路时避免重复解析
 _player_content_cache = {}
 _PLAYER_CACHE_TTL = 60
+# 清理路径的并发保护（L-19）：多线程 dispatch 同时触发清理时锁内迭代淘汰
+_player_cache_lock = threading.Lock()
+
+# /cache KV 目录总量配额（H-5c）：超 512MB 拒绝新写入；检查结果缓存 60s
+# 避免每次写入都全目录统计
+_KV_QUOTA_BYTES = 512 * 1024 * 1024
+_kv_quota_state = {'checked': 0.0, 'exceeded': False}
+_kv_quota_lock = threading.Lock()
 
 
 class _RedactingFormatter(logging.Formatter):
@@ -156,8 +170,17 @@ def _config_load_async(text):
 
 def _danmaku_reset():
     global _danmaku_clock
-    _danmaku_queue.clear()
-    _danmaku_clock = time.time()
+    with _danmaku_lock:
+        _danmaku_queue.clear()
+        _danmaku_clock = time.time()
+
+
+def _danmaku_push(text):
+    """弹幕入队（锁内），队列超过上限时丢最旧。"""
+    with _danmaku_lock:
+        _danmaku_queue.append(text)
+        if len(_danmaku_queue) > _DANMAKU_QUEUE_MAX:
+            del _danmaku_queue[:len(_danmaku_queue) - _DANMAKU_QUEUE_MAX]
 
 
 # ---------------------------------------------------------------- 分发逻辑
@@ -213,6 +236,41 @@ def _cache_size():
     return total, items
 
 
+def _browser_origin_rejected(request):
+    """浏览器来源防御（H-5b）：非本机 Origin 或 Sec-Fetch-Site: cross-site
+    的请求拒绝。spider 用 requests 调用 /cache /proxy 不带这些头不受影响；
+    恶意网页跨站打 127.0.0.1（CSRF / DNS rebinding）会带这些头。"""
+    origin = request.headers.get('origin')
+    if origin:
+        host = urllib.parse.urlparse(origin).hostname
+        if host not in ('127.0.0.1', 'localhost'):
+            return True
+    if (request.headers.get('sec-fetch-site') or '').strip().lower() == 'cross-site':
+        return True
+    return False
+
+
+def _kv_quota_exceeded():
+    """KV 目录总量配额（H-5c）：超 512MB 拒绝新写入；统计结果缓存 60s。"""
+    now = time.time()
+    with _kv_quota_lock:
+        if now - _kv_quota_state['checked'] < 60:
+            return _kv_quota_state['exceeded']
+    try:
+        total, _items = _dir_size(cache_store.dir)
+    except Exception:
+        total = 0
+    exceeded = total > _KV_QUOTA_BYTES
+    with _kv_quota_lock:
+        flipped = exceeded and not _kv_quota_state['exceeded']
+        _kv_quota_state['checked'] = now
+        _kv_quota_state['exceeded'] = exceeded
+    if flipped:
+        logger.warning('KV 缓存目录超过 %dMB 配额，/cache 新写入将被拒绝（可从设置面板清理缓存）',
+                       _KV_QUOTA_BYTES // (1024 * 1024))
+    return exceeded
+
+
 def _friendly_jar_error(err):
     """把 jar 蜘蛛的原始异常翻译为用户可读的提示。"""
     e = err or ''
@@ -259,15 +317,26 @@ def _attach_jar_error(ru, body, ensure_list=False):
     return body
 
 
+# 全局 spider 并发上限（C3）：阻塞 spider 调用经 anyio 默认线程池（~40 线程）
+# 无节制执行；超载请求在此排队而非线程暴涨/雪崩。16 = 线程池容量的 40%。
+# 注意：aggregate_search 内部的 8 线程池不经此信号量（自身已限），无嵌套死锁。
+_SPIDER_SEMAPHORE = threading.BoundedSemaphore(16)
+
+
 def dispatch_action(form):
     """返回 (status_code, body_text)。spider 调用均为同步阻塞，由调用方放线程池。"""
+    with _SPIDER_SEMAPHORE:
+        return _dispatch_action_inner(form)
+
+
+def _dispatch_action_inner(form):
     do = form.get('do', '')
     try:
         # ---- 面板指令（弹幕入队 / 配置热更新；推送已由主进程 push-server 接管）----
         if do == 'danmaku':
             text = form.get('text', '')
             if text:
-                _danmaku_queue.append(text)
+                _danmaku_push(text)
             logger.info('danmaku queued (%s in queue): %s', len(_danmaku_queue), text[:60])
             return 200, '{"code":200,"msg":"danmaku queued"}'
         if do == 'setting':
@@ -403,13 +472,21 @@ def dispatch_action(form):
                 return 200, cached['result']
             result = _attach_jar_error(ru, spider_app.playerContent(
                 ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')))
-            _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
-            # 防无限增长，超过 1024 项时清理过期项
-            if len(_player_content_cache) > 1024:
-                now = time.time()
-                stale = [k for k, v in _player_content_cache.items() if (now - v['ts']) > _PLAYER_CACHE_TTL]
-                for k in stale:
-                    del _player_content_cache[k]
+            with _player_cache_lock:
+                _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
+                # 防无限增长：超过 1024 项先清过期；仍无过期项则按 ts 淘汰最旧 10%
+                if len(_player_content_cache) > 1024:
+                    now = time.time()
+                    stale = [k for k, v in _player_content_cache.items()
+                             if (now - v['ts']) > _PLAYER_CACHE_TTL]
+                    for k in stale:
+                        del _player_content_cache[k]
+                    if len(_player_content_cache) > 1024:
+                        drop = max(1, len(_player_content_cache) // 10)
+                        oldest = sorted(_player_content_cache,
+                                        key=lambda k: _player_content_cache[k]['ts'])[:drop]
+                        for k in oldest:
+                            del _player_content_cache[k]
             return 200, result
         if do == 'liveContent':
             return 200, spider_app.liveContent(ru, form.get('url', ''))
@@ -464,14 +541,24 @@ def aggregate_search(word, timeout=60):
             pool.submit(_search_source_pages, s.runner, word): s
             for s in site_list
         }
-        for fut, s in futures.items():
+        # as_completed + 整体 deadline（C3）：原先按提交顺序逐个 result(timeout)，
+        # 慢源在前时总耗时被放大为 timeout×N；改整体超时，先到先合并。
+        deadline = time.time() + timeout
+        done, pending = concurrent.futures.wait(
+            futures, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED)
+        for fut in done:
+            s = futures[fut]
             try:
-                items = fut.result(timeout=timeout)
+                # 剩余预算交给 result（wait 返回的 done 集合正常已就绪，防御性保留）
+                items = fut.result(timeout=max(0.1, deadline - time.time()))
                 for item in items:
                     item.setdefault('source', s.key)
                     merged.append(item)
             except Exception as e:
                 logger.warning('search source %s failed: %s', s.key, e)
+        for fut in pending:
+            fut.cancel()
+            logger.warning('search source %s timed out (%ss)', futures[fut].key, timeout)
     return {'list': merged}
 
 
@@ -540,7 +627,9 @@ def create_app():
     @fastapi_app.middleware('http')
     async def token_auth(request: Request, call_next):
         path = request.url.path
-        if not path.startswith(TOKEN_EXEMPT):
+        # 精确匹配免 token 路径（H-5a）：原 startswith 会放过 /healthX、
+        # /cacheXXX 等同前缀路径
+        if path not in TOKEN_EXEMPT:
             token = request.headers.get('x-token') or request.query_params.get('token')
             if token != hoststate.get_token():
                 return JSONResponse({'code': 401, 'msg': 'invalid token'}, status_code=401)
@@ -562,15 +651,17 @@ def create_app():
         global _danmaku_clock
         if do == 'post':
             if text:
-                _danmaku_queue.append(text)
+                _danmaku_push(text)
             return JSONResponse({'code': 200, 'queued': len(_danmaku_queue)})
         if do == 'reset':
             _danmaku_reset()
             return JSONResponse({'code': 200})
-        items = list(_danmaku_queue)
-        _danmaku_queue.clear()
-        base = time.time() - _danmaku_clock
-        _danmaku_clock = time.time()
+        # 锁内原子交换（L-14）：避免 poll 与并发入队交错丢弹幕
+        with _danmaku_lock:
+            items = list(_danmaku_queue)
+            _danmaku_queue.clear()
+            base = time.time() - _danmaku_clock
+            _danmaku_clock = time.time()
         return JSONResponse({'items': items, 'baseSec': round(base, 2)})
 
     @fastapi_app.get('/search/stream')
@@ -582,13 +673,17 @@ def create_app():
                 yield 'event: done\ndata: {}\n\n'
                 return
             yield f'event: meta\ndata: {json.dumps({"total": len(site_list)})}\n\n'
-            with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
+            # 手动管理线程池（M-20）：shutdown(wait=False) 避免卡死的 worker
+            # 阻塞生成器退出导致 done 事件发不出去
+            pool = ThreadPoolExecutor(max_workers=min(8, len(site_list)))
+            try:
                 futures = {
                     pool.submit(_search_source_pages, s.runner, word): s
                     for s in site_list
                 }
                 try:
-                    # T38：单源拉全部页耗时变长，放宽到 120s；超时仍发 done 事件防前端挂死
+                    # T38：单源拉全部页耗时变长，放宽到 120s；超时/异常也必须
+                    # 落到最后的 done 事件，防前端进度条挂死
                     for fut in as_completed(futures, timeout=120):
                         s = futures[fut]
                         try:
@@ -601,6 +696,8 @@ def create_app():
                         yield f'data: {payload}\n\n'
                 except Exception as e:
                     logger.warning('sse search overall timeout: %s', e)
+            finally:
+                pool.shutdown(wait=False)
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
@@ -634,28 +731,45 @@ def create_app():
                     logger.warning('[kazumi] kazumi-search-stream failed: %s: %s', plugin.name, e)
                     return {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
 
-            with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
+            # 手动管理线程池（M-20）：as_completed 超时/异常也要发 done 事件，
+            # shutdown(wait=False) 防卡死 worker 阻塞生成器退出
+            pool = ThreadPoolExecutor(max_workers=min(8, len(plugins)))
+            try:
                 futures = {pool.submit(_search_one, p): p for p in plugins}
-                for fut in as_completed(futures, timeout=120):
-                    r = fut.result(timeout=0.1)
-                    if r is None:
-                        continue
-                    payload = json.dumps({
-                        'source': 'kazumi:' + r['pluginName'], 'name': r['pluginName'],
-                        'list': r.get('data', []),
-                        'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
-                        'captcha': r.get('captcha') or False,
-                        'captchaUrl': r.get('captchaUrl', ''),
-                        'msg': r.get('msg', ''),
-                    }, ensure_ascii=False)
-                    yield f'data: {payload}\n\n'
+                try:
+                    for fut in as_completed(futures, timeout=120):
+                        r = fut.result(timeout=0.1)
+                        if r is None:
+                            continue
+                        payload = json.dumps({
+                            'source': 'kazumi:' + r['pluginName'], 'name': r['pluginName'],
+                            'list': r.get('data', []),
+                            'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
+                            'captcha': r.get('captcha') or False,
+                            'captchaUrl': r.get('captchaUrl', ''),
+                            'msg': r.get('msg', ''),
+                        }, ensure_ascii=False)
+                        yield f'data: {payload}\n\n'
+                except Exception as e:
+                    logger.warning('kazumi sse search overall timeout: %s', e)
+            finally:
+                pool.shutdown(wait=False)
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
     @fastapi_app.api_route('/cache', methods=['GET', 'POST'])
-    def cache_endpoint(do: str = Query('get'), key: str = Query(''),
+    def cache_endpoint(request: Request, do: str = Query('get'), key: str = Query(''),
                        value: str = Form('')):
+        # 浏览器来源防御（H-5b）：spider 用 requests 调用不带这些头，不受影响
+        if _browser_origin_rejected(request):
+            return JSONResponse({'code': 403, 'msg': 'forbidden'}, status_code=403)
         if do == 'set':
+            # 配额（H-5c）：单 value 上限 1MB，防止把 KV 缓存当任意存储打爆磁盘
+            if len(value.encode('utf-8', 'replace')) > 1024 * 1024:
+                logger.warning('/cache do=set 拒绝写入：单 value 超过 1MB 上限（key=%s…）', str(key)[:40])
+                return JSONResponse({'code': 413, 'msg': 'value too large'}, status_code=413)
+            if _kv_quota_exceeded():
+                return JSONResponse({'code': 413, 'msg': 'cache quota exceeded'}, status_code=413)
             cache_store.set(key, value)
         elif do == 'del':
             cache_store.delete(key)
@@ -665,6 +779,9 @@ def create_app():
 
     @fastapi_app.api_route('/proxy', methods=['GET', 'POST'])
     async def proxy_endpoint(request: Request):
+        # 浏览器来源防御（H-5b）：同 /cache
+        if _browser_origin_rejected(request):
+            return JSONResponse({'code': 403, 'msg': 'forbidden'}, status_code=403)
         param = dict(request.query_params)
         if request.method == 'POST':
             param.update(dict(await request.form()))
@@ -819,6 +936,9 @@ def dispatch_kazumi_action(form):
             if plugin_filter:
                 # 单源重查（SourceSheet 别名/手动/重试/验证后重试）
                 plugins = [p for p in plugins if p.name == plugin_filter]
+            # 空插件列表直接返回（M-23）：max_workers=0 会让线程池抛异常变 500
+            if not plugins:
+                return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
             results = [None] * len(plugins)
             def _search_one(idx, plugin):
                 try:
@@ -1134,20 +1254,20 @@ def dispatch_kazumi_action(form):
             results = []
             error = ''
             try:
-                import requests as req
+                import http_client
                 ua = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'}
                 raw = None
                 if image_url:
-                    ir = req.get(image_url, timeout=15, verify=False, headers=ua)
+                    ir = http_client.get(image_url, timeout=15, verify=True, headers=ua)
                     ir.raise_for_status()
                     raw = ir.content
                 elif image_b64:
                     import base64
                     raw = base64.b64decode(image_b64)
                 if raw:
-                    rsp = req.post('https://api.trace.moe/search', params={'anilistInfo': 2},
+                    rsp = http_client.post('https://api.trace.moe/search', params={'anilistInfo': 2},
                                    data=raw, headers={**ua, 'Content-Type': _guess_image_type(raw)},
-                                   timeout=20, verify=False)
+                                   timeout=20, verify=True)
                     if rsp.status_code != 200:
                         error = f'trace.moe {rsp.status_code}'
                     else:

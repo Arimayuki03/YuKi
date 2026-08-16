@@ -31,41 +31,8 @@ import requests
 logger = logging.getLogger('vpc.goproxy')
 
 
-def _system_proxies():
-    """读取 Windows 系统代理（WinINET 注册表），启用时返回 requests proxies dict。
-
-    走系统代理（Clash 等）时夸克取流快（实测 0.3s），而 requests 默认
-    trust_env 在部分进程里读不到 WinINET → 退化直连，取流暴慢（42s 超时）。
-    这里显式检测，确保 go-proxy 的所有夸克请求都走快路径。
-    """
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as k:
-            enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
-            server, _ = winreg.QueryValueEx(k, 'ProxyServer')
-        if not enable or not server:
-            return {}
-        proxies = {}
-        if '=' in server:
-            parts = {}
-            for seg in server.split(';'):
-                if '=' in seg:
-                    p, a = seg.split('=', 1)
-                    parts[p.strip().lower()] = a.strip()
-            for proto in ('http', 'https'):
-                if parts.get(proto):
-                    proxies[proto] = 'http://' + parts[proto]
-            if not proxies:
-                for addr in parts.values():
-                    if addr:
-                        proxies = {'http': 'http://' + addr, 'https': 'http://' + addr}
-                        break
-        else:
-            proxies = {'http': 'http://' + server, 'https': 'http://' + server}
-        return proxies
-    except Exception:
-        return {}
+# 系统代理解析收编到 http_client（环境变量优先 + WinINET 兜底，全后端唯一实现）
+from http_client import system_proxies as _system_proxies
 
 
 # 带系统代理的 requests session：所有夸克 API 请求走代理（快路径），
@@ -73,6 +40,47 @@ def _system_proxies():
 _qses = requests.Session()
 _qses.trust_env = False
 _qses.proxies.update(_system_proxies())
+
+# 共享 _qses 的并发保护（L-18）：Session 非线程安全，且上游 Set-Cookie 落进
+# 共享 jar 后会在后续请求里覆盖显式传入的 Cookie 头（跨请求污染凭据）。
+# 方案：全局锁串行化 + 每次响应后清空 jar，Cookie 一律走显式 headers。
+# 不用 thread-local session：ThreadingHTTPServer 每连接一线程，线程局部
+# session 会退化成每请求新建连接池，丢掉共享连接池的快路径；而夸克 API
+# 均为秒级短 JSON 请求，播放流走 _fetch 的独立连接，锁串行化无感知。
+_QSES_LOCK = threading.Lock()
+
+
+def _qget(url, **kw):
+    with _QSES_LOCK:
+        try:
+            return _qses.get(url, **kw)
+        finally:
+            try:
+                _qses.cookies.clear()
+            except Exception:
+                pass
+
+
+def _qpost(url, **kw):
+    with _QSES_LOCK:
+        try:
+            return _qses.post(url, **kw)
+        finally:
+            try:
+                _qses.cookies.clear()
+            except Exception:
+                pass
+
+
+# 自动附加网盘 Cookie 的目标域名白名单（H-1c）：仅夸克/UC 系域名，
+# 防止把网盘凭据发给任意目标 URL；客户端请求头自带的 Cookie 始终透传不受限。
+def _cookie_host_allowed(url):
+    try:
+        host = (urllib.parse.urlparse(url).hostname or '').lower()
+    except ValueError:
+        return False
+    return host in ('quark.cn', 'myquark.cn', 'uc.cn') or \
+        host.endswith(('.quark.cn', '.myquark.cn', '.uc.cn'))
 
 # FongMi 蜘蛛期望的本地代理协议：
 # - 端口：不同 jar 蜘蛛把 127.0.0.1:<port> 硬编码进字节码，跨 jar 差异很大：
@@ -97,8 +105,13 @@ _SAVE_CACHE = {}
 # 分享解析缓存：pwd_id → {ts, stoken, fid, fid_token}（5 分钟 TTL，避免重复 token/detail）
 _SHARE_CACHE = {}
 _SHARE_CACHE_TTL = 300
+_SHARE_CACHE_MAX = 512   # C2：条目上限（触顶全清，过期即清）
 # 转存缓存持久化文件（放用户数据目录，幂等创建）
 _SAVE_CACHE_FILE = None
+# _SAVE_CACHE 条目上限（C2）：超限在持久化前删最早插入的条目
+_SAVE_CACHE_MAX = 2000
+# _SAVE_CACHE 持久化的并发保护：多个请求同时转存时避免互相覆盖
+_SAVE_LOCK = threading.Lock()
 
 
 def _save_cache_file():
@@ -126,13 +139,24 @@ def _load_save_cache():
 
 
 def _persist_save_cache():
-    try:
-        p = _save_cache_file()
-        if p:
-            with open(p, 'w', encoding='utf-8') as f:
-                f.write(json.dumps(_SAVE_CACHE, ensure_ascii=False))
-    except Exception:
-        pass
+    # 原子写（同目录临时文件 + os.replace）+ 加锁：避免并发写互相截断，
+    # 也避免进程中断留下半截 JSON
+    p = _save_cache_file()
+    if not p:
+        return
+    with _SAVE_LOCK:
+        data = json.dumps(_SAVE_CACHE, ensure_ascii=False)
+        # 临时文件名带 pid + 线程 id，避免与其他写入方抢同名句柄
+        tmp = '%s.tmp%d-%d' % (p, os.getpid(), threading.get_ident())
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(data)
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 _load_save_cache()
@@ -164,16 +188,22 @@ def _parse_range(rng, total):
     if end >= total:
         end = total - 1
     if start > end:
-        return 0, total - 1
+        # 越界/倒置 Range：返回 None，调用方回 416（Content-Range: bytes */total）
+        return None
     return start, end
 
 
-def _fetch(url, headers, start, end, timeout=60):
-    """单段请求：GET Range=bytes=start-end，流式返回 response。"""
+def _fetch(url, headers, start, end=None, timeout=60):
+    """单段请求：GET Range=bytes=start-end，流式返回 response。
+
+    end 为 None 表示开放区间（目标无长度信息，如 HLS）：不带 Range 头
+    整段请求，避免发出 bytes=start-start 的零字节区间。
+    """
     h = dict(headers)
-    h['Range'] = 'bytes=%d-%d' % (start, end)
+    if end is not None:
+        h['Range'] = 'bytes=%d-%d' % (start, end)
     return requests.get(url, headers=h, stream=True, timeout=timeout,
-                        verify=False, allow_redirects=True,
+                        verify=True, allow_redirects=True,
                         proxies=_system_proxies() or None)
 
 
@@ -202,16 +232,16 @@ def _quark_resolve_share(pwd_id, headers):
     last_err = None
     for attempt in range(3):
         try:
-            r = _qses.post(
+            r = _qpost(
                 'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                 headers={**headers, 'Content-Type': 'application/json'},
                 data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
-                timeout=20, verify=False)
+                timeout=20, verify=True)
             stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
             if not stoken:
                 raise ValueError('share token empty')
-            r2 = _qses.get(_quark_detail_url(pwd_id, stoken),
-                           headers=headers, timeout=20, verify=False)
+            r2 = _qget(_quark_detail_url(pwd_id, stoken),
+                           headers=headers, timeout=20, verify=True)
             d = ((r2.json() or {}).get('data') or {})
             lst = d.get('list') or []
             if not lst:
@@ -228,12 +258,12 @@ def _quark_resolve_share(pwd_id, headers):
 def _quark_v2play(fid, headers):
     """v2/play 取播放直链；分享文件未转存（file not found）返回 None。"""
     import json as _json
-    r = _qses.post(
+    r = _qpost(
         'https://drive-pc.quark.cn/1/clouddrive/file/v2/play?pr=ucpro&fr=pc&uc_param_str=',
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps({'fid': fid, 'resolutions': 'normal,low,high,super,2k,4k',
                           'supports': 'fmp4,m3u8'}),
-        timeout=25, verify=False, allow_redirects=False)
+        timeout=25, verify=True, allow_redirects=False)
     try:
         j = r.json()
     except Exception:
@@ -272,20 +302,20 @@ def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
     import time as _time
     body = {"pdir_fid": "0", "pwd_id": pwd_id, "scene": "link", "stoken": stoken,
             "to_pdir_fid": "0", "fid_list": [fid], "fid_token_list": [fid_token]}
-    r = _qses.post(
+    r = _qpost(
         'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save?pr=ucpro&fr=pc&uc_param_str=&__t=%d'
         % int(_time.time() * 1000),
         headers={**headers, 'Content-Type': 'application/json'},
-        data=_json.dumps(body), timeout=25, verify=False)
+        data=_json.dumps(body), timeout=25, verify=True)
     tid = ((r.json() or {}).get('data') or {}).get('task_id', '')
     if not tid:
         raise ValueError('save task id empty')
     for _ in range(12):
         _time.sleep(1)
         try:
-            r2 = _qses.get(
+            r2 = _qget(
                 'https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=pc&uc_param_str=&task_id=%s' % tid,
-                headers=headers, timeout=20, verify=False)
+                headers=headers, timeout=20, verify=True)
             sa = ((r2.json() or {}).get('data') or {}).get('save_as') or {}
             fids = sa.get('save_as_select_top_fids') or sa.get('save_as_top_fids') or []
             if fids:
@@ -319,19 +349,21 @@ def _quark_share_play_url(pwd_id, headers):
         try:
             now = _time.time()
             sc = _SHARE_CACHE.get(pwd_id)
+            if sc and (now - sc.get('ts', 0)) >= _SHARE_CACHE_TTL:
+                sc = _SHARE_CACHE.pop(pwd_id, None)   # 过期即清（C2：原先只跳过）
             if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
                 stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
             else:
-                r = _qses.post(
+                r = _qpost(
                     'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                     headers={**headers, 'Content-Type': 'application/json'},
                     data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
-                    timeout=20, verify=False)
+                    timeout=20, verify=True)
                 stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
                 if not stoken:
                     raise ValueError('share token empty')
                 detail_url = _quark_detail_url(pwd_id, stoken)
-                r2 = _qses.get(detail_url, headers=headers, timeout=20, verify=False)
+                r2 = _qget(detail_url, headers=headers, timeout=20, verify=True)
                 lst = ((r2.json() or {}).get('data') or {}).get('list') or []
                 if not lst:
                     raise ValueError('share has no files')
@@ -341,8 +373,8 @@ def _quark_share_play_url(pwd_id, headers):
                     folder = lst[0]
                     lst2 = []
                     for sub in range(4):
-                        r3 = _qses.get(_quark_detail_url(pwd_id, stoken, str(folder.get('fid', ''))),
-                                       headers=headers, timeout=20, verify=False)
+                        r3 = _qget(_quark_detail_url(pwd_id, stoken, str(folder.get('fid', ''))),
+                                       headers=headers, timeout=20, verify=True)
                         lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
                         if lst2:
                             break
@@ -352,6 +384,8 @@ def _quark_share_play_url(pwd_id, headers):
                     raise ValueError('share has no video file')
                 fid = str(f.get('fid', ''))
                 fid_token = str(f.get('share_fid_token') or '')
+                if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
+                    _SHARE_CACHE.clear()   # C2：触顶全清（条目均为 300s TTL，代价低）
                 _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
                                         'fid': fid, 'fid_token': fid_token}
             # 优先分享文件原始 fid 直链（快、不失效）
@@ -380,12 +414,12 @@ def _quark_download_url(share_id, file_id, file_token, headers):
     if not share_id or not file_id:
         raise ValueError('missing share/file id')
     import json as _json
-    r = _qses.post(
+    r = _qpost(
         'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps({'fid': file_id, 'uid': 0, 'scene': 'share',
                           'shareId': share_id, 'token': file_token}),
-        timeout=25, verify=False, allow_redirects=False)
+        timeout=25, verify=True, allow_redirects=False)
     loc = r.headers.get('Location', '')
     if not loc:
         raise ValueError('download no location (status %s)' % r.status_code)
@@ -409,6 +443,17 @@ class _SegStream:
         self._cancel = threading.Event()
         self._threads = []
 
+    def _put(self, q, item):
+        """入队（带超时重试）：队列满时每秒检查一次 _cancel，消费端断开后
+        丢弃返回，避免下载线程被满队列永久阻塞（线程泄漏）。"""
+        while not self._cancel.is_set():
+            try:
+                q.put(item, timeout=1.0)
+                return True
+            except queue.Empty:
+                continue
+        return False
+
     def _dl(self, i):
         total = self.range_end - self.range_start + 1
         seg = (total + self.n - 1) // self.n
@@ -430,8 +475,9 @@ class _SegStream:
                                 return
                             if not chunk:
                                 continue
-                            q.put(chunk)  # 满则阻塞（背压）
-                        q.put(None)  # 段结束哨兵
+                            if not self._put(q, chunk):
+                                return
+                        self._put(q, None)  # 段结束哨兵（已取消则丢弃）
                         return
                     last_err = RuntimeError('段 %d HTTP %d' % (i, r.status_code))
                     logger.warning('go-proxy 段 %d/%d HTTP %d（重试 %d/3）', i, self.n, r.status_code, attempt + 1)
@@ -442,7 +488,7 @@ class _SegStream:
             time.sleep(0.3 * (attempt + 1))  # 0.3s / 0.6s / 0.9s 退避
         if not self._cancel.is_set():
             logger.warning('go-proxy 段 %d/%d 下载失败，中断流: %s', i, self.n, last_err)
-            q.put(last_err)
+            self._put(q, last_err)
 
     def start(self):
         for i in range(self.n):
@@ -477,6 +523,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):  # 静默访问日志
         pass
 
+    def send_response(self, code, message=None):
+        # 标记已发状态行（L-15）：异常分支据此避免重复 send_response，
+        # 否则会产生两行状态行破坏响应协议
+        self._headers_sent = True
+        super().send_response(code, message)
+
+    def _reject_browser(self):
+        """浏览器来源防御（H-1b）：mpv/requests 发的请求没有 Origin /
+        Sec-Fetch-Site 头；恶意网页跨站请求 127.0.0.1（盗流/探测）会带
+        非本机 Origin 或 Sec-Fetch-Site: cross-site → 拒绝。"""
+        origin = self.headers.get('Origin')
+        if origin:
+            try:
+                host = urllib.parse.urlparse(origin).hostname
+            except ValueError:
+                return True
+            if host not in ('127.0.0.1', 'localhost'):
+                return True
+        if (self.headers.get('Sec-Fetch-Site') or '').strip().lower() == 'cross-site':
+            return True
+        return False
+
     def do_GET(self):
         self._handle()
 
@@ -484,7 +552,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._handle(head_only=True)
 
     def _handle(self, head_only=False):
+        self._headers_sent = False
         try:
+            if self._reject_browser():
+                body = b'forbidden'
+                self.send_response(403)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+                return
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             do = q.get('do', [''])[0]
 
@@ -505,7 +583,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             raw = q.get('url', [''])[0]
-            url = urllib.parse.unquote_plus(raw)
+            # parse_qs 已按 + → 空格语义解码过一次，不再重复 unquote_plus
+            # （重复解码会破坏含 % 字符的正常 URL）；仅兼容个别 jar 双重
+            # 编码：解码后仍含 %3A%2F%2F 形式的 scheme 时再补一次。
+            url = raw
+            if '%3a%2f%2f' in url[:32].lower():
+                url = urllib.parse.unquote_plus(url)
             if not url.startswith(('http://', 'https://')):
                 self.send_response(400)
                 self.end_headers()
@@ -515,9 +598,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 thread_n = int(q.get('thread', ['32'])[0])
             except ValueError:
                 pass
-            # Cookie：请求头自带（mpv --http-header-fields）优先，否则用已配置的网盘 Cookie
+            # Cookie：请求头自带（mpv --http-header-fields）始终透传优先；
+            # 自动附加已配置网盘 Cookie 仅限夸克/UC 域名（白名单防凭据外发）
             cookie = self.headers.get('Cookie', '')
-            if not cookie:
+            if not cookie and _cookie_host_allowed(url):
                 try:
                     from pan_cookies import load_pan_cookies
                     cookie = load_pan_cookies().get('quark', '') or ''
@@ -541,12 +625,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             finally:
                 probe.close()
             if total is None or total <= 0:
-                # 无长度信息（HLS 等）：退化单线程透传
+                # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
+                # 不发 Content-Length，按开放区间（不带 Range）直接透传
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.end_headers()
+                if head_only:
+                    return
                 self._stream_single(url, headers, head_only)
                 return
 
             rng = self.headers.get('Range')
-            start, end = _parse_range(rng, total)
+            parsed = _parse_range(rng, total)
+            if parsed is None:
+                # 越界/倒置 Range：416 + Content-Range: bytes */total
+                self.send_response(416)
+                self.send_header('Content-Range', 'bytes */%d' % total)
+                self.end_headers()
+                return
+            start, end = parsed
             length = end - start + 1
 
             if rng:
@@ -557,7 +654,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(length))
             self.send_header('Accept-Ranges', 'bytes')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             if head_only:
                 return
@@ -575,6 +671,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             pass
         except Exception as e:
             logger.warning('go-proxy request failed: %s', e, exc_info=True)
+            if getattr(self, '_headers_sent', False):
+                # 已发过状态行（L-15）：再 send_response 会产生重复状态行，
+                # 只记录并关闭连接止损
+                self.close_connection = True
+                return
             try:
                 self.send_response(502)
                 self.end_headers()
@@ -594,6 +695,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         file_token = urllib.parse.unquote_plus(q.get('fileToken', [''])[0])
         cookie = self.headers.get('Cookie', '')
         if not cookie:
+            # pan 链路目标均为 drive.quark.cn / drive-pc.quark.cn 等固定夸克
+            # 域名，天然满足 Cookie 白名单；请求头自带 Cookie 始终透传优先
             try:
                 from pan_cookies import load_pan_cookies
                 cookie = (load_pan_cookies() or {}).get('quark', '') or ''
@@ -626,11 +729,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if not url:
                     try:
                         import json as _json
-                        r = _qses.post(
+                        r = _qpost(
                             'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
                             headers={**headers, 'Content-Type': 'application/json'},
                             data=_json.dumps({'fids': [file_id]}),
-                            timeout=25, verify=False, allow_redirects=False)
+                            timeout=25, verify=True, allow_redirects=False)
                         d = ((r.json() or {}).get('data') or [{}])[0]
                         url = d.get('download_url') or ''
                     except Exception:
@@ -650,6 +753,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._stream_forward(url, headers, head_only)
         except Exception as e:
             logger.warning('go-proxy pan request failed: %s', e)
+            if getattr(self, '_headers_sent', False):
+                # 已发过状态行（L-15）：不再重复 send_response，关闭连接止损
+                self.close_connection = True
+                return
             try:
                 self.send_response(502)
                 self.end_headers()
@@ -676,10 +783,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         finally:
             probe.close()
         if total is None or total <= 0:
+            # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
+            # 不发 Content-Length，按开放区间（不带 Range）直接透传
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.end_headers()
+            if head_only:
+                return
             self._stream_single(url, headers, head_only)
             return
         rng = self.headers.get('Range')
-        start, end = _parse_range(rng, total)
+        parsed = _parse_range(rng, total)
+        if parsed is None:
+            # 越界/倒置 Range：416 + Content-Range: bytes */total
+            self.send_response(416)
+            self.send_header('Content-Range', 'bytes */%d' % total)
+            self.end_headers()
+            return
+        start, end = parsed
         length = end - start + 1
         if rng:
             self.send_response(206)
@@ -689,7 +810,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(length))
         self.send_header('Accept-Ranges', 'bytes')
-        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         if head_only:
             return
@@ -703,13 +823,36 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         w.stream(self.wfile)
 
     def _stream_single(self, url, headers, head_only, start=0, end=None):
-        """单线程流式转发指定区间。"""
+        """单线程流式转发指定区间；end=None 表示开放区间（请求不带 Range 头）。
+
+        上游非 200/206 时不透传错误体（L-16，Content-Length 已声明，写入
+        错误体会破坏协议）：未发响应头时回 502，已发头则直接断连止损；
+        上游 200 忽略 Range 时按已声明的区间长度截断写入。
+        """
         try:
-            r = _fetch(url, headers, start, end if end is not None else start, timeout=30)
+            r = _fetch(url, headers, start, end, timeout=30)
             try:
+                if r.status_code not in (200, 206):
+                    logger.warning('go-proxy 上游 HTTP %d（单流转发中断）', r.status_code)
+                    if not getattr(self, '_headers_sent', False):
+                        try:
+                            self.send_response(502)
+                            self.end_headers()
+                        except Exception:
+                            pass
+                    else:
+                        self.close_connection = True
+                    return
+                remain = None if end is None else (end - start + 1)
                 for chunk in r.iter_content(SEG_CHUNK):
                     if not chunk:
                         continue
+                    if remain is not None:
+                        if remain <= 0:
+                            break
+                        if len(chunk) > remain:
+                            chunk = chunk[:remain]
+                        remain -= len(chunk)
                     self.wfile.write(chunk)
             finally:
                 r.close()

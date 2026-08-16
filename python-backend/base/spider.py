@@ -2,8 +2,9 @@ import re
 import os
 import json
 import time
-import requests
+import urllib.parse
 import hoststate
+import http_client
 from lxml import etree
 from abc import abstractmethod, ABCMeta
 from importlib.machinery import SourceFileLoader
@@ -91,23 +92,25 @@ class Spider(metaclass=ABCMeta):
         return clean
 
     def fetch(self, url, params=None, cookies=None, headers=None, timeout=5, verify=True, stream=False, allow_redirects=True):
-        rsp = requests.get(url, params=params, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
+        rsp = http_client.get(url, params=params, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
         rsp.encoding = 'utf-8'
         return rsp
 
     def post(self, url, params=None, data=None, json=None, cookies=None, headers=None, timeout=5, verify=True, stream=False, allow_redirects=True):
-        rsp = requests.post(url, params=params, data=data, json=json, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
+        rsp = http_client.post(url, params=params, data=data, json=json, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
         rsp.encoding = 'utf-8'
         return rsp
 
     def html(self, content):
         return etree.HTML(content)
 
-    def str2json(str):
-        return json.loads(str)
+    @staticmethod
+    def str2json(text):
+        return json.loads(text)
 
-    def json2str(str):
-        return json.dumps(str, ensure_ascii=False)
+    @staticmethod
+    def json2str(obj):
+        return json.dumps(obj, ensure_ascii=False)
 
     def getProxyUrl(self, local=True):
         return f"{hoststate.get_proxy_url(local)}?do=py"
@@ -119,7 +122,10 @@ class Spider(metaclass=ABCMeta):
             print(f'{msg}')
 
     def getCache(self, key):
-        value = self.fetch(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=get&key={key}', timeout=5).text
+        # key 需 URL 编码（M-22）：含 &/=/#/中文等字符的 key 不编码会被
+        # 拆成多个查询参数或截断
+        k = urllib.parse.quote(str(key), safe='')
+        value = self.fetch(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=get&key={k}', timeout=5).text
         if len(value) > 0:
             if value.startswith('{') and value.endswith('}') or value.startswith('[') and value.endswith(']'):
                 value = json.loads(value)
@@ -139,9 +145,11 @@ class Spider(metaclass=ABCMeta):
         if len(value) > 0:
             if type(value) == dict or type(value) == list:
                 value = json.dumps(value, ensure_ascii=False)
-        r = self.post(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=set&key={key}', data={'value': value}, timeout=5)
+        k = urllib.parse.quote(str(key), safe='')
+        r = self.post(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=set&key={k}', data={'value': value}, timeout=5)
         return 'succeed' if r.status_code == 200 else 'failed'
 
     def delCache(self, key):
-        r = self.fetch(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=del&key={key}', timeout=5)
+        k = urllib.parse.quote(str(key), safe='')
+        r = self.fetch(f'http://127.0.0.1:{hoststate.get_port()}/cache?do=del&key={k}', timeout=5)
         return 'succeed' if r.status_code == 200 else 'failed'
