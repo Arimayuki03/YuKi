@@ -1,0 +1,26 @@
+{
+  "_comment": "影视仓兼容性语料（TVBOX_COMPAT_PLAN 任务一）。新增规则：用户报告的新仓库修复后必须录入本清单（修复进套件 = 回归保护）。tags 记录特征便于失败归因。",
+  "repos": [
+    { "name": "饭太硬", "url": "http://www.饭太硬.net/tv", "tags": ["idn", "jpeg-disguise"] },
+    { "name": "肥猫", "url": "http://肥猫.net", "tags": ["idn"] },
+    { "name": "王小二放牛娃", "url": "http://tvbox.王二小放牛娃.top", "tags": ["idn"] },
+    { "name": "王小二新", "url": "https://9280.kstore.vip/newwex.json", "tags": ["standard"] },
+    { "name": "哈基米", "url": "https://17264.kstore.space/哈基米.png", "tags": ["png-disguise", "pan-quark"] },
+    { "name": "南风", "url": "https://raw.githubusercontent.com/yoursmile66/TVBox/main/XC.json", "tags": ["github-raw"] },
+    { "name": "菜妮丝", "url": "https://tv.菜妮丝.top", "tags": ["idn", "ua-routing"] },
+    { "name": "HG", "url": "https://api.hgyx.vip/hgyx.json", "tags": ["standard"] },
+    { "name": "香雅情", "url": "https://raw.githubusercontent.com/xyq254245/xyqonlinerule/main/XYQTVBox.json", "tags": ["github-raw"] },
+    { "name": "小苹果", "url": "https://bitbucket.org/xduo/duoapi/raw/master/xpg.json", "tags": ["bitbucket"] },
+    { "name": "欧歌", "url": "https://xn--anna-wn6lw489o.v.nxog.top/m/", "tags": ["standard"] },
+    { "name": "驸马", "url": "http://fmys.top/fmys.json", "tags": ["standard"] },
+    { "name": "分享", "url": "https://raw.githubusercontent.com/maoystv/6/main/000.json", "tags": ["github-raw"] },
+    { "name": "嗷呜", "url": "https://cnb.cool/aooooowuuuuu/FreeSpider/-/git/raw/main/config", "tags": ["gitlab-raw"] },
+    { "name": "L佬", "url": "https://android.lushunming.qzz.io/json/index.json", "tags": ["standard"] },
+    { "name": "天神IY", "url": "https://gitee.com/cpu-iy/iy/raw/master/%E5%A4%A9%E7%A5%9EIY.json", "tags": ["gitee"] },
+    { "name": "苹果CMS", "url": "https://pastebin.com/raw/gtbKvnE1", "tags": ["pastebin", "cms"] },
+    { "name": "游魂多仓", "url": "https://www.iyouhun.com/tv/dc", "tags": ["multi-repo"] },
+    { "name": "老刘备多仓", "url": "https://raw.liucn.cc/box/m.json", "tags": ["multi-repo", "comments"] },
+    { "name": "高天多仓", "url": "https://cdn.jsdelivr.net/gh/gaotianliuyun/gao@master/0707.json", "tags": ["multi-repo", "jsdelivr"] },
+    { "name": "小盒子多仓", "url": "http://xhztv.top/DC.txt", "tags": ["multi-repo"] }
+  ]
+}

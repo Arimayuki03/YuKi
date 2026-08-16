@@ -10,6 +10,7 @@
     "smoke": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\smoke.py",
     "test:py": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\run_all.py",
     "test:js": "node scripts/check-js.js",
+    "test:compat": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\test_config_compat.py",
     "lint": "eslint src tests scripts",
     "lint:py": "python-backend\\.venv\\Scripts\\ruff.exe check python-backend",
     "test:jsunit": "node --test \"tests/js/*.test.js\"",

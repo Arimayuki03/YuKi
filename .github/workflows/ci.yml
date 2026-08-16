@@ -47,3 +47,15 @@ jobs:
           ruff check python-backend
 
   # B3 后续增强：tag push 时的 electron-builder 构建产物
+
+  # 影视仓兼容性套件（依赖外网 + 较慢）：手动触发
+  compat:
+    name: 影视仓兼容性（21 仓语料）
+    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.14' }
+      - run: pip install -r python-backend/requirements.txt
+      - run: python python-backend/tests/test_config_compat.py
