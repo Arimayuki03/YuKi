@@ -6,7 +6,7 @@
 """
 import json
 import re
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, parse_qsl
 
 from jsonpath_ng import parse as jsonpath_parse
 
@@ -288,7 +288,7 @@ class ApiRuleStrategy:
         if not parsed.scheme:
             raise ApiRuleFormatException(f'剧集页面 URL 无效: {path}')
         rendered_query = self._render_map(page.get('query', {}), variables)
-        merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.items()}}
+        merged_query = {**dict(parse_qsl(parsed.query)), **{k: str(v) for k, v in rendered_query.items()}}  # M-18：parsed.query 是字符串，dict() 直接展开必抛 ValueError（剧集全消失）
         from urllib.parse import urlencode
         query_str = urlencode(merged_query)
         return normalize_episode_url(base_url, parsed._replace(query=query_str).geturl())

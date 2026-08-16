@@ -64,6 +64,10 @@ class Plugin:
     def from_json(cls, data):
         if isinstance(data, str):
             data = json.loads(data)
+        # M-19：Plugin.__init__ 为 **kwargs 形态，天然容忍未知键（无需过滤）；
+        # 真正的坏记录（非 dict/非法 JSON）抛 ValueError，由 _load 逐条跳过
+        if not isinstance(data, dict):
+            raise ValueError(f'rule record must be an object, got {type(data).__name__}')
         return cls(**data)
 
     def to_json(self):

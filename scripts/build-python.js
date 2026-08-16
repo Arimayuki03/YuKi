@@ -52,6 +52,7 @@ const cmd = [
     '--add-data', `"js-engine;js-engine"`,
     '--add-data', `"spiders;spiders"`,
     '--add-data', `"base;base"`,
+    '--add-data', `"kazumi/assets;kazumi/assets"`,
     '--hidden-import', 'uvicorn.logging',
     '--hidden-import', 'uvicorn.loops.auto',
     '--hidden-import', 'uvicorn.protocols.http.auto',
@@ -64,7 +65,7 @@ run(cmd, BACKEND);
 
 // 4. 复制数据文件（PyInstaller --add-data 对 onefile 支持有限，额外手动复制）
 console.log('[build-python] 复制数据文件…');
-const dataDirs = ['js-engine', 'spiders', 'base'];
+const dataDirs = ['js-engine', 'spiders', 'base', 'kazumi/assets'];
 for (const dir of dataDirs) {
     const src = path.join(BACKEND, dir);
     const dst = path.join(DIST, dir);

@@ -1,7 +1,7 @@
 # 代码审查修复任务清单(详细步骤版)
 
 > 配套文档: `CODE_REVIEW.md`(问题编号定义:H=高危 / M=中危 / L=低危)
-> 更新日期: 2026-08-16 · 本版为**可照做执行**的详细步骤版,每项含:定位 → 现状代码 → 修改步骤(带 before/after)→ 验证 → 注意事项
+> 更新日期: 2026-08-17 · **全部六个工作流（A/B/C/D/E/F，64 项）已完成收口**；2 项按计划有意跳过（L-2/L-33）,每项含:定位 → 现状代码 → 修改步骤(带 before/after)→ 验证 → 注意事项
 
 ---
 
@@ -14,8 +14,8 @@
 | F. 渲染层 | `src/renderer/js/*` | ✅ **全部完成**(13 项，2026-08-17；2.2 H-7/2.3 M-29 已由 B2 轮 ESLint 修复提前完成；L-32 季度语义测试断言同步更新) |
 | B. jar 桥系列 | `python-backend/jar_bridge.py` `jar_spider.py` `site_manager.py` `jar-runner/SpiderRunner.java` `jar_patch.py` | ✅ **全部完成**(12 项，2026-08-17；SpiderRunner 已重编译，行为级验证：destroy 词不杀 JVM、__shutdown 优雅退出、重启上限生效) |
 | C. config + QuickJS | `python-backend/config.py` `app.py` `runner.py` `cms_spider.py` `js-engine/quickjs_host.py` | ✅ **全部完成**(9 项，2026-08-17；4.4/4.5 由 C1/C2 批次提前覆盖，行为级验证：死循环拦截/恶意 key 清洗/ENTITY 拒绝/GBK 回退/签名预检) |
-| D. Kazumi 规则引擎 | `python-backend/kazumi/*` `scripts/build-python.js` | ❌ 未开始(6 项) |
-| V. 全局收尾验证 | 全部 | ❌ 未开始 |
+| D. Kazumi 规则引擎 | `python-backend/kazumi/*` `scripts/build-python.js` | ✅ **全部完成**(6 项，2026-08-17；from_json 按 **kwargs 实际形态调整方案——非法记录显式 ValueError 由 _load 逐条跳过，行为级验证：坏记录不清空/路径注入双重中和/29 处 verify 收紧) |
+| V. 全局收尾验证 | 全部 | ✅ 完成（2026-08-17：Python 133 项 + JS 206 项 + Ruff/ESLint 0 错误 + jar 行为级验证全绿） |
 
 **当前已修改未提交的 14 个文件**:
 `python-backend/{base/spider.py, cache_store.py, go_proxy.py, pan_cookies.py, server.py}`、`src/main/{downloader.js, hls-downloader.js, index.js, mpv-player.js, pan-qr-window.js, parse-window.js, push-server.js, python-bridge.js, settings.js}`

@@ -22,11 +22,8 @@ from .utils import NoResultException, CaptchaRequiredException
 
 logger = logging.getLogger('vpc.kazumi.manager')
 
-# 代理：requests 自动读取环境变量 HTTP_PROXY/HTTPS_PROXY（由主进程在设置代理/启动时注入）；
-# 全部 http(s) 请求认可代理环境变量（trust_env 默认 True）。socks 代理需 socks 支持库，
-# 未安装时 requests 会忽略 socks:// 变量并直连 —— 主进程已把 socks 归一化为 http 规范化处理。
-
-logger = logging.getLogger('vpc.kazumi.manager')
+# 代理：应用内「代理设置」由主进程注入 HTTP(S)_PROXY 环境变量，
+# http_client.system_proxies 环境变量优先读取（C1 收编后不再依赖 requests trust_env）。
 
 # 内置默认规则目录（随应用打包，首次启动自动导入）
 _BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
@@ -180,7 +177,16 @@ class PluginManager:
                     return
                 with open(self._file, encoding='utf-8') as f:
                     data = json.load(f)
-                self._plugins = [Plugin.from_json(item) for item in data]
+                # M-19：单条坏记录（含未知字段/类型不符）跳过而非整体清空——
+                # 原先任一条抛错即走 except 备份后置空，下次 _save 把空列表写回，
+                # 用户全部规则丢失
+                plugins = []
+                for item in (data if isinstance(data, list) else []):
+                    try:
+                        plugins.append(Plugin.from_json(item))
+                    except Exception as e:
+                        logger.warning('[kazumi] 跳过不兼容规则记录: %s', e)
+                self._plugins = plugins
                 logger.info('[kazumi] loaded %d rules from %s', len(self._plugins), self._file)
             except Exception as e:
                 logger.exception('[kazumi] load plugins failed: %s', e)
@@ -511,7 +517,7 @@ class PluginManager:
                 json=body,
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=(5, 10),
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -543,7 +549,10 @@ class PluginManager:
         POST api.bgm.tv/v0/search/subjects，结果经日历归一化补 name_cn/air_date，
         按 id 去重后返回 {items, total}。镜像开启时经 _base_api() 走全域名反代。"""
         tags = list(tags or [])
-        weekdays = sorted({int(w) for w in (weekdays or []) if str(w).strip()})
+        try:
+            weekdays = sorted({int(w) for w in (weekdays or []) if str(w).strip()})
+        except (TypeError, ValueError):
+            weekdays = []   # L-25：非数字入参不再 500
         # rank：显式区间优先；sort=rank 时用 Kazumi 的 >0 下限，否则 >=0
         rank_filter = self._build_number_filter(rank_min, rank_max)
         if not rank_filter:
@@ -573,7 +582,7 @@ class PluginManager:
                 json=body,
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=(5, 10),
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -599,7 +608,7 @@ class PluginManager:
                 f'{self._base_api()}/v0/subjects/{subject_id}',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=(5, 8),
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -675,7 +684,7 @@ class PluginManager:
                     f'{self._base_next()}/p1/calendar',
                     headers={'User-Agent': BANGUMI_UA},
                     timeout=(5, 8),  # 连接 5s，读取 8s
-                    verify=False,
+                    verify=True,
                 )
                 rsp.raise_for_status()
                 return self._normalize_calendar(rsp.json())
@@ -725,7 +734,7 @@ class PluginManager:
                     json=body,
                     headers={'User-Agent': BANGUMI_UA},
                     timeout=(5, 10),
-                    verify=False,
+                    verify=True,
                 )
                 rsp.raise_for_status()
                 data = rsp.json()
@@ -759,7 +768,7 @@ class PluginManager:
                 params={'type': 2, 'limit': limit, 'offset': offset},
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -798,7 +807,7 @@ class PluginManager:
                 json=body,
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=(5, 10),
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -823,7 +832,7 @@ class PluginManager:
                 params={'subject_id': subject_id},
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -844,7 +853,7 @@ class PluginManager:
                 f'{self._base_api()}/v0/subjects/{subject_id}/characters',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             chars = rsp.json()
@@ -939,7 +948,7 @@ class PluginManager:
                 f'{self._base_api()}/v0/characters/{character_id}',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -954,7 +963,7 @@ class PluginManager:
                 f'{self._base_next()}/p1/characters/{character_id}/comments',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -969,7 +978,7 @@ class PluginManager:
                 f'{self._base_api()}/v0/subjects/{subject_id}/persons',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -984,7 +993,7 @@ class PluginManager:
                 params={'limit': limit, 'offset': offset},
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -999,7 +1008,7 @@ class PluginManager:
                 f'{self._base_api()}/v0/subjects/{subject_id}/subjects',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             return rsp.json()
@@ -1026,7 +1035,7 @@ class PluginManager:
             return None
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/me',
-                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=True)
             rsp.raise_for_status()
             return rsp.json()
         except Exception as e:
@@ -1064,7 +1073,7 @@ class PluginManager:
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections',
                                params={'subject_type': subject_type, 'limit': limit, 'offset': offset},
-                               headers=self._bangumi_auth_headers(token), timeout=(5, 10), verify=False)
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 10), verify=True)
             rsp.raise_for_status()
             data = rsp.json()
             return data.get('data', []) or []
@@ -1082,7 +1091,7 @@ class PluginManager:
             return None
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections/{subject_id}',
-                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
+                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=True)
             if rsp.status_code == 404:
                 return None
             rsp.raise_for_status()
@@ -1121,7 +1130,7 @@ class PluginManager:
                 for method in ('POST', 'PUT'):
                     try:
                         url = f'{base}/v0/users/{uname}/collections/{subject_id}'
-                        rsp = requests.request(method, url, json=body, headers=headers, timeout=(5, 8), verify=False)
+                        rsp = requests.request(method, url, json=body, headers=headers, timeout=(5, 8), verify=True)
                         # Bangumi 收藏写接口成功返回 2xx（含 202 Accepted）；只认 200/201/204 会把
                         # 202 误判为失败 → 前端弹「同步失败」但实际已同步。统一按 2xx 判定成功。
                         if 200 <= rsp.status_code < 300:
@@ -1166,7 +1175,7 @@ class PluginManager:
             for uname in usernames:
                 try:
                     url = f'{base}/v0/users/{uname}/collections/{subject_id}'
-                    rsp = requests.request('DELETE', url, headers=headers, timeout=(5, 8), verify=False)
+                    rsp = requests.request('DELETE', url, headers=headers, timeout=(5, 8), verify=True)
                     if 200 <= rsp.status_code < 300:
                         return True, 'ok'
                     # 404 在 DELETE 上视为「已不在收藏中」，幂等成功
@@ -1215,7 +1224,7 @@ class PluginManager:
                     try:
                         rsp = http_client.get(url, params={'subject_type': subject_type, 'type': ctype,
                                                          'limit': per_page, 'offset': offset},
-                                           headers=headers, timeout=(5, 10), verify=False)
+                                           headers=headers, timeout=(5, 10), verify=True)
                         if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
                             time.sleep(0.5)
                             continue  # 退避后重试本页
@@ -1326,7 +1335,7 @@ class PluginManager:
                     try:
                         url = f'{base}/v0/users/{uname}/collections/{subject_id}'
                         rsp = requests.request(method, url, json=body, headers=headers,
-                                               timeout=(5, 8), verify=False)
+                                               timeout=(5, 8), verify=True)
                         if 200 <= rsp.status_code < 300:
                             return True, 'ok'
                         if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
@@ -1427,7 +1436,7 @@ class PluginManager:
                 params={'keyword': title},
                 headers=headers,
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -1455,7 +1464,7 @@ class PluginManager:
                 f'{DANDAN_API}{path}',
                 headers=headers,
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -1485,7 +1494,7 @@ class PluginManager:
                 params={'withRelated': 'true'},
                 headers=headers,
                 timeout=10,
-                verify=False,
+                verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
@@ -1505,7 +1514,7 @@ class PluginManager:
             # 确保同步目录存在
             sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
             try:
-                requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=False)
+                requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=True)
             except Exception:
                 pass  # 目录可能已存在
             # 上传数据文件
@@ -1517,7 +1526,7 @@ class PluginManager:
                     headers={'Content-Type': 'application/json'},
                     auth=auth,
                     timeout=15,
-                    verify=False,
+                    verify=True,
                 )
                 rsp.raise_for_status()
             logger.info('[kazumi] webdav sync ok: %d files', len(data))
@@ -1536,7 +1545,7 @@ class PluginManager:
             for name in names:
                 file_url = f'{sync_dir}/{name}.json'
                 try:
-                    rsp = http_client.get(file_url, auth=auth, timeout=15, verify=False)
+                    rsp = http_client.get(file_url, auth=auth, timeout=15, verify=True)
                     if rsp.status_code == 200:
                         result[name] = rsp.json()
                 except Exception:
@@ -1568,7 +1577,7 @@ class PluginManager:
             ]
         for url in urls:
             try:
-                rsp = http_client.get(url, timeout=10, verify=False)
+                rsp = http_client.get(url, timeout=10, verify=True)
                 rsp.raise_for_status()
                 data = rsp.json()
                 logger.info('[kazumi] shop catalog loaded: %d rules from %s', len(data), url)
@@ -1581,6 +1590,11 @@ class PluginManager:
 
     def fetch_shop_rule(self, name):
         """从 KazumiRules 仓库下载单个规则；镜像开关开启时强制 GitCode 镜像。"""
+        # M-25：name 来自请求参数，直接拼进仓库 URL——basename + 白名单字符，
+        # 防 ../ 路径注入与特殊字符
+        name = os.path.basename(str(name).strip())
+        if not name or not re.match(r'^[\w\u4e00-\u9fa5.-]+$', name):
+            raise ValueError(f'bad rule name: {name!r}')
         if self.enable_git_proxy:
             urls = [f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json']
         else:
@@ -1590,9 +1604,11 @@ class PluginManager:
             ]
         for url in urls:
             try:
-                rsp = http_client.get(url, timeout=10, verify=False)
+                rsp = http_client.get(url, timeout=10, verify=True)
                 rsp.raise_for_status()
-                return Plugin.from_json(rsp.json())
+                plugin = Plugin.from_json(rsp.json())
+                plugin.validate()   # M-25：下载后先校验再返回（防坏规则入库）
+                return plugin
             except Exception as e:
                 logger.warning('[kazumi] shop rule %s from %s failed: %s', name, url, e)
         return None
