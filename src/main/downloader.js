@@ -290,6 +290,10 @@ class Downloader extends EventEmitter {
     addMetalink(b64, opts = {}) { return this._rpc('addMetalink', [b64, this._proxyOpts(opts)]); }
     pause(gid) { return this._rpc('pause', [gid]); }
     unpause(gid) { return this._rpc('unpause', [gid]); }
+    /** 全部暂停（返回被暂停的 gid 数组）。 */
+    pauseAll() { return this._rpc('pauseAll'); }
+    /** 全部恢复（返回被恢复的 gid 数组）。 */
+    unpauseAll() { return this._rpc('unpauseAll'); }
     // remove 仅适用于 active/waiting/paused；已停止（complete/error/removed）的
     // 任务用 forceRemove，再不行则从 stopped 列表 purge（不视为失败）
     async remove(gid) {

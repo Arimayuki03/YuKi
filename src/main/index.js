@@ -1554,6 +1554,23 @@ app.whenReady().then(() => {
                 case 'pause':
                     if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'm3u8 合成任务不支持暂停，可直接删除' };
                     await dl.pause(payload.gid); return { ok: true };
+                case 'pauseAll': {
+                    // 全部暂停：仅作用于 aria2 任务（m3u8 合成任务无暂停能力，保持单任务一致语义）
+                    if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
+                    let gids = [];
+                    try { gids = (await dl.pauseAll()) || []; } catch (e) { /* 无活跃任务时 aria2 可能返回空，忽略 */ }
+                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    startDlPoll();
+                    return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
+                }
+                case 'unpauseAll': {
+                    if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
+                    let gids = [];
+                    try { gids = (await dl.unpauseAll()) || []; } catch (e) { /* 无暂停任务时忽略 */ }
+                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    startDlPoll();
+                    return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
+                }
                 case 'unpause':
                     if (String(payload.gid).startsWith('hls-')) {
                         // HLS 任务：尝试从持久化记录恢复原始 URL

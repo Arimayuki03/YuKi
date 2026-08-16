@@ -32,6 +32,8 @@ const Downloads = {
         $('#dl-open-dir').on('click', () => this.openDir());
         $('#dl-clear').on('click', () => this.clearDone());
         $('#dl-clear-failed').on('click', () => this.clearFailed());
+        $('#dl-pause-all').on('click', () => this.pauseAll());
+        $('#dl-resume-all').on('click', () => this.resumeAll());
         $('#dl-uri').on('keydown', (e) => { if (e.key === 'Enter') this.addUri(); });
         $('#dl-list').on('click', (e) => this.onAction(e));
 
@@ -106,6 +108,22 @@ const Downloads = {
         const r = await window.vpc.download.control('clearFailed', {});
         if (!r.ok) warnToast(`删除失败：${r.reason}`);
         else warnToast(r.n ? `已删除 ${r.n} 个失败任务` : '当前没有失败任务');
+    },
+
+    /** 全部暂停（aria2 任务；m3u8 合成任务不支持暂停，保持单任务一致语义）。 */
+    async pauseAll() {
+        const r = await window.vpc.download.control('pauseAll', {});
+        if (!r.ok) warnToast(`全部暂停失败：${r.reason}`);
+        else if (!r.n) warnToast('当前没有进行中的任务');
+        else warnToast(`已暂停 ${r.n} 个任务`);
+    },
+
+    /** 全部开始（恢复所有已暂停任务）。 */
+    async resumeAll() {
+        const r = await window.vpc.download.control('unpauseAll', {});
+        if (!r.ok) warnToast(`全部开始失败：${r.reason}`);
+        else if (!r.n) warnToast('当前没有已暂停的任务');
+        else warnToast(`已开始 ${r.n} 个任务`);
     },
 
     async onAction(e) {
