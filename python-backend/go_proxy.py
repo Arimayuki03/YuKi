@@ -18,6 +18,8 @@ Python 实现等价的转发服务：
 """
 import http.server
 import logging
+import os
+import json
 import queue
 import threading
 import time
@@ -40,11 +42,51 @@ BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 MAX_THREADS = 32
 SEG_CHUNK = 262144
 QUEUE_DEPTH = 24  # 每段在途 chunk 上限（背压：下载过快时阻塞下载线程）
-# 分享转存结果缓存：pwd_id → 转存后的文件 fid（转存一次，后续播放秒开）
+# 分享转存结果缓存：pwd_id → 转存后的文件 fid（转存一次，后续播放秒开）。
+# 持久化到磁盘：后端重启不重复转存、也不占用网盘空间（转存一次永久可用）。
 _SAVE_CACHE = {}
 # 分享解析缓存：pwd_id → {ts, stoken, fid, fid_token}（5 分钟 TTL，避免重复 token/detail）
 _SHARE_CACHE = {}
 _SHARE_CACHE_TTL = 300
+# 转存缓存持久化文件（放用户数据目录，幂等创建）
+_SAVE_CACHE_FILE = None
+
+
+def _save_cache_file():
+    global _SAVE_CACHE_FILE
+    if _SAVE_CACHE_FILE is None:
+        try:
+            d = os.path.join(os.path.expanduser('~'), '.video-pc', 'cache')
+            os.makedirs(d, exist_ok=True)
+            _SAVE_CACHE_FILE = os.path.join(d, 'quark_save_cache.json')
+        except Exception:
+            _SAVE_CACHE_FILE = ''
+    return _SAVE_CACHE_FILE
+
+
+def _load_save_cache():
+    try:
+        p = _save_cache_file()
+        if p and os.path.isfile(p):
+            with open(p, encoding='utf-8') as f:
+                data = json.loads(f.read())
+            if isinstance(data, dict):
+                _SAVE_CACHE.update(data)
+    except Exception:
+        pass
+
+
+def _persist_save_cache():
+    try:
+        p = _save_cache_file()
+        if p:
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(_SAVE_CACHE, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+_load_save_cache()
 
 
 def _parse_range(rng, total):
@@ -265,7 +307,9 @@ def _quark_share_play_url(pwd_id, headers):
             if url:
                 return url
             new_fid = _quark_save_share(pwd_id, stoken, fid, fid_token, headers)
-            _SAVE_CACHE[pwd_id] = new_fid  # 转存一次，后续秒开
+            if new_fid:
+                _SAVE_CACHE[pwd_id] = new_fid  # 转存一次，后续秒开（含重启后）
+                _persist_save_cache()
             return _quark_v2play(new_fid, headers)
         except Exception as e:
             last_err = e
