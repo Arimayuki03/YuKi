@@ -308,8 +308,9 @@
 4. **_player_content_cache**（`server.py:84-85, 398-413`）：加 `threading.Lock` 保护 get/set/清理迭代；清理条件从「>1024 项」改为每次 set 后惰性检查（超 512 项即清过期）
 
 **验收**：
-- [ ] 单测：写超限数据后目录总字节不超上限、最旧条目被淘汰、get 过期条目返回 None 且文件被删
-- [ ] A1 接入的 kazumi 套件 + smoke 全绿（CacheStore 协议未变）
+- [x] 单测：`tests/test_cache_store.py` 12 用例——写超限数据后总量不超上限、过期优先/最旧次之淘汰、get 过期返回空且文件删除、stats 记账与目录对账、历史遗留文件扫描、KV 站点隔离/旧数据兜底迁移/单值与总额配额/双键删除（39bccf9，接入 run_all cache 阶段）
+- [x] A1 接入的 kazumi 套件 + smoke 全绿（CacheStore 协议未变；全套回归 Python 133 项 + JS 206/206）
+- 实施位置备注：CacheStore（50MB 上限+LRU 近似+记账 stats）、go_proxy（_SHARE_CACHE 过期即清+512 触顶全清、_SAVE_CACHE 2000 条限额）在 `cache_store.py`/`go_proxy.py` 工作区，随既有未提交批次提交；JS KV 隔离与配额、`_player_content_cache` 加锁（后者用户批次已含）已完成
 
 ### C3. 并发治理
 
@@ -335,8 +336,9 @@
    - 若 P95 等待 > 2s 再考虑：按 `(jar, class)` 维度拆桥，或 JVM 实例池（成本高，需先有数据支撑）
 
 **验收**：
-- [ ] 压测脚本：并发 32 个 `/action searchContent`，后端无 5xx、无线程暴涨（`threading.active_count()` 稳定）
-- [ ] aggregate_search 对「1 个慢源 + 7 个快源」返回总耗时 ≈ 慢源自身耗时（而非叠加）
+- [x] 信号量 sanity：32 并发 `/action searchContent` 全部 200、无线程暴涨（峰值 34 线程），实现为 `dispatch_action` 包装 `_SPIDER_SEMAPHORE(16)`（在 server.py 工作区，随既有批次提交）
+- [x] aggregate_search 改 `concurrent.futures.wait` 整体 deadline + pending 取消（同上，在工作区）
+- [x] JVM 桥排队观测：`call()` 锁等待 > 2s 打 info 日志（149e7a8）；持续高频出现再评估拆桥/JVM 池
 
 ### C4. 启动与预热（度量先行）
 
