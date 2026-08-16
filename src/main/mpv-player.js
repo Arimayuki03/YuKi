@@ -186,7 +186,12 @@ class MpvPlayer extends EventEmitter {
         // （--cache-dir 不是合法选项）。
         const isNet = /^https?:\/\//i.test(String(episodes[0].url || ''));
         if (isNet) {
-            args.push('--cache=yes', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=20');
+            // 网盘(夸克)go-proxy 转流 CDN 常限速（~5MB/s），并发分段几乎无增益。
+            // 加大读缓冲窗口让有限的带宽流水化填充缓存，减少 4K 起播/连播卡顿；
+            // 保持起播即时（不强制先缓冲满，否则等太久）。
+            args.push('--cache=yes',
+                      '--demuxer-max-bytes=512MiB', '--demuxer-readahead-secs=60',
+                      '--demuxer-max-back-bytes=128MiB');
             // 网盘 go-proxy 转发（do=pan）首次起播可能要先解析分享/转存（5-20s），
             // 加大网络超时避免 mpv 等待首字节超时断开（此前 10054 播放失败）。
             args.push('--network-timeout=120');
