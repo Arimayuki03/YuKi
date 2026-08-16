@@ -230,25 +230,21 @@
 
 **步骤**：
 
-1. **二进制下载校验（`scripts/download-binaries.js` 已核实无任何哈希校验）**：
-   - 新建 `scripts/binaries.lock.json`，为 mpv/aria2/ffmpeg/spider-runner.jar 等每个下载项记录 `{ url, version, sha256 }`
-   - 下载完成后 `crypto.createHash('sha256')` 比对，不匹配则删除并报错
-   - 首次生成哈希：从官方发布页核对版本后 `certutil -hashfile <file> SHA256`（Windows）逐个录入
-2. **依赖审计进 CI**（追加到 B1 的 workflow）：
-   ```yaml
-   - run: npm audit --omit=dev
-   - run: pip install pip-audit && pip-audit -r python-backend/requirements.txt
-   ```
-3. **Electron 升级窗口**（`^31`，2024 年中版本，Chromium 安全补丁已停）：
-   - 分步升级：31 → 33 → 35 → 当前最新，每步：`npm ci` → `npm run test:jsunit` → `npm start` 手动冒烟（播放/下载/网盘三条链路）
-   - 关注点：`BrowserWindow` webPreferences 默认值收紧（sandbox 默认值变化正合 CODE_REVIEW M-5 的修复方向）、`session`/`protocol` API 变更
-   - 每步单独提交，出问题可精确回退
-4. `package.json` 的 `devDependencies` 目前只有 electron + electron-builder——B2 加入 eslint 后注意 `npm audit --omit=dev` 只审计运行时依赖的策略不受影响
-
-**验收**：
-- [ ] 篡改 lock 文件中任一 sha256 后 `download-binaries.js` 能失败
-- [ ] CI 中 audit 步骤存在且绿
-- [ ] Electron 升级完成，版本接近当前最新
+1. **二进制下载校验（已完成，见下）**：
+   - [x] 新建 `scripts/binaries.lock.json`，为 mpv/aria2（锁 release tag + 压缩包 sha256）、anime4k（6 文件）、misans（202 分片）记录哈希；ffmpeg 上游无版本化摘要暂记 null
+   - [x] `download-binaries.js`：mpv/aria2 按 lock 锁定 tag 取 release（更新=改 lock）；所有新下载完成后 sha256 强校验，不符删除产物并报错；anime4k/misans 已存在文件跳过时也校验
+   - [x] 篡改测试通过：改坏任一哈希 → 文件被拒 + 清晰报错；恢复 lock 后重下校验通过
+2. **依赖审计进 CI（已完成，首轮 `|| true` 观察基线，稳定后改为拦截）**：
+   - [x] js job：`npm audit --omit=dev`
+   - [x] python job：`pip-audit -r python-backend/requirements.txt --strict`
+3. **Electron 升级窗口（需用户在场，方案已定）**：
+   - 现状 `^31` → 最新 **43.4.0**（落后 12 个大版本，Chromium 安全补丁已停）。不建议 12 级阶梯升级（每级都要人工冒烟），建议一次到位：
+     - ① `npm install -D electron@43 electron-builder@latest`（builder 25 对 43 的支持需同步升级）
+     - ② 自动门禁：`npm run test:jsunit && npm run test:js && npm run lint`
+     - ③ 核对 webPreferences 默认值变化（新版本 sandbox 默认收紧——与 CODE_REVIEW M-4/M-5 修复方向一致，先完成 M-4/M-5 可减少升级摩擦）、`session`/`protocol`/`utilityProcess` API 变更
+     - ④ **用户手动冒烟**（此步必须用户在场）：播放（本地/直链/网盘源）、下载（aria2/HLS）、夸克扫码、推送、DLNA、截图
+     - ⑤ 出问题按 `git revert` 单提交回退
+   - [ ] 待用户安排时间执行 ①-⑤
 
 ---
 
@@ -286,9 +282,13 @@
 4. 每步迁移后跑 `npm run test:py` + 手动聚合搜索一次（8 并发 × 多站最能暴露连接问题）
 
 **验收**：
-- [ ] `grep -rn "requests\.\(get\|post\)(" python-backend --include="*.py" | grep -v http_client | grep -v test` 仅剩 go_proxy 夸克专用 `_qses` 等有意保留项
-- [ ] `grep -c "def _system_proxies" python-backend -r` 为 0（只剩 http_client 一份）
-- [ ] 回归通过；开启系统代理场景手动验证一次（设置代理 → 聚合搜索）
+- [x] 残余 `requests.get/post` 直调仅剩 go_proxy:202（取流专用会话，有意保留）与 http_client 自身/测试（已 grep 核实）
+- [x] `def _system_proxies` 全后端为 0（app.py/go_proxy.py/jar_bridge.py 三份实现收编为 http_client 唯一版）
+- [x] 回归通过（Python 121 项 ALL PASS + JS 206/206 + Ruff/ESLint 0 错误）；test_kazumi 的 mock 点已随迁移更新（`requests.get`→`http_client.get` 19 处）
+- [x] 代理双来源兼容：环境变量（应用内代理，kazumi 链路原行为）优先、WinINET 兜底——避免破坏主进程注入的代理语义
+- [x] 顺带修复 CODE_REVIEW L-11：`redirect()` 收编为 `fetch_follow_redirects`（深度上限 5 + 相对 Location urljoin）
+- [x] Cookie 竖井：共享 Session 挂禁落地策略（Python 3.14 无 BlockAll，自定义 `set_ok=False`），显式 Cookie 头永不被 jar 覆盖（L-18 结论全局版）
+- 备注：base/spider.py、go_proxy.py、server.py 三文件的迁移与既有未提交修复同在工作区，随用户那批一起提交；spider 基类 UA 从 python-requests 变为 okhttp（TVBox 客户端同款，生态兼容性更佳）
 
 ### C2. 缓存体系加上限与主动淘汰
 
