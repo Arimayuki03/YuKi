@@ -37,16 +37,69 @@ DEFAULT_RUNNER_JAR = os.path.join(
 
 
 def fetch_text(url, timeout=15):
-    """http(s) 递归跟重定向取文本（委托 app.redirect，15s 超时）。失败返回 ''。"""
+    """http(s) 递归跟重定向取文本（委托 app.redirect，15s 超时）。失败返回 ''。
+
+    兼容两类 TVBox 生态特殊接口：
+    - 图片伪装接口（饭太硬系）：JPEG 尾部嵌入 base64 的配置 JSON，自动解出；
+    - 常规 JSON/直播源：原样返回文本。
+    """
     try:
         from app import redirect
         rsp = redirect(url)
         if rsp is None:
             return ''
-        return rsp.content.decode('utf-8', errors='replace')
+        raw = rsp.content
+        img_cfg = _image_tail_config(raw)
+        if img_cfg is not None:
+            return img_cfg
+        return raw.decode('utf-8', errors='replace')
     except Exception as e:
         logger.warning('fetch_text %s failed: %s', url, str(e)[:80])
         return ''
+
+
+def _image_tail_config(raw):
+    """图片伪装接口：JPEG 尾部嵌入 base64 的配置 JSON（如 饭太硬.net/tv）。
+
+    文件头为 JFIF/JPEG 图片，尾部追加一段长 base64；base64 解码后是配置 JSON。
+    非图片或解码失败返回 None。
+    """
+    if not raw or raw[:3] != b'\xff\xd8\xff':
+        return None
+    try:
+        import re
+        import base64
+        t = raw.decode('ascii', errors='ignore')
+        segs = re.findall(r'[A-Za-z0-9+/=]{100,}', t)
+        if not segs:
+            return None
+        text = base64.b64decode(segs[-1]).decode('utf-8', errors='replace').lstrip()
+        if text.startswith('{'):
+            return text
+    except Exception:
+        pass
+    return None
+
+
+def _strip_json_comment_lines(text):
+    """剥 TVBox 配置常见的注释与首尾空白。
+
+    覆盖三类形态：
+    - 整行注释：行首 `//...`（老刘备/小盒子/苹果CMS 等）与 `#...`（苹果CMS parses 区）；
+    - 行内注释：`{//数据接口...`（分享等）。
+    为避免误伤 URL（https://...），行内 `//` 仅当前一字符不是 ':' 时视为注释
+    （URL 的 `//` 前必为 ':'，注释的 `//` 前为 {、,、空白等）。
+    """
+    import re
+    lines = []
+    for l in (text or '').split('\n'):
+        s = l.strip()
+        if s.startswith('//') or s.startswith('#'):
+            continue
+        # 行内注释：// 前不是 ':'（排除 https://）且不在字符串值内部
+        l = re.sub(r'(?<!:)\/\/[^"\n]*', ' ', l)
+        lines.append(l)
+    return '\n'.join(lines).strip()
 
 
 def _looks_like_live_source(text):
@@ -68,9 +121,11 @@ def _looks_like_live_source(text):
 def parse_config_json(text):
     """解析 CatVod 配置 JSON；非 JSON 时抛出可读的 ValueError（而非裸 JSONDecodeError）。
 
+    先剥 TVBox 配置常见的行首 // 注释与首尾空白（老刘备/小盒子/欧歌等接口）。
     最常见的误用是把直播源地址（.txt/.m3u）粘进「配置」框——这里显式识别并给出
     可操作的引导，避免用户只看到 'Expecting value: line 1 column 1'。
     """
+    text = _strip_json_comment_lines(text)
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
@@ -214,7 +269,9 @@ class ConfigManager:
         """解析 config 顶层 spider（TVBox 共享 jar）为可下载的 http 地址（保留 ;md5）。
 
         形态：'https://x/fun.jar;md5' / './jar/x.jar'（相对 config 源）。
-        非 jar（如 drpy js spider）或无法解析为 http 时返回 ''（csp_ 站点将被跳过）。
+        注意：TVBox 生态的 jar 经常伪装成 .jpg/.png/.bin 等后缀（防直链/防封），
+        因此这里**不做后缀限制**；是否为真正 jar 由下载环节按内容魔数校验
+        （zip PK / dex），非 jar 的顶层 spider（如 drpy .js）会在那里跳过并记录。
         """
         raw = str(cfg.get('spider') or '').strip()
         if not raw:
@@ -224,9 +281,6 @@ class ConfigManager:
         if head.startswith('./') or head.startswith('../'):
             head = urljoin(base_url, head) if base_url else ''
         if not head.startswith('http'):
-            return ''
-        # 仅 .jar 视为共享 jar；drpy/js spider（.js 等）无 PC 运行时，返回空。
-        if not head.split('?')[0].lower().endswith('.jar'):
             return ''
         return head + (';' + tail.strip() if sep else '')
 
@@ -240,17 +294,21 @@ class ConfigManager:
         if cfg.get('spider'):
             logger.info('config.spider=%s → shared jar: %s', cfg['spider'], spider_jar or '(not a jar / unresolved)')
         new_sites = []
-        for item in cfg.get('sites') or []:
-            try:
-                site = self._build_site(item, base_url, spider_jar)
-                if site:
-                    new_sites.append(site)
-                    summary['sites'] += 1
-                else:
-                    summary['skipped'].append(item.get('key', '?'))
-            except Exception as e:
-                logger.exception('load site %s failed: %s', item.get('key'), e)
-                summary['skipped'].append(f"{item.get('key', '?')}: {e}")
+        items = cfg.get('sites') or []
+        # 站点构建并发化（jar 下载/子蜘蛛抓取耗时为主，串行会让导入明显卡顿）
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(self._build_site, item, base_url, spider_jar) for item in items]
+            for item, fut in zip(items, futures):
+                try:
+                    site = fut.result()
+                    if site:
+                        new_sites.append(site)
+                        summary['sites'] += 1
+                    else:
+                        summary['skipped'].append(item.get('key', '?'))
+                except Exception as e:
+                    logger.exception('load site %s failed: %s', item.get('key'), e)
+                    summary['skipped'].append(f"{item.get('key', '?')}: {e}")
         parses = cfg.get('parses') or []
         flags = cfg.get('flags') or []
         lives = cfg.get('lives') or []
@@ -377,6 +435,8 @@ class ConfigManager:
 
         spider_jar：config 顶层共享 jar 的 http 地址（TVBox 标准），供
         type=3 且 api 为类名（csp_XXX）的站点加载类。
+        站点条目自带 `jar` 字段（站点级独立 jar，如 欧歌/菜妮丝 等接口）
+        时优先使用站点 jar，回退顶层共享 jar。
         """
         key = item.get('key') or ''
         name = item.get('name') or key
@@ -393,10 +453,19 @@ class ConfigManager:
                 return None
             api = urljoin(base_url, api)
 
+        # 站点级独立 jar（TVBox 站点条目 `jar` 字段；可带 ;md5）。相对路径按配置源解析。
+        site_jar = str(item.get('jar') or '').strip()
+        if site_jar and not site_jar.startswith('http'):
+            if base_url:
+                site_jar = urljoin(base_url, site_jar)
+            else:
+                site_jar = ''
+        effective_jar = site_jar or spider_jar
+
         if stype == 3 and api.startswith('csp_'):
             # jar 内 Java 爬虫类（TVBox csp_*.jar）：经 JVM 子进程桥加载（见 jar_bridge.py）
-            # api 为纯类名（csp_XXX）时，jar 来自 config 顶层共享 spider；否则跳过。
-            spider = self._load_jar_spider(key, name, api, spider_jar)
+            # api 为纯类名（csp_XXX）时，jar 来自站点 `jar` 字段或 config 顶层共享 spider。
+            spider = self._load_jar_spider(key, name, api, effective_jar)
             if spider is None:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
                 return None

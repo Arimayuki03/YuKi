@@ -120,11 +120,29 @@ public class SpiderRunner {
             seedPanState(cached);
             return cached;
         }
+        // TVBox 蜘蛛静态初始化（BaseSpiderGuard → Init.getSpider → DexNative.<clinit>）
+        // 依赖宿主注入的全局 Context（Init.context()），必须先注入再实例化蜘蛛。
+        seedSpiderContext();
         Class<?> cls = Class.forName(className, true, loader);
         Object inst = cls.getDeclaredConstructor().newInstance();
         spiders.put(className, inst);
         seedPanState(inst);
         return inst;
+    }
+
+    /** 向 jar 内 Init 注入 stub Application 全局 Context（对应 TVBox 宿主启动时的 Init.init(context)）。 */
+    static void seedSpiderContext() {
+        try {
+            Class<?> initCls = Class.forName("com.github.catvod.spider.Init", true, loader);
+            try {
+                java.lang.reflect.Method m = initCls.getMethod("init", android.content.Context.class);
+                m.invoke(null, new android.app.Application());
+            } catch (NoSuchMethodException ignore) {
+                // 部分 jar 的 Init 无 init(Context)（如自加载型），跳过
+            }
+        } catch (Throwable ignore) {
+            // 无 Init 类（标准 TVBox spider 无此依赖）或初始化失败：不影响蜘蛛加载
+        }
     }
 
     // ---- 网盘 Cookie 注入（用户配置，经 params.pan_cookies 传入）----

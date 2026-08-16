@@ -52,6 +52,14 @@ DEXDEPS_DIR = os.path.join(
 # 全局 jar 桥缓存：key = jar_path → JarBridge 实例
 _jar_bridges = {}
 _jar_bridges_lock = threading.Lock()
+# jar 下载/转换锁：key = jar_url → Lock（并发构建同一 jar 时串行化下载与 dex2jar）
+_jar_download_locks = {}
+_jar_download_locks_guard = threading.Lock()
+
+
+def _jar_download_lock(url):
+    with _jar_download_locks_guard:
+        return _jar_download_locks.setdefault(url, threading.Lock())
 
 
 class JarBridge:
@@ -145,7 +153,13 @@ class JarBridge:
 
         若下载的 jar 包含 Android DEX（classes.dex），自动转换为 JVM .class jar
         并缓存，返回转换后的路径。
+        按 URL 加锁：站点构建并发化后同一 jar 可能被多线程同时下载/转换。
         """
+        with _jar_download_lock(jar_url):
+            return JarBridge._download_jar_locked(jar_url, md5, site_key, jar_dir)
+
+    @staticmethod
+    def _download_jar_locked(jar_url, md5='', site_key='', jar_dir=None):
         import hashlib
         jar_dir = jar_dir or os.path.join(os.path.expanduser('~'), '.video-pc', 'cache', 'jar')
         try:
@@ -160,6 +174,10 @@ class JarBridge:
         raw = requests_get_jar(jar_url)
         if not raw or len(raw) < 4:
             raise ValueError(f'jar download empty: {jar_url}')
+        # 内容魔数校验：TVBox 生态 jar 常伪装成 .jpg/.png/.bin（防直链），
+        # 必须以内容判断而非后缀。zip 魔数 PK\x03\x04 或 raw dex（dex\n035）。
+        if not (raw[:2] == b'PK' or raw[:4] == b'dex\n'):
+            raise ValueError(f'downloaded content is not a jar archive (magic check failed): {jar_url}')
         if md5 and hashlib.md5(raw).hexdigest() != md5:
             raise ValueError(f'jar md5 mismatch: {jar_url}')
         with open(dest, 'wb') as f:
