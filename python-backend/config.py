@@ -193,6 +193,13 @@ class ConfigManager:
 
     # ------------------------------------------------------------ 入口
 
+    def _resolve_repo_url(self, base, sub):
+        """多仓子仓相对路径（./x.json）以多仓配置源 URL 为基址解析为绝对地址。"""
+        if str(sub).startswith('./') or str(sub).startswith('../'):
+            if str(base).startswith('http'):
+                return urljoin(base, sub)
+        return sub
+
     def load(self, url_or_json, _depth=0, _text=None):
         """解析并整体热替换站点；返回加载摘要 dict。
 
@@ -217,7 +224,7 @@ class ConfigManager:
             sub_cfgs = {}   # 成功解析的子仓配置（含主条目），供 T44 跨仓合并
             chosen = None
             for item in entries:
-                sub = (item or {}).get('url', '')
+                sub = self._resolve_repo_url(url_or_json, (item or {}).get('url', ''))
                 if not sub:
                     continue
                 name = item.get('name')
@@ -346,7 +353,7 @@ class ConfigManager:
         primary_src = prepared['source_url']
         pending = []   # 尚未拉取过的条目 url（选中之后直接 break，未及拉取）
         for it in entries:
-            u = (it or {}).get('url', '')
+            u = self._resolve_repo_url(primary_src, (it or {}).get('url', ''))
             if u and u != primary_src and u not in sub_cfgs:
                 pending.append(u)
 
