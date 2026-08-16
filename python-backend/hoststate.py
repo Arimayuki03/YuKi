@@ -15,6 +15,8 @@ _state = {
     'cache_dir': os.path.join(_HOME, 'cache'),
     'plugins_dir': os.path.join(_HOME, 'cache', 'py'),  # 对应原 Android cacheDir/py
     'log_dir': os.path.join(_HOME, 'logs'),
+    'pan_fast_path': True,  # 任务三：网盘快路径开关（默认开：夸克文件前置短路；
+                            # 关：全走 jar，兜底才用 go-proxy）
 }
 
 
@@ -49,6 +51,11 @@ def get_log_dir():
 def get_proxy_url(local=True):
     """对应原 Proxy.getUrl(local)；local 语义在 PC 端无差异。"""
     return f"http://127.0.0.1:{_state['port']}/proxy"
+
+
+def get_pan_fast_path():
+    """任务三：网盘快路径开关（True=前置短路；False=jar优先+兜底）。"""
+    return _state.get('pan_fast_path', True)
 
 
 def ensure_dirs():

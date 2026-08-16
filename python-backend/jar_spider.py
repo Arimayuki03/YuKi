@@ -128,16 +128,26 @@ class JarSpider(Spider):
         return _ensure_local_proxy_ports(self.playerContentRaw(flag, id, vipFlags))
 
     def playerContentRaw(self, flag, id, vipFlags):
-        # 我的夸克网盘文件（shareId 空 + folder fid）：
-        # ea3f jar 的取流链路（sharepage/save 转存）对网盘内文件必失败
-        # （pwd_id 为空 → 400），且 w.l() 对无 data 响应会 NPE。
-        # 这类文件不依赖 jar —— go-proxy 直接 v2/play 或 file/download 取直链，
-        # 这里短路生成 go-proxy do=pan URL，跳过 jar 调用（更快且不触发 NPE）。
+        # 任务三：夸克特判降级为协议层兜底。
+        # 我的夸克网盘文件（shareId 空 + folder fid）：ea3f jar 的取流链路
+        # （sharepage/save 转存）对网盘内文件必失败（pwd_id 空 → 400），
+        # 且 w.l() 对无 data 响应会 NPE。这类文件不依赖 jar —— go-proxy
+        # 直接 v2/play 或 file/download 取直链。
+        #
+        # 架构调整（TVBOX_COMPAT_PLAN 任务三）：
+        # - 旧实现：检测格式 → 前置短路（绑定特定 jar 的 vodId 假设）
+        # - 新实现：jar 优先 → 失败/退化时兜底拼 go-proxy URL
+        # - 快路径开关 pan_fast_path（默认 True 保持现有行为，False 全走 jar）
+        import hoststate
         folder, share_id = self._quark_folder_id(id)
+        pan_url = None
         if folder and not share_id:
-            return {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
-                           % quote(str(folder), safe=''),
-                    'parse': 0, 'header': {}}
+            pan_url = 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s' % quote(str(folder), safe='')
+            # 快路径：前置短路（现有行为，现有用户零感知）
+            if hoststate.get_pan_fast_path():
+                return {'url': pan_url, 'parse': 0, 'header': {}}
+
+        # jar 优先路径：先走 jar playerContent
         raw = self._call('playerContent', flag, id, list(vipFlags) if vipFlags else [])
         result = self._json(raw, {'url': id, 'parse': 1})
         if result is None:
@@ -145,14 +155,11 @@ class JarSpider(Spider):
             if not self.last_error:
                 self.last_error = '网盘解析失败：Cookie 无效或已过期，或分享链接已失效'
             result = {'url': id, 'parse': 1}
-        # 兜底：jar 内部失败（url 空/[]）或 NPE 退化（url 仍是原样 id）时，
-        # 若 id 是我的网盘 folder JSON → 同样拼 go-proxy do=pan URL。
+
+        # 兜底：jar 失败/退化（url 空/[] 或仍是原样 id）且命中网盘格式 → go-proxy URL
         url = (result or {}).get('url')
-        if not url or (isinstance(url, str) and url == id):
-            if folder and not share_id:
-                result = {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
-                                  % quote(str(folder), safe=''),
-                          'parse': 0, 'header': result.get('header') or {}}
+        if pan_url and (not url or (isinstance(url, str) and url == id)):
+            result = {'url': pan_url, 'parse': 0, 'header': result.get('header') or {}}
         return result
 
     def liveContent(self, url):
