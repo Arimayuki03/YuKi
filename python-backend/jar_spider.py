@@ -71,32 +71,47 @@ class JarSpider(Spider):
         return self._json(self._call('searchContent', key, self._truthy(quick), str(pg)),
                           {'list': []})
 
+    @staticmethod
+    def _quark_folder_id(id):
+        """从 vodId 提取我的夸克网盘文件 fid。
+
+        我的网盘文件 vodId 是 [{"folder":"<fid>","shareId":"",...}]（shareId 空）。
+        返回 (folder, share_id)；非该结构返回 ('', '')。
+        """
+        try:
+            vid = json.loads(id) if isinstance(id, str) and id.lstrip().startswith('[') else None
+            if isinstance(vid, list) and vid and isinstance(vid[0], dict):
+                return str(vid[0].get('folder') or ''), str(vid[0].get('shareId') or '')
+        except Exception:
+            pass
+        return '', ''
+
     def playerContent(self, flag, id, vipFlags):
+        # 我的夸克网盘文件（shareId 空 + folder fid）：
+        # ea3f jar 的取流链路（sharepage/save 转存）对网盘内文件必失败
+        # （pwd_id 为空 → 400），且 w.l() 对无 data 响应会 NPE。
+        # 这类文件不依赖 jar —— go-proxy 直接 v2/play 或 file/download 取直链，
+        # 这里短路生成 go-proxy do=pan URL，跳过 jar 调用（更快且不触发 NPE）。
+        folder, share_id = self._quark_folder_id(id)
+        if folder and not share_id:
+            return {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
+                           % folder,
+                    'parse': 0, 'header': {}}
         raw = self._call('playerContent', flag, id, list(vipFlags) if vipFlags else [])
         result = self._json(raw, {'url': id, 'parse': 1})
         if result is None:
             # 蜘蛛明确返回 null（如网盘 Cookie 无效、分享失效）→ 附加可读提示
             if not self.last_error:
                 self.last_error = '网盘解析失败：Cookie 无效或已过期，或分享链接已失效'
-            return {'url': id, 'parse': 1}
-        # 我的夸克网盘兜底：jar 转存链路（sharepage/save 需 pwd_id）对网盘内文件
-        # 必失败 → url 空。此时 vodId 是 [{"folder":"<fid>","shareId":"",...}]，
-        # 直接用 folder 拼 go-proxy do=pan URL（go-proxy 已支持 shareId 空 + 纯 fid）。
-        # 端口用 go-proxy 主端口常量 9978（EXTRA_PORTS 7944/1314 为兼容旧 jar 硬编码）。
-        if not (result or {}).get('url'):
-            try:
-                vid = json.loads(id) if isinstance(id, str) and id.lstrip().startswith('[') else None
-                folder = ''
-                share_id = ''
-                if isinstance(vid, list) and vid:
-                    folder = str((vid[0] or {}).get('folder') or '')
-                    share_id = str((vid[0] or {}).get('shareId') or '')
-                if folder and not share_id:
-                    result = {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
-                                      % folder,
-                              'parse': 0, 'header': result.get('header') or {}}
-            except Exception:
-                pass
+            result = {'url': id, 'parse': 1}
+        # 兜底：jar 内部失败（url 空/[]）或 NPE 退化（url 仍是原样 id）时，
+        # 若 id 是我的网盘 folder JSON → 同样拼 go-proxy do=pan URL。
+        url = (result or {}).get('url')
+        if not url or (isinstance(url, str) and url == id):
+            if folder and not share_id:
+                result = {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
+                                  % folder,
+                          'parse': 0, 'header': result.get('header') or {}}
         return result
 
     def liveContent(self, url):
