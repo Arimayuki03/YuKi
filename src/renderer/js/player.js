@@ -433,8 +433,7 @@ const Player = {
             hideLoading();
             if (resolved && resolved.ok) {
                 try {
-                    // 合并 header：解析器返回的优先，但保留源 header 中未被覆盖的字段
-                    const mergedHeader = {...header, ...(resolved.header || {})};
+                    const mergedHeader = { ...(resolved.header || {}) };
                     const r = await window.vpc.playUrl(resolved.url, {
                         title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
                     });

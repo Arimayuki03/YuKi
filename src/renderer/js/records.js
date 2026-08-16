@@ -148,10 +148,11 @@ const Records = {
         let list = await recGet('favorites');
         const idx = list.findIndex((x) => String(x.site) === String(v.site) && String(x.vodId) === String(v.vodId));
         let added = false;
+        let entry = null;
         if (idx >= 0) {
             list.splice(idx, 1);
         } else {
-            let entry = { uid: genUid(), site: v.site, siteName: v.siteName || '', vodId: v.vodId, name: v.name || '', pic: v.pic || '', remarks: v.remarks || '', tag: 'want', ts: Date.now() };
+            entry = { uid: genUid(), site: v.site, siteName: v.siteName || '', vodId: v.vodId, name: v.name || '', pic: v.pic || '', remarks: v.remarks || '', tag: 'want', ts: Date.now() };
             // 第三方源仅匹配 Bangumi ID 供时间表筛选用，不替换封面/片名
             if (v.bangumiId) {
                 entry.bangumiId = String(v.bangumiId);

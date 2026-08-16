@@ -342,8 +342,9 @@ const Detail = {
             // T74：命中缓存直接复用，避免重复打开重复拉详情（localStorage 持久缓存，重启仍有效）
             const cacheKey = String(this.site) + '|' + String(this.vodId);
             let vod = _detailCacheGet(DETAIL_VOD_CACHE_PREFIX, cacheKey);
+            let data = null;
             if (!vod) {
-                const data = await doAction('detailContent', { site: this.site, ids: JSON.stringify([this.vodId]) });
+                data = await doAction('detailContent', { site: this.site, ids: JSON.stringify([this.vodId]) });
                 vod = (data && data.list && data.list[0]) || null;
                 if (vod) _detailCacheSet(DETAIL_VOD_CACHE_PREFIX, cacheKey, vod, DETAIL_CACHE_TTL);
             }
