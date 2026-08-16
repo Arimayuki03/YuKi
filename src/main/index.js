@@ -228,17 +228,21 @@ async function mpvStartedOk(timeoutMs = 8000) {
 /**
  * 直播备用线路：首播未开播则逐条重试 meta.fallbackUrls，
  * 经 vpc:play-retry / vpc:play-failed 通知渲染层提示。
+ * gen 为播放控制代际（mpv.controlGen）：用户主动停止/直接关掉 mpv 窗口/另起播放
+ * 都会推进代际，循环据此立即退出，不再抢着重播下一条线路。
  */
-async function watchLiveFallbacks(title, alts, header) {
+async function watchLiveFallbacks(title, alts, header, gen) {
     if ((await mpvStartedOk(8000)) !== false) return;
     for (const u of alts) {
+        if (mpv.controlGen !== gen) return; // 用户已停止或另起播放
         send('vpc:play-retry', { title, url: u });
         const r = mpv.play([{ url: u, title }], { title, header, resume: false });
         if (!r.ok) return;
+        gen = mpv.controlGen; // 本次切换是循环自己发起：重置代际基准继续监控新会话
         afterPlay();
         if ((await mpvStartedOk(8000)) !== false) return;
     }
-    send('vpc:play-failed', { title });
+    if (mpv.controlGen === gen) send('vpc:play-failed', { title });
 }
 
 function createWindow() {
@@ -257,7 +261,6 @@ function createWindow() {
             preload: path.join(__dirname, '..', 'preload', 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
-            sandbox: false,
         },
     });
     win.setMenuBarVisibility(false);
@@ -656,6 +659,16 @@ app.whenReady().then(() => {
     //     （外部播放器拿不到结束事件，故选 A：只交首集、不起自动连播。）
     //  b) 否则内置 mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
     ipcMain.handle('vpc:play', async (_e, payload) => {
+        // L-1：URL 协议白名单——本地文件播放走 vpc:dl-play / vpc:file-push 专用通道，
+        // 此处仅放行网络协议，拒绝 file://、edl:// 等可直接触碰本地文件的 scheme
+        // （渲染层 playUrl 调用点已确认均为网络直链：站点剧集/直播源/直链播放）
+        {
+            const protoOk = (u) => /^(https?|rtmps?|rtsp|magnet):/i.test(String(u || ''));
+            const meta0 = (payload && payload.meta) || {};
+            const bad = (payload && payload.url && !protoOk(payload.url))
+                || (Array.isArray(meta0.playlist) && meta0.playlist.some((e) => e && e.url && !protoOk(e.url)));
+            if (bad) return { ok: false, reason: 'bad url protocol' };
+        }
         // 外部播放器为主：直接转交，不再走内置 mpv（mpv 缺失时也能用外部播放器起播）
         const extPrimary = primaryExternalPlayer();
         if (extPrimary) {
@@ -693,7 +706,7 @@ app.whenReady().then(() => {
             // 非连播会话（本地文件/推送）：sessionId 取负，渲染层据此不触碰连播链
             if (meta.noSeq) r.sessionId = -Math.abs(r.sessionId);
             afterPlay();
-            if (alts.length) watchLiveFallbacks(title, alts, meta.header).catch(() => { });
+            if (alts.length) watchLiveFallbacks(title, alts, meta.header, mpv.controlGen).catch(() => { });
             r.anime4k = !!mpv.anime4kShaders; // 渲染层 toast 提示 Anime4K 是否生效
             // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
             // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放
@@ -703,7 +716,8 @@ app.whenReady().then(() => {
                     const urlPath = String(ep.url).split('?')[0];
                     const isM3u8 = /\.m3u8$/i.test(urlPath);
                     const ext = (urlPath.match(/\.(mp4|mkv|flv|mov|avi|webm|ts)$/i) || ['', ''])[1];
-                    const out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + ext;
+                    // M-9：命中扩展名才补「.ext」，未命中（如直播/无扩展直链）不加悬挂点号
+                    const out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + (ext ? '.' + ext : '');
                     if (isM3u8) {
                         syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                         hls.add({ url: ep.url, out, header: meta.header,
@@ -840,11 +854,16 @@ app.whenReady().then(() => {
 
     ipcMain.handle('vpc:parse', async (_e, url) => {
         try {
-            // 25s 安全超时：解析窗口偶发挂起（槽位/cookies 卡住）时也返回，避免渲染层 loading 永不消失
-            return await Promise.race([
-                parseWin.resolve(String(url || '')),
-                new Promise((res) => setTimeout(() => res(null), 25000)),
-            ]);
+            // 25s 安全超时 + 取消传播：超时置 abort 标记，解析窗口立即作废并释放槽位
+            // （此前只 race 返回 null，后台解析仍占着槽位，连续超时会耗尽解析池）
+            const abort = { requested: false };
+            let timer = null;
+            try {
+                return await Promise.race([
+                    parseWin.resolve(String(url || ''), undefined, undefined, abort),
+                    new Promise((res) => { timer = setTimeout(() => { abort.requested = true; res(null); }, 25000); }),
+                ]);
+            } finally { clearTimeout(timer); }
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
@@ -854,11 +873,14 @@ app.whenReady().then(() => {
             // 兼容两种调用：字符串 url（旧）或 {url, legacy}（Kazumi 旧解析器）
             const url = (payload && typeof payload === 'object') ? String(payload.url || '') : String(payload || '');
             const legacy = !!(payload && typeof payload === 'object' && payload.legacy);
-            // 25s 安全超时：隐藏窗口偶发挂起时也返回，避免渲染层 loading 永不消失
+            // 25s 安全超时 + 取消传播：超时置 abort 标记，隐藏窗口作废并释放槽位
+            const abort = { requested: false };
+            let timer = null;
             const r = await Promise.race([
-                parseWin.captureDirect(url, undefined, legacy),
-                new Promise((res) => setTimeout(() => res(null), 25000)),
+                parseWin.captureDirect(url, undefined, legacy, abort),
+                new Promise((res) => { timer = setTimeout(() => { abort.requested = true; res(null); }, 25000); }),
             ]);
+            clearTimeout(timer);
             return (r && r.ok) ? r : { ok: false, reason: 'capture-failed' };
         } catch (err) { return { ok: false, reason: err.message }; }
     });
@@ -877,7 +899,31 @@ app.whenReady().then(() => {
     });
 
     ipcMain.handle('vpc:settings-get', () => settings.all());
-    ipcMain.handle('vpc:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
+    // settings-set 键白名单（M-1）：仅放行渲染层实际使用的偏好/数据键，防页面脚本写任意键；
+    // 敏感路径键（播放器/缓存/下载目录，可指向本地任意位置）不在此列，只能经
+    // vpc:pick-player / vpc:pick-cache-dir / vpc:dl pickDir 等主进程对话框设置，走 settings-set 一律忽略。
+    const SETTINGS_SET_ALLOWED = new Set([
+        'anime4k', 'anime4kMode', 'animEnabled', 'autoNext',
+        'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
+        'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedSites',
+        'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
+        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'enableBangumiProxy', 'enableGitProxy',
+        'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
+        'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
+        // 各列表页每页条数（panels.js 动态 key 写入）
+        'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
+        'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
+        'probedSites', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat',
+        'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
+        'useMisansFont', 'wallpaper', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
+        'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
+        'webDavPassword', 'webDavUrl', 'webDavUsername',
+    ]);
+    ipcMain.handle('vpc:settings-set', (_e, key, value) => {
+        const k = String(key);
+        if (!SETTINGS_SET_ALLOWED.has(k)) return { value: undefined, ignored: true };
+        return { value: settings.set(k, value) };
+    });
 
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
@@ -1140,8 +1186,8 @@ app.whenReady().then(() => {
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
         settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
-        // app.exit(0) 不触发 before-quit，须先停 mpv 避免残留后台进程
-        if (mpv.playing) mpv.stop();
+        // M-8：app.exit(0) 不触发 before-quit，复用退出清理序列停掉 mpv/aria2/推送/后端等子进程
+        runQuitCleanup();
         app.relaunch();
         isQuitting = true;
         app.exit(0);
@@ -1503,6 +1549,8 @@ app.whenReady().then(() => {
                     // m3u8 切片流：分片并发模式（concurrency > 1）或 ffmpeg 顺序拉流（兜底）
                     const uri = String(payload.uri || '').trim();
                     if (!uri) throw new Error('empty uri');
+                    // M-2：仅放行 http(s)，防 file:// 等本地/畸形 scheme 经 ffmpeg/分片拉取触碰本地文件
+                    if (!/^https?:\/\//i.test(uri)) throw new Error('bad uri protocol');
                     syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                     let gid;
                     try {
@@ -1730,11 +1778,20 @@ app.whenReady().then(() => {
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    // 下载完成一键播放：直接播本地产出文件（用户主动选择，不受文件白名单限制）
+    // 下载完成一键播放：直接播本地产出文件（来源为下载任务的 files，均在下载目录内）
     ipcMain.handle('vpc:dl-play', (_e, filePath) => {
         try {
             if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
             const abs = path.resolve(String(filePath || ''));
+            // L-1：路径限制在下载目录或本地媒体根目录内（path.relative 无 '..' 前缀且非绝对），
+            // 防页面脚本传任意本地路径借 mpv 播放窥探磁盘
+            const inside = (root) => {
+                if (!root) return false;
+                const rel = path.relative(path.resolve(String(root)), abs);
+                return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+            };
+            const dlRoot = dl.dir || settings.get('dlDir') || app.getPath('downloads');
+            if (!inside(dlRoot) && !inside(fileMgr.root)) return { ok: false, reason: 'path-denied' };
             if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return { ok: false, reason: 'file-not-found' };
             if (!fileMgr.isVideo(abs)) return { ok: false, reason: 'not-video' };
             const title = path.basename(abs);
@@ -2227,7 +2284,9 @@ app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+/** 退出前清理序列（M-8）：before-quit 与 settings-reset 的 app.exit(0) 共用——
+ *  app.exit 不派发 before-quit 事件，settings-reset 漏清理会残留 mpv/aria2/后端子进程。 */
+function runQuitCleanup() {
     if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
     stopScheduledLogCleanup();
     mpv.stop();
@@ -2235,6 +2294,10 @@ app.on('before-quit', () => {
     pushServer.stop();
     try { syncplay.disconnect(); } catch (e) { /* ignore */ }
     bridge.stop();
+}
+
+app.on('before-quit', () => {
+    runQuitCleanup();
 });
 
 // 全局未捕获异常兜底：防进程崩溃导致窗口消失

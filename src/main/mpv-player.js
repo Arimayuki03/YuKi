@@ -97,6 +97,7 @@ class MpvPlayer extends EventEmitter {
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
         this._lastSp = 1;          // 播放期间倍速（实时追踪，exit 时无需查询）
         this._activeSession = null; // {id, proc, pos, duration, fullscreen, speed}，退出时使用缓存
+        this.controlGen = 0;        // 播放控制代际：stop()/用户关闭/新起播时自增，供直播备用线路循环检测退出
         this._frontTimer = null;   // 前台抢焦重试定时器（Windows foreground lock 兜底）
         this._frontTries = 0;
     }
@@ -262,6 +263,8 @@ class MpvPlayer extends EventEmitter {
                 // 用户主动关闭：应用 stop() 标记，或 mpv 自己 end-file reason=quit/stop（点窗口关闭键）
                 userStopped: session.userStopped || session.endReason === 'quit' || session.endReason === 'stop',
             };
+            // 用户直接关掉 mpv 窗口（未走应用 stop()）：同样自增代际，备用线路循环不再接手重播
+            if (info.userStopped) this.controlGen++;
             // 只清理该会话；旧进程延迟退出时不能误清掉刚起播的新会话。
             this._teardown(sessionId);
             this.emit('exit', info);
@@ -271,6 +274,7 @@ class MpvPlayer extends EventEmitter {
     }
 
     stop() {
+        this.controlGen++; // 用户/应用主动停止：代际自增，监控循环（直播备用线路）据此立即退出
         const sessionId = this._activeSession ? this._activeSession.id : null;
         const proc = this.proc;
         if (proc) {
@@ -529,7 +533,9 @@ class MpvPlayer extends EventEmitter {
             pos = `{\\an7\\move(${from},${y},${to},${y})}`;
         }
         const color = d.color === 0xFFFFFF ? '' : `{\\c${MpvPlayer._assColor(d.color)}}`;
-        const text = d.content.replace(/\r?\n/g, '\\N');
+        // M-6：弹幕文本先转义换行，再转义 { }（ASS 内 {…} 是样式覆盖块，未转义的
+        // 花括号会被解析器吞掉/干扰渲染，恶意文本还可注入 \pos 等覆盖指令）
+        const text = d.content.replace(/\r?\n/g, '\\N').replace(/\{/g, '({').replace(/\}/g, '})');
         return `Dialogue: 0,${start},${end},Default,,0,0,0,,${pos}${color}${text}`;
     }
 

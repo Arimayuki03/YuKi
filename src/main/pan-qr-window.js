@@ -105,9 +105,11 @@ function openLoginWindow() {
             autoHideMenuBar: true,
             webPreferences: {
                 partition: PARTITION,
-                contextIsolation: false,
+                // M-4：加载的是远程官方页面，无 preload/无 node 依赖（登录判定靠主进程轮询
+                // session Cookie），严格隔离 + 沙箱，页面脚本拿不到任何特权环境
+                contextIsolation: true,
                 nodeIntegration: false,
-                sandbox: false,
+                sandbox: true,
             },
         });
         win.setMenuBarVisibility(false);

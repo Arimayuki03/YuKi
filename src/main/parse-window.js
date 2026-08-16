@@ -153,9 +153,11 @@ class ParseWindow {
 
     /**
      * 解析目标地址为可播直链。
+     * @param abort 可选取消标记 { requested }：置位后本次解析立即作废——
+     *        停止后续接口尝试/窗口导航并释放解析池槽位（调用方 25s 安全超时用）。
      * @returns {{ok:true, url:string, header?:object, via?:string} | {ok:false, reason:string}}
      */
-    async resolve(targetUrl, parsesOverride, legacy) {
+    async resolve(targetUrl, parsesOverride, legacy, abort) {
         if (!/^https?:\/\//i.test(String(targetUrl || ''))) {
             return { ok: false, reason: 'bad target url' };
         }
@@ -165,13 +167,15 @@ class ParseWindow {
 
         // type=1 JSON 解析优先（无需窗口，快）
         for (const p of list.filter((x) => parseInt(x.type, 10) === 1)) {
+            if (abort && abort.requested) return { ok: false, reason: 'aborted' };
             const r = await this._tryJson(p, targetUrl);
             if (r) return r;
         }
         // iframe 型逐个尝试（跳过拼出畸形 scheme 的解析接口，防系统「打开方式」弹窗）
         for (const p of list.filter((x) => parseInt(x.type, 10) !== 1)) {
+            if (abort && abort.requested) return { ok: false, reason: 'aborted' };
             if (!isLoadableUrl(p.url + targetUrl)) continue;
-            const r = await this._tryIframe(p, targetUrl, IFRAME_TIMEOUT, legacy);
+            const r = await this._tryIframe(p, targetUrl, IFRAME_TIMEOUT, legacy, abort);
             if (r) return r;
         }
         return { ok: false, reason: 'resolve-failed' };
@@ -199,8 +203,8 @@ class ParseWindow {
     }
 
     /** iframe 型：隐藏窗口加载解析页，webRequest 捕获媒体直链。 */
-    _tryIframe(parse, targetUrl, timeout, legacy) {
-        return this._capture({ url: parse.url + targetUrl, via: parse.name || parse.url, timeout, legacy });
+    _tryIframe(parse, targetUrl, timeout, legacy, abort) {
+        return this._capture({ url: parse.url + targetUrl, via: parse.name || parse.url, timeout, legacy, abort });
     }
 
     /**
@@ -208,18 +212,21 @@ class ParseWindow {
      * 隐藏窗口直接加载目标页，捕获其播放器发起的媒体请求。
      * legacy=true 时走旧解析器（useLegacyParser）：监听 iframe src 并跟随，直到命中媒体直链。
      * 同 key（legacy|url）并发调用经 AsyncSingleFlight 去重，只开一个窗口、共享结果。
+     * @param abort 可选取消标记（resolve 同款）：置位后立即作废并释放槽位。
+     *        注意单飞合并的并发调用共享同一窗口，任一调用方放弃即整体作废。
      */
-    captureDirect(url, timeout = IFRAME_TIMEOUT, legacy) {
+    captureDirect(url, timeout = IFRAME_TIMEOUT, legacy, abort) {
         if (!isLoadableUrl(url)) return Promise.resolve(null);
         const key = `${legacy ? 'L' : 'N'}|${url}`;
-        return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout, legacy }));
+        return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout, legacy, abort }));
     }
 
     /** 隐藏窗口加载 url，webRequest 捕获媒体直链（_tryIframe/captureDirect 共用）。
      *  从解析池取一个独立 partition 槽位，并发捕获互不干扰。
      *  legacy=true 走旧解析器：注入 MutationObserver 监听 iframe src，媒体直链即命中，
-     *  非媒体页跟随加载（限深防环）；否则用 JS 轮询 <video>/<audio> 元素兜底。 */
-    _capture({ url, via, timeout, legacy }) {
+     *  非媒体页跟随加载（限深防环）；否则用 JS 轮询 <video>/<audio> 元素兜底。
+     *  abort（可选）置位后立即 finish(null)：停止导航/轮询、销毁窗口并释放槽位。 */
+    _capture({ url, via, timeout, legacy, abort }) {
         return this._acquire().then((slot) => new Promise((resolve) => {
             let win;
             try {
@@ -247,6 +254,7 @@ class ParseWindow {
             let initialLoadDone = false;  // 首个页面是否已成功加载（did-fail-load 快速失败判定用）
             let jsPoll = null;      // 视频元素轮询（非 legacy）
             let legacyPoll = null;  // iframe src 轮询（legacy）
+            let abortPoll = null;   // 取消标记轮询（调用方放弃时立即作废）
             const done = (r) => {
                 try { win.destroy(); } catch (e) { /* ignore */ }
                 this._release(slot);
@@ -258,6 +266,7 @@ class ParseWindow {
                 clearTimeout(timer);
                 clearInterval(jsPoll);
                 clearInterval(legacyPoll);
+                clearInterval(abortPoll);
                 try { ses.webRequest.onBeforeRequest(null); } catch (e) { /* ignore */ }
                 // 先读会话 Cookie 再销毁窗口（session 随最后窗口关闭销毁）；推给后端持久化
                 ses.cookies.get({}).then((cookies) => {
@@ -266,6 +275,11 @@ class ParseWindow {
                 }).catch(() => done(r));
             };
             const timer = setTimeout(() => finish(null), timeout);
+            // 调用方放弃（25s 安全超时等）：轮询检测取消标记，命中即销毁窗口、释放槽位，
+            // 不再等满 timeout 占着解析池
+            if (abort) {
+                abortPoll = setInterval(() => { if (abort.requested) finish(null); }, 100);
+            }
 
             // R4：主框架加载失败（解析站死链/连接被拒）→ 秒级跳过该解析站，不必烧满 IFRAME_TIMEOUT。
             // 忽略：非主框架（页面内 iframe 失败）、ERR_ABORTED(-3，跟随加载/主动中断）、

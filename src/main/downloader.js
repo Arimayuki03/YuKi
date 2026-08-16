@@ -146,7 +146,8 @@ class Downloader extends EventEmitter {
         // 任务级注入（见 _proxyOpts），添加时取实时值，代理失效不影响新任务。
         // stdio 设为 pipe 以捕获 stderr：aria2c 启动失败（端口占用/参数错/损坏）
         // 时 stderr 含真实原因，原 'ignore' 会丢失导致只报笼统的 rpc not ready。
-        this.proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        const proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        this.proc = proc;
         // 重置上次启动的残留诊断信息（exit code / spawn error / stderr）
         this._exitCode = null;
         this._spawnError = '';
@@ -159,9 +160,12 @@ class Downloader extends EventEmitter {
         });
         // 捕获退出码：aria2c --enable-rpc 正常不该退出；记录 code 便于区分
         // 正常退出（0，理论不出现）与错误退出（非 0，如端口占用/参数错）。
-        this.proc.on('exit', (code) => {
+        proc.on('exit', (code) => {
             if (code) { try { console.error(`[aria2] exited code=${code}`); } catch (e) { /* ignore */ } }
-            this._exitCode = code;
+            this._exitCode = code; // 诊断信息照常记录（含旧进程迟到 exit 的场景）
+            // H-9：stop→start 已换新进程时旧进程的迟到 exit——不清新进程的 this.proc/_ready，
+            // 否则新任务被误判「aria2 not running」、_waitReady 提前误跳
+            if (this.proc !== proc) return;
             this.proc = null;
             this._ready = null;
         });

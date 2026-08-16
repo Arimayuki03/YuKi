@@ -120,13 +120,18 @@ class HlsDownloader extends EventEmitter {
     /** 新增任务；返回 gid。ffmpeg 缺失抛 Error('ffmpeg-missing')。
      *  concurrency > 1 时走分片并发模式（解析 m3u8 → 并行拉取分片 → ffmpeg 合并）；
      *  concurrency <= 1 或加密流/解析失败时回退 ffmpeg 顺序拉流模式。
-     *  adFilter=true 时先过滤广告分段（CUE-OUT/CUE-IN + 广告路径特征）。 */
+     *  adFilter=true 时先过滤广告分段（CUE-OUT/CUE-IN + 广告路径特征）。
+     *  M-2：url 仅接受 http(s)，非 http(s)（file:// 等）直接拒绝。 */
     add({ url, out, header, adFilter, concurrency }) {
+        if (!/^https?:\/\//i.test(String(url || ''))) throw new Error('bad url protocol');
         const bin = findFfmpeg();
         if (!bin) throw new Error('ffmpeg-missing');
         const gid = `hls-${++_seq}-${Date.now().toString(36)}`;
         fs.mkdirSync(this.dir, { recursive: true });
-        const name = (out || 'video.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 150);
+        // M-10：文件名须为纯文件名——sanitize 已去分隔符，再挡 '.'/'..'/空串等
+        // 会 path.join 逃逸或指向目录本身的取值，非法一律回落默认名
+        let name = (out || '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 150);
+        if (!name || path.basename(name) !== name || name === '.' || name === '..') name = 'video.mp4';
         const dest = path.join(this.dir, name);
         const conc = Math.max(1, Math.min(32, parseInt(concurrency, 10) || 1));
         const task = {
@@ -135,7 +140,7 @@ class HlsDownloader extends EventEmitter {
             errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false,
             adFilter: !!adFilter, _adTemp: null, _input: null,
             _mode: 'ffmpeg', // 'concurrent' | 'ffmpeg'（分片并发 / ffmpeg 顺序拉流）
-            _segsDir: dest + '.segs', // 分片临时目录
+            _segsDir: `${dest}.${gid}.segs`, // 分片临时目录（M-10：带 gid，同名任务并发互不覆盖）
             _segments: null, _totalSegs: 0, _downloaded: 0, _segBytes: 0,
             _speedTimer: null, _speedLastBytes: 0, _speedLastTs: 0,
         };

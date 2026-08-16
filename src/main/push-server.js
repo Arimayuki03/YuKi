@@ -91,7 +91,8 @@ class PushServer extends EventEmitter {
 code{background:#333;padding:2px 6px;border-radius:4px;word-break:break-all}</style></head>
 <body><h2>影視 PC · URL 推送</h2>
 <p>在手機瀏覽器打開以下地址（替換 <code>&lt;播放地址&gt;</code>）即可推送到本機播放：</p>
-<code>http://${ip}:${this.port}/push?url=&lt;播放地址&gt;&amp;token=${this.token}</code>
+<code>http://${ip}:${this.port}/push?url=&lt;播放地址&gt;&amp;token=&lt;token&gt;</code>
+<p>token 請在應用內「推送」面板查看（首頁不回顯完整 token，避免局域網內任意設備直接讀取）。</p>
 <p>支援 GET 與 POST（表單 <code>url</code> 欄位），僅接受 http/https 連結。</p>
 </body></html>`;
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

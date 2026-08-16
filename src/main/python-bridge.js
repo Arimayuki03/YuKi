@@ -55,6 +55,7 @@ class PythonBridge extends EventEmitter {
 
     _spawn() {
         if (this.stopping) return;
+        this.info = null; // info 只属于当前进程：换进程前重置，READY 行才能重新捕获新端口/token
         this.emit('state', 'starting');
         const args = this._isPackaged ? [] : ['-X', 'utf8', this.script];
         const proc = spawn(this._pythonExe(), args, {
@@ -84,6 +85,9 @@ class PythonBridge extends EventEmitter {
             process.stderr.write(`[python] ${chunk}`);
         });
         proc.on('exit', (code) => {
+            // H-9：stop→start 已换新进程时旧进程的迟到 exit——直接忽略，
+            // 不清掉新进程的 info/proc，也不再安排多余的 _spawn（防进程翻倍）
+            if (this.proc !== proc) return;
             this._stopHealthCheck();
             this.info = null;
             this.proc = null;
