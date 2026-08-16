@@ -24,10 +24,55 @@ import queue
 import threading
 import time
 import urllib.parse
+import urllib.request
 
 import requests
 
 logger = logging.getLogger('vpc.goproxy')
+
+
+def _system_proxies():
+    """读取 Windows 系统代理（WinINET 注册表），启用时返回 requests proxies dict。
+
+    走系统代理（Clash 等）时夸克取流快（实测 0.3s），而 requests 默认
+    trust_env 在部分进程里读不到 WinINET → 退化直连，取流暴慢（42s 超时）。
+    这里显式检测，确保 go-proxy 的所有夸克请求都走快路径。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as k:
+            enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
+            server, _ = winreg.QueryValueEx(k, 'ProxyServer')
+        if not enable or not server:
+            return {}
+        proxies = {}
+        if '=' in server:
+            parts = {}
+            for seg in server.split(';'):
+                if '=' in seg:
+                    p, a = seg.split('=', 1)
+                    parts[p.strip().lower()] = a.strip()
+            for proto in ('http', 'https'):
+                if parts.get(proto):
+                    proxies[proto] = 'http://' + parts[proto]
+            if not proxies:
+                for addr in parts.values():
+                    if addr:
+                        proxies = {'http': 'http://' + addr, 'https': 'http://' + addr}
+                        break
+        else:
+            proxies = {'http': 'http://' + server, 'https': 'http://' + server}
+        return proxies
+    except Exception:
+        return {}
+
+
+# 带系统代理的 requests session：所有夸克 API 请求走代理（快路径），
+# 避免部分进程里 requests 默认 trust_env 读不到 WinINET 退化直连（暴慢）。
+_qses = requests.Session()
+_qses.trust_env = False
+_qses.proxies.update(_system_proxies())
 
 # FongMi 蜘蛛期望的本地代理协议：
 # - 端口：不同 jar 蜘蛛把 127.0.0.1:<port> 硬编码进字节码，跨 jar 差异很大：
@@ -128,7 +173,8 @@ def _fetch(url, headers, start, end, timeout=60):
     h = dict(headers)
     h['Range'] = 'bytes=%d-%d' % (start, end)
     return requests.get(url, headers=h, stream=True, timeout=timeout,
-                        verify=False, allow_redirects=True)
+                        verify=False, allow_redirects=True,
+                        proxies=_system_proxies() or None)
 
 
 def _quark_detail_url(pwd_id, stoken, pdir_fid=''):
@@ -156,7 +202,7 @@ def _quark_resolve_share(pwd_id, headers):
     last_err = None
     for attempt in range(3):
         try:
-            r = requests.post(
+            r = _qses.post(
                 'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                 headers={**headers, 'Content-Type': 'application/json'},
                 data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
@@ -164,8 +210,8 @@ def _quark_resolve_share(pwd_id, headers):
             stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
             if not stoken:
                 raise ValueError('share token empty')
-            r2 = requests.get(_quark_detail_url(pwd_id, stoken),
-                              headers=headers, timeout=20, verify=False)
+            r2 = _qses.get(_quark_detail_url(pwd_id, stoken),
+                           headers=headers, timeout=20, verify=False)
             d = ((r2.json() or {}).get('data') or {})
             lst = d.get('list') or []
             if not lst:
@@ -182,7 +228,7 @@ def _quark_resolve_share(pwd_id, headers):
 def _quark_v2play(fid, headers):
     """v2/play 取播放直链；分享文件未转存（file not found）返回 None。"""
     import json as _json
-    r = requests.post(
+    r = _qses.post(
         'https://drive-pc.quark.cn/1/clouddrive/file/v2/play?pr=ucpro&fr=pc&uc_param_str=',
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps({'fid': fid, 'resolutions': 'normal,low,high,super,2k,4k',
@@ -226,7 +272,7 @@ def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
     import time as _time
     body = {"pdir_fid": "0", "pwd_id": pwd_id, "scene": "link", "stoken": stoken,
             "to_pdir_fid": "0", "fid_list": [fid], "fid_token_list": [fid_token]}
-    r = requests.post(
+    r = _qses.post(
         'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save?pr=ucpro&fr=pc&uc_param_str=&__t=%d'
         % int(_time.time() * 1000),
         headers={**headers, 'Content-Type': 'application/json'},
@@ -237,7 +283,7 @@ def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
     for _ in range(12):
         _time.sleep(1)
         try:
-            r2 = requests.get(
+            r2 = _qses.get(
                 'https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=pc&uc_param_str=&task_id=%s' % tid,
                 headers=headers, timeout=20, verify=False)
             sa = ((r2.json() or {}).get('data') or {}).get('save_as') or {}
@@ -276,7 +322,7 @@ def _quark_share_play_url(pwd_id, headers):
             if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
                 stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
             else:
-                r = requests.post(
+                r = _qses.post(
                     'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                     headers={**headers, 'Content-Type': 'application/json'},
                     data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
@@ -285,7 +331,7 @@ def _quark_share_play_url(pwd_id, headers):
                 if not stoken:
                     raise ValueError('share token empty')
                 detail_url = _quark_detail_url(pwd_id, stoken)
-                r2 = requests.get(detail_url, headers=headers, timeout=20, verify=False)
+                r2 = _qses.get(detail_url, headers=headers, timeout=20, verify=False)
                 lst = ((r2.json() or {}).get('data') or {}).get('list') or []
                 if not lst:
                     raise ValueError('share has no files')
@@ -295,8 +341,8 @@ def _quark_share_play_url(pwd_id, headers):
                     folder = lst[0]
                     lst2 = []
                     for sub in range(4):
-                        r3 = requests.get(_quark_detail_url(pwd_id, stoken, str(folder.get('fid', ''))),
-                                          headers=headers, timeout=20, verify=False)
+                        r3 = _qses.get(_quark_detail_url(pwd_id, stoken, str(folder.get('fid', ''))),
+                                       headers=headers, timeout=20, verify=False)
                         lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
                         if lst2:
                             break
@@ -334,7 +380,7 @@ def _quark_download_url(share_id, file_id, file_token, headers):
     if not share_id or not file_id:
         raise ValueError('missing share/file id')
     import json as _json
-    r = requests.post(
+    r = _qses.post(
         'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps({'fid': file_id, 'uid': 0, 'scene': 'share',
@@ -661,3 +707,4 @@ def start_go_proxy():
         servers.append(srv)
         logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', port)
     return servers[0] if servers else None
+
