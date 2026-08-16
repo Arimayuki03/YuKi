@@ -140,24 +140,20 @@ const Home = {
         if (!all.length && this._allSites.length) {
             return;
         }
-        // 源集合变更（配置自动重载后 key 集不同）：旧探测/屏蔽记录不再适用，
-        // 重置后重新探测，否则新配置的源永远不会被筛选（T25）
+        // 源集合变更（配置自动重载后 key 集不同，多仓漂移常见）：旧探测/屏蔽记录
+        // 不再适用。但**保留全部持久化状态**（probedSites/blockedSites/空分类结果
+        // 及其内存镜像 _emptyCls/_okCls/_clsTs/_clsStarted）：它们按源 key 复用——
+        // 已探测/已屏蔽的 key 直接跳过（24h 新鲜期内零网络请求），仅新出现的 key
+        // 需要探测。此前每次 sig 变化都清空记录，导致多仓每次返回不同仓时每次
+        // 重启全量重探，且用户手动屏蔽的源被悄悄恢复（T25 的顾虑由「新 key 自然
+        // 全探」满足，无需清空旧记录）。
         const sig = all.map((s) => s.key).join('|');
         if (this._allSites.length && sig !== this._allSites.map((s) => s.key).join('|')) {
             this._probeToken++; // 进行中的旧探测写入前校验世代，结果丢弃
             this._probing = false; // 释放锁，允许对新集合重新发起探测
-            this._emptyCls = {}; // T60：源集合变更，分类空态缓存作废
             this._clsProbed = {};
-            this._okCls = {};
             this._clsBusy = {};
-            this._clsStarted = {};
-            this._clsTs = {};
             this._probingAll = false; // 全源探测在途锁随源集合变更释放
-            this._clearPersistedEmptyClasses(); // T60：持久化空分类结果同步作废
-            try {
-                await window.vpc.settingsSet('probedSites', []);
-                await window.vpc.settingsSet('blockedSites', []);
-            } catch (e) { /* 重置失败不阻断主流程 */ }
         }
         this._allSites = all;
         const blocked = await this._getBlocked();
