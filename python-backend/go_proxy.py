@@ -131,6 +131,20 @@ def _fetch(url, headers, start, end, timeout=60):
                         verify=False, allow_redirects=True)
 
 
+def _quark_detail_url(pwd_id, stoken, pdir_fid=''):
+    """拼夸克分享 detail URL（stoken 必须 URL 编码）。
+
+    stoken 含 +/= 等字符，直接拼进 URL 会被当作空格 → 夸克返回
+    code:14001「非法token」。编码后才能正确取到分享文件列表。
+    """
+    import urllib.parse as _up
+    u = ('https://drive.quark.cn/1/clouddrive/share/sharepage/detail'
+         '?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s' % (pwd_id, _up.quote(stoken, safe='')))
+    if pdir_fid:
+        u += '&pdir_fid=%s' % pdir_fid
+    return u
+
+
 def _quark_resolve_share(pwd_id, headers):
     """夸克分享解析：sharepage/token → sharepage/detail → (share_id, file_id, token)。
 
@@ -150,10 +164,8 @@ def _quark_resolve_share(pwd_id, headers):
             stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
             if not stoken:
                 raise ValueError('share token empty')
-            r2 = requests.get(
-                'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
-                % (pwd_id, stoken),
-                headers=headers, timeout=20, verify=False)
+            r2 = requests.get(_quark_detail_url(pwd_id, stoken),
+                              headers=headers, timeout=20, verify=False)
             d = ((r2.json() or {}).get('data') or {})
             lst = d.get('list') or []
             if not lst:
@@ -246,30 +258,20 @@ def _quark_pick_video(lst):
 
 
 def _quark_share_play_url(pwd_id, headers):
-    """夸克分享完整播放链路：token → detail →（进目录找视频）→ v2/play 或转存后播放。
+    """夸克分享完整播放链路：token → detail →（进目录找视频）→ v2/play 直链。
 
-    转存结果按 pwd_id 缓存（进程内）：首次播放转存（约 5-15s），同分享再次
-    播放直接 v2/play 秒开，避免重复转存占用网盘空间与等待。缓存失效
-    （v2/play 404）时自动重新转存。
-    解析结果（stoken/detail）另缓存 5 分钟，避免重复 token/detail 请求触发限流。
-    夸克 API 偶发空响应（限流抖动），重试间隔递增（1/2/4s）。
+    分享文件原始 fid 的 v2/play 直接可出直链（实测 3s 内），**不需要转存**。
+    磁盘转存文件会被夸克清理而失效，转而依赖轻量解析缓存：
+    - _SHARE_CACHE 缓存 stoken + 原始分享 fid（5 分钟），秒开且不失效；
+    - 分享文件 v2/play 偶尔被夸克拒时，fallback 到转存一次再播放。
+    夸克 API 偶发空响应（限流抖动），重试间隔递增。
     """
     import json as _json
     import time as _time
-    now = _time.time()
-    cached_fid = _SAVE_CACHE.get(pwd_id)
-    if cached_fid:
-        try:
-            url = _quark_v2play(cached_fid, headers)
-            if url:
-                return url
-        except Exception:
-            pass
-        _SAVE_CACHE.pop(pwd_id, None)  # 缓存失效（文件被删/转存过期）→ 重新转存
     last_err = None
     for attempt in range(3):
         try:
-            # 解析缓存（5 分钟内同分享直接复用 stoken/detail，跳过 token/detail 请求）
+            now = _time.time()
             sc = _SHARE_CACHE.get(pwd_id)
             if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
                 stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
@@ -282,8 +284,7 @@ def _quark_share_play_url(pwd_id, headers):
                 stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
                 if not stoken:
                     raise ValueError('share token empty')
-                base = 'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
-                detail_url = base % (pwd_id, stoken)
+                detail_url = _quark_detail_url(pwd_id, stoken)
                 r2 = requests.get(detail_url, headers=headers, timeout=20, verify=False)
                 lst = ((r2.json() or {}).get('data') or {}).get('list') or []
                 if not lst:
@@ -294,7 +295,7 @@ def _quark_share_play_url(pwd_id, headers):
                     folder = lst[0]
                     lst2 = []
                     for sub in range(4):
-                        r3 = requests.get(detail_url + '&pdir_fid=%s' % str(folder.get('fid', '')),
+                        r3 = requests.get(_quark_detail_url(pwd_id, stoken, str(folder.get('fid', ''))),
                                           headers=headers, timeout=20, verify=False)
                         lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
                         if lst2:
@@ -307,12 +308,15 @@ def _quark_share_play_url(pwd_id, headers):
                 fid_token = str(f.get('share_fid_token') or '')
                 _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
                                         'fid': fid, 'fid_token': fid_token}
+            # 优先分享文件原始 fid 直链（快、不失效）
             url = _quark_v2play(fid, headers)
             if url:
+                _SAVE_CACHE.pop(pwd_id, None)
                 return url
+            # 分享文件 v2/play 被拒：转存一次兜底（期间 mpv 等待 120s 足够）
             new_fid = _quark_save_share(pwd_id, stoken, fid, fid_token, headers)
             if new_fid:
-                _SAVE_CACHE[pwd_id] = new_fid  # 转存一次，后续秒开（含重启后）
+                _SAVE_CACHE[pwd_id] = new_fid
                 _persist_save_cache()
             return _quark_v2play(new_fid, headers)
         except Exception as e:
