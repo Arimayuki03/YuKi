@@ -185,6 +185,49 @@ class JarBridge:
         return JarBridge._ensure_jvm_compatible(dest, md5)
 
     @staticmethod
+    def proxy_java_args():
+        """读取 Windows 系统代理，生成 JVM 代理系统属性参数列表。
+
+        JVM 内蜘蛛的网络请求（okhttp / HttpURLConnection）默认直连，被墙站点
+        （github 等）全部失败；注入 http(s).proxyHost/Port 后 okhttp 经
+        ProxySelector.getDefault()、HttpURLConnection 经系统属性自动走代理。
+        系统代理未启用或无可用地址时返回 []（保持直连）。
+        """
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as k:
+                enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
+                server, _ = winreg.QueryValueEx(k, 'ProxyServer')
+            if not enable or not server:
+                return []
+            host = server
+            port = ''
+            if '=' in server:
+                # 按协议指定时取 https 段（http 段优先），否则取第一个
+                parts = {}
+                for seg in server.split(';'):
+                    if '=' in seg:
+                        p, a = seg.split('=', 1)
+                        parts[p.strip().lower()] = a.strip()
+                host = parts.get('https') or parts.get('http') or ''
+                if not host:
+                    return []
+            if ':' in host:
+                h, _, p = host.rpartition(':')
+                host, port = h, p
+            if not host or not port:
+                return []
+            return [
+                '-Dhttp.proxyHost=' + host,
+                '-Dhttp.proxyPort=' + port,
+                '-Dhttps.proxyHost=' + host,
+                '-Dhttps.proxyPort=' + port,
+            ]
+        except Exception:
+            return []
+
+    @staticmethod
     def apply_jar_patches(jar_path):
         """应用已知 jar 字节码补丁（如蜘蛛失效 CSS 选择器修复），返回实际应加载的 jar 路径。
 
@@ -192,8 +235,8 @@ class JarBridge:
         patched 文件存在且不早于源文件时直接复用。无补丁命中时返回原路径。
         """
         try:
-            from jar_patch import SELECTOR_PATCHES, patch_jar
-            if not SELECTOR_PATCHES or not jar_path or not os.path.isfile(jar_path):
+            from jar_patch import SELECTOR_PATCHES, METHODREF_PATCHES, patch_jar
+            if not jar_path or not os.path.isfile(jar_path):
                 return jar_path
             try:
                 import zipfile
@@ -201,7 +244,8 @@ class JarBridge:
                     names = set(z.namelist())
             except Exception:
                 return jar_path
-            if not any(p in names for p in SELECTOR_PATCHES):
+            needed = set(SELECTOR_PATCHES) | set(METHODREF_PATCHES)
+            if not any(p in names for p in needed):
                 return jar_path
             patched_path = (jar_path[:-4] + '.patched.jar') if jar_path.lower().endswith('.jar') else (jar_path + '.patched.jar')
             if os.path.isfile(patched_path) and os.path.getmtime(patched_path) >= os.path.getmtime(jar_path):
@@ -346,17 +390,18 @@ class JarBridge:
 
             # 判断是否为 DEX 转换后的 jar（需要 dexdeps；含补丁产物 -jvm.patched.jar）
             needs_deps = '-jvm' in self.jar_path.lower()
+            proxy_args = JarBridge.proxy_java_args()
             if needs_deps and os.path.isdir(DEXDEPS_DIR):
                 deps = [os.path.join(DEXDEPS_DIR, f) for f in os.listdir(DEXDEPS_DIR) if f.endswith('.jar')]
                 if deps:
                     cp = os.pathsep.join([self.runner_jar] + deps)
                     # SpiderRunner: <jar_path> <class_name> — className 作为占位符
-                    args = [java_bin, '-noverify', '-cp', cp, 'SpiderRunner',
+                    args = [java_bin, '-noverify'] + proxy_args + ['-cp', cp, 'SpiderRunner',
                             self.jar_path, self.class_name or 'default']
                 else:
-                    args = [java_bin, '-jar', self.runner_jar, self.jar_path, self.class_name or 'default']
+                    args = [java_bin, '-jar'] + proxy_args + [self.runner_jar, self.jar_path, self.class_name or 'default']
             else:
-                args = [java_bin, '-jar', self.runner_jar, self.jar_path, self.class_name or 'default']
+                args = [java_bin, '-jar'] + proxy_args + [self.runner_jar, self.jar_path, self.class_name or 'default']
             try:
                 proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -164,6 +164,60 @@ public class SpiderRunner {
                 }
             }
         }
+        seedCookieFiles();
+    }
+
+    /**
+     * 把用户网盘 Cookie 写入 FongMi 蜘蛛约定的 cookie 文件。
+     *
+     * 部分 FongMi 系网盘蜘蛛（ea3f/4K 网盘 jar 等）不从静态字段读 cookie，
+     * 而是从 Environment.getExternalStorageDirectory()/TVBox/ 下的
+     * quark_cookie.txt / uc_cookie.txt / bili_cookie.txt / 189_cookie.txt
+     * 读取登录态（Android 上即 /sdcard/TVBox/...）。账号对象（merge.i.d）
+     * 的登录判定要求 cookie / member_type / nickname 三字段都非空，因此
+     * 写入 JSON 格式而非裸 cookie 串；不写文件则蜘蛛永远「未登录」。
+     */
+    static void seedCookieFiles() {
+        try {
+            File root = new File(System.getProperty("java.io.tmpdir"), "vpc-jar-cache");
+            File tvboxDir = new File(root, "TVBox");
+            if (!tvboxDir.exists() && !tvboxDir.mkdirs()) return;
+            String[][] files = {
+                {"quark", "quark_cookie.txt"},
+                {"uc", "uc_cookie.txt"},
+                {"bili", "bili_cookie.txt"},
+                {"189", "189_cookie.txt"},
+                {"diy", "diy_cookie.txt"},
+            };
+            for (String[] pair : files) {
+                String cfg = panCookies.get(pair[0]);
+                if (cfg == null || cfg.trim().isEmpty()) continue;
+                File f = new File(tvboxDir, pair[1]);
+                String json = "{\"cookie\":\"" + jsonEscapeStr(cfg.trim())
+                        + "\",\"member_type\":\"1\",\"nickname\":\"PC\"}";
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
+                    fos.write(json.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Throwable ignore) {
+        }
+    }
+
+    /** JSON 字符串值转义（cookie 值含 ; = % + / 等，无引号也兜底转义）。 */
+    static String jsonEscapeStr(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.toCharArray()) {
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default: sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     /**
