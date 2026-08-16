@@ -515,7 +515,14 @@ class JarBridge:
         if lock is None:
             lock = threading.RLock()
             self._call_lock = lock
+        # 排队观测（C3）：JVM 按桥串行，高并发下等待时长是"是否需要按站点
+        # 拆桥/JVM 池"的数据依据。P95 持续 > 2s 再考虑动架构。
+        wait_started = time.time()
         with lock:  # 每实例串行化：跨站点并发 call 排队执行
+            waited = time.time() - wait_started
+            if waited > 2.0:
+                logger.info('[jar:%s] call queued %.1fs before lock (method=%s)',
+                            self.jar_path and os.path.basename(self.jar_path), waited, method)
             return self._call_inner(method, *args, class_name=class_name, pan_cookies=pan_cookies)
 
     def _call_inner(self, method, *args, class_name='', pan_cookies=None):
