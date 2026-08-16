@@ -27,7 +27,13 @@ import requests
 
 logger = logging.getLogger('vpc.goproxy')
 
-PORT = 7944
+# FongMi 蜘蛛期望的本地代理协议：
+# - 端口：蜘蛛启动时自动扫描 9978-10000（GET /proxy?do=ck 返回 "ok" 即命中）；
+#   另有部分模板硬编码 127.0.0.1:1314（F.a 播放转发）。
+# - do=ck：健康检查；do=pan：网盘（夸克/UC）分享文件取流；
+#   ?url=<encoded>：通用下载转发（分段并发）。
+PORT = 9978
+EXTRA_PORTS = [1314]  # 兼容 jar 硬编码的 1314 播放转发模板
 BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
 # 并发上限：与官方 thread=32 一致；32 连接即可跑满带宽
@@ -72,6 +78,194 @@ def _fetch(url, headers, start, end, timeout=60):
     h['Range'] = 'bytes=%d-%d' % (start, end)
     return requests.get(url, headers=h, stream=True, timeout=timeout,
                         verify=False, allow_redirects=True)
+
+
+def _quark_resolve_share(pwd_id, headers):
+    """夸克分享解析：sharepage/token → sharepage/detail → (share_id, file_id, token)。
+
+    返回首个文件的分享参数（供 file/download 取流）。夸克 API 偶发返回空
+    list（限流抖动），空结果重试最多 3 次；仍失败抛异常。
+    """
+    import json as _json
+    import time as _time
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+                headers={**headers, 'Content-Type': 'application/json'},
+                data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
+                timeout=20, verify=False)
+            stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
+            if not stoken:
+                raise ValueError('share token empty')
+            r2 = requests.get(
+                'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
+                % (pwd_id, stoken),
+                headers=headers, timeout=20, verify=False)
+            d = ((r2.json() or {}).get('data') or {})
+            lst = d.get('list') or []
+            if not lst:
+                raise ValueError('share has no files')
+            first = lst[0]
+            return stoken, str(first.get('fid', '')), str(first.get('share_token') or stoken)
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(0.5 * (attempt + 1))
+    raise last_err or ValueError('share resolve failed')
+
+
+def _quark_v2play(fid, headers):
+    """v2/play 取播放直链；分享文件未转存（file not found）返回 None。"""
+    import json as _json
+    r = requests.post(
+        'https://drive-pc.quark.cn/1/clouddrive/file/v2/play?pr=ucpro&fr=pc&uc_param_str=',
+        headers={**headers, 'Content-Type': 'application/json'},
+        data=_json.dumps({'fid': fid, 'resolutions': 'normal,low,high,super,2k,4k',
+                          'supports': 'fmp4,m3u8'}),
+        timeout=25, verify=False, allow_redirects=False)
+    try:
+        j = r.json()
+    except Exception:
+        return None
+    if 'file not found' in (j.get('message') or ''):
+        return None
+    # 递归找第一个 http(s) 直链（play_info.urls 结构随接口版本变化）
+    found = [None]
+
+    def walk(node):
+        if found[0]:
+            return
+        if isinstance(node, dict):
+            if 'url' in node and isinstance(node.get('url'), str) and node['url'].startswith('http'):
+                found[0] = node['url']
+                return
+            for v in node.values():
+                walk(v)
+                if found[0]:
+                    return
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+                if found[0]:
+                    return
+    walk(j)
+    return found[0]
+
+
+def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
+    """转存分享文件：sharepage/save → 轮询任务 → 新 fid（网盘内）。
+
+    返回转存后的 fid；失败抛异常。
+    """
+    import json as _json
+    import time as _time
+    body = {"pdir_fid": "0", "pwd_id": pwd_id, "scene": "link", "stoken": stoken,
+            "to_pdir_fid": "0", "fid_list": [fid], "fid_token_list": [fid_token]}
+    r = requests.post(
+        'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save?pr=ucpro&fr=pc&uc_param_str=&__t=%d'
+        % int(_time.time() * 1000),
+        headers={**headers, 'Content-Type': 'application/json'},
+        data=_json.dumps(body), timeout=25, verify=False)
+    tid = ((r.json() or {}).get('data') or {}).get('task_id', '')
+    if not tid:
+        raise ValueError('save task id empty')
+    for _ in range(12):
+        _time.sleep(1)
+        try:
+            r2 = requests.get(
+                'https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=pc&uc_param_str=&task_id=%s' % tid,
+                headers=headers, timeout=20, verify=False)
+            sa = ((r2.json() or {}).get('data') or {}).get('save_as') or {}
+            fids = sa.get('save_as_select_top_fids') or sa.get('save_as_top_fids') or []
+            if fids:
+                return str(fids[0])
+        except Exception:
+            pass
+    raise ValueError('save task timeout')
+
+
+def _quark_pick_video(lst):
+    """从分享文件列表挑第一个非目录条目（视频/文件）；全目录返回 None。"""
+    for f in lst or []:
+        if f.get('file_type') != 0:
+            return f
+    return None
+
+
+def _quark_share_play_url(pwd_id, headers):
+    """夸克分享完整播放链路：token → detail →（进目录找视频）→ v2/play 或转存后播放。
+
+    夸克 API 偶发空响应（限流抖动），空结果重试最多 3 次。
+    """
+    import json as _json
+    import time as _time
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+                headers={**headers, 'Content-Type': 'application/json'},
+                data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
+                timeout=20, verify=False)
+            stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
+            if not stoken:
+                raise ValueError('share token empty')
+            base = 'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
+            detail_url = base % (pwd_id, stoken)
+            r2 = requests.get(detail_url, headers=headers, timeout=20, verify=False)
+            lst = ((r2.json() or {}).get('data') or {}).get('list') or []
+            if not lst:
+                raise ValueError('share has no files')
+            f = _quark_pick_video(lst)
+            if f is None:
+                # 根目录只有文件夹：进入第一个目录找视频（夸克对 pdir_fid 限流严重，
+                # 空响应概率高，内层重试 6 次、间隔递增）
+                folder = lst[0]
+                lst2 = []
+                for sub in range(6):
+                    r3 = requests.get(detail_url + '&pdir_fid=%s' % str(folder.get('fid', '')),
+                                      headers=headers, timeout=20, verify=False)
+                    lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
+                    if lst2:
+                        break
+                    _time.sleep(0.6 * (sub + 1))
+                f = _quark_pick_video(lst2)
+            if f is None:
+                raise ValueError('share has no video file')
+            fid = str(f.get('fid', ''))
+            fid_token = str(f.get('share_fid_token') or '')
+            url = _quark_v2play(fid, headers)
+            if url:
+                return url
+            new_fid = _quark_save_share(pwd_id, stoken, fid, fid_token, headers)
+            return _quark_v2play(new_fid, headers)
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(0.5 * (attempt + 1))
+    raise last_err or ValueError('share play failed')
+
+
+def _quark_download_url(share_id, file_id, file_token, headers):
+    """夸克分享文件取流：POST file/download（新版接口）→ 302 Location 真实直链。
+
+    返回直链 URL；无 Location 抛异常。
+    """
+    if not share_id or not file_id:
+        raise ValueError('missing share/file id')
+    import json as _json
+    r = requests.post(
+        'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
+        headers={**headers, 'Content-Type': 'application/json'},
+        data=_json.dumps({'fid': file_id, 'uid': 0, 'scene': 'share',
+                          'shareId': share_id, 'token': file_token}),
+        timeout=25, verify=False, allow_redirects=False)
+    loc = r.headers.get('Location', '')
+    if not loc:
+        raise ValueError('download no location (status %s)' % r.status_code)
+    return loc
 
 
 class _SegStream:
@@ -168,6 +362,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle(self, head_only=False):
         try:
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            do = q.get('do', [''])[0]
+
+            # FongMi 本地代理协议：健康检查（蜘蛛启动时扫描端口用）
+            if do == 'ck':
+                body = b'ok'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+                return
+
+            # FongMi 本地代理协议：网盘分享文件取流（夸克/UC/百度等）
+            if do == 'pan':
+                self._handle_pan(q, head_only)
+                return
+
             raw = q.get('url', [''])[0]
             url = urllib.parse.unquote_plus(raw)
             if not url.startswith(('http://', 'https://')):
@@ -242,6 +454,100 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _handle_pan(self, q, head_only=False):
+        """网盘分享取流：do=pan&site=quark&shareId=&fileId=&fileToken=...
+
+        蜘蛛 playerContent 返回该协议 URL（127.0.0.1:<port>/proxy?do=pan...）。
+        若蜘蛛未解析出 shareId（分享解析失败兜底，fileId 为分享 URL），
+        这里自行解析分享（token → detail → 首个文件）再取流。
+        """
+        site = q.get('site', [''])[0]
+        share_id = urllib.parse.unquote_plus(q.get('shareId', [''])[0])
+        file_id = urllib.parse.unquote_plus(q.get('fileId', [''])[0])
+        file_token = urllib.parse.unquote_plus(q.get('fileToken', [''])[0])
+        cookie = self.headers.get('Cookie', '')
+        if not cookie:
+            try:
+                from pan_cookies import load_pan_cookies
+                cookie = (load_pan_cookies() or {}).get('quark', '') or ''
+            except Exception:
+                cookie = ''
+        headers = {'User-Agent': BROWSER_UA, 'Referer': 'https://pan.quark.cn/'}
+        if cookie:
+            headers['Cookie'] = cookie
+        if site != 'quark':
+            self.send_response(400)
+            self.end_headers()
+            return
+        try:
+            if site != 'quark':
+                self.send_response(400)
+                self.end_headers()
+                return
+            url = None
+            if (not share_id) and 'pan.quark.cn/s/' in file_id:
+                pwd = file_id.split('/s/')[-1].split('?')[0].strip()
+                url = _quark_share_play_url(pwd, headers)
+            elif share_id and file_id:
+                # 蜘蛛已解析出分享参数：分享文件直链（file/download POST）或转存
+                try:
+                    url = _quark_download_url(share_id, file_id, file_token, headers)
+                except Exception:
+                    url = None
+                if not url:
+                    url = _quark_v2play(file_id, headers)
+            if not url:
+                self.send_response(502)
+                self.end_headers()
+                return
+            self._stream_forward(url, headers, head_only)
+        except Exception as e:
+            logger.warning('go-proxy pan request failed: %s', e)
+            try:
+                self.send_response(502)
+                self.end_headers()
+            except Exception:
+                pass
+
+    def _stream_forward(self, url, headers, head_only):
+        """通用取流转发：探测长度 → 分段并发/单线程 → 写回。"""
+        probe = _fetch(url, headers, 0, 0, timeout=30)
+        total = None
+        ctype = 'video/mp4'
+        try:
+            cr = probe.headers.get('Content-Range', '')
+            if '/' in cr:
+                total = int(cr.rsplit('/', 1)[1])
+            ctype = probe.headers.get('Content-Type') or ctype
+        except (TypeError, ValueError):
+            total = None
+        finally:
+            probe.close()
+        if total is None or total <= 0:
+            self._stream_single(url, headers, head_only)
+            return
+        rng = self.headers.get('Range')
+        start, end = _parse_range(rng, total)
+        length = end - start + 1
+        if rng:
+            self.send_response(206)
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, total))
+        else:
+            self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(length))
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if head_only:
+            return
+        if length < 4 * 1024 * 1024:
+            self._stream_single(url, headers, head_only, start=start, end=end)
+            return
+        w = _SegStream(url, headers, start, end, MAX_THREADS)
+        w.start()
+        w.stream(self.wfile)
+
     def _stream_single(self, url, headers, head_only, start=0, end=None):
         """单线程流式转发指定区间。"""
         try:
@@ -258,14 +564,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 def start_go_proxy():
-    """启动 7944 转发服务（幂等：已监听则复用）。返回 server 对象或 None。"""
-    try:
-        srv = http.server.ThreadingHTTPServer(('127.0.0.1', PORT), _Handler)
-    except OSError as e:
-        logger.warning('go-proxy %d 启动失败（端口可能已被占用）: %s', PORT, e)
-        return None
-    t = threading.Thread(target=srv.serve_forever, daemon=True,
-                         name='go-proxy-7944')
-    t.start()
-    logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', PORT)
-    return srv
+    """启动本地代理服务（幂等：已监听则复用）。
+
+    主端口 9978（FongMi 蜘蛛启动时扫描 9978-10000 找 go-proxy），
+    另起 EXTRA_PORTS（1314，jar 硬编码的播放转发模板）监听。
+    返回 server 对象或 None。
+    """
+    servers = []
+    for port in [PORT] + list(EXTRA_PORTS):
+        try:
+            srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), _Handler)
+        except OSError as e:
+            logger.warning('go-proxy %d 启动失败（端口可能已被占用）: %s', port, e)
+            continue
+        t = threading.Thread(target=srv.serve_forever, daemon=True,
+                             name='go-proxy-%d' % port)
+        t.start()
+        servers.append(srv)
+        logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', port)
+    return servers[0] if servers else None
