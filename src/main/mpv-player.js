@@ -187,6 +187,9 @@ class MpvPlayer extends EventEmitter {
         const isNet = /^https?:\/\//i.test(String(episodes[0].url || ''));
         if (isNet) {
             args.push('--cache=yes', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=20');
+            // 网盘 go-proxy 转发（do=pan）首次起播可能要先解析分享/转存（5-20s），
+            // 加大网络超时避免 mpv 等待首字节超时断开（此前 10054 播放失败）。
+            args.push('--network-timeout=120');
             if (this.cacheMode === 'disk' && this.cacheDir) {
                 try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
                 args.push('--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);

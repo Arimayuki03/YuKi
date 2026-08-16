@@ -40,6 +40,11 @@ BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 MAX_THREADS = 32
 SEG_CHUNK = 262144
 QUEUE_DEPTH = 24  # 每段在途 chunk 上限（背压：下载过快时阻塞下载线程）
+# 分享转存结果缓存：pwd_id → 转存后的文件 fid（转存一次，后续播放秒开）
+_SAVE_CACHE = {}
+# 分享解析缓存：pwd_id → {ts, stoken, fid, fid_token}（5 分钟 TTL，避免重复 token/detail）
+_SHARE_CACHE = {}
+_SHARE_CACHE_TTL = 300
 
 
 def _parse_range(rng, total):
@@ -197,54 +202,75 @@ def _quark_pick_video(lst):
 def _quark_share_play_url(pwd_id, headers):
     """夸克分享完整播放链路：token → detail →（进目录找视频）→ v2/play 或转存后播放。
 
-    夸克 API 偶发空响应（限流抖动），空结果重试最多 3 次。
+    转存结果按 pwd_id 缓存（进程内）：首次播放转存（约 5-15s），同分享再次
+    播放直接 v2/play 秒开，避免重复转存占用网盘空间与等待。缓存失效
+    （v2/play 404）时自动重新转存。
+    解析结果（stoken/detail）另缓存 5 分钟，避免重复 token/detail 请求触发限流。
+    夸克 API 偶发空响应（限流抖动），重试间隔递增（1/2/4s）。
     """
     import json as _json
     import time as _time
+    now = _time.time()
+    cached_fid = _SAVE_CACHE.get(pwd_id)
+    if cached_fid:
+        try:
+            url = _quark_v2play(cached_fid, headers)
+            if url:
+                return url
+        except Exception:
+            pass
+        _SAVE_CACHE.pop(pwd_id, None)  # 缓存失效（文件被删/转存过期）→ 重新转存
     last_err = None
     for attempt in range(3):
         try:
-            r = requests.post(
-                'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
-                headers={**headers, 'Content-Type': 'application/json'},
-                data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
-                timeout=20, verify=False)
-            stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
-            if not stoken:
-                raise ValueError('share token empty')
-            base = 'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
-            detail_url = base % (pwd_id, stoken)
-            r2 = requests.get(detail_url, headers=headers, timeout=20, verify=False)
-            lst = ((r2.json() or {}).get('data') or {}).get('list') or []
-            if not lst:
-                raise ValueError('share has no files')
-            f = _quark_pick_video(lst)
-            if f is None:
-                # 根目录只有文件夹：进入第一个目录找视频（夸克对 pdir_fid 限流严重，
-                # 空响应概率高，内层重试 6 次、间隔递增）
-                folder = lst[0]
-                lst2 = []
-                for sub in range(6):
-                    r3 = requests.get(detail_url + '&pdir_fid=%s' % str(folder.get('fid', '')),
-                                      headers=headers, timeout=20, verify=False)
-                    lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
-                    if lst2:
-                        break
-                    _time.sleep(0.6 * (sub + 1))
-                f = _quark_pick_video(lst2)
-            if f is None:
-                raise ValueError('share has no video file')
-            fid = str(f.get('fid', ''))
-            fid_token = str(f.get('share_fid_token') or '')
+            # 解析缓存（5 分钟内同分享直接复用 stoken/detail，跳过 token/detail 请求）
+            sc = _SHARE_CACHE.get(pwd_id)
+            if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
+                stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
+            else:
+                r = requests.post(
+                    'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+                    headers={**headers, 'Content-Type': 'application/json'},
+                    data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
+                    timeout=20, verify=False)
+                stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
+                if not stoken:
+                    raise ValueError('share token empty')
+                base = 'https://drive.quark.cn/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s'
+                detail_url = base % (pwd_id, stoken)
+                r2 = requests.get(detail_url, headers=headers, timeout=20, verify=False)
+                lst = ((r2.json() or {}).get('data') or {}).get('list') or []
+                if not lst:
+                    raise ValueError('share has no files')
+                f = _quark_pick_video(lst)
+                if f is None:
+                    # 根目录只有文件夹：进入第一个目录找视频（夸克对 pdir_fid 限流严重）
+                    folder = lst[0]
+                    lst2 = []
+                    for sub in range(4):
+                        r3 = requests.get(detail_url + '&pdir_fid=%s' % str(folder.get('fid', '')),
+                                          headers=headers, timeout=20, verify=False)
+                        lst2 = ((r3.json() or {}).get('data') or {}).get('list') or []
+                        if lst2:
+                            break
+                        _time.sleep(0.8 * (sub + 1))
+                    f = _quark_pick_video(lst2)
+                if f is None:
+                    raise ValueError('share has no video file')
+                fid = str(f.get('fid', ''))
+                fid_token = str(f.get('share_fid_token') or '')
+                _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
+                                        'fid': fid, 'fid_token': fid_token}
             url = _quark_v2play(fid, headers)
             if url:
                 return url
             new_fid = _quark_save_share(pwd_id, stoken, fid, fid_token, headers)
+            _SAVE_CACHE[pwd_id] = new_fid  # 转存一次，后续秒开
             return _quark_v2play(new_fid, headers)
         except Exception as e:
             last_err = e
             if attempt < 2:
-                _time.sleep(0.5 * (attempt + 1))
+                _time.sleep(1.0 * (attempt + 1))
     raise last_err or ValueError('share play failed')
 
 
