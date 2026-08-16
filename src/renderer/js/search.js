@@ -16,6 +16,7 @@ const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每
 const Search = {
     es: null,
     _inited: false,
+    _searchToken: 0, // M-30a：搜索令牌（run 自增；旧词在途回调据此丢弃）
     _size: 0,        // 本次搜索生效的每页条数（run 时按设置解析一次）
     _curSrc: '',     // 当前筛选源（空 = 「全部」视图，限显前 20 条）
     _grpSeq: 0,      // 分组 id 自增序号（分页容器唯一定位）
@@ -201,6 +202,7 @@ const Search = {
     async run() {
         const word = $('#search-keyword').val().trim();
         if (!word) { warnToast('请输入关键字'); return; }
+        const myToken = ++this._searchToken; // M-30a：搜索令牌——旧词在途回调不作数
         // T39：每页条数取「搜索页」单独设置（默认 20）
         this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
         this.stop();
@@ -264,6 +266,7 @@ const Search = {
         // Kazumi 聚合搜索（与 CatVod SSE 并行；kimi UI 设计，glm5.2 后端端点）
         if (typeof Kazumi !== 'undefined' && Kazumi.hasEnabledRules && Kazumi.hasEnabledRules()) {
             Kazumi.aggregateSearch(word).then((results) => {
+                if (myToken !== this._searchToken) return; // M-30a：旧词在途回调丢弃，防混入新词结果页
                 if (!results || !results.length) return;
                 if (this._curSrc) return; // 已切到单源筛选，不追加 Kazumi 结果
                 results.forEach((r) => {

@@ -168,8 +168,7 @@ const Records = {
             added = true;
             if (list.length > 200) list = list.slice(0, 200);
         }
-        await recSet('favorites', list);
-        FavHub.changed({ site: v.site, vodId: v.vodId, bangumiId: v.bangumiId });
+        await recSet('favorites', list); // recSet 内部已 FavHub.changed 广播（L-29：去掉双重广播）
         // 收藏状态变动自动同步到 Bangumi（开关默认关）：仅新加入收藏时触发单条上传
         if (added && v.site !== 'bangumi') {
             try {
@@ -204,8 +203,7 @@ const Records = {
             // 回填 bangumiId（旧记录可能缺少该字段，时间表「只显示在看」筛选依赖它）
             if (!it.bangumiId && v.bangumiId) it.bangumiId = String(v.bangumiId);
         }
-        await recSet('favorites', list);
-        FavHub.changed({ site: v.site, vodId: v.vodId, bangumiId: v.bangumiId });
+        await recSet('favorites', list); // recSet 内部已 FavHub.changed 广播（L-29）
         // 收藏标签变动自动同步到 Bangumi（开关默认关）：仅标签变化时触发单条上传
         if (v.site !== 'bangumi') {
             try {
@@ -587,8 +585,13 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     concurrency: 4, poolKey: 'rec-' + storeKey,
                     onOne: (site, name, pic) => {
                         if (!String(site).startsWith('kazumi:') || !name || !pic) return;
-                        const target = list.find((v) => v && !v.pic && String(v.site || '') === site && v.name === name);
-                        if (target) { target.pic = pic; recSet(storeKey, list).catch(() => { }); }
+                        // L-30：回写前重读当前记录再合并——list 是 render 开始时的快照，
+                        // 直接整体覆盖会"复活"并发删除的条目/回退并发编辑
+                        (async () => {
+                            const cur = await recGet(storeKey).catch(() => []);
+                            const t = (cur || []).find((v) => v && !v.pic && String(v.site || '') === site && v.name === name);
+                            if (t) { t.pic = pic; recSet(storeKey, cur).catch(() => { }); }
+                        })();
                     },
                 });
             }

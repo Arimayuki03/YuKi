@@ -62,7 +62,9 @@ function escPath(s) {
 }
 
 function escHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // H-6：补 ' 转义——URL 拼进属性内单引号 JS 字符串时（onerror 等），不转义可闭合注入
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /**
@@ -274,7 +276,7 @@ function bangumiCard(item) {
     const score = rating.score ? `⭐${rating.score}` : '';
     const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${rating.rank}">#${rating.rank}</span>` : '';
     const air = item.air_date || '';
-    return `<div class="vod-card bangumi-card" data-id="${item.id}" data-name="${escHtml(name)}" tabindex="0">
+    return `<div class="vod-card bangumi-card" data-id="${escHtml(String(item.id))}" data-name="${escHtml(name)}" tabindex="0">
         <div class="vod-cover">${vodCoverImg(cover)}${rank}</div>
         <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
         <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · '))}</div>
@@ -656,9 +658,10 @@ function confirmDialog(msg, opts) {
 
 let warnToastTimer = null;
 
-function warnToast(msg) {
-    // 应用内错误提示开关（2.8）：关闭时错误类提示静默（成功/信息类 toast 不受影响）
-    if (!_errorToastOn && /(失败|无法|不能|未找到|出错|错误|无效)/.test(String(msg))) return;
+function warnToast(msg, opts = {}) {
+    // 应用内错误提示开关（2.8）：关闭时错误类提示静默（成功/信息类 toast 不受影响）。
+    // L-31：汇总类提示（opts.summary，如"上传 3 · 失败 1"）不属错误语义，不受过滤。
+    if (!_errorToastOn && !opts.summary && /(失败|无法|不能|未找到|出错|错误|无效)/.test(String(msg))) return;
     $('#warnToastContent').text(msg);
     $('#warnToast').removeClass('out').show();
     if (warnToastTimer) clearTimeout(warnToastTimer);

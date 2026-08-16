@@ -69,7 +69,7 @@ test('解析相邻的 tag 与 sort 语法', () => {
 test('解析季度并映射为日期区间', () => {
     const state = P.toFilterState('season:2026Q1');
     assert.equal(state.season, '2026Q1');
-    deepEq(P.effectiveDateRange(state), { start: '2025-12-01', end: '2026-03-01' });
+    deepEq(P.effectiveDateRange(state), { start: '2026-01-01', end: '2026-04-01' });
 });
 
 test('解析自定义日期区间', () => {
@@ -106,11 +106,12 @@ test('筛选状态序列化回查询语法', () => {
 });
 
 test('季度映射覆盖四个季度的月份边界', () => {
-    // Q1 起始月 1 → start 落在上一年 12 月（对齐 Kazumi startMonth-1）
-    deepEq(P.seasonToDateRange('2023Q1'), { start: '2022-12-01', end: '2023-03-01' });
-    deepEq(P.seasonToDateRange('2023Q2'), { start: '2023-03-01', end: '2023-06-01' });
-    deepEq(P.seasonToDateRange('2023Q3'), { start: '2023-06-01', end: '2023-09-01' });
-    deepEq(P.seasonToDateRange('2023Q4'), { start: '2023-09-01', end: '2023-12-01' });
+    // L-32：标准季度半开区间 [首月1日, 首月+3月1日)——与 timeline.js 对齐
+    // （原实现对齐 Kazumi Dart 的偏移行为：起点提前一月、结束多算一月）
+    deepEq(P.seasonToDateRange('2023Q1'), { start: '2023-01-01', end: '2023-04-01' });
+    deepEq(P.seasonToDateRange('2023Q2'), { start: '2023-04-01', end: '2023-07-01' });
+    deepEq(P.seasonToDateRange('2023Q3'), { start: '2023-07-01', end: '2023-10-01' });
+    deepEq(P.seasonToDateRange('2023Q4'), { start: '2023-10-01', end: '2024-01-01' });
 });
 
 test('toFilterState/fromFilterState 往返稳定', () => {

@@ -398,9 +398,11 @@ const Home = {
      * 冷启动（无合并窗口且在首页第 1 页）时优先重建本地持久化 feed 缓存，网络返回前即可上屏。
      */
     async _fetchHomeFeed(pg, size) {
+        const site = this.site;          // M-30b：快照本次加载的源与令牌
+        const token = this._loadToken;
         // 冷启动加速：仅当首次进入、无内存窗口时，尝试用本地持久化缓存用旧 feed 先渲染
-        if (pg === 1 && !this._catWin.has(this.site + '|__all__') && !this._homeCacheBooted) {
-            const boot = this._cacheHomeGet(this.site);
+        if (pg === 1 && !this._catWin.has(site + '|__all__') && !this._homeCacheBooted) {
+            const boot = this._cacheHomeGet(site);
             if (boot && boot.items.length) {
                 this._homeList = boot.items.slice(0, size);
                 if (boot.pagecount > 0) this.pagecount = boot.pagecount;
@@ -409,11 +411,12 @@ const Home = {
             }
             this._homeCacheBooted = true; // 只引导一次（网络返回后以最新覆盖）
         }
-        const win = this._catWinGet(this.site, '__all__');
+        const win = this._catWinGet(site, '__all__');
         const need = pg * size; // 累计需覆盖到该页末尾
         let guard = 0;
         while (win.items.length < need && guard++ < 200) {
-            const data = await doAction('homeVideoContent', { site: this.site, pg: String(win.sourcePg + 1) });
+            const data = await doAction('homeVideoContent', { site, pg: String(win.sourcePg + 1) });
+            if (token !== this._loadToken || site !== this.site) return; // M-30b：切源即中止
             const list = (data && data.list) || [];
             if (!list.length) break;
             if (data && data.total > 0) win.total = data.total;
@@ -437,9 +440,9 @@ const Home = {
         } else {
             this.pagecount = Math.max(this.pagecount || 1, pg + 1); // 未知总量：暂允试下一页
         }
-        this._cachePut(this.site, '__all__', pg, this._homeList, this.pagecount);
+        this._cachePut(site, '__all__', pg, this._homeList, this.pagecount);
         // 持久化首页 feed 缓存（仅第 1 页、有内容时写入，下次冷启动直接上屏）
-        this._cacheHomePut(this.site, this._homeList, this.pagecount);
+        this._cacheHomePut(site, this._homeList, this.pagecount);
         return this._homeList;
     },
 
@@ -584,14 +587,17 @@ const Home = {
      * 前进/后退翻页复用已拉数据不再重复请求。
      */
     async _fetchCat(tid, pg, size) {
-        const win = this._catWinGet(this.site, tid);
+        const site = this.site;          // M-30b：快照本次加载的源与令牌
+        const token = this._loadToken;
+        const win = this._catWinGet(site, tid);
         const need = pg * size; // 累计需覆盖到的条数
         let guard = 0;
         this._catError = '';
         while (win.items.length < need && guard++ < 200) {
             const data = await doAction('categoryContent', {
-                site: this.site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
+                site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
             });
+            if (token !== this._loadToken || site !== this.site) return; // M-30b：切源即中止，旧窗口作废
             const list = (data && data.list) || [];
             if (data && data.error) this._catError = data.error; // jar 蜘蛛调用失败原因（后端附加）
             if (!list.length) break; // 源已拉空
@@ -618,7 +624,7 @@ const Home = {
             pagecount = Math.max(this.pagecount || 1, pg + 1); // 未知总量：暂允试下一页
         }
         this.pagecount = pagecount;
-        this._cachePut(this.site, tid, pg, this._catItems, pagecount);
+        this._cachePut(site, tid, pg, this._catItems, pagecount);
     },
 
     /** 缓存命中后的后台静默重拉：令牌有效且仍在该页时才可能更新画面（重拉前清窗口取最新）。 */

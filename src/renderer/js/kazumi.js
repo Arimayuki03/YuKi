@@ -253,8 +253,15 @@ const Kazumi = {
     async openEditorDialog(ruleName) {
         let rule = null;
         if (ruleName) {
-            // 编辑现有规则
-            const rsp = await doAction('kazumiList', {}, '/kazumi/action');
+            // 编辑现有规则。L-27：后端异常给出提示并中止——原先裸 await 抛错
+            // 导致编辑弹窗静默打不开
+            let rsp = null;
+            try {
+                rsp = await doAction('kazumiList', {}, '/kazumi/action');
+            } catch (e) {
+                warnToast('规则列表读取失败，请检查后端服务');
+                return;
+            }
             const list = (rsp && rsp.list) || [];
             const item = list.find((r) => r.name === ruleName);
             if (item) {
@@ -625,7 +632,12 @@ const Kazumi = {
     async saveBangumiToken() {
         const token = $('#bangumi_token').val().trim();
         if (!token) { warnToast('请输入 Bangumi Access Token'); return; }
-        await window.vpc.settingsSet('bangumiToken', token);
+        try {
+            await window.vpc.settingsSet('bangumiToken', token);
+        } catch (e) {
+            warnToast('Token 保存失败');
+            return;
+        }
         warnToast('Token 已保存');
         this.testBangumi();
     },
@@ -824,7 +836,7 @@ const Kazumi = {
             if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
             else hideLoading();
             const upMsg = up ? `上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}` : '';
-            warnToast(`已同步 Bangumi 收藏（${n} 条）${upMsg ? '；' + upMsg : ''}`);
+            warnToast(`已同步 Bangumi 收藏（${n} 条）${upMsg ? '；' + upMsg : ''}`, { summary: true });
         } catch (e) {
             if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
             else hideLoading();
@@ -866,7 +878,7 @@ const Kazumi = {
                 const valid = results.filter((r) => r.validity === 'valid').length;
                 const invalid = results.filter((r) => r.validity === 'invalid').length;
                 const captcha = results.filter((r) => r.validity === 'captcha').length;
-                warnToast(`检测完成：有效 ${valid} · 失效 ${invalid}${captcha ? ` · 需验证 ${captcha}` : ''}`);
+                warnToast(`检测完成：有效 ${valid} · 失效 ${invalid}${captcha ? ` · 需验证 ${captcha}` : ''}`, { summary: true });
                 this.refreshRuleList();
             }, '检测有效性');
         } catch (e) {
@@ -1524,8 +1536,8 @@ const Kazumi = {
             const summary = (info.summary || '').slice(0, 200);
             const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
             const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
-            const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${info.id}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
-                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${escHtml(bangumiMirrorUrl(cover))}';}else{this.style.display='none'}">` : ''}
+            const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${escHtml(String(info.id))}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
+                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=this.dataset.fbSrc;}else{this.style.display='none'}">` : ''}
                 <div class="kazumi-bangumi-info">
                     <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
                     <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
@@ -1621,7 +1633,7 @@ const Kazumi = {
         let html = `<div class="bangumi-info-card" style="margin-bottom:16px;">
             <div class="bangumi-info-title">${escHtml(name)}</div>
             <div class="bangumi-info-row">
-                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${escHtml(bangumiMirrorUrl(cover))}';}else{this.style.display='none'}"></div>` : ''}
+                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=this.dataset.fbSrc;}else{this.style.display='none'}"></div>` : ''}
                 <div class="bangumi-info-meta">
                     <div class="bi-label">放送开始</div>
                     <div class="bi-value">${escHtml(airDate || '—')}</div>
@@ -1667,14 +1679,17 @@ const Kazumi = {
         this._curBangumiName = name;
         // 回填当前收藏状态（异步，不阻塞）
         this._applyBangumiColState(info.id);
+        // L-26：box 为常驻容器，先清上一轮弹窗的 .kbd 委托再绑定，
+        // 否则反复打开详情弹窗会无限累积 click 监听器（内存泄漏）
+        box.off('.kbd');
         // 开始观看：打开 Kazumi 源弹窗
-        box.on('click', '.kazumi-start-watch', (e) => {
+        box.on('click.kbd', '.kazumi-start-watch', (e) => {
             if (token !== this._dlgToken) return;
             const title = this._curBangumiName || '';
             if (title && typeof this.openSourceDialog === 'function') this.openSourceDialog(title, 'kazumi', '');
         });
         // 收藏状态按钮：点击即同步；「未收藏」删除收藏
-        box.on('click', '.kazumi-col-btn', async (e) => {
+        box.on('click.kbd', '.kazumi-col-btn', async (e) => {
             if (token !== this._dlgToken) return;
             const btn = $(e.currentTarget);
             const id = String(btn.closest('.kazumi-col-btns').data('id') || '');
@@ -1688,7 +1703,7 @@ const Kazumi = {
             }
         });
         // 标签点击：按 Bangumi 标签精确筛选番剧（非关键词搜索，任务四 4.2）
-        box.on('click', '.kazumi-tag', (e) => {
+        box.on('click.kbd', '.kazumi-tag', (e) => {
             if (token !== this._dlgToken) return;
             const tag = String($(e.currentTarget).data('tag') || '');
             if (!tag) return;
@@ -1728,7 +1743,7 @@ const Kazumi = {
                 box.html(list.length
                     ? '<div class="tip-line pad0" style="margin-bottom:8px;">点击集数 → 从 Kazumi 规则源选源播放</div>'
                       + list.map((ep) => `<div class="kazumi-detail-ep" tabindex="0">
-                        <span class="kazumi-detail-ep-no">${ep.sort || ep.ep || ''}</span>
+                        <span class="kazumi-detail-ep-no">${escHtml(String(ep.sort || ep.ep || ''))}</span>
                         <span class="kazumi-detail-ep-name">${escHtml(ep.name_cn || ep.name || '')}</span>
                         <span class="kazumi-detail-ep-type">${escHtml(ep.type === 1 ? 'SP' : ep.type === 2 ? 'OP' : ep.type === 3 ? 'ED' : '')}</span>
                     </div>`).join('')

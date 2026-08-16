@@ -684,8 +684,10 @@ const Detail = {
         if (!box.length || !this._bgmId || typeof Kazumi === 'undefined') return;
         $('#bgm-ep-order').text(this._bgmEpDesc ? '⇅ 切正序' : '⇅ 切倒序');
         box.html('<div class="tip-line">载入中…</div>');
+        const gen = this._bgmExtraGen; // M-30c：分集加载世代守卫（防旧番分集写入新番）
         try {
             const data = await Kazumi.bangumiEpisodes(this._bgmId);
+            if (gen !== this._bgmExtraGen) return; // 已切到别的番剧，旧分集丢弃
             let list = ((data && data.data) || []).slice();
             // 记录集序号（供下载按 sort 定位），倒序仅影响展示
             this._bgmEps = list;
@@ -1280,8 +1282,10 @@ const Detail = {
     async _loadMoreComments() {
         if (this._commentAllLoaded || this._commentLoading || !this._bgmId || typeof Kazumi === 'undefined') return;
         this._commentLoading = true;
+        const gen = this._bgmExtraGen; // M-30c：评论续拉世代守卫
         try {
             const more = await Kazumi.bangumiComments(this._bgmId, 100, this._commentOffset || 0).catch(() => []);
+            if (gen !== this._bgmExtraGen) return; // 已切到其他番剧，旧评论丢弃
             if (more && more.length) {
                 this._comments = this._comments.concat(more);
                 this._commentOffset = (this._commentOffset || 0) + more.length;

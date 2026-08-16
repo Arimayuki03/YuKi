@@ -163,10 +163,11 @@ const BangumiSearchParser = {
         const year = parseInt(m[1], 10);
         const quarter = parseInt(m[2], 10);
         const startMonth = (quarter - 1) * 3 + 1;
-        // Kazumi: start = DateTime(year, startMonth-1, 1)（月份 1-based，startMonth-1 表示上月）
-        // JS Date 月份 0-based：DateTime(y, startMonth-1, 1) → new Date(y, startMonth-2, 1)
-        const start = new Date(year, startMonth - 2, 1);
-        const end = new Date(year, startMonth + 1, 1);
+        // L-32：标准季度半开区间 [首月1日, 首月+3月1日)，与 timeline.js 的
+        // SEASON_MONTH_START 对齐——原先刻意复刻 Kazumi Dart 的偏移实现
+        // （起点提前一月、结束多算一月），同一年度季度在时间表与搜索里过滤不一致
+        const start = new Date(year, startMonth - 1, 1);
+        const end = new Date(year, startMonth + 2, 1);
         return { start: bgmFormatDate(start), end: bgmFormatDate(end) };
     },
 

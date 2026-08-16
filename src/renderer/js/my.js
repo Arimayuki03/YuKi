@@ -62,7 +62,7 @@ const My = {
             await this._getBangumiItems(true);
             if (this._favorites) await this._favorites.render();
             My._closeSyncProgress();
-            if (up) warnToast(`已同步 Bangumi：上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}`);
+            if (up) warnToast(`已同步 Bangumi：上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}`, { summary: true });
             else warnToast('已同步 Bangumi 收藏');
         });
         // 清空播放统计：确认后重置 watchStats 并刷新统计页

@@ -544,12 +544,15 @@ function _localFp(st) {
 }
 
 /** 拉取并渲染目录列表（200ms 未返回先显示 loading；needRoot 转引导态；分页重置回第一页；silent=手动刷新，内容无变化不重渲）。 */
+let _listSeq = 0; // M-30d：目录导航序号——快速连续导航时旧目录迟到响应丢弃
 function listFile(relPath, silent) {
+    const seq = ++_listSeq;
     const prevFp = silent && _localPage && _localPageNo === 1 ? _localFp(_localPage) : '';
     const loadingTimer = setTimeout(() => showLoading(), 200);
     window.vpc.fileList(relPath || '').then((info) => {
         clearTimeout(loadingTimer);
         hideLoading();
+        if (seq !== _listSeq) return; // M-30d：旧目录迟到响应丢弃，防覆盖新目录/导航栈错位
         if (!info) { warnToast('载入失败'); return; }
         if (info.needRoot) { currentRoot = ''; currentParent = '.'; renderNeedRoot(); return; }
         const parent = info.parent;
