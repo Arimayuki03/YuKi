@@ -12,7 +12,6 @@ SpiderRunner 在 params.class_name 中接收目标类名，避免每个站点派
 """
 import json
 import os
-import re
 import shutil
 import subprocess
 import threading

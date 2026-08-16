@@ -17,13 +17,13 @@ os.environ['VPC_DATA_DIR'] = tempfile.mkdtemp()
 import hoststate
 hoststate.configure(data_dir=os.environ['VPC_DATA_DIR'])
 
-from kazumi.plugin import Plugin, RuleMode
+from kazumi.plugin import Plugin
 from kazumi.plugin_manager import PluginManager
 from kazumi.rule_engine import RuleEngine
 from kazumi.cookie_jar import CookieJar
 from kazumi.xpath_strategy import XPathRuleStrategy
 from kazumi.api_strategy import ApiRuleStrategy, RestrictedJsonPath
-from kazumi.utils import normalize_episode_url, get_random_ua
+from kazumi.utils import normalize_episode_url
 
 
 class TestPlugin(unittest.TestCase):
@@ -518,7 +518,6 @@ class TestBangumiSync(unittest.TestCase):
         self.assertNotIn('bangumi.lol', BANGUMI_API_NEXT)
 
     def test_me_with_token(self):
-        import requests
         from unittest import mock
         me = {'id': 1, 'username': 'alice', 'nickname': '爱丽丝'}
 
@@ -584,7 +583,6 @@ class TestBangumiSync(unittest.TestCase):
 
     def test_search_post_v0(self):
         # R6：搜索改为 POST api.bgm.tv/v0/search/subjects（对齐 Kazumi buildBangumiSearchParams）
-        import requests
         from unittest import mock
         items = [{'id': 311310, 'name_cn': '番剧A'}]
 

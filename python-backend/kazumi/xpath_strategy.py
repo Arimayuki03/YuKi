@@ -11,7 +11,7 @@ from lxml import html as lxml_html
 from lxml import etree
 
 from .models import SearchItem, Road, PreparedRuleRequest, RuleSearchParseResult, RuleChapterParseResult
-from .utils import normalize_episode_url, XPathRuleFormatException, CaptchaRequiredException, NoResultException
+from .utils import normalize_episode_url, XPathRuleFormatException, CaptchaRequiredException
 
 logger = logging.getLogger('vpc.kazumi.xpath')
 

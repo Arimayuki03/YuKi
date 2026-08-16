@@ -4,10 +4,8 @@
 依赖 JDK（JAVA_HOME 或 PATH）；无 JDK 时跳过（不视为失败）。
 用法：<venv>/python tests/test_jar_e2e.py
 """
-import json
 import os
 import sys
-import time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)

@@ -3,13 +3,11 @@
 
 对齐 Kazumi lib/services/plugin/rule_engine.dart。
 """
-import json
 import logging
-import threading
 
 import requests
 
-from .models import RuleExecutionConfig, RuleSearchTrace, RuleChapterTrace, PluginSearchResponse
+from .models import RuleSearchTrace, RuleChapterTrace, PluginSearchResponse
 from .xpath_strategy import XPathRuleStrategy
 from .api_strategy import ApiRuleStrategy
 from .utils import get_random_ua, SearchErrorException, ChapterErrorException, NoResultException, CaptchaRequiredException

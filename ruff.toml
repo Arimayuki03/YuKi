@@ -1,0 +1,19 @@
+# Ruff 配置 —— 首轮只开零误伤高危规则（语法错误/未定义名/未使用导入）。
+# 存量清零后逐步放开 B（bugbear）/PL（pylint）等规则集。
+
+line-length = 120
+target-version = "py312"
+
+extend-exclude = [
+    ".venv",
+    "jar-runner",   # Java 目录误匹配排除无碍，显式列出以便未来放 py 辅助脚本
+]
+
+[lint]
+select = [
+    "E9",   # 语法/缩进错误（含 TAB 与 EOL 约定）
+    "F63",  # 比较语法误用（if x == print() 之类）
+    "F7",   # break/continue/return 用在函数外等
+    "F82",  # 未定义变量名 —— CODE_REVIEW H-7 同类问题的 Python 版拦截器
+    "F401", # 未使用导入
+]

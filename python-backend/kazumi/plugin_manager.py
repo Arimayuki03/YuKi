@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import hoststate
-import requests
 
 from .plugin import Plugin
 from .utils import NoResultException, CaptchaRequiredException

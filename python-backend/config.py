@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import app as spider_app
 import hoststate
-import java_probe
 from runner import Runner
 from site_manager import Site
 from js_spider import make_js_spider_class

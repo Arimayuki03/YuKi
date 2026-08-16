@@ -6,7 +6,6 @@
 import json
 import os
 import sys
-import time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
@@ -63,7 +62,7 @@ def test_norm_jar_src():
 
 def test_jar_spider_direct():
     """JarSpider 在桥不可用（无 java）时降级返回空"""
-    from jar_spider import JarSpider, make_jar_spider_class
+    from jar_spider import make_jar_spider_class
 
     class FakeBridge:
         def call(self, method, *args, class_name='', pan_cookies=None):

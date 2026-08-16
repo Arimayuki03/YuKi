@@ -10,9 +10,6 @@
    Spider（runner 内置 stub），invokespecial/invokevirtual 均按
    JVM 虚方法语义正常解析。
 """
-import os
-import re
-import shutil
 import zipfile
 
 # 已知失效选择器补丁表：jar 内 class 路径 → [(旧选择器, 新选择器), ...]

@@ -5,8 +5,8 @@
 """
 import json
 
-from .models import RuleExecutionConfig, SearchItem, Road
-from .utils import normalize_episode_url, get_random_ua, is_http_url
+from .models import RuleExecutionConfig
+from .utils import normalize_episode_url, get_random_ua
 
 
 class RuleMode:
