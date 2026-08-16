@@ -140,10 +140,16 @@ def _looks_like_live_source(text):
 def parse_config_json(text):
     """解析 CatVod 配置 JSON；非 JSON 时抛出可读的 ValueError（而非裸 JSONDecodeError）。
 
-    先剥 TVBox 配置常见的行首 // 注释与首尾空白（老刘备/小盒子/欧歌等接口）。
+    先尝试严格解析；成功说明是干净 JSON，直接返回——注释剥除只作为兜底。
+    （不能无条件先剥：合法 JSON 字符串值内部也可能含 "//"（如内嵌 JS spider
+    源码的注释），行内剥除会把它们连同后续代码一起吃掉，损坏源码。）
     最常见的误用是把直播源地址（.txt/.m3u）粘进「配置」框——这里显式识别并给出
     可操作的引导，避免用户只看到 'Expecting value: line 1 column 1'。
     """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
     text = _strip_json_comment_lines(text)
     try:
         return json.loads(text)
