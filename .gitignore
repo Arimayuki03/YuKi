@@ -32,3 +32,7 @@ analysis-tmp/
 python-backend/jar-runner/runner.jar
 python-backend/jar-runner/test-spider.jar
 python-backend/jar-runner/test-build/
+
+# 兼容性套件过程产物（基线 compat_baseline.json 入库，过程文件不入库）
+python-backend/tests/compat_progress.jsonl
+python-backend/tests/compat_report.txt

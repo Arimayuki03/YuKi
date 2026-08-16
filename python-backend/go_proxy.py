@@ -881,3 +881,50 @@ def start_go_proxy():
         logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', port)
     return servers[0] if servers else None
 
+
+# ---- 端口泛化（TVBOX_COMPAT_PLAN 任务二）-------------------------------
+# jar 家族把 127.0.0.1:<port> 硬编码进字节码（7944/9978/1314 只是已知三家），
+# 穷举永远追不上新 jar。改为按需补监听：播放 URL 流经点（jar_spider）与
+# jar 加载期字节扫描（jar_bridge）都会调 ensure_listener，同一 _Handler 协议。
+_extra_servers = {}
+_extra_servers_lock = threading.Lock()
+EXTRA_LISTENER_CAP = 16   # 泛化监听上限（防异常 jar 打满端口）
+
+
+def ensure_listener(port):
+    """幂等按需监听（只绑 127.0.0.1）。
+
+    返回 True=本端口可用（已在监听/新起成功/被外部进程占用）；
+    False=拒绝（保护端口/超范围/达上限）。bind 失败视为"已有服务"——
+    被占用的可能正是真代理，播放 URL 能连通即达成目的。
+    """
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    protected = {PORT} | set(EXTRA_PORTS)
+    try:
+        import hoststate
+        backend_port = int(hoststate.get_port() or 0)
+        if backend_port > 0:
+            protected.add(backend_port)   # 绝不把代理 Handler 挂到后端 API 端口
+    except Exception:
+        pass
+    if port in protected or not (1024 <= port <= 65535):
+        return False
+    with _extra_servers_lock:
+        if port in _extra_servers:
+            return True
+        if len(_extra_servers) >= EXTRA_LISTENER_CAP:
+            logger.warning('go-proxy 泛化监听达上限(%d)，忽略端口 %d', EXTRA_LISTENER_CAP, port)
+            return False
+        try:
+            srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), _Handler)
+        except OSError:
+            return True   # 已被其他进程监听，视为覆盖
+        threading.Thread(target=srv.serve_forever, daemon=True,
+                         name='go-proxy-auto-%d' % port).start()
+        _extra_servers[port] = srv
+        logger.info('go-proxy 泛化监听已启动: 127.0.0.1:%d', port)
+        return True
+

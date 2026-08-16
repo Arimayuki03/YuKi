@@ -10,6 +10,7 @@ TVBox jar 契约（CatVodTV/TVBoxOSC Spider）：
 """
 import json
 import logging
+import re
 import threading
 from urllib.parse import quote
 
@@ -25,6 +26,27 @@ def _load_pan_cookies():
         return load_pan_cookies() or None
     except Exception:
         return None
+
+
+def _ensure_local_proxy_ports(result):
+    """播放 URL 指向本机端口时按需补监听（TVBOX_COMPAT_PLAN 任务二·机制A）。
+
+    jar 家族把 127.0.0.1:<port> 硬编码进字节码，宿主穷举端口追不上新 jar；
+    播放地址全部流经 playerContent 返回值，在此拦截并动态起同协议监听
+    （go_proxy._Handler），配合 jar 加载期字节扫描（jar_bridge·机制B）双保险。
+    """
+    if not isinstance(result, dict):
+        return result
+    url = result.get('url')
+    if isinstance(url, str):
+        m = re.match(r'^https?://127\.0\.0\.1:(\d+)(/|$)', url)
+        if m:
+            try:
+                from go_proxy import ensure_listener
+                ensure_listener(int(m.group(1)))
+            except Exception:
+                pass
+    return result
 
 
 class JarSpider(Spider):
@@ -102,6 +124,10 @@ class JarSpider(Spider):
         return '', ''
 
     def playerContent(self, flag, id, vipFlags):
+        # 端口泛化拦截（任务二机制A）：所有 jar 播放地址的单一流经点
+        return _ensure_local_proxy_ports(self.playerContentRaw(flag, id, vipFlags))
+
+    def playerContentRaw(self, flag, id, vipFlags):
         # 我的夸克网盘文件（shareId 空 + folder fid）：
         # ea3f jar 的取流链路（sharepage/save 转存）对网盘内文件必失败
         # （pwd_id 为空 → 400），且 w.l() 对无 data 响应会 NPE。

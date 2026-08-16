@@ -12,6 +12,7 @@ SpiderRunner 在 params.class_name 中接收目标类名，避免每个站点派
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -79,6 +80,40 @@ def get_jar_runtime_dir():
         _jar_runtime_dir_cache = d
         return d
 
+def _scan_jar_ports(jar_path):
+    """扫 jar 内容里的 127.0.0.1:<port> 字面量（任务二·机制B）。
+
+    jar 是 zip：DEX/class 均在条目内（可能压缩），逐条解压扫描；
+    非 zip（裸 dex）直接扫字节。返回端口集合（1024-65535）。
+    """
+    import zipfile
+    pat = re.compile(rb'127\.0\.0\.1:(\d{4,5})')
+    ports = set()
+
+    def _scan(blob):
+        for m in pat.finditer(blob):
+            p = int(m.group(1))
+            if 1024 <= p <= 65535:
+                ports.add(p)
+
+    try:
+        with zipfile.ZipFile(jar_path) as z:
+            for info in z.infolist():
+                if info.is_dir() or info.file_size > (8 << 20):
+                    continue
+                try:
+                    _scan(z.read(info.filename))
+                except Exception:
+                    continue
+    except Exception:
+        try:
+            with open(jar_path, 'rb') as f:
+                _scan(f.read(8 << 20))
+        except OSError:
+            pass
+    return ports
+
+
 # 全局 jar 桥缓存：key = jar_path → JarBridge 实例
 _jar_bridges = {}
 _jar_bridges_lock = threading.Lock()
@@ -108,6 +143,14 @@ class JarBridge:
             b = _jar_bridges.get(jar_path)
             if b is not None:
                 return b
+            # 任务二·机制B：jar 加载期预启动其硬编码的本地代理端口，
+            # 避免首次播放才补监听（首连失败）
+            try:
+                import go_proxy
+                for p in _scan_jar_ports(jar_path):
+                    go_proxy.ensure_listener(p)
+            except Exception:
+                pass
             b = JarBridge(jar_path, runner_jar=runner_jar)
             _jar_bridges[jar_path] = b
             return b
