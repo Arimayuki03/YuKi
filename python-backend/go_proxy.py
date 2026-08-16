@@ -562,10 +562,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if head_only:
                 return
 
-            if length < 4 * 1024 * 1024 or thread_n <= 1:
+            # 单连接透传已能跑 ~4.5MB/s；大 Range 才分段，并发封顶 8（夸克 CDN 峰值
+            # 为 8 连接并发，更高只增开销）。thread 参数尊重但有上限 8。
+            eff = min(max(thread_n, 1), 8)
+            if length < 32 * 1024 * 1024 or eff <= 1:
                 self._stream_single(url, headers, head_only, start=start, end=end)
                 return
-            w = _SegStream(url, headers, start, end, thread_n)
+            w = _SegStream(url, headers, start, end, eff)
             w.start()
             w.stream(self.wfile)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -634,7 +637,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 pass
 
     def _stream_forward(self, url, headers, head_only):
-        """通用取流转发：探测长度 → 分段并发/单线程 → 写回。"""
+        """通用取流转发：探测长度 → 分段并发/单线程 → 写回。
+
+        并发上限 8：实测夸克 CDN 8 并发即达带宽峰值（12MB/s），更高并发
+        只增加连接开销反而略降。小 Range（<32MB）用单连接透传，避免分
+        段过多退化。
+        """
         probe = _fetch(url, headers, 0, 0, timeout=30)
         total = None
         ctype = 'video/mp4'
@@ -665,10 +673,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if head_only:
             return
-        if length < 4 * 1024 * 1024:
+        # 单连接透传已能跑 ~4.5MB/s，小 Range 不值得分段（分段过细并发退化）；
+        # 大 Range 用 8 并发（夸克 CDN 峰值约为 8 连接并发）。
+        if length < 32 * 1024 * 1024:
             self._stream_single(url, headers, head_only, start=start, end=end)
             return
-        w = _SegStream(url, headers, start, end, MAX_THREADS)
+        w = _SegStream(url, headers, start, end, 8)
         w.start()
         w.stream(self.wfile)
 
