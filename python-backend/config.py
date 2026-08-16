@@ -603,7 +603,7 @@ class ConfigManager:
 
     def _load_js_spider(self, key, name, api):
         from quickjs_host import JsEngine   # js-engine 目录（server.py 已加入 sys.path）
-        engine = JsEngine()
+        engine = JsEngine(site_key=key)   # site_key：local KV 按站点隔离（M-24/C2）
         engine.proxy_port = hoststate.get_port()   # js2Proxy 生成后端代理 URL 用
         try:
             if api.startswith('http'):

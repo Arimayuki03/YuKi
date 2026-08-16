@@ -17,6 +17,7 @@ STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
+    ('cache', [PY, os.path.join(HERE, 'test_cache_store.py')]),
     ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
     ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
 ]

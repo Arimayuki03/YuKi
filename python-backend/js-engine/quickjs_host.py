@@ -59,26 +59,71 @@ def _local_kv_save(data):
         logger.warning('local kv save failed: %s', e)
 
 
-def _native_local_get(key):
-    with _local_kv_lock:
-        return _local_kv_load().get(key) or ''
+# ---- C2/M-24：JS local KV 按站点隔离 + 配额 ----
+# 存储键 = "<site_key>\u0002<原key>"；读取时 scoped 未命中回退裸 key（迁移前
+# 旧数据兼容），写入时顺带清理同名裸键。全站点共享一个 JSON 文件，但互不可见。
+KV_SCOPE_SEP = '\u0002'
+KV_MAX_VALUE_BYTES = 64 * 1024         # 单值上限
+KV_MAX_TOTAL_BYTES = 2 * 1024 * 1024   # 全文件上限（超限拒写并告警）
 
 
-def _native_local_set(key, value):
-    with _local_kv_lock:
-        data = _local_kv_load()
-        data[key] = value
-        _local_kv_save(data)
-    return None
+def _kv_scoped(site_key, key):
+    return site_key + KV_SCOPE_SEP + key if site_key else key
 
 
-def _native_local_delete(key):
-    with _local_kv_lock:
-        data = _local_kv_load()
-        if key in data:
-            del data[key]
+def _native_local_get(site_key=''):
+    def fn(key):
+        with _local_kv_lock:
+            data = _local_kv_load()
+            v = data.get(_kv_scoped(site_key, key))
+            if v is None and site_key:
+                v = data.get(key)   # 迁移前旧数据兜底
+            return v if isinstance(v, str) else ''
+    return fn
+
+
+def _native_local_set(site_key=''):
+    def fn(key, value):
+        value = str(value)
+        if len(value.encode('utf-8')) > KV_MAX_VALUE_BYTES:
+            logger.warning('[js] local.set skipped: value %dKB > %dKB (site=%s key=%.60s)',
+                           len(value) // 1024, KV_MAX_VALUE_BYTES // 1024, site_key, key)
+            return None
+        with _local_kv_lock:
+            data = _local_kv_load()
+            sk = _kv_scoped(site_key, key)
+            data[sk] = value
+            if site_key and key in data:
+                del data[key]   # 迁移走同名裸键，避免兜底读到旧值
+            try:
+                blob = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            except Exception:
+                blob = b''
+            if len(blob) > KV_MAX_TOTAL_BYTES:
+                logger.warning('[js] local.set skipped: kv total %dKB > %dKB (site=%s)',
+                               len(blob) // 1024, KV_MAX_TOTAL_BYTES // 1024, site_key)
+                return None   # 不落盘，本次写丢弃
             _local_kv_save(data)
-    return None
+        return None
+    return fn
+
+
+def _native_local_delete(site_key=''):
+    def fn(key):
+        with _local_kv_lock:
+            data = _local_kv_load()
+            changed = False
+            sk = _kv_scoped(site_key, key)
+            if sk in data:
+                del data[sk]
+                changed = True
+            if site_key and key in data:
+                del data[key]   # 旧数据一并清理
+                changed = True
+            if changed:
+                _local_kv_save(data)
+        return None
+    return fn
 
 
 def _native_md5(text):
@@ -139,16 +184,17 @@ def _native_http(url, options_json):
 class JsEngine:
     """单个 JS spider 的运行环境（Context + 宿主 API）。"""
 
-    def __init__(self):
+    def __init__(self, site_key=''):
         self.lock = threading.RLock()
         self.ctx = quickjs.Context()
         self.ctx.add_callable('_native_http', _native_http)
         self.ctx.add_callable('_native_log', self._log)
-        self.ctx.add_callable('_native_local_get', _native_local_get)
-        self.ctx.add_callable('_native_local_set', _native_local_set)
-        self.ctx.add_callable('_native_local_delete', _native_local_delete)
+        self.ctx.add_callable('_native_local_get', _native_local_get(site_key))
+        self.ctx.add_callable('_native_local_set', _native_local_set(site_key))
+        self.ctx.add_callable('_native_local_delete', _native_local_delete(site_key))
         self.ctx.add_callable('_native_md5', _native_md5)
         self.ctx.add_callable('_native_js2proxy', self._js2proxy)
+        self.site_key = str(site_key or '')   # local KV 隔离域（config 加载时传站点 key）
         self.proxy_port = 0          # 后端 HTTP 端口（config 加载时注入）
         self.init_protocol = 'string'  # string=CatVod 单文件；fongmi=TVBox 多模块
         self._bootstrap()
