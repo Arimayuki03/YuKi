@@ -18,10 +18,10 @@ public class Context {
 
     /**
      * 可写缓存目录（TVBox 蜘蛛静态初始化常调用，如 DexNative → getCacheDir()）。
-     * PC 端返回系统临时目录下 vpc-jar-cache 并自动创建。
+     * PC 端返回用户主目录 ~/.video-pc/jar-cache（L-10：不落共享临时目录）。
      */
     public File getCacheDir() {
-        File f = new File(System.getProperty("java.io.tmpdir"), "vpc-jar-cache");
+        File f = new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-cache");
         if (!f.exists()) {
             f.mkdirs();
         }
@@ -30,7 +30,7 @@ public class Context {
 
     /** 可写数据目录（蜘蛛落盘临时资源用），与缓存同语义。 */
     public File getFilesDir() {
-        File f = new File(System.getProperty("java.io.tmpdir"), "vpc-jar-files");
+        File f = new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-files");
         if (!f.exists()) {
             f.mkdirs();
         }

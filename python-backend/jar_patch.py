@@ -144,7 +144,7 @@ def patch_utf8_constant(data, old, new):
     count = 0
     old_b = old.encode('utf-8')
     new_b = new.encode('utf-8')
-    if len(old_b) != len(old_b) or len(new_b) > 65535:
+    if not old_b or not new_b or len(new_b) > 65535:
         raise ValueError('bad patch length')
     # 定位 "tag=1 length=len(old_b) old_b" 模式
     pattern = b'\x01' + len(old_b).to_bytes(2, 'big') + old_b

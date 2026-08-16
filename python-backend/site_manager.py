@@ -72,9 +72,17 @@ class SiteManager:
         return None
 
     def destroy_all(self):
+        # M-17：spider 级 destroy 只做清理不退进程（SpiderRunner 不再有
+        # destroy=终态语义）；全部站点卸载后再统一关停 JVM 进程并清桥缓存，
+        # 避免热重载时同 jar 站点"杀-重启-杀"风暴
         for site in self.sites:
             try:
                 site.runner.destroy()
             except Exception:
                 pass
         self.sites.clear()
+        try:
+            from jar_bridge import JarBridge
+            JarBridge.destroy_all()
+        except Exception:
+            pass

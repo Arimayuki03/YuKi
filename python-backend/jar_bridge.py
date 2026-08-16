@@ -116,26 +116,12 @@ class JarBridge:
     def destroy_all():
         """销毁所有 JVM 子进程（应用退出时调用）。"""
         with _jar_bridges_lock:
-            for b in _jar_bridges.values():
+            for b in list(_jar_bridges.values()):
                 try:
                     b.destroy()
                 except Exception:
                     pass
             _jar_bridges.clear()
-
-    def __init__(self, jar_path, runner_jar=None, class_name=''):
-        self.jar_path = jar_path
-        # 默认类名（SpiderRunner 启动时预加载用；请求时可用 params.class_name 覆盖）
-        self.class_name = class_name
-        self.runner_jar = runner_jar or DEFAULT_RUNNER_JAR
-        self._call_lock = threading.RLock()  # 可重入锁；auto-init 内部再 call 不阻塞
-        self.proc = None
-        self._lock = threading.Lock()
-        self._pending = {}
-        self._buf = b''
-        self._last_error = ''
-        self._started = False
-        self._restart_count = 0
 
     # ------------------------------------------------------------ 静态工具
 
@@ -196,7 +182,10 @@ class JarBridge:
             os.makedirs(jar_dir, exist_ok=True)
         except OSError:
             pass
-        fname = os.path.basename(jar_url.split('?')[0]) or f'{site_key or "spider"}.jar'
+        # M-13：内容寻址——文件名带 URL 哈希前缀。TVBox 生态大量 jar 同名
+        # （spider.jar），按裸文件名缓存会让不同源互相顶替/错用。
+        base = os.path.basename(jar_url.split('?')[0]) or f'{site_key or "spider"}.jar'
+        fname = hashlib.sha1(jar_url.encode('utf-8')).hexdigest()[:10] + '_' + base
         dest = os.path.join(jar_dir, fname)
         if os.path.isfile(dest):
             if not md5 or _file_md5(dest) == md5:
@@ -289,7 +278,9 @@ class JarBridge:
         # 需要转换：jvm 缓存路径 = 原路径去掉 .jar 加 -jvm.jar
         base = jar_path.rsplit('.', 1)[0]
         jvm_path = base + '-jvm.jar'
-        if os.path.isfile(jvm_path):
+        # M-14：源 jar 更新（md5 变化重新下载）后，旧转换产物必须失效——
+        # 否则永远加载旧版类，表现为"更新配置不生效"
+        if os.path.isfile(jvm_path) and os.path.getmtime(jvm_path) >= os.path.getmtime(jar_path):
             return JarBridge.apply_jar_patches(jvm_path)
         # 用 dex2jar 转换
         d2j_jar = DEX2JAR_JAR
@@ -355,13 +346,17 @@ class JarBridge:
         # 默认类名（SpiderRunner 启动时预加载用；请求时可用 params.class_name 覆盖）
         self.class_name = class_name
         self.runner_jar = runner_jar or DEFAULT_RUNNER_JAR
+        # M-12：构造即建锁（此前类体里有两个 __init__，生效的那个没有锁，
+        # call() 懒初始化在并发首调时会各建各的锁、同时写 stdin 破坏协议流）
+        self._call_lock = threading.RLock()  # 可重入锁；auto-init 内部再 call 不阻塞
         self.proc = None
         self._lock = threading.Lock()
         self._pending = {}
         self._buf = b''
         self._last_error = ''
-        self._started = False
-        self._restart_count = 0
+        # M-27a：连续失败计数——需要重新拉起（崩溃/启动失败/被 kill）一律 +1，
+        # 成功调用清零，>3 拒绝再拉起（取代原先会被 _kill_proc 重置的 _started/_restart_count）
+        self._crash_count = 0
 
     # ------------------------------------------------------------ 进程管理
 
@@ -374,21 +369,15 @@ class JarBridge:
         """
         with self._lock:
             if self.proc and self.proc.poll() is None:
-                self._restart_count = 0  # 进程存活，重置重启计数
                 return True
-            # 旧进程已死，清理引用（不再 kill，进程已退出）
-            if self.proc:
-                self.proc = None
-            if self._started:
-                # 已崩过，指数退避重试，最多 3 次
-                self._restart_count += 1
-                if self._restart_count > 3:
-                    self._last_error = 'jar restart limit exceeded (3)'
-                    return False
-                time.sleep(1.0 * self._restart_count)
-            self._started = True
-            # 注意：_restart_count 不在启动成功前重置，
-            # 启动失败时由 _ensure_alive 调用者（_kill_proc）负责清理
+            # 需要重新拉起（进程已死 / 上次启动失败 / 被 kill）：一律计入崩溃
+            # 计数，成功调用才会清零——杜绝坏 jar 无限重启循环（M-27a）
+            self.proc = None
+            self._crash_count += 1
+            if self._crash_count > 3:
+                self._last_error = 'jar restart limit exceeded (3)'
+                return False
+            time.sleep(min(1.0 * self._crash_count, 5.0))
             java_bin = java_probe.find_java()
             if not java_bin:
                 self._last_error = 'no-java-runtime'
@@ -510,15 +499,10 @@ class JarBridge:
         同一 jar 共享的 JVM 进程同时只允许一个调用在途（_call_lock 串行化），
         防止并发写 stdin 破坏 JSON-RPC 流。进程崩溃时自动重启一次并重试。
         """
-        # 懒初始化 _call_lock（兼容旧版 .pyc 缓存）
-        lock = getattr(self, '_call_lock', None)
-        if lock is None:
-            lock = threading.RLock()
-            self._call_lock = lock
         # 排队观测（C3）：JVM 按桥串行，高并发下等待时长是"是否需要按站点
         # 拆桥/JVM 池"的数据依据。P95 持续 > 2s 再考虑动架构。
         wait_started = time.time()
-        with lock:  # 每实例串行化：跨站点并发 call 排队执行
+        with self._call_lock:  # 每实例串行化：跨站点并发 call 排队执行（构造即建，M-12）
             waited = time.time() - wait_started
             if waited > 2.0:
                 logger.info('[jar:%s] call queued %.1fs before lock (method=%s)',
@@ -615,14 +599,18 @@ class JarBridge:
             raise TimeoutError(f'jar {method} timeout (bridge restarted)')
         if 'e' in result:
             raise result['e']
+        self._crash_count = 0   # M-27a：调用成功视为进程健康，清零崩溃计数
         return result.get('v')
 
     def _kill_proc(self):
-        """强制结束当前 JVM 子进程（写失败/崩溃后重启前调用）。"""
+        """强制结束当前 JVM 子进程（写失败/崩溃后重启前调用）。
+
+        M-27a：不再重置任何崩溃计数——需要重新拉起时 _ensure_alive 统一计数，
+        否则超时/写失败路径会绕过"最多重启 3 次"上限形成无限循环。
+        """
         with self._lock:
             proc = self.proc
             self.proc = None
-            self._started = False
             self._pending.clear()
         if proc:
             try:
@@ -639,18 +627,32 @@ class JarBridge:
     # ------------------------------------------------------------ 生命周期
 
     def destroy(self):
+        """进程级关停（M-17）：发 __shutdown 让 SpiderRunner 走正常退出
+        （shutdown hook 会清理 cookie 缓存目录），1s 未退则强杀。
+
+        显式关停清零崩溃计数（用户/热重载主动行为，非崩溃）。
+        """
         with self._lock:
             proc = self.proc
             self.proc = None
             self._pending.clear()
-        if proc:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        # 从全局缓存中移除
+            self._crash_count = 0
+        # 先从全局缓存移除，避免关停中被 get_or_create 再次取走
         with _jar_bridges_lock:
             _jar_bridges.pop(self.jar_path, None)
+        if proc:
+            try:
+                proc.stdin.write(json.dumps({'id': -1, 'method': '__shutdown'}).encode('utf-8') + b'\n')
+                proc.stdin.flush()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 # ------------------------------------------------------------ 文件工具
@@ -665,7 +667,10 @@ def _file_md5(path):
 
 
 def requests_get_jar(url, timeout=30):
-    """下载 jar 二进制（跟重定向；走共享连接池与双来源代理）。"""
-    rsp = http_client.get(url, allow_redirects=True, timeout=timeout, verify=False)
+    """下载 jar 二进制（跟重定向；走共享连接池与双来源代理）。
+
+    H-2：jar 会在 JVM 内反射执行（等价任意代码），传输必须校验 TLS。
+    """
+    rsp = http_client.get(url, allow_redirects=True, timeout=timeout, verify=True)
     rsp.raise_for_status()
     return rsp.content

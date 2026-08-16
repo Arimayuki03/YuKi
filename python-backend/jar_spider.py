@@ -10,6 +10,8 @@ TVBox jar 契约（CatVodTV/TVBoxOSC Spider）：
 """
 import json
 import logging
+import threading
+from urllib.parse import quote
 
 from base.spider import Spider
 
@@ -34,7 +36,20 @@ class JarSpider(Spider):
 
     _inited = False
     _ext = ''
-    last_error = ''  # 最近一次桥调用错误（供 server 层附加到响应，前端可提示具体原因）
+
+    # 最近一次桥调用错误（供 server 层附加到响应，前端可提示具体原因）。
+    # M-27b：改线程局部——多站点并发搜索时，A 站点的错误不再附着到 B 站点的
+    # 成功响应上（server 在同一线程内写入读取，语义不变）。
+    @property
+    def last_error(self):
+        tls = getattr(self, '_tls', None)
+        return tls.last_error if tls is not None else ''
+
+    @last_error.setter
+    def last_error(self, value):
+        if not hasattr(self, '_tls'):
+            self._tls = threading.local()
+        self._tls.last_error = value
 
     def init(self, extend=''):
         if extend is None:
@@ -95,7 +110,7 @@ class JarSpider(Spider):
         folder, share_id = self._quark_folder_id(id)
         if folder and not share_id:
             return {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
-                           % folder,
+                           % quote(str(folder), safe=''),
                     'parse': 0, 'header': {}}
         raw = self._call('playerContent', flag, id, list(vipFlags) if vipFlags else [])
         result = self._json(raw, {'url': id, 'parse': 1})
@@ -110,7 +125,7 @@ class JarSpider(Spider):
         if not url or (isinstance(url, str) and url == id):
             if folder and not share_id:
                 result = {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
-                                  % folder,
+                                  % quote(str(folder), safe=''),
                           'parse': 0, 'header': result.get('header') or {}}
         return result
 
@@ -136,11 +151,12 @@ class JarSpider(Spider):
         return self._json(self._call('action', json.dumps(action or {}, ensure_ascii=False)), {})
 
     def destroy(self):
-        # destroy 是终态：runner 应答后进程自行退出，进程退出属正常语义，静默吞掉
+        # M-17：destroy 只是 spider 级清理（SpiderRunner 不再因此退出进程），
+        # 进程级关停统一走 JarBridge.destroy/__shutdown（site_manager.destroy_all）
         if self.bridge is None:
             return
         try:
-            self.bridge.call('destroy')
+            self.bridge.call('destroy', class_name=self.class_name)
         except Exception:
             pass
 

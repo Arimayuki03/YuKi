@@ -32,6 +32,9 @@ public class SpiderRunner {
         }
         jarPath = argv[0];
         String defaultClass = argv[1];
+        // L-10：进程退出时清理 cookie 缓存目录（__shutdown 正常退出 / main 结束均触发；
+        // 强杀不经过 hook，但目录已移到用户主目录，无共享临时目录暴露面）
+        Runtime.getRuntime().addShutdownHook(new Thread(SpiderRunner::deleteCacheDir));
         loader = new ChildFirstLoader(new URL[]{new File(jarPath).toURI().toURL()},
                                       SpiderRunner.class.getClassLoader());
 
@@ -68,8 +71,10 @@ public class SpiderRunner {
             out.flush();
             // 请求可能首次触发网盘蜘蛛初始化（AE 等实例在此后才存在），请求后再播种一次
             seedPanState(null);
-            // destroy 是终态：应答后退出进程（Python 侧 destroy 语义）
-            if (line.indexOf("\"destroy\"") >= 0) {
+            // M-15/M-17：按解析后的 method 判断终态——原对原始行做 "destroy"
+            // 子串匹配，搜索词恰为 destroy 时整个 JVM 被误杀（同 jar 全部站点
+            // 瞬间不可用）。spider 级 destroy 只是普通方法；退出统一走 __shutdown。
+            if ("__shutdown".equals(extractMethod(line))) {
                 break;
             }
         }
@@ -77,6 +82,17 @@ public class SpiderRunner {
     }
 
     // ---- 请求处理 ----
+
+    /** 从请求行提取 method（终态判定用）；解析失败回退空串。 */
+    static String extractMethod(String line) {
+        try {
+            Map<String,Object> req = (Map<String,Object>) parseValue(line);
+            Object m = req == null ? null : req.get("method");
+            return m == null ? "" : m.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
 
     /** 从请求行提取 id（用于错误响应）；解析失败回退 0。 */
     static long extractId(String line) {
@@ -177,9 +193,31 @@ public class SpiderRunner {
      * 的登录判定要求 cookie / member_type / nickname 三字段都非空，因此
      * 写入 JSON 格式而非裸 cookie 串；不写文件则蜘蛛永远「未登录」。
      */
+    /** 蜘蛛可写根目录（L-10）：用户主目录下私有路径，替代共享 %TMP%/vpc-jar-cache
+     *  （明文 cookie 落共享临时目录可被同机其他用户读取）。与 Context/
+     *  Environment stub 的映射保持一致。 */
+    static File cacheRoot() {
+        return new File(System.getProperty("user.home"),
+                ".video-pc" + File.separator + "jar-cache");
+    }
+
+    /** 递归删除缓存目录（shutdown hook 调用）。 */
+    static void deleteCacheDir() {
+        deleteTree(cacheRoot());
+    }
+
+    static void deleteTree(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteTree(c);
+        }
+        try { f.delete(); } catch (Throwable ignore) {}
+    }
+
     static void seedCookieFiles() {
         try {
-            File root = new File(System.getProperty("java.io.tmpdir"), "vpc-jar-cache");
+            File root = cacheRoot();
             File tvboxDir = new File(root, "TVBox");
             if (!tvboxDir.exists() && !tvboxDir.mkdirs()) return;
             String[][] files = {
@@ -214,7 +252,9 @@ public class SpiderRunner {
                 case '\n': sb.append("\\n"); break;
                 case '\r': sb.append("\\r"); break;
                 case '\t': sb.append("\\t"); break;
-                default: sb.append(c);
+                default:
+                    if (c < 0x20) { sb.append(String.format("\\u%04x", (int) c)); }
+                    else { sb.append(c); }
             }
         }
         return sb.toString();
@@ -562,7 +602,9 @@ public class SpiderRunner {
                 case '\n': sb.append("\\n"); break;
                 case '\r': sb.append("\\r"); break;
                 case '\t': sb.append("\\t"); break;
-                default: sb.append(c);
+                default:
+                    if (c < 0x20) { sb.append(String.format("\\u%04x", (int) c)); }
+                    else { sb.append(c); }
             }
         }
         sb.append('"');
