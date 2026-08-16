@@ -6,6 +6,7 @@
 import logging
 
 import requests
+import http_client
 
 from .models import RuleSearchTrace, RuleChapterTrace, PluginSearchResponse
 from .xpath_strategy import XPathRuleStrategy
@@ -158,14 +159,14 @@ class RuleEngine:
         if request.method == 'POST':
             if request.body_type == 'json':
                 headers.setdefault('content-type', 'application/json')
-                rsp = requests.post(request.url, headers=headers, params=request.query,
+                rsp = http_client.post(request.url, headers=headers, params=request.query,
                                     json=request.body, timeout=10)
             else:
                 headers.setdefault('content-type', 'application/x-www-form-urlencoded')
-                rsp = requests.post(request.url, headers=headers, params=request.query,
+                rsp = http_client.post(request.url, headers=headers, params=request.query,
                                     data=request.body, timeout=10)
         else:
-            rsp = requests.get(request.url, headers=headers, params=request.query, timeout=10)
+            rsp = http_client.get(request.url, headers=headers, params=request.query, timeout=10)
         rsp.encoding = 'utf-8'
         rsp.raise_for_status()
         return rsp.text

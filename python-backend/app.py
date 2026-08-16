@@ -1,5 +1,5 @@
 import os
-import requests
+import http_client
 from importlib.machinery import SourceFileLoader
 import json
 
@@ -24,111 +24,18 @@ def writeFile(path, content):
         f.write(content)
 
 
-def _system_proxies():
-    """读取 Windows 系统代理（WinINET 注册表），启用时返回 requests proxies dict。
-
-    TVBox 生态大量源（github raw / jsdelivr / pastebin 等）在部分网络下需要
-    代理才能访问；app.redirect / fetch_text 走系统代理可让 PC 端与手机 TVBox
-    行为一致。仅当系统代理启用且目标非本机时使用；代理不可用自动回退直连。
-    """
-    try:
-        import winreg
-        key_path = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as k:
-            enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
-            server, _ = winreg.QueryValueEx(k, 'ProxyServer')
-            bypass, _ = winreg.QueryValueEx(k, 'ProxyOverride')
-        if not enable or not server:
-            return {}
-        proxies = {}
-        if '=' in server:
-            # 按协议指定：http=host:port;https=host:port
-            for part in server.split(';'):
-                if '=' in part:
-                    proto, addr = part.split('=', 1)
-                    proto = proto.strip().lower()
-                    addr = addr.strip()
-                    if proto and addr:
-                        proxies[proto] = 'http://' + addr
-        else:
-            proxies = {'http': 'http://' + server, 'https': 'http://' + server}
-        return proxies
-    except Exception:
-        return {}
-
-
-def _should_bypass_proxy(url, bypass):
-    """按 WinINET ProxyOverride 语义判断是否直连（本机/通配符/分号列表）。"""
-    try:
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or '').lower()
-    except Exception:
-        return True
-    if host in ('127.0.0.1', 'localhost', '::1'):
-        return True
-    if not bypass:
-        return False
-    for item in (bypass or '').split(';'):
-        item = item.strip().lower()
-        if not item:
-            continue
-        if item == '<local>':
-            # 无点号主机名视为局域网
-            if host.count('.') == 0:
-                return True
-        elif item.startswith('*.'):
-            if host.endswith(item[1:]):
-                return True
-        elif item.startswith('*'):
-            if host.endswith(item[1:]):
-                return True
-        elif item and item in host:
-            return True
-    return False
-
-
 def _fetch(url, timeout=15):
-    """requests GET：优先系统代理，失败回退直连；返回 Response 或 None。
+    """GET（不自动跟重定向；okhttp UA；代理优先+失败回退直连）。
 
-    UA 使用 okhttp（TVBox 客户端同款）：大量 TVBox 生态接口按 UA 分流
-    （浏览器 UA 返回下载页/HTML，okhttp UA 才返回配置 JSON，如 菜妮丝/王二小/游魂）。
+    UA 与代理语义已收编到 http_client（WinINET/环境变量双来源）。
+    verify 保持 False 与历史行为一致（TLS 收紧属 CODE_REVIEW H-2 批次）。
     """
-    headers = {'User-Agent': 'okhttp/4.9.3'}
-    last = None
-    try:
-        import winreg
-        enable = 0
-        server = ''
-        bypass = ''
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as k:
-            enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
-            server, _ = winreg.QueryValueEx(k, 'ProxyServer')
-            bypass, _ = winreg.QueryValueEx(k, 'ProxyOverride')
-    except Exception:
-        enable, server, bypass = 0, '', ''
-    if enable and server and not _should_bypass_proxy(url, bypass):
-        try:
-            return requests.get(url, headers=headers, allow_redirects=False,
-                                verify=False, timeout=timeout, proxies=_system_proxies())
-        except Exception as e:
-            last = e
-    try:
-        return requests.get(url, headers=headers, allow_redirects=False,
-                            verify=False, timeout=timeout)
-    except Exception as e:
-        if last:
-            raise last from e
-        raise
+    return http_client.get(url, timeout=timeout, allow_redirects=False, verify=False)
 
 
 def redirect(url, timeout=15):
-    rsp = _fetch(url, timeout=timeout)
-    if rsp is None:
-        return rsp
-    if 'Location' in rsp.headers:
-        return redirect(rsp.headers['Location'], timeout=timeout)
-    return rsp
+    """递归跟重定向取最终响应（收编到 http_client：深度上限 5 + 相对 Location urljoin）。"""
+    return http_client.fetch_follow_redirects(url, timeout=timeout)
 
 
 def str2json(content):

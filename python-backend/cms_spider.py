@@ -15,7 +15,7 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 
-import requests
+import http_client
 
 logger = logging.getLogger('vpc.cms')
 
@@ -125,7 +125,7 @@ class CmsSpider:
     # ------------------------------------------------------------ 工具
 
     def _fetch(self, params):
-        rsp = requests.get(self.api, params=params, headers=UA, timeout=15, verify=False)
+        rsp = http_client.get(self.api, params=params, headers=UA, timeout=15, verify=False)
         rsp.encoding = rsp.apparent_encoding or 'utf-8'
         text = rsp.text.strip()
         if text.startswith('{') or text.startswith('['):

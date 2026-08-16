@@ -486,13 +486,13 @@ class TestRuleEngineCookie(unittest.TestCase):
             def raise_for_status(self):
                 pass
 
-        orig = re_mod.requests.get
+        orig = re_mod.http_client.get
 
         def fake_get(url, **kw):
             captured['cookie'] = kw.get('headers', {}).get('cookie', '')
             return FakeRsp()
 
-        re_mod.requests.get = fake_get
+        re_mod.http_client.get = fake_get
         try:
             cfg = types.SimpleNamespace(base_url='https://example.com', user_agent='')
             req = PreparedRuleRequest(method='GET', url='https://example.com/s', headers={})
@@ -528,7 +528,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return me
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             result = self.mgr.bangumi_me('tok')
         self.assertEqual(result, me)
         url = m.call_args[0][0]
@@ -550,7 +550,7 @@ class TestBangumiSync(unittest.TestCase):
                 return data
 
         with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice') as um, \
-                mock.patch('requests.get', return_value=FakeRsp()) as m:
+                mock.patch('http_client.get', return_value=FakeRsp()) as m:
             items = self.mgr.bangumi_user_collections('tok', limit=50)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['type'], 2)
@@ -569,7 +569,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return {'username': 'alice', 'nickname': '爱丽丝'}
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             username = self.mgr._bangumi_username('tok')
         self.assertEqual(username, 'alice')
         self.assertIn('api.bgm.tv/v0/me', m.call_args[0][0])
@@ -577,7 +577,7 @@ class TestBangumiSync(unittest.TestCase):
 
     def test_bangumi_username_invalid_token(self):
         from unittest import mock
-        with mock.patch('requests.get', side_effect=Exception('401')):
+        with mock.patch('http_client.get', side_effect=Exception('401')):
             username = self.mgr._bangumi_username('bad-token')
         self.assertIsNone(username)
 
@@ -593,7 +593,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return {'data': items}
 
-        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.post', return_value=FakeRsp()) as m:
             result = self.mgr.bangumi_search('海贼王', limit=5)
         self.assertEqual(result, items)
         url = m.call_args[0][0]
@@ -615,7 +615,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return {'data': []}
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             self.mgr.bangumi_trends()
         self.assertIn('next.bgm.tv/p1/trending/subjects', m.call_args[0][0])
         self.assertEqual(m.call_args[1]['params'], {'type': 2, 'limit': 24, 'offset': 0})
@@ -644,7 +644,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return data
 
-        with mock.patch('requests.get', return_value=FakeRsp()):
+        with mock.patch('http_client.get', return_value=FakeRsp()):
             calendar = self.mgr.bangumi_calendar()
         self.assertEqual(len(calendar), 7)
         self.assertEqual(calendar[0]['weekday']['id'], 1)
@@ -746,7 +746,7 @@ class TestBangumiSync(unittest.TestCase):
 
         with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
                 mock.patch('time.sleep'), \
-                mock.patch('requests.get', side_effect=fake_get):
+                mock.patch('http_client.get', side_effect=fake_get):
             items = self.mgr._bangumi_all_collections('tok', page_delay=0)
         self.assertEqual(len(items), 150)  # 完整 150 条（跨两页），未截断在 100
         self.assertTrue(all('type' in it for it in items))
@@ -780,7 +780,7 @@ class TestBangumiSync(unittest.TestCase):
 
         with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
                 mock.patch('time.sleep'), \
-                mock.patch('requests.get', side_effect=fake_get):
+                mock.patch('http_client.get', side_effect=fake_get):
             items = self.mgr._bangumi_all_collections('tok', page_delay=0)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['subject_id'], 7)
@@ -863,7 +863,7 @@ class TestBangumiSync(unittest.TestCase):
                 return {'data': [{'id': 1, 'name': '番A', 'nameCN': '番A中', 'rating': {'score': 8.0}}]}
 
         self.mgr.enable_bangumi_proxy = True
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             out = self.mgr.bangumi_trends(limit=5)
         self.assertIn(BANGUMI_MIRROR_NEXT + '/p1/trending/subjects', m.call_args[0][0])
         self.assertEqual(out['items'][0]['name_cn'], '番A中')
@@ -882,7 +882,7 @@ class TestBangumiSync(unittest.TestCase):
                 return {'data': [{'id': 1, 'name_cn': '番A'}]}
 
         self.mgr.enable_bangumi_proxy = True
-        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.post', return_value=FakeRsp()) as m:
             out = self.mgr.bangumi_search('测试', limit=3)
         self.assertIn(BANGUMI_MIRROR_API + '/v0/search/subjects', m.call_args[0][0])
         self.assertEqual(len(out), 1)
@@ -900,7 +900,7 @@ class TestBangumiSync(unittest.TestCase):
                 return {'data': []}
 
         self.mgr.enable_bangumi_proxy = True
-        with mock.patch('requests.post', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.post', return_value=FakeRsp()) as m:
             self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01')
         self.assertIn(BANGUMI_MIRROR_API + '/v0/search/subjects', m.call_args[0][0])
 
@@ -917,7 +917,7 @@ class TestBangumiSync(unittest.TestCase):
                 return {'data': []}
 
         self.mgr.enable_bangumi_proxy = False
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             self.mgr.bangumi_trends(limit=5)
         self.assertIn(BANGUMI_API_NEXT + '/p1/trending/subjects', m.call_args[0][0])
 
@@ -927,7 +927,7 @@ class TestBangumiSync(unittest.TestCase):
         from unittest import mock
         self.mgr.enable_bangumi_proxy = True
         with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
-                mock.patch('requests.get') as m:
+                mock.patch('http_client.get') as m:
             class FakeRsp:
                 def raise_for_status(self):
                     pass
@@ -948,7 +948,7 @@ class TestBangumiSync(unittest.TestCase):
             def json(self):
                 return {'id': 123, 'name': '角色A', 'summary': '简介'}
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             info = self.mgr.bangumi_character_detail('123')
         self.assertEqual(info['name'], '角色A')
         self.assertIn('/v0/characters/123', m.call_args[0][0])
@@ -991,7 +991,7 @@ class TestBangumiSeason(unittest.TestCase):
         def fake_post(url, params=None, json=None, **kw):
             return FakeRsp(pages.get(params['offset'], []))
 
-        with mock.patch('requests.post', side_effect=fake_post) as m:
+        with mock.patch('http_client.post', side_effect=fake_post) as m:
             calendar = self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01', page_size=2)
         # 7 个星期桶
         self.assertEqual(len(calendar), 7)
@@ -1017,7 +1017,7 @@ class TestBangumiSeason(unittest.TestCase):
 
     def test_season_calendar_request_failure(self):
         from unittest import mock
-        with mock.patch('requests.post', side_effect=Exception('net down')):
+        with mock.patch('http_client.post', side_effect=Exception('net down')):
             self.assertEqual(self.mgr.bangumi_season_calendar('2026-07-01', '2026-10-01'), [])
 
     def test_season_weekday_helper(self):
@@ -1053,7 +1053,7 @@ class TestBangumiTrends(unittest.TestCase):
             def json(self):
                 return payload
 
-        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+        with mock.patch('http_client.get', return_value=FakeRsp()) as m:
             out = self.mgr.bangumi_trends(limit=24, offset=0)
         self.assertEqual(out['total'], 2)
         self.assertEqual(len(out['items']), 2)
@@ -1068,7 +1068,7 @@ class TestBangumiTrends(unittest.TestCase):
 
     def test_trends_failure_returns_empty(self):
         from unittest import mock
-        with mock.patch('requests.get', side_effect=Exception('net down')):
+        with mock.patch('http_client.get', side_effect=Exception('net down')):
             out = self.mgr.bangumi_trends()
         self.assertEqual(out, {'items': [], 'total': 0})
 

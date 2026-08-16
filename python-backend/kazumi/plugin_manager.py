@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import hoststate
+import http_client
 
 from .plugin import Plugin
 from .utils import NoResultException, CaptchaRequiredException
@@ -498,14 +499,13 @@ class PluginManager:
 
         注意：旧实现用 GET next.bgm.tv/p1/search/subjects，该路由在官方 API 上不存在（404）。
         Kazumi 标准为 POST /v0/search/subjects + JSON body（keyword/sort/filter）。"""
-        import requests
         try:
             body = {
                 'keyword': keyword,
                 'sort': 'heat',
                 'filter': {'type': [2], 'tag': [], 'rank': ['>=0', '<=99999'], 'nsfw': False},
             }
-            rsp = requests.post(
+            rsp = http_client.post(
                 f'{self._base_api()}/v0/search/subjects',
                 params={'limit': limit, 'offset': 0},
                 json=body,
@@ -542,7 +542,6 @@ class PluginManager:
         排序（heat/rank/score/match）、播出日期区间、排名区间、评分区间、放送星期。
         POST api.bgm.tv/v0/search/subjects，结果经日历归一化补 name_cn/air_date，
         按 id 去重后返回 {items, total}。镜像开启时经 _base_api() 走全域名反代。"""
-        import requests
         tags = list(tags or [])
         weekdays = sorted({int(w) for w in (weekdays or []) if str(w).strip()})
         # rank：显式区间优先；sort=rank 时用 Kazumi 的 >0 下限，否则 >=0
@@ -568,7 +567,7 @@ class PluginManager:
             'filter': filter_body,
         }
         try:
-            rsp = requests.post(
+            rsp = http_client.post(
                 f'{self._base_api()}/v0/search/subjects',
                 params={'limit': min(int(limit), 50), 'offset': max(int(offset), 0)},
                 json=body,
@@ -595,9 +594,8 @@ class PluginManager:
 
     def bangumi_info(self, subject_id):
         """Bangumi 番剧详情（api.bgm.tv）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/subjects/{subject_id}',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=(5, 8),
@@ -671,10 +669,9 @@ class PluginManager:
 
     def bangumi_calendar(self):
         """Bangumi 每日放送（next.bgm.tv），转换为稳定的前端数据结构。"""
-        import requests
         for attempt in range(3):
             try:
-                rsp = requests.get(
+                rsp = http_client.get(
                     f'{self._base_next()}/p1/calendar',
                     headers={'User-Agent': BANGUMI_UA},
                     timeout=(5, 8),  # 连接 5s，读取 8s
@@ -706,7 +703,6 @@ class PluginManager:
         再按播出星期分桶为 [{weekday:{id}, items:[...]}]（与 bangumi_calendar 同形状）。
         镜像开启时经 _base_api() 走全域名反代 api.bangumi.lol（免签名，全路径可用）。
         start/end 形如 YYYY-MM-DD；失败或无结果返回 []。"""
-        import requests
         if not start or not end:
             return []
         body = {
@@ -723,7 +719,7 @@ class PluginManager:
         merged = {}
         try:
             for page in range(max_pages):
-                rsp = requests.post(
+                rsp = http_client.post(
                     f'{self._base_api()}/v0/search/subjects',
                     params={'limit': page_size, 'offset': page * page_size},
                     json=body,
@@ -756,10 +752,9 @@ class PluginManager:
         """Bangumi 番剧趋势榜单（next.bgm.tv /p1/trending/subjects），返回归一化 {items,total}。
         镜像开启时经 _base_next() 走全域名反代 next.bangumi.lol（免签名，全路径可用）。
         注意：该端点必须传 type/limit/offset，否则返回 400。"""
-        import requests
         # 官方/镜像趋势（镜像开启时 _base_next() 指向 next.bangumi.lol）
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_next()}/p1/trending/subjects',
                 params={'type': 2, 'limit': limit, 'offset': offset},
                 headers={'User-Agent': BANGUMI_UA},
@@ -784,7 +779,6 @@ class PluginManager:
     def bangumi_list_by_tag(self, tag, limit=100, offset=0):
         """按标签搜索番剧（对齐 Kazumi getBangumiList：POST /v0/search/subjects + tag filter）。
         tag 为空时返回热门排行（日本限定），非空时按标签筛选。"""
-        import requests
         try:
             if tag:
                 body = {
@@ -798,7 +792,7 @@ class PluginManager:
                     'sort': 'rank',
                     'filter': {'type': [2], 'tag': ['日本'], 'rank': ['>=2', '<=1050'], 'nsfw': False},
                 }
-            rsp = requests.post(
+            rsp = http_client.post(
                 f'{self._base_api()}/v0/search/subjects',
                 params={'limit': limit, 'offset': offset},
                 json=body,
@@ -823,9 +817,8 @@ class PluginManager:
 
     def bangumi_episodes(self, subject_id):
         """Bangumi 番剧分集信息（api.bgm.tv）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/episodes',
                 params={'subject_id': subject_id},
                 headers={'User-Agent': BANGUMI_UA},
@@ -846,9 +839,8 @@ class PluginManager:
         并发补全每个角色的 name_cn（有界线程池，best-effort：单个失败保留原名），
         供前端「角色卡片默认用简体中文名」渲染。首次较慢，由 server 层 TTL 缓存兜住重复访问。
         """
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/subjects/{subject_id}/characters',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
@@ -942,9 +934,8 @@ class PluginManager:
 
     def bangumi_character_detail(self, character_id):
         """单个角色详情（api.bgm.tv /v0/characters/{id}）：资料 + 简介。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/characters/{character_id}',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
@@ -958,9 +949,8 @@ class PluginManager:
 
     def bangumi_character_comments(self, character_id):
         """单个角色吐槽（next.bgm.tv /p1/characters/{id}/comments）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_next()}/p1/characters/{character_id}/comments',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
@@ -974,9 +964,8 @@ class PluginManager:
 
     def bangumi_staff(self, subject_id):
         """Bangumi 番剧制作人员（api.bgm.tv）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/subjects/{subject_id}/persons',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
@@ -989,9 +978,8 @@ class PluginManager:
             return []
     def bangumi_comments(self, subject_id, limit=20, offset=0):
         """Bangumi 番剧评论（next.bgm.tv）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_next()}/p1/subjects/{subject_id}/comments',
                 params={'limit': limit, 'offset': offset},
                 headers={'User-Agent': BANGUMI_UA},
@@ -1006,9 +994,8 @@ class PluginManager:
 
     def bangumi_relations(self, subject_id):
         """Bangumi 番剧关联（前传/续作链，api.bgm.tv）。"""
-        import requests
         try:
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{self._base_api()}/v0/subjects/{subject_id}/subjects',
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
@@ -1035,11 +1022,10 @@ class PluginManager:
 
     def bangumi_me(self, token):
         """当前用户信息（需 token；返回 None 表示 token 无效或网络失败）。"""
-        import requests
         if not token:
             return None
         try:
-            rsp = requests.get(f'{self._base_api()}/v0/me',
+            rsp = http_client.get(f'{self._base_api()}/v0/me',
                                headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
             rsp.raise_for_status()
             return rsp.json()
@@ -1068,7 +1054,6 @@ class PluginManager:
         """当前用户收藏列表（subject_type=2 动画），条目含 subject_id/type/name。
         R1：改用真实用户名（_bangumi_username），不再用 `/v0/users/-/collections`。
         注意：Bangumi API 该端点 limit 上限为 100，超出返回 400，此处统一钳制。"""
-        import requests
         if not token:
             return []
         limit = max(1, min(int(limit or 100), 100))
@@ -1077,7 +1062,7 @@ class PluginManager:
             logger.warning('[kazumi] bangumi collections: 无法获取用户名（token 无效或网络失败）')
             return []
         try:
-            rsp = requests.get(f'{self._base_api()}/v0/users/{username}/collections',
+            rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections',
                                params={'subject_type': subject_type, 'limit': limit, 'offset': offset},
                                headers=self._bangumi_auth_headers(token), timeout=(5, 10), verify=False)
             rsp.raise_for_status()
@@ -1089,7 +1074,6 @@ class PluginManager:
 
     def bangumi_collection(self, token, subject_id):
         """单个 subject 的收藏状态；未收藏返回 None。"""
-        import requests
         if not token:
             return None
         username = self._bangumi_username(token)
@@ -1097,7 +1081,7 @@ class PluginManager:
             logger.warning('[kazumi] bangumi collection get: 无法获取用户名（token 无效）')
             return None
         try:
-            rsp = requests.get(f'{self._base_api()}/v0/users/{username}/collections/{subject_id}',
+            rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections/{subject_id}',
                                headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=False)
             if rsp.status_code == 404:
                 return None
@@ -1211,7 +1195,6 @@ class PluginManager:
           - 返回按 subject_id 去重的合并列表（每项保留原始 subject/subject_id，并回填 type）。
 
         与 bangumi_user_collections（单页、上限 100）区别：本方法拉全量供同步用，不截断。"""
-        import requests
         if not token:
             return []
         username = self._bangumi_username(token)
@@ -1230,7 +1213,7 @@ class PluginManager:
                 data = None
                 for attempt in range(2):  # 单页最多 1 次退避重试（429/5xx）
                     try:
-                        rsp = requests.get(url, params={'subject_type': subject_type, 'type': ctype,
+                        rsp = http_client.get(url, params={'subject_type': subject_type, 'type': ctype,
                                                          'limit': per_page, 'offset': offset},
                                            headers=headers, timeout=(5, 10), verify=False)
                         if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
@@ -1425,7 +1408,6 @@ class PluginManager:
 
     def danmaku_search(self, title):
         """弹弹 play 番剧搜索（获取 DanDanBangumiID）。"""
-        import requests
         import time
         appid, key = self._dandan_creds()
         if not appid or not key:
@@ -1440,7 +1422,7 @@ class PluginManager:
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
             }
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{DANDAN_API}{path}',
                 params={'keyword': title},
                 headers=headers,
@@ -1456,7 +1438,6 @@ class PluginManager:
 
     def danmaku_get_episode_id(self, bangumi_id, episode):
         """从 Bangumi ID 获取弹弹 play 分集弹幕 ID。"""
-        import requests
         import time
         appid, key = self._dandan_creds()
         if not appid or not key:
@@ -1470,7 +1451,7 @@ class PluginManager:
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
             }
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{DANDAN_API}{path}',
                 headers=headers,
                 timeout=10,
@@ -1486,7 +1467,6 @@ class PluginManager:
 
     def danmaku_get_comments(self, episode_id):
         """获取弹幕评论（弹弹 play）。"""
-        import requests
         import time
         appid, key = self._dandan_creds()
         if not appid or not key:
@@ -1500,7 +1480,7 @@ class PluginManager:
                 'X-Signature': self._dandan_signature(path, ts),
                 'X-Auth': '1',
             }
-            rsp = requests.get(
+            rsp = http_client.get(
                 f'{DANDAN_API}{path}',
                 params={'withRelated': 'true'},
                 headers=headers,
@@ -1548,7 +1528,6 @@ class PluginManager:
 
     def webdav_restore(self, webdav_url, username, password, names):
         """WebDAV 恢复（从远程下载收藏/历史/规则）。"""
-        import requests
         from requests.auth import HTTPBasicAuth
         result = {}
         try:
@@ -1557,7 +1536,7 @@ class PluginManager:
             for name in names:
                 file_url = f'{sync_dir}/{name}.json'
                 try:
-                    rsp = requests.get(file_url, auth=auth, timeout=15, verify=False)
+                    rsp = http_client.get(file_url, auth=auth, timeout=15, verify=False)
                     if rsp.status_code == 200:
                         result[name] = rsp.json()
                 except Exception:
@@ -1580,7 +1559,6 @@ class PluginManager:
         now = time.time()
         if self._shop_catalog_cache and now - self._shop_catalog_ts < 300:
             return self._shop_catalog_cache
-        import requests
         if self.enable_git_proxy:
             urls = ['https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/index.json']
         else:
@@ -1590,7 +1568,7 @@ class PluginManager:
             ]
         for url in urls:
             try:
-                rsp = requests.get(url, timeout=10, verify=False)
+                rsp = http_client.get(url, timeout=10, verify=False)
                 rsp.raise_for_status()
                 data = rsp.json()
                 logger.info('[kazumi] shop catalog loaded: %d rules from %s', len(data), url)
@@ -1603,7 +1581,6 @@ class PluginManager:
 
     def fetch_shop_rule(self, name):
         """从 KazumiRules 仓库下载单个规则；镜像开关开启时强制 GitCode 镜像。"""
-        import requests
         if self.enable_git_proxy:
             urls = [f'https://raw.gitcode.com/gh_mirrors/ka/KazumiRules/raw/main/{name}.json']
         else:
@@ -1613,7 +1590,7 @@ class PluginManager:
             ]
         for url in urls:
             try:
-                rsp = requests.get(url, timeout=10, verify=False)
+                rsp = http_client.get(url, timeout=10, verify=False)
                 rsp.raise_for_status()
                 return Plugin.from_json(rsp.json())
             except Exception as e:

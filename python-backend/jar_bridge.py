@@ -18,9 +18,9 @@ import threading
 import time
 import logging
 
-import requests
 
 import hoststate
+import http_client
 import java_probe
 
 logger = logging.getLogger('vpc.jar')
@@ -216,7 +216,7 @@ class JarBridge:
 
     @staticmethod
     def proxy_java_args():
-        """读取 Windows 系统代理，生成 JVM 代理系统属性参数列表。
+        """读取系统代理（http_client 收编版），生成 JVM 代理系统属性参数列表。
 
         JVM 内蜘蛛的网络请求（okhttp / HttpURLConnection）默认直连，被墙站点
         （github 等）全部失败；注入 http(s).proxyHost/Port 后 okhttp 经
@@ -224,35 +224,17 @@ class JarBridge:
         系统代理未启用或无可用地址时返回 []（保持直连）。
         """
         try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as k:
-                enable, _ = winreg.QueryValueEx(k, 'ProxyEnable')
-                server, _ = winreg.QueryValueEx(k, 'ProxyServer')
-            if not enable or not server:
+            addr = http_client.system_proxy_addr()
+            if not addr:
                 return []
-            host = server
-            port = ''
-            if '=' in server:
-                # 按协议指定时取 https 段（http 段优先），否则取第一个
-                parts = {}
-                for seg in server.split(';'):
-                    if '=' in seg:
-                        p, a = seg.split('=', 1)
-                        parts[p.strip().lower()] = a.strip()
-                host = parts.get('https') or parts.get('http') or ''
-                if not host:
-                    return []
-            if ':' in host:
-                h, _, p = host.rpartition(':')
-                host, port = h, p
+            host, port = addr
             if not host or not port:
                 return []
             return [
                 '-Dhttp.proxyHost=' + host,
-                '-Dhttp.proxyPort=' + port,
+                '-Dhttp.proxyPort=' + str(port),
                 '-Dhttps.proxyHost=' + host,
-                '-Dhttps.proxyPort=' + port,
+                '-Dhttps.proxyPort=' + str(port),
             ]
         except Exception:
             return []
@@ -676,7 +658,7 @@ def _file_md5(path):
 
 
 def requests_get_jar(url, timeout=30):
-    """下载 jar 二进制（跟重定向）。"""
-    rsp = requests.get(url, allow_redirects=True, timeout=timeout, verify=False)
+    """下载 jar 二进制（跟重定向；走共享连接池与双来源代理）。"""
+    rsp = http_client.get(url, allow_redirects=True, timeout=timeout, verify=False)
     rsp.raise_for_status()
     return rsp.content

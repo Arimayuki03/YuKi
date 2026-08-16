@@ -17,10 +17,11 @@ import time
 import hashlib
 import logging
 import threading
+
+import http_client
 from urllib.parse import quote
 
 import quickjs
-import requests
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 if ENGINE_DIR not in sys.path:
@@ -118,9 +119,9 @@ def _native_http(url, options_json):
                       allow_redirects=bool(allow_redirects), verify=False)
         if method == 'POST':
             kwargs['data'] = opt.get('body') or opt.get('data')
-            rsp = requests.post(url, **kwargs)
+            rsp = http_client.post(url, **kwargs)
         else:
-            rsp = requests.get(url, **kwargs)
+            rsp = http_client.get(url, **kwargs)
         return json.dumps({
             'ok': rsp.status_code < 400,
             'status': rsp.status_code,
