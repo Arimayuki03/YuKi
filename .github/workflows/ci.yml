@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  js:
+    name: JS 单元测试 + 语法门禁
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # postinstall 的 download-binaries 已容错（|| exit 0），CI 拉不到二进制不阻塞
+      - run: npm ci
+      - run: npm run test:jsunit
+      - run: npm run test:js
+
+  python:
+    name: Python 回归（smoke/phase3/kazumi/jar + 编译检查）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: 安装锁定依赖
+        run: pip install -r python-backend/requirements.txt
+      - name: 运行后端回归
+        run: python python-backend/tests/run_all.py
+        # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真跑
+      - name: Ruff lint
+        run: |
+          pip install ruff
+          ruff check python-backend
+
+  # B3 后续增强：npm audit / pip-audit、tag push 时的 electron-builder 构建产物
