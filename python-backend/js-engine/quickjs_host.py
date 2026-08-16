@@ -187,6 +187,15 @@ class JsEngine:
     def __init__(self, site_key=''):
         self.lock = threading.RLock()
         self.ctx = quickjs.Context()
+        # H-3：远程 JS 源不可信——C 扩展同步 eval 期间不释放 GIL，一段
+        # while(true){} 会冻结整个后端（所有端点、所有站点）。三重限额：
+        # CPU 30s / 内存 256MB / 栈 1MB；API 缺失时降级告警。
+        try:
+            self.ctx.set_time_limit(30)
+            self.ctx.set_memory_limit(256 * 1024 * 1024)
+            self.ctx.set_max_stack_size(1024 * 1024)
+        except AttributeError:
+            logger.warning('quickjs-ng 缺少限额 API，跳过（建议升级 quickjs-ng）')
         self.ctx.add_callable('_native_http', _native_http)
         self.ctx.add_callable('_native_log', self._log)
         self.ctx.add_callable('_native_local_get', _native_local_get(site_key))

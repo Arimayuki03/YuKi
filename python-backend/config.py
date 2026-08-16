@@ -361,14 +361,43 @@ class ConfigManager:
         }
 
     def _apply(self, prepared):
-        """热替换：销毁旧站点并安装新内容（全部就绪后才调用）。"""
-        self.sites.destroy_all()
-        self.sites.sites.extend(prepared['sites'])
+        """热替换：先整体原子替换，再销毁旧站点。
+
+        L-22：旧序（先 destroy_all 再 extend）存在空窗期——并发请求在
+        销毁与安装之间到达会 404。改为先把 sites 列表整体换血，请求立即
+        看到新站点，旧站点随后销毁。
+        M-17 配套：不再无条件关停全部 JVM——仅回收新配置不再引用的桥
+        （同 jar 热重载复用进程，不再杀-重启）。
+        """
+        old = list(self.sites.sites)
+        old_bridges = {}
+        for s in old:
+            b = getattr(s.runner, 'bridge', None)
+            if b is not None:
+                old_bridges[id(b)] = b
+        self.sites.sites[:] = prepared['sites']
         self.parses = prepared['parses']
         self.flags = prepared['flags']
         self.lives = prepared['lives']
         self.wallpaper = prepared['wallpaper']
         self.source_url = prepared['source_url']
+        for s in old:
+            try:
+                s.runner.destroy()
+            except Exception:
+                pass
+        # 回收新配置不再引用的 JVM 桥（同 jar 复用，换掉的才关停）
+        new_bridge_ids = set()
+        for s in self.sites.sites:
+            b = getattr(s.runner, 'bridge', None)
+            if b is not None:
+                new_bridge_ids.add(id(b))
+        for bid, b in old_bridges.items():
+            if bid not in new_bridge_ids:
+                try:
+                    b.destroy()
+                except Exception:
+                    pass
 
     # ------------------------------------------------ 多仓合并（T44）
 
@@ -461,8 +490,16 @@ class ConfigManager:
         if s.startswith('{'):
             return s
         if os.path.exists(s):
-            with open(s, encoding='utf-8') as f:
-                return f.read()
+            # L-23：Windows 记事本保存的本地配置常为 GBK——按字节读，
+            # utf-8 失败回退 gbk，仍失败容错替换
+            with open(s, 'rb') as f:
+                raw = f.read()
+            for enc in ('utf-8', 'gbk'):
+                try:
+                    return raw.decode(enc)
+                except UnicodeDecodeError:
+                    continue
+            return raw.decode('utf-8', errors='replace')
         raise ValueError('unsupported config source')
 
     def _build_site(self, item, base_url='', spider_jar=''):
@@ -589,11 +626,18 @@ class ConfigManager:
             return spider_app.spider(hoststate.get_plugins_dir(), api)
         # 内联源码：直接落盘后加载（原 app.spider 对非 http 会按文件名处理，
         # 内联源码无文件名，这里显式以 key 命名）
-        path = os.path.join(hoststate.get_plugins_dir(), f'{key}.py')
+        # H-4：key 来自远端配置，白名单化防路径穿越（../、..\、C:\ 等；
+        # Windows 上 os.path.join 遇绝对路径第二参数会直接采用后者）
+        import re as _re
+        safe_key = _re.sub(r'[^\w.-]', '_', str(key))[:64] or 'site'
+        path = os.path.join(hoststate.get_plugins_dir(), f'{safe_key}.py')
+        if not os.path.realpath(path).startswith(
+                os.path.realpath(hoststate.get_plugins_dir()) + os.sep):
+            raise ValueError(f'bad site key: {key}')
         with open(path, 'wb') as f:
             f.write(api.encode('utf-8'))
         from importlib.machinery import SourceFileLoader
-        return SourceFileLoader(key, path).load_module().Spider()
+        return SourceFileLoader(safe_key, path).load_module().Spider()
 
     def _load_cms_spider(self, key, name, api, stype):
         from cms_spider import CmsSpider

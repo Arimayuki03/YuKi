@@ -13,7 +13,7 @@
 | E. Electron 主进程 | `src/main/*` `src/preload/*` | 🟡 主体完成(13 项),**剩 L-3/L-4/L-7/L-8/L-9 共 5 项** |
 | F. 渲染层 | `src/renderer/js/*` | ❌ 未开始(13 项) |
 | B. jar 桥系列 | `python-backend/jar_bridge.py` `jar_spider.py` `site_manager.py` `jar-runner/SpiderRunner.java` `jar_patch.py` | ✅ **全部完成**(12 项，2026-08-17；SpiderRunner 已重编译，行为级验证：destroy 词不杀 JVM、__shutdown 优雅退出、重启上限生效) |
-| C. config + QuickJS | `python-backend/config.py` `app.py` `runner.py` `cms_spider.py` `js-engine/quickjs_host.py` | ❌ 未开始(9 项) |
+| C. config + QuickJS | `python-backend/config.py` `app.py` `runner.py` `cms_spider.py` `js-engine/quickjs_host.py` | ✅ **全部完成**(9 项，2026-08-17；4.4/4.5 由 C1/C2 批次提前覆盖，行为级验证：死循环拦截/恶意 key 清洗/ENTITY 拒绝/GBK 回退/签名预检) |
 | D. Kazumi 规则引擎 | `python-backend/kazumi/*` `scripts/build-python.js` | ❌ 未开始(6 项) |
 | V. 全局收尾验证 | 全部 | ❌ 未开始 |
 

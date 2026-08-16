@@ -125,7 +125,7 @@ class CmsSpider:
     # ------------------------------------------------------------ 工具
 
     def _fetch(self, params):
-        rsp = http_client.get(self.api, params=params, headers=UA, timeout=15, verify=False)
+        rsp = http_client.get(self.api, params=params, headers=UA, timeout=15, verify=True)
         rsp.encoding = rsp.apparent_encoding or 'utf-8'
         text = rsp.text.strip()
         if text.startswith('{') or text.startswith('['):
@@ -136,6 +136,12 @@ class CmsSpider:
 
     def _parse_xml(self, text):
         """type=0 苹果 CMS XML → 与 JSON 接口同构的 dict。"""
+        # L-24：billion-laughs 防护——stdlib ElementTree 会展开实体，
+        # 拒绝带 DOCTYPE/ENTITY 的文档（CMS 接口正常响应不会携带）
+        head = (text[:4096] if isinstance(text, str)
+                else text[:4096].decode('utf-8', 'ignore')).lower()
+        if '<!doctype' in head or '<!entity' in head:
+            raise ValueError('suspicious XML rejected (DOCTYPE/ENTITY)')
         root = ET.fromstring(text.encode('utf-8') if isinstance(text, str) else text)
         data = {}
         for tag in ('page', 'pagecount', 'limit', 'total'):

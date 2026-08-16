@@ -1,14 +1,20 @@
 import os
+import re
 import http_client
 from importlib.machinery import SourceFileLoader
+from urllib.parse import urlparse
 import json
 
 
 def spider(cache, api):
-    name = os.path.basename(api)
-    path = cache + "/" + name
+    # H-4：去 query/fragment 再取 basename，并清洗 Windows 非法字符——
+    # api 形如 '.../spider.py?ver=2' 时旧逻辑取到 'spider.py?ver=2'，
+    # Windows 上属非法文件名导致站点加载失败
+    name = os.path.basename(urlparse(str(api)).path) or 'spider.py'
+    name = re.sub(r'[\\/:*?"<>|#%]', '_', name)
+    path = os.path.join(cache, name)
     download(path, api)
-    name = name.split(".")[0]
+    name = name.split('.')[0]
     return SourceFileLoader(name, path).load_module().Spider()
 
 
@@ -28,9 +34,8 @@ def _fetch(url, timeout=15):
     """GET（不自动跟重定向；okhttp UA；代理优先+失败回退直连）。
 
     UA 与代理语义已收编到 http_client（WinINET/环境变量双来源）。
-    verify 保持 False 与历史行为一致（TLS 收紧属 CODE_REVIEW H-2 批次）。
     """
-    return http_client.get(url, timeout=timeout, allow_redirects=False, verify=False)
+    return http_client.get(url, timeout=timeout, allow_redirects=False, verify=True)
 
 
 def redirect(url, timeout=15):

@@ -1,3 +1,6 @@
+import inspect
+
+
 class Runner:
     def __init__(self, spider):
         self.spider = spider
@@ -15,11 +18,14 @@ class Runner:
         return self.spider.homeContent(filter)
 
     def homeVideoContent(self, pg='1'):
-        # T76：「全部」总览 feed 分页；旧爬虫不接受 pg 参数则回退无参调用
+        # T76：「全部」总览 feed 分页；旧爬虫不接受 pg 参数则回退无参调用。
+        # L-20：签名预检代替 except TypeError——业务代码抛出的 TypeError
+        # 不再被误判为"旧签名"而触发二次调用（副作用翻倍）
         try:
-            return self.spider.homeVideoContent(pg)
-        except TypeError:
-            return self.spider.homeVideoContent()
+            n = len(inspect.signature(self.spider.homeVideoContent).parameters)
+        except (TypeError, ValueError):
+            n = 1
+        return self.spider.homeVideoContent(pg) if n >= 1 else self.spider.homeVideoContent()
 
     def categoryContent(self, tid, pg, filter, extend):
         return self.spider.categoryContent(tid, pg, filter, extend)
