@@ -1,0 +1,24 @@
+# PC 端宿主核心依赖（第三方爬虫插件的完整清单见 apk_analysis/PHASE0_依赖矩阵.md）
+# 注：ujson / pyquery 暂缓 —— ujson 在新版 Python 上可能无预编译轮子，
+# 待 Phase 3 冒烟测试按需补充。
+#
+# ── 依赖锁定流程 ──────────────────────────────────────────────
+# 本文件是顶层声明（允许范围）；requirements.txt 是 pip-compile 生成的
+# 全量锁定（含传递依赖的精确版本），安装/构建一律用锁文件。
+# 升级流程：改本文件 → 重新编译 → 全量回归（npm run test:py）：
+#   python-backend/.venv/Scripts/python.exe -m piptools compile \
+#     --strip-extras --no-emit-index-url \
+#     -o python-backend/requirements.txt python-backend/requirements.in
+# 编译后若锁版本高于 venv 现装版本，先 pip install <锁内版本> 再跑回归。
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+requests>=2.32
+lxml>=5.3
+beautifulsoup4>=4.12
+pycryptodome>=3.20
+cachetools>=5.3
+# JS spider 宿主（quickjs-ng：import 名为 quickjs，cp310-abi3 轮子兼容 py3.14）
+quickjs-ng>=0.16
+# Kazumi 规则引擎 API 模式 JSONPath 解析（受限实现）
+jsonpath-ng>=1.8,<2.0
