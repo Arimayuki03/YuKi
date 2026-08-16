@@ -16,8 +16,13 @@ session-logs/
 mpv-shot*.jpg
 
 # 网盘蜘蛛运行时状态（含 cookie 敏感文件，禁止入库）
+# jar 蜘蛛按自身 cwd 写入：正常已固定到缓存目录 jar-runtime/，此处兜底拦截任意层级
 FM/
 python-backend/FM/
+DuoDuo/
+VOX/
+TV/
+TVBox/
 # 本地工具/编排器配置
 .omo/
 .zcode/

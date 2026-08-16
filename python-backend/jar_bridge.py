@@ -13,6 +13,7 @@ SpiderRunner 在 params.class_name 中接收目标类名，避免每个站点派
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -20,6 +21,7 @@ import logging
 
 import requests
 
+import hoststate
 import java_probe
 
 logger = logging.getLogger('vpc.jar')
@@ -48,6 +50,35 @@ DEX2JAR_JAR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar')
 DEXDEPS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'dexdeps')
+
+# jar 蜘蛛（夸克/FongMi 系）以自身 cwd 为基准写运行时状态（DuoDuo/.quark 含登录
+# Cookie、FM/、VOX/、TVBox/ 等）。JVM 不设 cwd 会继承后端进程 cwd —— 历史上曾
+# 因此把 Cookie 写进仓库工作区。固定到缓存目录下，并迁移历史遗留状态。
+JAR_RUNTIME_STATE_DIRS = ('DuoDuo', 'FM', 'VOX', 'TVBox', 'TV')
+_jar_runtime_dir_cache = None
+_jar_runtime_dir_lock = threading.Lock()
+
+
+def get_jar_runtime_dir():
+    global _jar_runtime_dir_cache
+    if _jar_runtime_dir_cache:
+        return _jar_runtime_dir_cache
+    with _jar_runtime_dir_lock:
+        if _jar_runtime_dir_cache:
+            return _jar_runtime_dir_cache
+        d = os.path.join(hoststate.get_cache_dir(), 'jar-runtime')
+        try:
+            os.makedirs(d, exist_ok=True)
+            legacy_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            for name in JAR_RUNTIME_STATE_DIRS:
+                src = os.path.join(legacy_base, name)
+                dst = os.path.join(d, name)
+                if os.path.isdir(src) and not os.path.exists(dst):
+                    shutil.move(src, dst)
+        except Exception:
+            logger.exception('jar runtime dir migrate failed')
+        _jar_runtime_dir_cache = d
+        return d
 
 # 全局 jar 桥缓存：key = jar_path → JarBridge 实例
 _jar_bridges = {}
@@ -405,6 +436,7 @@ class JarBridge:
             try:
                 proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=get_jar_runtime_dir(),
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                 )
             except Exception as e:
