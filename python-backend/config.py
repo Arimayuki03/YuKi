@@ -39,16 +39,27 @@ DEFAULT_RUNNER_JAR = os.path.join(
 def fetch_text(url, timeout=15):
     """http(s) 递归跟重定向取文本（委托 app.redirect，15s 超时）。失败返回 ''。
 
-    兼容两类 TVBox 生态特殊接口：
-    - 图片伪装接口（饭太硬系）：JPEG 尾部嵌入 base64 的配置 JSON，自动解出；
+    兼容三类 TVBox 生态特殊接口：
+    - 图片伪装接口（饭太硬系）：JPEG/PNG 尾部嵌入 base64 的配置 JSON，自动解出；
+    - gzip 压缩：自动解压；
     - 常规 JSON/直播源：原样返回文本。
     """
     try:
         from app import redirect
+        import gzip
         rsp = redirect(url)
         if rsp is None:
             return ''
         raw = rsp.content
+
+        # gzip 解压：检测魔数 \x1f\x8b
+        if raw[:2] == b'\x1f\x8b':
+            try:
+                raw = gzip.decompress(raw)
+            except Exception as e:
+                logger.warning('gzip decompress failed for %s: %s', url, str(e)[:80])
+                # 解压失败时回退原始内容（可能误判）
+
         img_cfg = _image_tail_config(raw)
         if img_cfg is not None:
             return img_cfg
@@ -59,13 +70,21 @@ def fetch_text(url, timeout=15):
 
 
 def _image_tail_config(raw):
-    """图片伪装接口：JPEG 尾部嵌入 base64 的配置 JSON（如 饭太硬.net/tv）。
+    """图片伪装接口：JPEG/PNG 尾部嵌入 base64 的配置 JSON（如 饭太硬.net/tv、哈基米.png）。
 
-    文件头为 JFIF/JPEG 图片，尾部追加一段长 base64；base64 解码后是配置 JSON。
+    文件头为 JFIF/JPEG 或 PNG 图片，尾部追加一段长 base64；base64 解码后是配置 JSON。
     非图片或解码失败返回 None。
     """
-    if not raw or raw[:3] != b'\xff\xd8\xff':
+    if not raw:
         return None
+
+    # 检测 JPEG 或 PNG 魔数
+    is_jpeg = raw[:3] == b'\xff\xd8\xff'
+    is_png = raw[:8] == b'\x89PNG\r\n\x1a\n'
+
+    if not (is_jpeg or is_png):
+        return None
+
     try:
         import re
         import base64
@@ -293,7 +312,7 @@ class ConfigManager:
 
     def _prepare(self, cfg, source):
         """纯构建：解析 config 并构建新站点列表，不触碰现有全局状态。"""
-        summary = {'sites': 0, 'skipped': [], 'parses': 0, 'flags': 0, 'lives': 0}
+        summary = {'sites': 0, 'skipped': [], 'parses': 0, 'flags': 0, 'lives': 0, 'panSites': 0}
         base_url = source if str(source).startswith('http') else ''
         # TVBox 标准：顶层 spider 是所有 csp_ 站点共享的 jar；解析出 http 地址后
         # 供 type=3 且 api 为类名（csp_XXX）的站点加载（见 _build_site）。
@@ -311,6 +330,10 @@ class ConfigManager:
                     if site:
                         new_sites.append(site)
                         summary['sites'] += 1
+                        # 统计网盘源：api 包含 quark/uc/baidu/tianyi 等关键词
+                        api_lower = str(item.get('api', '')).lower()
+                        if any(kw in api_lower for kw in ['quark', 'uc', 'baidu', 'tianyi', '123pan', 'xunlei']):
+                            summary['panSites'] += 1
                     else:
                         summary['skipped'].append(item.get('key', '?'))
                 except Exception as e:

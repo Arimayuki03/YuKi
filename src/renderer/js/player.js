@@ -433,8 +433,10 @@ const Player = {
             hideLoading();
             if (resolved && resolved.ok) {
                 try {
+                    // 合并 header：解析器返回的优先，但保留源 header 中未被覆盖的字段
+                    const mergedHeader = {...header, ...(resolved.header || {})};
                     const r = await window.vpc.playUrl(resolved.url, {
-                        title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
+                        title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
                     });
                     if (r && r.ok) { this._rememberSession(r); this._lastUrl = resolved.url; this._mpvToast(r, `解析成功（${resolved.via || ''}），已在 mpv 播放`); return { ok: true }; }
                     if (r && r.reason === 'mpv-missing') { warnToast('解析成功但未安装 mpv，无法播放直链'); return { ok: false, reason: 'mpv-missing' }; }

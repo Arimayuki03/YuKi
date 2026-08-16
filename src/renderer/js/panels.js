@@ -33,8 +33,14 @@ function ensureLocalPanel() {
 /** 载入配置（名称固定 config）：URL 或 JSON 均可；异步任务轮询 configTask。
  *  长时间（多仓库扫描可达分钟级）仅显示非阻塞进度条，不遮挡 UI，用户可继续操作。 */
 async function setting() {
-    const text = $('#setting_text').val().trim();
+    let text = $('#setting_text').val().trim();
     if (!text) { warnToast('请输入配置地址或 JSON'); return; }
+
+    // IDN 转换：中文域名 → punycode（复用 asciiUrl 逻辑，统一处理）
+    if (text.startsWith('http://') || text.startsWith('https://')) {
+        text = asciiUrl(text);
+    }
+
     warnToast('正在载入配置…');
     let rsp;
     try {
@@ -91,6 +97,11 @@ function applyConfigResult(sm, text) {
         if (sm.skipped && sm.skipped.length) parts.push(`跳过 ${sm.skipped.length} 个`);
         const jarN = sm.jarSites || 0;
         if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
+
+        // 新增：网盘源提示
+        const panN = sm.panSites || 0;
+        if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→源设置→网盘账号）`);
+
         warnToast(parts.join('、'));
         // 成功才持久化，下次启动自动重载；并记入历史源
         if (/^https?:\/\//i.test(text.trim())) {
