@@ -17,6 +17,9 @@ jobs:
           cache: npm
       # postinstall 的 download-binaries 已容错（|| exit 0），CI 拉不到二进制不阻塞
       - run: npm ci
+      - name: 供应链审计
+        run: npm audit --omit=dev || true
+        # 运行时依赖审计（当前仅 electron 链）；首轮观察，稳定后去掉 || true
       - run: npm run test:jsunit
       - run: npm run test:js
 
@@ -30,6 +33,11 @@ jobs:
           python-version: '3.14'
       - name: 安装锁定依赖
         run: pip install -r python-backend/requirements.txt
+      - name: 供应链审计
+        run: |
+          pip install pip-audit
+          pip-audit -r python-backend/requirements.txt --strict || true
+          # --strict 失败暂不拦截（首轮基线先观察），稳定后去掉 || true
       - name: 运行后端回归
         run: python python-backend/tests/run_all.py
         # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真跑
@@ -38,4 +46,4 @@ jobs:
           pip install ruff
           ruff check python-backend
 
-  # B3 后续增强：npm audit / pip-audit、tag push 时的 electron-builder 构建产物
+  # B3 后续增强：tag push 时的 electron-builder 构建产物

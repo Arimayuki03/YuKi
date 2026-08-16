@@ -7,15 +7,60 @@
  * ffmpeg：m3u8 切片合成 + 本地视频预览图抓帧 → vendor/ffmpeg/ffmpeg.exe（应用启动也会自动下载）
  * misans：MiSans 子集化 UI 字体 → vendor/misans/*.css + 分片 woff2（应用启动也会自动补齐）
  * Windows 额外支持：node scripts/download-binaries.js mpv --winget
+ *
+ * 完整性校验（scripts/binaries.lock.json）：
+ * - mpv/aria2：锁定 release tag 与压缩包 sha256（mpv 摘要来自 GitHub API digest）。
+ *   上游发新版不会自动跟——更新二进制 = 人工核对后改 lock 再重跑（防供应链漂移）。
+ * - anime4k/misans：逐文件 sha256；已存在的文件跳过时也校验（文件小，代价可忽略）。
+ * - ffmpeg：上游 gyan.dev 为滚动 release 无版本化摘要，暂不校验（lock 中 sha256 为 null）。
  */
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const VENDOR = path.join(ROOT, 'vendor');
 const WIN = process.platform === 'win32';
+const LOCK_PATH = path.join(__dirname, 'binaries.lock.json');
+
+function loadLock() {
+    try { return JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); }
+    catch (e) { return null; }
+}
+
+function sha256File(p) {
+    return new Promise((resolve, reject) => {
+        const h = crypto.createHash('sha256');
+        fs.createReadStream(p)
+            .on('data', (c) => h.update(c))
+            .on('end', () => resolve(h.digest('hex')))
+            .on('error', reject);
+    });
+}
+
+/** 已存在且（有期望时）哈希匹配 → true；不符则删除按缺失处理（触发重下）。 */
+async function checkExisting(p, expected) {
+    if (!fs.existsSync(p)) return false;
+    if (!expected) return true;
+    if (await sha256File(p) === expected) return true;
+    log(`${path.basename(p)} 与 binaries.lock.json 不符，重新下载…`);
+    try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
+    return false;
+}
+
+/** 新下载产物的强校验：不符直接抛错（产物已删除，不会被误用）。 */
+async function verifyDownload(p, expected, label) {
+    if (!expected) return;
+    const got = await sha256File(p);
+    if (got !== expected) {
+        try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
+        throw new Error(`${label} sha256 校验失败（期望 ${expected}，实际 ${got}）。`
+            + ' 上游可能已更新或被篡改——请人工核对后更新 scripts/binaries.lock.json');
+    }
+    log(`${label} sha256 校验通过`);
+}
 
 // shinchiro 构建（mpv 官方推荐的 Windows 发行渠道），从 latest release 动态取 tag
 const MPV_API = 'https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest';
@@ -105,17 +150,26 @@ async function downloadMpv(vendorDir) {
     // 暂存放在 vendor/.tmp（避开系统临时目录权限差异）
     const stage = path.join(vendor, '.tmp');
     ensureDir(stage);
+    const lock = loadLock();
+    const pinned = lock && lock.mpv;
 
-    // 1) 取 latest release tag，选 mpv-x86_64-<tag>-git-*.7z（非 dev / 非 v3）
-    const meta = JSON.parse(await download(MPV_API, null, { binary: false }));
+    // 1) 取 release：优先 lock 锁定 tag（可复现），无 lock 时退回 latest
+    const api = pinned && pinned.tag
+        ? `https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/tags/${pinned.tag}`
+        : MPV_API;
+    const meta = JSON.parse(await download(api, null, { binary: false }));
     const tag = meta.tag_name;
-    const asset = (meta.assets || []).find((a) => /^mpv-x86_64-\d+-git-[\da-f]+\.7z$/.test(a.name));
+    let asset = (meta.assets || []).find((a) => /^mpv-x86_64-\d+-git-[\da-f]+\.7z$/.test(a.name));
+    if (pinned && pinned.asset) {
+        asset = (meta.assets || []).find((a) => a.name === pinned.asset) || asset;
+    }
     if (!asset) throw new Error(`no mpv-x86_64 7z asset in release ${tag}`);
     log(`release ${tag} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
 
-    // 2) 下载并解压
+    // 2) 下载、校验、解压
     const archive = path.join(stage, 'vpc-mpv.7z');
     await download(asset.browser_download_url, archive);
+    if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `mpv ${tag}`);
     const tmp = path.join(stage, 'vpc-mpv-extract');
     extract(archive, tmp);
     const found = findFile(tmp, 'mpv.exe');
@@ -146,15 +200,24 @@ async function downloadAria2() {
     ensureDir(path.join(VENDOR, 'aria2'));
     const stage = path.join(VENDOR, '.tmp');
     ensureDir(stage);
+    const lock = loadLock();
+    const pinned = lock && lock.aria2;
 
-    const meta = JSON.parse(await download(ARIA2_API, null, { binary: false }));
-    const asset = (meta.assets || []).find((a) =>
+    const api = pinned && pinned.tag
+        ? `https://api.github.com/repos/aria2/aria2/releases/tags/${pinned.tag}`
+        : ARIA2_API;
+    const meta = JSON.parse(await download(api, null, { binary: false }));
+    let asset = (meta.assets || []).find((a) =>
         /^aria2-\d+[\d.]*-win-64bit-build\d+\.zip$/.test(a.name));
+    if (pinned && pinned.asset) {
+        asset = (meta.assets || []).find((a) => a.name === pinned.asset) || asset;
+    }
     if (!asset) throw new Error(`no win-64bit zip asset in release ${meta.tag_name}`);
     log(`release ${meta.tag_name} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
 
     const archive = path.join(stage, 'vpc-aria2.zip');
     await download(asset.browser_download_url, archive);
+    if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `aria2 ${meta.tag_name}`);
     const tmp = path.join(stage, 'vpc-aria2-extract');
     extract(archive, tmp);
     const found = findFile(tmp, 'aria2c.exe');
@@ -167,14 +230,17 @@ async function downloadAria2() {
 async function downloadAnime4k() {
     const dir = path.join(VENDOR, 'anime4k');
     ensureDir(dir);
+    const lock = loadLock();
+    const locked = (lock && lock.anime4k) || {};
     let okCount = 0;
     for (const rel of ANIME4K_FILES) {
         const dest = path.join(dir, path.basename(rel)); // 扁平化：只留文件名
-        if (fs.existsSync(dest) && fs.statSync(dest).size >= 128) { okCount += 1; continue; }
+        if (await checkExisting(dest, locked[path.basename(rel)])) { okCount += 1; continue; }
         let got = false;
         for (const base of ANIME4K_BASES) {
             try {
                 await download(base + rel, dest);
+                await verifyDownload(dest, locked[path.basename(rel)], `anime4k ${path.basename(rel)}`);
                 okCount += 1;
                 got = true;
                 break;
@@ -221,15 +287,19 @@ const MISANS_WEIGHTS = ['Regular', 'Bold'];
 async function downloadMisans() {
     const dir = path.join(VENDOR, 'misans');
     ensureDir(dir);
+    const lock = loadLock();
+    const locked = (lock && lock.misans) || {};
     // 1) 拉三个字重的 CSS（内含各分片 url 与 unicode-range）
     const cssFiles = [];
     for (const w of MISANS_WEIGHTS) {
         const dest = path.join(dir, `MiSans-${w}.min.css`);
-        if (!(fs.existsSync(dest) && fs.statSync(dest).size > 1024)) {
-            try { await download(`${MISANS_BASE}MiSans-${w}.min.css`, dest); }
-            catch (e) { log(`MiSans-${w} CSS 下载失败：${e.message}`); continue; }
+        if (await checkExisting(dest, locked[`MiSans-${w}.min.css`])) { cssFiles.push(dest); continue; }
+        try {
+            await download(`${MISANS_BASE}MiSans-${w}.min.css`, dest);
+            await verifyDownload(dest, locked[`MiSans-${w}.min.css`], `misans MiSans-${w}.min.css`);
+            cssFiles.push(dest);
         }
-        cssFiles.push(dest);
+        catch (e) { log(`MiSans-${w} CSS 下载失败：${e.message}`); }
     }
     if (!cssFiles.length) { log('MiSans CSS 全部下载失败'); return; }
     // 2) 解析所有 CSS 引用的分片，逐个下载（并发 8，跳过已存在 → 幂等）
@@ -243,8 +313,9 @@ async function downloadMisans() {
     const pool = [];
     for (const name of list) {
         const dest = path.join(dir, name);
-        if (fs.existsSync(dest) && fs.statSync(dest).size > 500) { ok++; continue; }
+        if (await checkExisting(dest, locked[name])) { ok++; continue; }
         pool.push(download(`${MISANS_BASE}${name}`, dest)
+            .then(() => verifyDownload(dest, locked[name], `misans ${name}`))
             .then(() => ok++)
             .catch((e) => log(`分片 ${name} 下载失败：${e.message}`)));
         if (pool.length >= 8) { await Promise.all(pool); pool.length = 0; }
