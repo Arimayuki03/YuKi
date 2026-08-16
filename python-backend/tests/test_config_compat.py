@@ -33,7 +33,9 @@ BASELINE = os.path.join(HERE, 'compat_baseline.json')
 PROGRESS = os.path.join(HERE, 'compat_progress.jsonl')   # 逐仓增量落盘（随时可看/断点续跑）
 REPORT = os.path.join(HERE, 'compat_report.txt')
 
-REPO_TIMEOUT = 420       # 单仓子进程硬超时（秒）——jar 密集仓 dex2jar 转换可达数分钟
+REPO_TIMEOUT = 180       # 单仓子进程硬超时（秒）。原 420s 过长且 jar 密集仓
+                         # 在 Windows PIPE 模式下因 pipe 缓冲区满而死锁——
+                         # 改用文件重定向后，多数仓 <60s 完成，180s 足够兜底。
 HOME_PROBE_MAX = 12      # 每仓首页冒烟站点数上限
 HOME_PROBE_TIMEOUT = 12  # 单站 homeContent 超时（秒）
 RATE_TOLERANCE = 0.05    # 聚合率对比容差（±5pp 网络抖动）
@@ -177,12 +179,27 @@ def run_corpus(repos, resume=False):
             continue
         print('[%2d/%d] %s ...' % (i + 1, len(repos), repo['name']), flush=True)
         t0 = time.time()
+        # 子进程输出重定向到临时文件，而非 capture_output=True（PIPE）。
+        # 原因：jar spider 初始化会向 stderr 打印大量堆栈（10KB+），
+        # Windows 默认 4KB 管道缓冲区塞满后子进程阻塞在 write()，
+        # 父进程只在 run() 结束才读 → 死锁，表现为子进程卡到 420s 超时。
+        out_fd, out_path = tempfile.mkstemp(prefix='vpc-compat-out-')
+        err_fd, err_path = tempfile.mkstemp(prefix='vpc-compat-err-')
+        os.close(out_fd)
+        os.close(err_fd)
         try:
             env = dict(os.environ, PYTHONIOENCODING='utf-8')
-            p = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), '--one', str(i)],
-                capture_output=True, timeout=REPO_TIMEOUT, env=env, cwd=BASE)
-            line = [l for l in p.stdout.decode('utf-8', 'replace').splitlines()
+            with open(out_path, 'w', encoding='utf-8') as out_f, \
+                 open(err_path, 'w', encoding='utf-8') as err_f:
+                p = subprocess.run(
+                    [sys.executable, os.path.abspath(__file__), '--one', str(i)],
+                    stdout=out_f, stderr=err_f,
+                    timeout=REPO_TIMEOUT, env=env, cwd=BASE)
+            with open(out_path, encoding='utf-8', errors='replace') as f:
+                out_text = f.read()
+            with open(err_path, encoding='utf-8', errors='replace') as f:
+                err_text = f.read()
+            line = [l for l in out_text.splitlines()
                     if l.startswith('COMPAT_RESULT ')]
             if p.returncode == 0 and line:
                 rec = json.loads(line[-1][len('COMPAT_RESULT '):])
@@ -192,12 +209,18 @@ def run_corpus(repos, resume=False):
                             'build_rate': 0.0, 'home_ok': 0, 'home_total': 0,
                             'home_rate': 0.0,
                             'note': 'runner crashed rc=%s: %s' % (
-                                p.returncode, p.stderr.decode('utf-8', 'replace')[-160:])})
+                                p.returncode, err_text[-160:])})
         except subprocess.TimeoutExpired:
             rec = {k: repos[i].get(k, '') for k in ('name', 'tags')}
             rec.update({'fetch': 0, 'parse': 0, 'sites': 0, 'skipped_n': 0,
                         'build_rate': 0.0, 'home_ok': 0, 'home_total': 0,
                         'home_rate': 0.0, 'note': 'runner timeout (%ss)' % REPO_TIMEOUT})
+        finally:
+            for _p in (out_path, err_path):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
         rec['elapsed'] = round(time.time() - t0, 1)
         results.append(rec)
         # 增量落盘：任何时刻中断，已完成仓库的结果不丢
