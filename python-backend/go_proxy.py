@@ -615,6 +615,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if (not share_id) and 'pan.quark.cn/s/' in file_id:
                 pwd = file_id.split('/s/')[-1].split('?')[0].strip()
                 url = _quark_share_play_url(pwd, headers)
+            elif (not share_id) and file_id and 'pan.quark.cn/s/' not in file_id:
+                # 我的夸克网盘文件（shareId 空、fileId 为纯 fid）：
+                # 不经 jar 转存（ea3f 转存链路 pwd_id 为空必失败），
+                # 直接 v2/play 取直链；失败退 file/download（网盘内文件无 share 语义）。
+                try:
+                    url = _quark_v2play(file_id, headers)
+                except Exception:
+                    url = None
+                if not url:
+                    try:
+                        import json as _json
+                        r = _qses.post(
+                            'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
+                            headers={**headers, 'Content-Type': 'application/json'},
+                            data=_json.dumps({'fids': [file_id]}),
+                            timeout=25, verify=False, allow_redirects=False)
+                        d = ((r.json() or {}).get('data') or [{}])[0]
+                        url = d.get('download_url') or ''
+                    except Exception:
+                        url = None
             elif share_id and file_id:
                 # 蜘蛛已解析出分享参数：分享文件直链（file/download POST）或转存
                 try:

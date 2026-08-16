@@ -79,6 +79,24 @@ class JarSpider(Spider):
             if not self.last_error:
                 self.last_error = '网盘解析失败：Cookie 无效或已过期，或分享链接已失效'
             return {'url': id, 'parse': 1}
+        # 我的夸克网盘兜底：jar 转存链路（sharepage/save 需 pwd_id）对网盘内文件
+        # 必失败 → url 空。此时 vodId 是 [{"folder":"<fid>","shareId":"",...}]，
+        # 直接用 folder 拼 go-proxy do=pan URL（go-proxy 已支持 shareId 空 + 纯 fid）。
+        # 端口用 go-proxy 主端口常量 9978（EXTRA_PORTS 7944/1314 为兼容旧 jar 硬编码）。
+        if not (result or {}).get('url'):
+            try:
+                vid = json.loads(id) if isinstance(id, str) and id.lstrip().startswith('[') else None
+                folder = ''
+                share_id = ''
+                if isinstance(vid, list) and vid:
+                    folder = str((vid[0] or {}).get('folder') or '')
+                    share_id = str((vid[0] or {}).get('shareId') or '')
+                if folder and not share_id:
+                    result = {'url': 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s'
+                                      % folder,
+                              'parse': 0, 'header': result.get('header') or {}}
+            except Exception:
+                pass
         return result
 
     def liveContent(self, url):
