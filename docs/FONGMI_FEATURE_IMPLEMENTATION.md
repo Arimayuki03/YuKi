@@ -71,8 +71,23 @@ Android API、native 或 DRM 而 Android Worker 未启用时，站点保留在�
 Android 运行时。播放请求的 requestId/playSessionId 已贯穿 `/action`、JAR RPC、解析、
 本地代理和 mpv。确定性基线只依赖 loopback 夹具，公共仓仅作带网络元数据的趋势报告。
 
-本节只记录 G0；进程 Supervisor、生产 Worker 进程隔离/硬终止和熔断仍属于 S1，未在本轮提前实现。
-验收证据与受管环境的 Node 子进程权限说明见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)。
+本节只记录 G0；G0 验收时尚未实现的 Supervisor、进程隔离/硬终止和熔断，现状见下方
+S1 小节。验收证据与受管环境的 Node 子进程权限说明见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)。
+
+### 1.4 S1 可终止运行时（2026-08-18）
+
+S1.1-S1.4 已完成。Windows 统一使用 spawn Worker 和 Job Object；远程 Python、QuickJS 与
+portable JAR 控制调用不再在 FastAPI 进程执行。Worker 在加载不可信代码前停在启动屏障，
+由父进程成功绑定 Job 后放行。绝对 deadline 覆盖队列、Worker/JVM 启动、
+RPC 和重启；超时/取消会结束实际进程树。JAR Proxy 视频主体继续走一次性 loopback socket，
+控制 pipe 只携带描述符，Range 断连以 JVM 上游关闭和数据端口关闭为证据。聚合搜索按
+20 秒总预算、16 个最大在途源返回已完成结果；50 源中 10 个永久阻塞的夹具连续搜索两次
+仍各返回 40 个健康结果。连续 3 次同阶段可重试失败熔断 60 秒，Cookie 缺失与网络超时采用
+不同恢复策略，配置/Cookie/主动重试恢复均走 HTTP 集成测试。20 次热重载和应用退出验证
+无 Python/Java/Node 后代或监听端口残留。
+
+本轮到 S1 为止，未进入 C2；Android Worker、drpy/Node Worker 和后续配置能力路由仍按任务书
+后续阶段执行。
 
 ## 2. 目标架构
 

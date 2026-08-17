@@ -24,6 +24,7 @@ import logging
 
 import hoststate
 from runtime.errors import RuntimeError as RuntimeContractError
+from runtime.contracts import current_runtime_request
 from runtime.health import android_worker_enabled
 import http_client
 import java_probe
@@ -76,6 +77,14 @@ class JarProxyBody:
         return self._closed
 
 CALL_TIMEOUT = 60
+
+
+def _runtime_budget_seconds(default=CALL_TIMEOUT):
+    request = current_runtime_request()
+    if request is None:
+        return float(default)
+    request.raise_if_cancelled()
+    return max(0.001, min(float(default), request.remaining_ms / 1000.0))
 _id_lock = threading.Lock()
 _id_counter = 0
 
@@ -279,12 +288,13 @@ class JarBridge:
                 return b
             # 任务二·机制B：jar 加载期预启动其硬编码的本地代理端口，
             # 避免首次播放才补监听（首连失败）
-            try:
-                import go_proxy
-                for p in _scan_jar_ports(jar_path):
-                    go_proxy.ensure_listener(p)
-            except Exception:
-                pass
+            if os.environ.get('VPC_WORKER_CONTROL_ONLY') != '1':
+                try:
+                    import go_proxy
+                    for p in _scan_jar_ports(jar_path):
+                        go_proxy.ensure_listener(p)
+                except Exception:
+                    pass
             report = classify_jar_compatibility(jar_path)
             logger.info('jar compatibility %s: %s', os.path.basename(jar_path), report)
             b = JarBridge(jar_path, runner_jar=runner_jar)
@@ -749,17 +759,29 @@ class JarBridge:
         """
         # 排队观测（C3）：JVM 按桥串行，高并发下等待时长是"是否需要按站点
         # 拆桥/JVM 池"的数据依据。P95 持续 > 2s 再考虑动架构。
-        wait_started = time.time()
-        with self._call_lock:  # 每实例串行化：跨站点并发 call 排队执行（构造即建，M-12）
-            waited = time.time() - wait_started
+        wait_started = time.monotonic()
+        budget = _runtime_budget_seconds()
+        deadline = wait_started + budget
+        if not self._call_lock.acquire(timeout=budget):
+            raise TimeoutError('[L3:jar] deadline expired while queued for jar worker')
+        try:
+            waited = time.monotonic() - wait_started
             if waited > 2.0:
                 logger.info('[jar:%s] call queued %.1fs before lock (method=%s)',
                             self.jar_path and os.path.basename(self.jar_path), waited, method)
-            return self._call_inner(method, *args, class_name=class_name, pan_cookies=pan_cookies)
+            return self._call_inner(
+                method, *args, class_name=class_name,
+                pan_cookies=pan_cookies, deadline=deadline)
+        finally:
+            self._call_lock.release()
 
-    def _call_inner(self, method, *args, class_name='', pan_cookies=None):
+    def _call_inner(self, method, *args, class_name='', pan_cookies=None, deadline=None):
+        deadline = deadline or (time.monotonic() + _runtime_budget_seconds())
         if not self._ensure_alive():
             raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable"}')
+        request = current_runtime_request()
+        if request is not None:
+            request.raise_if_cancelled()
         # 构建 params dict
         params = {}
         m = method
@@ -841,7 +863,7 @@ class JarBridge:
                 with self._lock:
                     self._pending.pop(rid, None)
                 raise RuntimeError(f'[L3:jar] jar write after restart failed: {e2}')
-        if not fut.wait(CALL_TIMEOUT):
+        if not fut.wait(max(0.001, deadline - time.monotonic())):
             with self._lock:
                 self._pending.pop(rid, None)
             # JVM 内请求可能死循环/阻塞（如网盘 Cookie 等待、站点响应挂起）。
@@ -864,20 +886,49 @@ class JarBridge:
         body 由 ``JarProxyBody`` 按块读取。调用仍复用同一 JVM 的串行锁，
         但视频主体不会经过 JSON-RPC stdout。
         """
-        wait_started = time.time()
-        with self._call_lock:
-            waited = time.time() - wait_started
+        return self._call_proxy_with_mode(
+            params, class_name=class_name, pan_cookies=pan_cookies,
+            return_descriptor=False)
+
+    def call_proxy_descriptor(self, params=None, class_name='', pan_cookies=None):
+        """返回 Proxy 流的 loopback 描述符，供 Supervisor 控制 Worker 使用。
+
+        Worker 不连接也不搬运视频主体；父进程收到描述符后直接连接 JVM 的
+        一次性数据 socket，保持控制面与数据面分离。
+        """
+        return self._call_proxy_with_mode(
+            params, class_name=class_name, pan_cookies=pan_cookies,
+            return_descriptor=True)
+
+    def _call_proxy_with_mode(self, params=None, class_name='', pan_cookies=None,
+                              return_descriptor=False):
+        wait_started = time.monotonic()
+        budget = _runtime_budget_seconds()
+        deadline = wait_started + budget
+        if not self._call_lock.acquire(timeout=budget):
+            raise TimeoutError('[L3:jar] deadline expired while queued for jar proxy')
+        try:
+            waited = time.monotonic() - wait_started
             if waited > 2.0:
                 logger.info('[jar:%s] proxy queued %.1fs',
                             self.jar_path and os.path.basename(self.jar_path), waited)
-            return self._call_proxy_inner(params or {}, class_name=class_name,
-                                          pan_cookies=pan_cookies)
+            return self._call_proxy_inner(
+                params or {}, class_name=class_name,
+                pan_cookies=pan_cookies, deadline=deadline,
+                return_descriptor=return_descriptor)
+        finally:
+            self._call_lock.release()
 
-    def _call_proxy_inner(self, params, class_name='', pan_cookies=None):
+    def _call_proxy_inner(self, params, class_name='', pan_cookies=None,
+                          deadline=None, return_descriptor=False):
         from proxy_contract import ProxyResult
 
+        deadline = deadline or (time.monotonic() + _runtime_budget_seconds())
         if not self._ensure_alive():
             raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable"}')
+        request = current_runtime_request()
+        if request is not None:
+            request.raise_if_cancelled()
         request_params = dict(params or {})
         request_params['__static_proxy'] = True
         if class_name:
@@ -922,7 +973,7 @@ class JarBridge:
                     self._pending.pop(rid, None)
                 raise RuntimeError(f'[L3:jar] jar proxy write after restart failed: {e2}')
 
-        if not fut.wait(CALL_TIMEOUT):
+        if not fut.wait(max(0.001, deadline - time.monotonic())):
             with self._lock:
                 self._pending.pop(rid, None)
             self._kill_proc()
@@ -938,6 +989,16 @@ class JarBridge:
         headers = {str(k): str(v) for k, v in (info.get('headers') or {}).items()
                    if v is not None}
         stream = info.get('stream')
+        if return_descriptor:
+            self._crash_count = 0
+            return {
+                '__vpc_proxy__': True,
+                'status': status,
+                'mime': mime,
+                'headers': headers,
+                'stream': stream if isinstance(stream, dict) else None,
+                'body': info.get('body') or '',
+            }
         close = None
         if isinstance(stream, dict) and stream.get('port') and stream.get('token'):
             body = JarProxyBody(stream.get('host') or '127.0.0.1', stream['port'],
@@ -962,7 +1023,13 @@ class JarBridge:
         with self._lock:
             proc = self.proc
             self.proc = None
+            pending = list(self._pending.values())
             self._pending.clear()
+        for _resolve, reject in pending:
+            try:
+                reject(RuntimeError('jar process restarted'))
+            except Exception:
+                pass
         if proc:
             try:
                 proc.stdin.close()

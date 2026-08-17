@@ -19,6 +19,11 @@ class TestLayeredDiagnostics(unittest.TestCase):
         self.sites = SiteManager()
         self.cfg = ConfigManager(self.sites)
 
+    def tearDown(self):
+        # ConfigManager now owns spawn Workers; tests must exercise the same
+        # explicit lifecycle as configuration reload/application shutdown.
+        self.sites.destroy_all()
+
     def test_type_unsupported_categorization(self):
         """验证不支持的 type 被分类为 L2:type 错误"""
         config = {

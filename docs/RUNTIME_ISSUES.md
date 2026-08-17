@@ -16,6 +16,7 @@
 | R7 | 观看统计断流重连重复累计已改为按观看链去重 | ✅ 已验证：独立实例 CDP 实测重连只补增量、次数不重复 |
 | R8 | `ended` 事件附带会话号并按会话匹配「看完」判定 | ✅ 已验证：旧会话延迟 ended 不误判新会话，新会话自身 ended 判看完 |
 | R9 | G0 运行时契约、站点健康和兼容夹具退出边界 | ✅ 已验证：离线 4 夹具、Python 全量、Node 222/222、JS 语法 40/40 |
+| R11 | S1 不可信运行时隔离、硬超时、聚合取消和熔断恢复 | ✅ 已验证：Python 24 阶段、Node 225/225、JS 语法 40/40、Ruff/ESLint 0 error |
 
 ---
 
@@ -42,8 +43,9 @@
 ## 2026-08-18 G0 运行时契约与兼容退出验证
 
 本轮只覆盖 G0.1/G0.2/G0.3。兼容套件使用 loopback 正常、异常、超时和无限循环夹具；
-超时/无限循环子进程先写出阶段报告，再由父进程按预算终止整棵进程树。夹具额外生成的
-Python 后代在终止后均不存在，报告没有写入 Cookie、token 或 Authorization。
+G0 当时的超时夹具由仓级父进程树兜底。S1 收口后该路径已替换为逐 requestId 的 Supervisor
+硬取消，超时/无限循环记录自然退出且后代 Python 为 0；报告不写入 Cookie、token 或
+Authorization。
 
 `RuntimeRequest` 的客户端断连、deadline 和主动取消都映射为结构化 L3 错误，运行时登记
 在协作式退出后清理；解析 JSON/iframe 超时会通知主进程取消并释放隐藏窗口槽位。JAR/Spider
@@ -53,6 +55,25 @@ Python 后代在终止后均不存在，报告没有写入 Cookie、token 或 Au
 
 生产 Worker 的进程隔离、硬杀、重启和熔断仍属于 S1；本记录的硬终止证据仅针对兼容套件
 父子进程边界，不把测试夹具的能力宣称为生产 Supervisor 能力。
+
+## 2026-08-18 S1 可终止运行时与资源回收验证
+
+本轮完成 S1.1-S1.4。Windows Worker 统一使用 `spawn`，远程 Python、QuickJS 和 portable
+JAR 控制调用均进入可终止进程；绝对 deadline 覆盖排队、Worker/JVM 启动、RPC 与重启。
+超时和取消会终止实际 Worker 进程树，不以 `Future.cancel()` 作为任务结束证明。Worker/JVM
+崩溃后可自动恢复；聚合取消按 `requestId` 精确匹配，不误杀同站点并发调用。同阶段连续
+3 次可重试失败进入 60 秒熔断，半开只允许一个探测。
+
+确定性故障测试覆盖正常、异常、无限循环、超时、取消、进程崩溃、自动重启、HTTP 熔断
+恢复、20 次真实 Python/Node 配置重载、FastAPI/Electron 退出、Python/Java/Node 后代和
+端口释放。50 个源中 10 个永久阻塞时，连续两次聚合搜索都在总预算内返回 40 个健康结果，
+阻塞 Worker 全部退出。JAR Proxy 的媒体字节经一次性 loopback 数据 socket 传输；Range
+断连验证 JVM 上游 `InputStream.close()` 和数据端口关闭，不以本地 `_closed` 代替。
+
+最终 `npm run test:all` 通过：Python `run_all.py` 24 阶段通过并编译 70 个文件，Node 单元
+225/225，JavaScript 语法 40/40，ESLint 0 error（64 条既有 warning），Ruff 通过。诊断夹具
+访问 `example.com` 时得到预期 404/502，这属于外部响应/故障分类覆盖，不是代码回归失败。
+本轮未进入 C2；Android/Dex/native JAR 和真实公共仓可用性仍按后续阶段及外部环境单独验收。
 
 ---
 

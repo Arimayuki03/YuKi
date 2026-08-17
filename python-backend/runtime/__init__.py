@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""统一运行时控制面契约。
-
-G0 只定义请求、响应、错误和站点健康状态；进程级 Supervisor 属于 S1，
-不在本包中提前实现。
-"""
+"""统一运行时控制面契约与 S1 进程监督边界。"""
 
 from .contracts import RuntimeRequest, RuntimeResponse, bind_runtime_request, current_runtime_request
 from .errors import RuntimeError, ERROR_SPECS, redact_sensitive
@@ -14,3 +10,6 @@ __all__ = [
     'ERROR_SPECS', 'bind_runtime_request', 'current_runtime_request',
     'redact_sensitive',
 ]
+from .supervisor import RuntimePolicy, RuntimeSupervisor, destroy_all_supervisors
+
+__all__ += ['RuntimePolicy', 'RuntimeSupervisor', 'destroy_all_supervisors']

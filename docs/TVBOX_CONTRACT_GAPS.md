@@ -112,8 +112,26 @@ Python `Runner` 保持六方法入口；JAR、JS、Python、CMS 均归一为 `ur
   `L2_SITE_REQUIRES_ANDROID` / C2，不再进入普通 JVM 路径并误报 healthy。
 - 兼容基线默认使用 loopback 正常/异常/超时/无限循环夹具；21 仓公共语料改为显式
   `--public`，外网失败不参与确定性成功判定。
-- 兼容套件超时由父进程执行进程树终止，并在离线夹具中验证后代 Python 进程已回收；
-  `Future.cancel()` 只用于停止等待，不作为硬终止证据。
+- 兼容套件按探测 requestId 调用 `/runtime/cancel`，只有 Worker 已终止且 dispatch 已收尾才
+  记录 cancelled；离线超时/无限循环夹具自然退出并验证后代 Python 为 0。外层进程树终止
+  只保留为仓级异常兜底，`Future.cancel()` 不作为硬终止证据。
 - `/action` 端点覆盖正常、异常、deadline、客户端断连和资源登记清理；解析 JSON/iframe
   取消会中止请求、销毁隐藏窗口并释放解析槽位。JAR/Spider 内嵌错误会被提升为非 2xx
   结构化响应，不再以 HTTP 200 + 字符串 error 表示失败。
+
+## 2026-08-18 S1 可终止边界收敛
+
+- 远程 Python、QuickJS、CMS 和 portable JAR 控制调用按站点进入 spawn Worker；子进程在
+  加载不可信代码前等待父进程绑定 Windows Job Object，绑定失败不继续运行。Job Object
+  负责内存上限和整棵进程树回收，超时后以 Worker 实际退出作为完成证据。
+- 调用预算从进入 Supervisor 队列时开始，覆盖锁等待、Worker/JVM 启动、RPC 和重启。
+  JAR 慢调用不再让后续请求无限排队；JVM 被杀后下一健康请求会重建运行时。
+- JAR Proxy 的控制帧只含状态、headers 和一次性 stream 描述符；媒体字节仍走 loopback
+  socket。Range 中断由上游 `InputStream.close()` 回连和数据端口关闭共同证明，不把视频
+  整体编码到 JSON/stdout。
+- 聚合搜索采用 20 秒总预算、16 个最大在途源和增量背压；未完成源由 Supervisor 终止。
+  `Future.cancel()` 仅阻止未开始的协调任务，不再充当底层工作结束证明。
+- 连续 3 次同阶段可重试错误熔断 60 秒，单探测半开成功后恢复。Cookie 缺失使用
+  `L3_RUNTIME_CREDENTIALS_REQUIRED` 且不自动重试，网络超时使用可重试错误；Cookie/配置
+  更新或用户主动重试可提前探测，三条恢复入口均有 HTTP `/action` 集成测试。
+- 仍未解决的 Android/Dex/native JAR 属于后续 A4/C2 路由范围；S1 没有进入或伪造 C2。

@@ -25,12 +25,12 @@ class OfflineCompatibilityTest(unittest.TestCase):
         env = {
             **os.environ,
             'PYTHONIOENCODING': 'utf-8',
-            'VPC_COMPAT_HOME_TIMEOUT': '0.5',
-            'VPC_COMPAT_HOME_BUDGET': '1.0',
-            # Timeout/infinite fixtures intentionally leave a non-daemon
-            # probe worker alive after writing their report.  This forces the
-            # parent process-tree termination path instead of an in-child
-            # forced-exit shortcut.
+            # Keep the HTTP call alive beyond the aggregate probe budget so
+            # the suite must send exact request cancellation and wait for the
+            # Supervisor hard stop; a client-side requests timeout cannot hide
+            # broken cancellation semantics.
+            'VPC_COMPAT_HOME_TIMEOUT': '5',
+            'VPC_COMPAT_HOME_BUDGET': '0.5',
             'VPC_COMPAT_REPO_TIMEOUT': '6',
         }
         started = time.monotonic()
@@ -48,13 +48,13 @@ class OfflineCompatibilityTest(unittest.TestCase):
         self.assertEqual(records['offline-error']['stages']['S3']['state'], 'failed')
         self.assertEqual(records['offline-timeout']['stages']['S3']['state'], 'timeout')
         self.assertEqual(records['offline-infinite']['stages']['S3']['state'], 'timeout')
-        self.assertTrue(records['offline-timeout']['termination']['forced'])
-        self.assertTrue(records['offline-infinite']['termination']['forced'])
+        self.assertFalse(records['offline-timeout']['termination']['forced'])
+        self.assertFalse(records['offline-infinite']['termination']['forced'])
         self.assertFalse(records['offline-timeout']['termination'].get('descendantsAlive', True))
         self.assertFalse(records['offline-infinite']['termination'].get('descendantsAlive', True))
         self.assertTrue(records['offline-timeout']['termination'].get('descendantPids'))
         self.assertTrue(records['offline-infinite']['termination'].get('descendantPids'))
-        self.assertEqual(report['aggregate']['forced_terminations'], 2)
+        self.assertEqual(report['aggregate']['forced_terminations'], 0)
         self.assertFalse(records['offline-error']['sites_detail'][0]['healthy'])
         self.assertFalse(records['offline-timeout']['sites_detail'][0]['healthy'])
         self.assertFalse(records['offline-infinite']['sites_detail'][0]['healthy'])

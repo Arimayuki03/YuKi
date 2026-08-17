@@ -41,8 +41,12 @@ ERROR_SPECS = {
     'L3_RUNTIME_INVALID_REQUEST': ('runtime', False, 400, '运行时请求参数无效'),
     'L3_RUNTIME_TIMEOUT': ('runtime', True, 504, '站点运行时响应超时'),
     'L3_RUNTIME_CANCELLED': ('runtime', True, 499, '站点运行时请求已取消'),
+    'L3_RUNTIME_BUSY': ('runtime', True, 429, '站点运行时队列已满，请稍后重试'),
+    'L3_RUNTIME_CIRCUIT_OPEN': ('runtime', True, 503, '站点运行时暂时熔断，稍后将自动重试'),
+    'L3_RUNTIME_CREDENTIALS_REQUIRED': ('runtime', False, 401, '站点需要有效的 Cookie 或登录凭据'),
     'L3_RUNTIME_RESTARTED': ('runtime', True, 503, '站点运行时已重启，请重试'),
     'L3_RUNTIME_CRASHED': ('runtime', True, 503, '站点运行时异常退出'),
+    'L3_RUNTIME_PROTOCOL_ERROR': ('runtime', True, 502, '站点运行时通信协议异常'),
     # L4 route/parser
     'L4_PLAY_ROUTE_INVALID': ('parse', False, 422, '播放路由结果无效'),
     'L4_PARSE_FAILED': ('parse', True, 502, '播放地址解析失败'),
@@ -135,6 +139,28 @@ class RuntimeError(Exception):
         if include_raw and self.raw_error:
             payload['rawError'] = self.raw_error
         return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any] | None, *, fallback_code='L3_RUNTIME_CALL_FAILED'):
+        """从 Worker 的 JSON 错误帧恢复稳定错误对象。
+
+        Worker 数据来自隔离进程，字段必须重新经过错误目录和脱敏逻辑，不能
+        直接反序列化任意异常对象。
+        """
+        data = dict(payload or {})
+        code = str(data.get('code') or fallback_code)
+        if code not in ERROR_SPECS:
+            code = fallback_code
+        return cls(
+            code,
+            message=str(data.get('message') or ''),
+            site_key=str(data.get('siteKey') or ''),
+            runtime=str(data.get('runtime') or ''),
+            request_id=str(data.get('requestId') or ''),
+            play_session_id=str(data.get('playSessionId') or ''),
+            details=data.get('details') if isinstance(data.get('details'), Mapping) else {},
+            raw_error=str(data.get('rawError') or ''),
+        )
 
 
 def error_from_exception(exc: Exception, *, stage: str = 'runtime', request=None,

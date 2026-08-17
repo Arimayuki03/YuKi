@@ -1100,6 +1100,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             pass
 
 
+_base_servers = []
+
+
 def start_go_proxy():
     """启动本地代理服务（幂等：已监听则复用）。
 
@@ -1107,6 +1110,9 @@ def start_go_proxy():
     另起 EXTRA_PORTS（1314，jar 硬编码的播放转发模板）监听。
     返回 server 对象或 None。
     """
+    global _base_servers
+    if _base_servers:
+        return _base_servers[0]
     servers = []
     for port in [PORT] + list(EXTRA_PORTS):
         try:
@@ -1119,6 +1125,7 @@ def start_go_proxy():
         t.start()
         servers.append(srv)
         logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', port)
+    _base_servers = servers
     return servers[0] if servers else None
 
 
@@ -1167,3 +1174,21 @@ def ensure_listener(port):
         _extra_servers[port] = srv
         logger.info('go-proxy 泛化监听已启动: 127.0.0.1:%d', port)
         return True
+
+
+def stop_go_proxy():
+    """关闭全部固定/动态监听器；配置重置和应用退出共用。"""
+    global _base_servers
+    with _extra_servers_lock:
+        servers = list(_base_servers) + list(_extra_servers.values())
+        _base_servers = []
+        _extra_servers.clear()
+    for server in servers:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass

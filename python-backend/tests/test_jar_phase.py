@@ -147,10 +147,15 @@ class Spider(Spider):
 
 
 def main():
-    test_java_probe()
-    test_norm_jar_src()
-    test_jar_spider_direct()
-    test_config_load_jar_sites()
+    try:
+        test_java_probe()
+        test_norm_jar_src()
+        test_jar_spider_direct()
+        test_config_load_jar_sites()
+    finally:
+        # 配置站点现在由 spawn Supervisor 持有，脚本结束必须走与应用退出
+        # 相同的显式回收链，不能依赖 Future/解释器隐式退出。
+        server.sites.destroy_all()
 
     print()
     print(f'RESULT: {len(PASSED)} passed, {len(FAILED)} failed')

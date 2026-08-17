@@ -1,7 +1,7 @@
 # TVBox / FongMi 功能一致性详细任务书
 
 - **编写日期**：2026-08-18
-- **状态**：G0.1、G0.2、G0.3 验收通过（2026-08-18）；S1 未开始
+- **状态**：G0.1-G0.3、S1.1-S1.4 验收通过（2026-08-18）；未进入 C2
 - **目标平台**：Windows 优先，macOS/Linux 在 PC 原生运行时稳定后跟进
 - **产品目标**：用户只输入一个影视仓库地址，应用自动获取配置、识别并加载可运行的站点，最终成功播放用户有权访问的媒体
 - **相关文档**：[现有兼容计划](TVBOX_COMPAT_PLAN.md)、[剩余验收项](TVBOX_COMPAT_PLAN_REMAINING.md)、[契约差距](TVBOX_CONTRACT_GAPS.md)、[FongMi 功能实现](FONGMI_FEATURE_IMPLEMENTATION.md)、[系统架构](ARCHITECTURE.md)
@@ -283,11 +283,11 @@ flowchart TD
 - [x] 基线更新必须显式使用 `--update-baseline`。
 
 实现记录（2026-08-18）：默认兼容测试改为四个 loopback 离线夹具；21 仓公共语料仅在
-`--public` 下运行。首页探测不再使用会在 `__exit__` 等待失控线程的临时线程池；子进程
-写出阶段结果后保持存活，由父进程在预算到期时实际终止整棵进程树，并记录后代 Python
-进程已回收。报告保存 S0-S6、每站 runtime、compatibility、init/home/play/media 状态，
-以及公共模式的测试时间、网络出口、失败域名和 HTTP 状态。正常、异常、超时、无限循环
-和取消均有离线测试。
+`--public` 下运行。首页探测不使用会在 `__exit__` 等待失控线程的临时线程池；G0 验收时
+曾由仓级父进程树终止超时夹具，S1.3 后已升级为逐 requestId 硬取消并自然退出，仓级强杀
+只保留给整个子进程崩溃/失联兜底。报告保存 S0-S6、每站 runtime、compatibility、
+init/home/play/media 状态，以及公共模式的测试时间、网络出口、失败域名和 HTTP 状态。
+正常、异常、超时、无限循环和取消均有离线测试。
 
 ### G0.2 定义统一运行时与错误契约
 
@@ -357,10 +357,11 @@ Android Worker 未启用时返回 `L2_SITE_REQUIRES_ANDROID`，不会回退为 h
 G0.1-G0.3 的确定性离线验收和现有回归均通过，本阶段退出；未实施 RuntimeSupervisor、
 生产 Worker 进程隔离/强制终止、熔断或 S1 的搜索迁移。本轮到此停止，不进入 S1。
 
-验收证据：`test_config_compat_offline.py` 通过 4 个离线夹具，超时和无限循环均由父进程
-树终止且后代 Python 进程为 0；`run_all.py` 全部 Python 阶段和 57 个文件编译通过；
+G0 检查点当时的验收证据：`test_config_compat_offline.py` 通过 4 个离线夹具，超时和无限循环
+由父进程树终止且后代 Python 进程为 0；`run_all.py` 全部 Python 阶段和 57 个文件编译通过；
 Node 单元测试 222/222、JavaScript 语法 40/40、ESLint 0 error、Ruff 通过。默认受管
 环境的 Node 子进程测试会因 `spawn EPERM` 失败，已在允许子进程的权限下复跑并通过。
+当前 S1 验收已由下节的 Supervisor 精确取消/自然退出证据取代该故意驻留夹具。
 
 ---
 
@@ -388,10 +389,19 @@ Node 单元测试 222/222、JavaScript 语法 40/40、ESLint 0 error、Ruff 通�
 
 验收：
 
-- [ ] 无限循环夹具在 deadline 后被强制结束；
-- [ ] Worker 崩溃一次自动重启，连续崩溃进入熔断；
-- [ ] 配置重载 20 次无僵尸进程；
-- [ ] 后端退出不等待失控 Worker。
+- [x] 无限循环夹具在 deadline 后被强制结束；
+- [x] Worker 崩溃一次自动重启，连续崩溃进入熔断；
+- [x] 配置重载 20 次无僵尸进程；
+- [x] 后端退出不等待失控 Worker。
+
+实现记录（2026-08-18）：新增 spawn-only `RuntimeSupervisor`、JSON pipe transport、
+Worker 入口与按运行时策略。远程 Python import、QuickJS eval 和 portable JAR 控制调用不再
+进入 FastAPI 进程。spawn 子进程先停在可信 `booted` 屏障，父进程成功绑定 kill-on-close
+Job Object 后才发送 `start`，Job 绑定失败会终止启动，避免不可信 import/JVM 抢先派生后代。
+队列、串行锁、启动握手与调用共享绝对 deadline；终止函数以进程已退出为证据。配置替换、
+FastAPI lifespan、设置重启和 Electron 退出共用进程树销毁链。正常、异常、无限循环、超时、
+取消、崩溃、启动期派生、20 次真实 Python/Node 热重载、活跃 Worker 退出和端口释放均有
+Windows 离线测试。
 
 ### S1.2 迁移 JAR 调用边界
 
@@ -416,10 +426,18 @@ Node 单元测试 222/222、JavaScript 语法 40/40、ESLint 0 error、Ruff 通�
 
 验收：
 
-- [ ] 一个 JAR 方法阻塞不会让后续请求无限排队；
-- [ ] 杀死 JVM 后下一次健康请求可以自动恢复；
-- [ ] 视频代理不通过 stdout/JSON 整体传输；
-- [ ] Range 请求中断后上游连接释放。
+- [x] 一个 JAR 方法阻塞不会让后续请求无限排队；
+- [x] 杀死 JVM 后下一次健康请求可以自动恢复；
+- [x] 视频代理不通过 stdout/JSON 整体传输；
+- [x] Range 请求中断后上游连接释放。
+
+实现记录（2026-08-18）：每个 JAR 站点由独立 Supervisor Worker 管理 `SpiderRunner`，
+同一 JAR 的坏站不会占住另一站的 JVM。`JarBridge` 的锁等待、JVM 启动、RPC 等待和重启
+共享请求剩余预算；超时杀死 Worker/Java 进程树。静态 Proxy 控制帧只返回状态、响应头和
+一次性 loopback stream 描述符，视频字节由父进程直接连接 JVM 数据 socket；客户端关闭时
+关闭该 socket。实际 Java 夹具覆盖异常、无限阻塞、取消、JVM 外部终止与恢复、配置热重载
+和 FastAPI 退出；Range 中断夹具由上游 `InputStream.close()` 回连观察端口，并验证一次性
+数据端口不再接受连接，不再用 Python 对象的 `_closed` 字段代替上游释放证据。
 
 ### S1.3 修复聚合搜索和兼容套件取消语义
 
@@ -442,9 +460,17 @@ Node 单元测试 222/222、JavaScript 语法 40/40、ESLint 0 error、Ruff 通�
 
 验收：
 
-- [ ] 50 个源中 10 个永久阻塞时，搜索仍在总预算内返回；
-- [ ] 后续搜索不被上一批遗留任务占满；
-- [ ] 测试进程按时结束，无人工 Ctrl+C。
+- [x] 50 个源中 10 个永久阻塞时，搜索仍在总预算内返回；
+- [x] 后续搜索不被上一批遗留任务占满；
+- [x] 测试进程按时结束，无人工 Ctrl+C。
+
+实现记录（2026-08-18）：聚合搜索以 20 秒总预算和最多 16 个在途源做增量提交；预算结束
+返回已完成结果，并按 `requestId` 并行终止本批实际 Worker，不误杀同站点并发的非搜索调用。
+`Future.cancel()` 只阻止尚未开始的协调任务，不作为结束证明；线程池显式
+`shutdown(wait=False)`。50 源（10 个永久阻塞）故障测试连续执行两次搜索，每次都在同一
+总预算内返回 40 个健康结果，阻塞 Worker 全部退出。兼容套件为每个探测分配 requestId，
+预算结束调用 `/runtime/cancel` 精确终止对应 Worker；只有接口同时报告 Worker 已终止且
+dispatch 已收尾时才写 `cancelled`，超时/无限循环夹具自然退出，不依赖外层 `taskkill`。
 
 ### S1.4 熔断、退避与健康恢复
 
@@ -461,9 +487,23 @@ Node 单元测试 222/222、JavaScript 语法 40/40、ESLint 0 error、Ruff 通�
 
 验收：
 
-- [ ] 坏源不会持续刷请求和日志；
-- [ ] 临时网络恢复后无需重启应用即可恢复；
-- [ ] Cookie 缺失与网络超时使用不同恢复策略。
+- [x] 坏源不会持续刷请求和日志；
+- [x] 临时网络恢复后无需重启应用即可恢复；
+- [x] Cookie 缺失与网络超时使用不同恢复策略。
+
+实现记录（2026-08-18）：同阶段连续 3 次可重试失败后打开 60 秒熔断，半开只放行一个探测；
+成功探测清零并关闭。配置更新建立新运行时，Cookie 更新或 `runtimeRetry` 可提前放行一次探测。
+凭据缺失使用不可自动重试的 `L3_RUNTIME_CREDENTIALS_REQUIRED`，网络超时使用可重试的
+`L3_RUNTIME_TIMEOUT`；熔断期间不会启动新 Worker。确定性 HTTP `/action` 测试分别穿过
+`runtimeRetry`、`panCookie act=set` 和配置重载，再执行健康调用验证熔断/永久凭据阻断恢复。
+
+### S1 阶段退出结论（2026-08-18）
+
+S1.1-S1.4 以可观察资源状态完成确定性 Windows 离线验收，第一迭代退出标准达到；本轮在此
+停止，不进入 C2。验证覆盖启动屏障、实际 Python/QuickJS/JAR 无限循环、JVM 崩溃和重启、
+HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node 热重载、FastAPI/Electron
+退出、Python/Java/Node 后代及监听端口回收；未新增按仓库名或 JAR 哈希的特判。兼容夹具
+不再故意驻留等待父进程强杀。公共仓外网趋势仍与代码回归分开，不作为本阶段确定性门禁。
 
 ---
 
@@ -1059,17 +1099,17 @@ subs, position, flag, drm, msg, code, proxy
 
 ### 第 3～6 天：Supervisor
 
-- [ ] 完成 S1.1 最小 Supervisor；
-- [ ] 先迁移 Python/测试 Worker，验证 Windows `spawn`；
-- [ ] 接入硬 deadline、terminate、restart；
-- [ ] 增加退出和配置重载资源回收测试。
+- [x] 完成 S1.1 最小 Supervisor；
+- [x] 先迁移 Python/测试 Worker，验证 Windows `spawn`；
+- [x] 接入硬 deadline、terminate、restart；
+- [x] 增加退出和配置重载资源回收测试。
 
 ### 第 7～8 天：JAR 与搜索
 
-- [ ] 将 JAR 生命周期接到 Supervisor；
-- [ ] 队列等待计入调用预算；
-- [ ] 修复聚合搜索和兼容套件 `shutdown(wait=True)` 卡住；
-- [ ] 验证一个阻塞 JAR 不影响其他健康源。
+- [x] 将 JAR 生命周期接到 Supervisor；
+- [x] 队列等待计入调用预算；
+- [x] 修复聚合搜索和兼容套件 `shutdown(wait=True)` 卡住；
+- [x] 验证一个阻塞 JAR 不影响其他健康源。
 
 ### 第 9～10 天：健康度和回归
 

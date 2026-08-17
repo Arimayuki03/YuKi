@@ -37,6 +37,8 @@ class SiteHealth:
     last_error: RuntimeError | None = None
     consecutive_failures: int = 0
     circuit_open_until: float = 0
+    failure_stage: str = ''
+    half_open: bool = False
 
     def __post_init__(self):
         self.capabilities = sorted(set(str(v) for v in self.capabilities if v))
@@ -63,6 +65,9 @@ class SiteHealth:
         self.last_success_at = time.time()
         self.last_error = None
         self.consecutive_failures = 0
+        self.failure_stage = ''
+        self.circuit_open_until = 0
+        self.half_open = False
         return self
 
     def record_success(self, _capability: str = ''):
@@ -80,6 +85,9 @@ class SiteHealth:
         self.last_success_at = time.time()
         self.last_error = None
         self.consecutive_failures = 0
+        self.failure_stage = ''
+        self.circuit_open_until = 0
+        self.half_open = False
         return self
 
     def record_failure(self, error, *, stage: str = 'runtime'):
@@ -90,17 +98,55 @@ class SiteHealth:
         err.runtime = err.runtime or self.runtime
         self.last_error = err
         self.healthy = False
-        self.consecutive_failures += 1
+        if err.code.endswith('_CANCELLED'):
+            pass
+        elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN':
+            retry_ms = int((err.details or {}).get('retryAfterMs') or 0)
+            self.circuit_open_until = max(
+                self.circuit_open_until, time.time() + retry_ms / 1000.0)
+        elif err.retryable:
+            if self.failure_stage == err.stage:
+                self.consecutive_failures += 1
+            else:
+                self.failure_stage = err.stage
+                self.consecutive_failures = 1
+            if self.consecutive_failures >= 3:
+                self.circuit_open_until = time.time() + 60
+        else:
+            self.consecutive_failures = 0
         if err.code == 'L2_SITE_REQUIRES_ANDROID':
             self.runtime = 'android'
             self.compatibility = 'C2'
             self.state = 'requires_android'
         elif err.code.endswith('_CANCELLED'):
             self.state = 'cancelled'
+        elif err.code == 'L3_RUNTIME_CREDENTIALS_REQUIRED':
+            self.state = 'credentials_required'
+        elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN' or self.circuit_open_until > time.time():
+            self.state = 'circuit-open'
         elif err.code.endswith('_TIMEOUT'):
             self.state = 'timeout'
         else:
             self.state = 'unavailable'
+        return self
+
+    def apply_runtime_state(self, state):
+        data = dict(state or {})
+        self.consecutive_failures = int(data.get('consecutiveFailures') or 0)
+        self.failure_stage = str(data.get('failureStage') or '')
+        remaining = int(data.get('circuitOpenForMs') or 0)
+        self.circuit_open_until = time.time() + remaining / 1000.0 if remaining else 0
+        self.half_open = str(data.get('state') or '') == 'half-open'
+        if str(data.get('state') or '') == 'open':
+            self.healthy = False
+            self.state = 'circuit-open'
+        return self
+
+    def force_half_open(self):
+        self.circuit_open_until = 0
+        self.half_open = True
+        if self.state in ('circuit-open', 'credentials_required'):
+            self.state = 'half-open'
         return self
 
     def to_dict(self):
@@ -118,6 +164,8 @@ class SiteHealth:
             'lastError': self.last_error.to_dict() if self.last_error else None,
             'consecutiveFailures': int(self.consecutive_failures),
             'circuitOpenUntil': int(self.circuit_open_until * 1000) if self.circuit_open_until else 0,
+            'failureStage': self.failure_stage,
+            'halfOpen': bool(self.half_open),
         }
 
 

@@ -40,7 +40,8 @@ def _find_tool(name):
 
 def _ensure_fixture():
     """用源码夹具生成 jar，避免把二进制测试产物提交到仓库。"""
-    if os.path.isfile(FIXTURE_JAR):
+    if (os.path.isfile(FIXTURE_JAR)
+            and os.path.getmtime(FIXTURE_JAR) >= os.path.getmtime(FIXTURE_SRC)):
         return True
     javac = _find_tool('javac')
     jar = _find_tool('jar')

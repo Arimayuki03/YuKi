@@ -133,13 +133,25 @@ FastAPI Python 后端
   method、deadlineMs 和 args；Runner 与 JAR RPC 复用同一上下文。
 - 错误按 L1 配置、L2 站点、L3 运行时、L4 解析、L5 媒体、L6 播放器分层；运行时错误
   返回非 2xx HTTP 和结构化 `RuntimeResponse`，UI 文本与日志均脱敏限长。
-- 客户端断连、deadline 和主动取消通过 `/runtime/cancel` 传播到协作式 Spider/JAR/解析请求；
-  解析超时会销毁隐藏窗口并释放槽位。非协作式生产 Worker 的强制终止不在 G0 保证内。
+- 客户端断连、deadline 和主动取消通过 `/runtime/cancel` 传播到 Supervisor；非协作式
+  Python/QuickJS/JAR 调用会终止实际 Worker 进程树。解析超时仍会销毁隐藏窗口并释放槽位。
 - `SiteHealth` 分别记录 configured、built、initialized、healthy。`/sites.sites` 是内容页
   可用清单，`/sites.diagnostics` 保存包括不兼容站点在内的完整诊断。
 - 普通 JVM 仅接收 portable JAR；Dex、Android API、native 与 DRM 信号在 Android Worker
   未启用时标记 C2 / `requires_android`，不得计入 healthy。
-- 当前 G0 仍以进程外的兼容测试子进程作为硬退出边界；生产 Worker Supervisor 属于 S1。
+- 远程 Python、QuickJS、CMS 和 portable JAR 控制调用按站点进入 spawn Worker。Windows
+  使用 kill-on-close Job Object 管理 Worker 与 Java/Node/Python 后代，并施加运行时内存上限。
+- Worker 控制面使用本地 pipe 的有大小上限 JSON 帧；spawn 子进程先发送可信 `booted` 并
+  等待，父进程绑定 Windows Job Object 后才允许加载站点模块/QuickJS/JAR。JAR
+  `InputStream` 只经一次性 loopback 数据 socket 传输。队列等待、启动、RPC 与重启共享
+  同一个绝对 deadline。
+- 聚合搜索最多保留 16 个在途源，只等待整体预算；超时源由 Supervisor 实际终止，不以
+  `Future.cancel()` 作为结束证据。
+- 同阶段连续 3 次可重试失败熔断 60 秒；半开只允许一个探测。Cookie 缺失不自动重试，
+  Cookie 更新、配置更新或用户重试可提前触发探测。
+- 配置原子替换、FastAPI lifespan、设置重置和 Electron 退出复用同一资源销毁链；Windows
+  Electron 后端停止检查 `taskkill` 返回码并在失败时回退。真实 Python 根进程及其
+  Python/Java/Node 后代、JAR Worker/JVM 和本地监听端口均由生命周期测试观察回收。
 
 ## 11. 构建与验证
 

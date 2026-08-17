@@ -133,8 +133,12 @@ def _start_http_backend(tmp):
 
 def _http_action(base, token, data, timeout=20):
     import requests
-    rsp = requests.post(base + '/action', data=data,
-                        headers={'x-token': token}, timeout=timeout)
+    payload_data = dict(data or {})
+    request_id = str(payload_data.get('requestId') or ('compat-' + uuid.uuid4().hex))
+    payload_data['requestId'] = request_id
+    rsp = requests.post(base + '/action', data=payload_data,
+                        headers={'x-token': token, 'x-request-id': request_id},
+                        timeout=timeout)
     try:
         payload = rsp.json()
     except ValueError:
@@ -142,6 +146,27 @@ def _http_action(base, token, data, timeout=20):
     if isinstance(payload, dict):
         payload.setdefault('code', rsp.status_code)
     return rsp.status_code, payload
+
+
+def _cancel_http_action(base, token, request_id, timeout=3):
+    """Cancel one exact action and return only observable cleanup facts."""
+    import requests
+    request_id = str(request_id or '')
+    if not request_id:
+        return {'cancelled': False, 'completed': False, 'workerTerminated': False}
+    try:
+        rsp = requests.post(
+            base + '/runtime/cancel',
+            params={'token': token},
+            json={'requestId': request_id},
+            headers={'x-token': token, 'x-request-id': request_id},
+            timeout=timeout,
+        )
+        result = rsp.json()
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        return {'cancelled': False, 'completed': False,
+                'workerTerminated': False, 'reason': str(exc)}
 
 
 def _load_via_http(base, token, url):
@@ -274,12 +299,27 @@ def run_one(repo):
     probe = ([s for s in all_sites if s.get('spiderType') == 'jar'][:4] +
              [s for s in all_sites if s.get('spiderType') != 'jar'][:HOME_PROBE_MAX])[:HOME_PROBE_MAX]
 
+    probe_control = {}
+
     def probe_home(site):
         outcome = {'key': site.get('key'), 'home': _stage(), 'play': _stage(), 'media': _stage()}
+        request_id = 'compat-probe-' + uuid.uuid4().hex
+        control = {'requestId': request_id, 'runtimeActive': False}
+        probe_control[site.get('key')] = control
+
+        def action(data):
+            control['runtimeActive'] = True
+            try:
+                return _http_action(
+                    base, token, {**data, 'requestId': request_id},
+                    timeout=HOME_PROBE_TIMEOUT)
+            finally:
+                control['runtimeActive'] = False
+
         try:
-            status, r = _http_action(base, token, {
+            status, r = action({
                 'do': 'homeContent', 'site': site.get('key', ''),
-            }, timeout=HOME_PROBE_TIMEOUT)
+            })
             if status != 200 or (isinstance(r.get('error'), dict)):
                 error = r.get('error') or {}
                 outcome['home'] = _stage('failed', error.get('code') or error.get('message') or status)
@@ -294,10 +334,10 @@ def run_one(repo):
             if not vod_id:
                 outcome['play'] = _stage('not_tested', 'home has no vod_id')
                 return outcome
-            d_status, detail = _http_action(base, token, {
+            d_status, detail = action({
                 'do': 'detailContent', 'site': site.get('key', ''),
                 'ids': json.dumps([vod_id], ensure_ascii=False),
-            }, timeout=HOME_PROBE_TIMEOUT)
+            })
             vod = ((detail.get('list') or [{}])[0]) if d_status == 200 else {}
             play_from = str(vod.get('vod_play_from') or '').split('$$$')[0]
             play_group = str(vod.get('vod_play_url') or '').split('$$$')[0]
@@ -305,10 +345,10 @@ def run_one(repo):
             if not episode_id:
                 outcome['play'] = _stage('failed', 'detail has no episode id')
                 return outcome
-            p_status, play = _http_action(base, token, {
+            p_status, play = action({
                 'do': 'playerContent', 'site': site.get('key', ''),
                 'flag': play_from, 'id': episode_id, 'vipFlags': '[]',
-            }, timeout=HOME_PROBE_TIMEOUT)
+            })
             media_url = str(play.get('url') or '')
             if p_status != 200 or not media_url:
                 error = play.get('error') or {}
@@ -346,13 +386,35 @@ def run_one(repo):
             outcomes.append({'key': futures[fut].get('key'), 'home': _stage('failed', exc),
                              'play': _stage(), 'media': _stage()})
     for fut in pending:
-        # A running Future cannot be hard-stopped by cancel().  Record that
-        # the parent stopped waiting and leave termination to the outer
-        # process-tree boundary exercised below.
+        site = futures[fut]
+        control = probe_control.get(site.get('key')) or {}
+        cancel_state = {}
+        if control.get('runtimeActive'):
+            cancel_state = _cancel_http_action(
+                base, token, control.get('requestId'), timeout=3)
+        # Future.cancel() is only allowed to prevent a task that has not
+        # started.  A running probe is called cancelled only after the exact
+        # backend request reports both Worker termination and dispatch cleanup.
+        never_started = fut.cancel()
+        confirmed = bool(
+            cancel_state.get('cancelled')
+            and cancel_state.get('workerTerminated')
+            and cancel_state.get('completed'))
+        if confirmed:
+            try:
+                fut.result(timeout=2)
+            except Exception:
+                pass
+            confirmed = fut.done()
+        remaining_state = ('cancelled' if confirmed else 'not_tested')
+        remaining_reason = ('exact request Worker terminated' if confirmed else
+                            'probe budget exceeded before cleanup confirmation')
+        if never_started:
+            remaining_reason = 'probe did not start before budget expired'
         outcomes.append({'key': futures[fut].get('key'),
                          'home': _stage('timeout', 'home probe budget exceeded'),
-                         'play': _stage('cancelled', 'parent stopped waiting'),
-                         'media': _stage('cancelled', 'parent stopped waiting')})
+                         'play': _stage(remaining_state, remaining_reason),
+                         'media': _stage(remaining_state, remaining_reason)})
     # 关键：不能使用 ``with ThreadPoolExecutor``，其 __exit__ 会 wait=True。
     pool.shutdown(wait=False, cancel_futures=True)
     rec['home_total'] = len(probe)
@@ -403,7 +465,12 @@ def run_one(repo):
 
 
 def _finish(rec, tmp, http_instance=None, fixture_instance=None):
-    """优雅关停 JVM 并清理临时目录（失败不影响结果上报）。"""
+    """走生产销毁链关停 Worker/JVM/端口并清理临时目录。"""
+    try:
+        import server
+        server.sites.destroy_all()
+    except Exception:
+        pass
     try:
         from jar_bridge import JarBridge
         JarBridge.destroy_all()
@@ -413,7 +480,13 @@ def _finish(rec, tmp, http_instance=None, fixture_instance=None):
         http_instance.should_exit = True
         thread = getattr(http_instance, '_compat_thread', None)
         if thread is not None:
-            thread.join(timeout=2)
+            thread.join(timeout=1)
+            if thread.is_alive():
+                # The test host already ran the production resource teardown
+                # above. Do not leave Uvicorn's graceful keep-alive wait to
+                # keep the per-repository process alive after its result.
+                http_instance.force_exit = True
+                thread.join(timeout=3)
     if fixture_instance is not None:
         try:
             fixture_instance.shutdown()
@@ -540,6 +613,7 @@ def run_corpus(repos, resume=False):
         err_path = _compat_temp_path('vpc-compat-err-')
         p = None
         child_pid_path = _compat_temp_path('vpc-compat-child-')
+        recorded_child_pid = None
         forced_termination = False
         try:
             env = dict(os.environ, PYTHONIOENCODING='utf-8')
@@ -605,6 +679,7 @@ def run_corpus(repos, resume=False):
         finally:
             if p is not None and p.poll() is None:
                 _terminate_process_tree(p)
+            recorded_child_pid = _fixture_child_pid(child_pid_path)
             for _p in (out_path, err_path):
                 try:
                     os.remove(_p)
@@ -615,6 +690,24 @@ def run_corpus(repos, resume=False):
             except OSError:
                 pass
         rec['elapsed'] = round(time.time() - t0, 1)
+        if not forced_termination:
+            descendant_alive = _pid_exists(recorded_child_pid)
+            rec['termination'] = {
+                'mode': 'natural', 'forced': False,
+                'descendantPids': [recorded_child_pid] if recorded_child_pid else [],
+                'descendantsAlive': bool(descendant_alive),
+            }
+            if descendant_alive:
+                if os.name == 'nt':
+                    subprocess.run(
+                        ['taskkill', '/PID', str(recorded_child_pid), '/T', '/F'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=5, check=False)
+                else:
+                    try:
+                        os.kill(recorded_child_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
         rec.setdefault('termination', {'mode': 'natural', 'forced': False})
         results.append(rec)
         if not rec.get('fetch'):
@@ -732,21 +825,6 @@ def compare_expectations(repos, results):
     return (not problems), problems
 
 
-def _hold_after_timeout_record(record):
-    """Keep a timed-out child alive so the parent kill path is exercised.
-
-    This is deliberately driven by the observed stage state, never by a
-    repository/JAR name.  The parent owns the hard process-tree boundary.
-    """
-    if str(os.environ.get('VPC_COMPAT_HOLD_AFTER_RESULT', '1')).lower() not in ('1', 'true', 'yes'):
-        return
-    stages = record.get('stages') or {}
-    if (stages.get('S3') or {}).get('state') != 'timeout':
-        return
-    while True:
-        time.sleep(1)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--one', type=int, default=None, help='子进程模式：跑语料中第 N 个仓库')
@@ -767,7 +845,6 @@ def main():
     if args.one is not None:
         rec = run_one(all_repos[args.one])
         print('COMPAT_RESULT ' + json.dumps(rec, ensure_ascii=False), flush=True)
-        _hold_after_timeout_record(rec)
         return
 
     if args.one_name:
@@ -776,7 +853,6 @@ def main():
             raise SystemExit('unknown compatibility repo: %s' % args.one_name)
         rec = run_one(matched[0])
         print('COMPAT_RESULT ' + json.dumps(rec, ensure_ascii=False), flush=True)
-        _hold_after_timeout_record(rec)
         return
 
     if args.only:

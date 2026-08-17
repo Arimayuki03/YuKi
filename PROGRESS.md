@@ -69,8 +69,9 @@
 
 ### TVBox / FongMi G0 基线、契约与健康模型（2026-08-18）
 
-- 兼容基线默认使用 loopback 正常、异常、超时和无限循环夹具；父进程按预算终止进程树，
-  并验证后代 Python 已回收；公共 21 仓仅通过显式 `--public` 运行。
+- 兼容基线默认使用 loopback 正常、异常、超时和无限循环夹具；G0 时由仓级父进程树兜底，
+  S1 后改为逐 requestId 终止实际 Worker 并自然退出，后代 Python 已回收；公共 21 仓仅
+  通过显式 `--public` 运行。
 - `RuntimeRequest`、`RuntimeResponse`、L1-L6 `RuntimeError` 和 `SiteHealth` 已接入 `/action`、
   Runner、JAR RPC、解析窗口、本地代理和 mpv；异常响应统一为非 2xx 结构化错误。
 - 配置摘要严格区分 configured/built/initialized/healthy；Android/Dex/native/DRM JAR 在
@@ -148,6 +149,14 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-08-18 S1.1-S1.4 验收：新增 spawn-only `RuntimeSupervisor`；Worker 在不可信加载前等待
+Windows Job 绑定，deadline 覆盖排队、启动和收尾，超时/取消以进程树实际退出为证据。
+JAR Range 断连可观察上游关闭；50 源连续搜索两次均在总预算内返回；配置/Cookie/用户重试
+恢复穿过 HTTP 集成路径。20 次真实 Python/Node 热重载及 FastAPI/Electron 退出无
+Python/Java/Node 后代或监听端口残留。`npm run test:all` 全绿：Python 24 阶段、70 文件编译、
+Node 225/225、JS 语法 40/40、ESLint 0 error（64 条既有 warning）、Ruff PASS。本轮按任务书
+停止，未进入 C2。
 
 2026-08-18 G0.1-G0.3 验收：`npm run test:all` 在允许 Node 子进程的权限下通过；Python `run_all.py`
 全部阶段通过并编译 57 个文件，离线兼容矩阵 4/4 通过（超时/无限循环强制终止 2/2、后代

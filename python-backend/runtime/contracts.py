@@ -18,11 +18,13 @@ DEFAULT_DEADLINES_MS = {
     'homeVideoContent': 15000,
     'categoryContent': 20000,
     'searchContent': 20000,
+    'search': 20000,
     'detailContent': 20000,
     'playerContent': 30000,
     'parse': 20000,
     'mediaProbe': 15000,
     'playerStart': 30000,
+    'proxy': 30000,
 }
 MAX_DEADLINE_MS = 120000
 _ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$')

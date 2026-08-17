@@ -8,7 +8,7 @@
  * （extraResources/python-backend/video-pc-backend.exe），无 venv 依赖。
  */
 const { app } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
@@ -153,7 +153,24 @@ class PythonBridge extends EventEmitter {
     stop() {
         this.stopping = true;
         this._stopHealthCheck();
-        if (this.proc) { this.proc.kill(); this.proc = null; }
+        if (this.proc) {
+            const proc = this.proc;
+            this.proc = null;
+            // Windows 的 ChildProcess.kill() 只结束 Python 宿主，不保证清理其
+            // spawn Worker、JVM 或 Node 后代。退出/设置重置必须杀完整进程树。
+            if (process.platform === 'win32' && proc.pid) {
+                try {
+                    const result = spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
+                        windowsHide: true,
+                        stdio: 'ignore',
+                        timeout: 5000,
+                    });
+                    if (result.error || result.status !== 0) proc.kill();
+                } catch (e) { proc.kill(); }
+            } else {
+                proc.kill();
+            }
+        }
     }
 }
 

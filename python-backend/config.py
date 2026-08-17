@@ -16,16 +16,19 @@ type 处理：
 import os
 import json
 import logging
+import hashlib
+import re
+from urllib.parse import urlparse
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
 
 import app as spider_app
 import hoststate
-from runner import Runner
 from site_manager import Site
 from js_spider import make_js_spider_class
 from runtime.errors import RuntimeError as RuntimeContractError, error_from_exception, redact_sensitive
 from runtime.health import infer_site_health, android_worker_enabled
+from runtime.supervised_runner import SupervisedRunner
 
 logger = logging.getLogger('vpc.config')
 
@@ -423,18 +426,24 @@ class ConfigManager:
                     # 过渡期保留既有 [L2:type]/[L3:js] 细分类，后接稳定 L1-L6
                     # 错误码；原始文本先脱敏并限长，诊断页仍能解释 drpy/JS 等根因。
                     legacy = redact_sensitive(err_msg, 240)
+                    runtime_tag = {
+                        'jar': '[L3:jar]', 'js': '[L3:js]',
+                        'cms': '[L3:cms]', 'python': '[L3:py]',
+                    }.get(error.runtime or health.runtime, '')
+                    if runtime_tag and runtime_tag not in legacy:
+                        legacy = runtime_tag + ' ' + legacy
                     summary['skipped'].append(
                         f"{item.get('key', '?')}: {legacy} [{error.code}] {error.message}")
                     # 任务五：按层级标签聚合错误计数
                     if error.code in ('L2_SITE_UNSUPPORTED', 'L2_SITE_REQUIRES_ANDROID') or '[L2:type]' in err_msg:
                         summary['build_errors']['type_unsupported'] += 1
-                    elif '[L3:jar]' in err_msg:
+                    elif health.runtime == 'jar' or error.runtime == 'jar' or '[L3:jar]' in err_msg:
                         summary['build_errors']['jar_failed'] += 1
-                    elif '[L3:js]' in err_msg:
+                    elif health.runtime == 'js' or error.runtime == 'js' or '[L3:js]' in err_msg:
                         summary['build_errors']['js_failed'] += 1
-                    elif '[L3:cms]' in err_msg:
+                    elif health.runtime == 'cms' or error.runtime == 'cms' or '[L3:cms]' in err_msg:
                         summary['build_errors']['cms_failed'] += 1
-                    elif '[L3:py]' in err_msg:
+                    elif health.runtime == 'python' or error.runtime == 'python' or '[L3:py]' in err_msg:
                         summary['build_errors']['py_failed'] += 1
                     else:
                         summary['build_errors']['other'] += 1
@@ -675,8 +684,8 @@ class ConfigManager:
         if stype == 3 and api.startswith('csp_'):
             # jar 内 Java 爬虫类（TVBox csp_*.jar）：经 JVM 子进程桥加载（见 jar_bridge.py）
             # api 为纯类名（csp_XXX）时，jar 来自站点 `jar` 字段或 config 顶层共享 spider。
-            spider = self._load_jar_spider(key, name, api, effective_jar)
-            if spider is None:
+            runner = self._load_jar_runner(key, name, api, effective_jar)
+            if runner is None:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
                 raise ValueError('[L3:jar] jar runtime unavailable or no shared jar')
             ext = self._resolve_ext(ext, base_url)
@@ -684,7 +693,7 @@ class ConfigManager:
             site.health = health
             site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
-            site.runner = Runner(spider)
+            site.runner = runner
             site.searchable = bool(item.get('searchable', 1))
             site.quick_search = bool(item.get('quickSearch', 1))
             site.filterable = bool(item.get('filterable', 1))
@@ -693,7 +702,7 @@ class ConfigManager:
             if ext:
                 ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
                 if ext_str:
-                    spider._ext = ext_str
+                    site.ext = ext_str
             self._initialize_site(site, ext)
             logger.info('site built: %s (%s, type=jar)', key, name)
             return site
@@ -701,8 +710,8 @@ class ConfigManager:
         # jar 直链 api（.jar 后缀）或 jar 内类名（csp_ 开头）之外的形态：若 api 是 http .jar 直链
         # （如部分源直接以 jar URL 作为 api），同样走 jar 装配
         if stype == 3 and api.split('?')[0].lower().endswith('.jar'):
-            spider = self._load_jar_spider(key, name, api)
-            if spider is None:
+            runner = self._load_jar_runner(key, name, api)
+            if runner is None:
                 logger.info('skip site %s: jar runtime unavailable (java not found)', key)
                 raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             ext = self._resolve_ext(ext, base_url)
@@ -710,14 +719,14 @@ class ConfigManager:
             site.health = health
             site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
-            site.runner = Runner(spider)
+            site.runner = runner
             site.searchable = bool(item.get('searchable', 1))
             site.quick_search = bool(item.get('quickSearch', 1))
             site.filterable = bool(item.get('filterable', 1))
             if ext:
                 ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
                 if ext_str:
-                    spider._ext = ext_str
+                    site.ext = ext_str
             self._initialize_site(site, ext)
             logger.info('site built: %s (%s, type=jar-url)', key, name)
             return site
@@ -730,29 +739,36 @@ class ConfigManager:
         # JS 爬虫：type=4，或 type=3 且 api 为 http .js 直链（CatVod/TVBox JS 协议）
         is_js = stype == 4 or (stype == 3 and api.startswith('http') and api.split('?')[0].endswith('.js'))
         if is_js:
-            spider = self._load_js_spider(key, name, api)
+            runner = SupervisedRunner({
+                'kind': 'js', 'site_key': key, 'name': name, 'api': api,
+                'proxy_port': hoststate.get_port(),
+            })
         elif stype == 3:
-            spider = self._load_python_spider(key, api)
+            path = self._materialize_python_spider(key, api)
+            runner = SupervisedRunner({
+                'kind': 'python', 'site_key': key, 'name': name, 'path': path,
+            })
         elif stype in (0, 1):
             # CMS 站源（苹果 CMS JSON/XML 接口）：纯 HTTP 直连，无运行时依赖
-            spider = self._load_cms_spider(key, name, api, stype)
+            if not api.startswith('http'):
+                raise ValueError('[L3:cms] cms site needs http api')
+            runner = SupervisedRunner({
+                'kind': 'cms', 'site_key': key, 'name': name,
+                'api': api, 'stype': stype,
+            })
         else:
             logger.info('skip site %s: unsupported type %s', key, stype)
             raise ValueError(f'[L2:type] unsupported type {stype}')
 
         # 代理地址必须携带站点上下文；否则多个 JS/Python/CMS 源同时播放
         # 时，旧的 recent loader 选择会把请求送到另一站点。
-        try:
-            spider.site_key = key
-        except Exception:
-            pass
         site = Site(key, api, ext)
         site.health = health
         site.headers = item.get('headers') or item.get('header') or {}
         # 供统一 /proxy 在缺少 siteKey 时按 FongMi 的 recent loader
         # 语义选择 JS/Python/CMS Spider。JAR 分支在上方已显式标记。
         site.spider_type = 'js' if is_js else ('py' if stype == 3 else 'cms')
-        site.runner = Runner(spider)
+        site.runner = runner
         site.searchable = bool(item.get('searchable', 1))
         site.quick_search = bool(item.get('quickSearch', 1))
         site.filterable = bool(item.get('filterable', 1))
@@ -778,8 +794,16 @@ class ConfigManager:
                 )
             site.health.mark_initialized().mark_healthy()
         except RuntimeContractError:
+            try:
+                site.runner.destroy()
+            except Exception:
+                pass
             raise
         except Exception as exc:
+            try:
+                site.runner.destroy()
+            except Exception:
+                pass
             raise RuntimeContractError(
                 'L3_RUNTIME_INIT_FAILED',
                 site_key=site.key,
@@ -824,6 +848,26 @@ class ConfigManager:
             return SourceFileLoader(safe_key, path).load_module().Spider()
         except Exception as e:
             raise ValueError(f'[L3:py] python spider load failed: {e}') from e
+
+    def _materialize_python_spider(self, key, api):
+        """只下载/落盘远程 Python，不在宿主进程 import 或执行。"""
+        try:
+            safe_key = re.sub(r'[^\w.-]', '_', str(key))[:48] or 'site'
+            if api.startswith('http'):
+                basename = os.path.basename(urlparse(str(api)).path) or 'spider.py'
+                basename = re.sub(r'[^\w.-]', '_', basename)[:48] or 'spider.py'
+            else:
+                basename = 'inline.py'
+            digest = hashlib.sha256(str(api).encode('utf-8')).hexdigest()[:12]
+            path = os.path.realpath(os.path.join(
+                hoststate.get_plugins_dir(), f'{safe_key}-{digest}-{basename}'))
+            root = os.path.realpath(hoststate.get_plugins_dir()) + os.sep
+            if not path.startswith(root):
+                raise ValueError(f'bad site key: {key}')
+            spider_app.download(path, api)
+            return path
+        except Exception as e:
+            raise ValueError(f'[L3:py] python spider materialize failed: {e}') from e
 
     def _load_cms_spider(self, key, name, api, stype):
         from cms_spider import CmsSpider
@@ -892,10 +936,42 @@ class ConfigManager:
         except RuntimeContractError:
             raise
         except Exception as e:
-            # 任务五：jar 相关错误统一添加 [L3:jar] 标签
+            # 旧的直接构造入口只保留给低层兼容测试；生产配置走
+            # _load_jar_runner，不在宿主进程加载第三方类。
             err_msg = str(e)
             if not err_msg.startswith('[L3:jar]'):
                 raise ValueError(f'[L3:jar] {err_msg}') from e
+            raise
+
+    def _load_jar_runner(self, key, name, api, spider_jar=''):
+        """下载并分级 JAR；实际类加载与调用只发生在 Supervisor Worker/JVM。"""
+        import java_probe
+        from jar_bridge import JarBridge
+        try:
+            jar_url, md5, class_name = JarBridge.norm_jar_src(api)
+            if not jar_url:
+                if api.startswith('csp_') and spider_jar:
+                    jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
+                    class_name = api
+                if not jar_url:
+                    return None
+            jar_path = JarBridge.download_jar(
+                jar_url, md5, site_key=key,
+                portable_only=not android_worker_enabled())
+            if not java_probe.find_java():
+                raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
+            class_name = JarBridge.map_class_name(jar_path, class_name)
+            return SupervisedRunner({
+                'kind': 'jar', 'site_key': key, 'name': name,
+                'jar_path': jar_path, 'class_name': class_name,
+                'runner_jar': DEFAULT_RUNNER_JAR,
+            })
+        except RuntimeContractError:
+            raise
+        except Exception as e:
+            text = str(e)
+            if not text.startswith('[L3:jar]'):
+                raise ValueError(f'[L3:jar] {text}') from e
             raise
 
     # ------------------------------------------------------------ 查询

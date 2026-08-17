@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 import re
 import threading
 import urllib.parse
+from contextlib import asynccontextmanager
 
 # 抑制 urllib3 InsecureRequestWarning（PC 端大量 verify=False 请求）
 try:
@@ -127,12 +128,28 @@ def _unregister_runtime_request(request):
 
 
 def cancel_runtime_request(request_id, reason='cancelled'):
+    """Cancel one traced request and synchronously stop its active Worker.
+
+    Registration and hard process termination are reported separately so a
+    caller cannot interpret an event/Future cancellation as completed work.
+    """
+    request_id = str(request_id or '')
     with _active_runtime_lock:
-        request = _active_runtime_requests.get(str(request_id or ''))
+        request = _active_runtime_requests.get(request_id)
     if request is None:
-        return False
+        return {'registered': False, 'workerTerminated': False}
     request.cancel(reason)
-    return True
+    terminated = False
+    for site in list(sites.sites):
+        cancel = getattr(getattr(site, 'runner', None), 'cancel_request', None)
+        if callable(cancel) and cancel(request_id, reason):
+            terminated = True
+    return {'registered': True, 'workerTerminated': terminated}
+
+
+def _runtime_request_is_active(request_id):
+    with _active_runtime_lock:
+        return str(request_id or '') in _active_runtime_requests
 
 
 def _runtime_control_error(request, timed_out=False):
@@ -343,12 +360,18 @@ def _runtime_site_call(site, capability, callback):
                 raw_error=last_error,
             )
         site.health.record_success(capability)
+        state = getattr(site.runner, 'runtime_state', None)
+        if callable(state):
+            site.health.apply_runtime_state(state())
         return result
     except Exception as exc:
         error = error_from_exception(
             exc, stage='runtime', request=request,
             site_key=site.key, runtime=site.health.runtime)
         site.health.record_failure(error)
+        state = getattr(site.runner, 'runtime_state', None)
+        if callable(state):
+            site.health.apply_runtime_state(state())
         raise error from exc
 
 
@@ -644,6 +667,13 @@ def _dispatch_action_inner(form):
                 if not isinstance(cookies, dict):
                     raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='cookies must be a JSON object')
                 saved, warnings = save_pan_cookies(cookies)
+                # 凭据缺失是不可自动重试错误；Cookie 更新只提前放行一次半开
+                # 探测，不清空配置也不持续刷请求。
+                for configured_site in list(sites.sites):
+                    force = getattr(configured_site.runner, 'force_half_open', None)
+                    if callable(force):
+                        force()
+                        configured_site.health.force_half_open()
                 return 200, json.dumps({'code': 200, 'cookies': saved, 'warnings': warnings},
                                        ensure_ascii=False)
             if act == 'qrCreate':
@@ -677,6 +707,15 @@ def _dispatch_action_inner(form):
         if do == 'file':
             logger.info('file play: %s', form.get('path'))
             return 200, '{"code":200,"msg":"file received"}'
+
+        if do == 'runtimeRetry':
+            site = _site_or_error(form)
+            force = getattr(site.runner, 'force_half_open', None)
+            if callable(force):
+                force()
+                site.health.force_half_open()
+            return 200, json.dumps({'code': 200, 'siteKey': site.key,
+                                    'state': site.health.state}, ensure_ascii=False)
 
         # ---- 多源聚合搜索（Phase 1 基础版：线程池并发 + 超时合并）----
         if do == 'search':
@@ -766,15 +805,27 @@ def _dispatch_action_inner(form):
             site_key=str(form.get('site') or '')) from e
 
 
-def _search_source_pages(runner, word, max_pages=50):
+def _search_source_pages(runner, word, max_pages=50, deadline=None, site_key='', request=None):
     """单源搜索拉全部页合并去重（T38：取消 3 页限制，CMS 源搜索接口
     服务端分页 limit=20）；遇空页/短页/整页无新增即停（防部分源伪分页死循环），
     max_pages 仅作安全防护上限，异常不抛。"""
     merged = []
     seen = set()
     for pg in range(1, max_pages + 1):
+        if request is not None:
+            request.raise_if_cancelled()
+        if deadline is not None:
+            remaining_ms = int(max(0, deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+        else:
+            remaining_ms = 20000
         try:
-            data = json.loads(spider_app.searchContent(runner, word, '0', str(pg)))
+            page_request = request or RuntimeRequest.create(
+                site_key=site_key, method='searchContent', deadline_ms=remaining_ms,
+                args={'word': word, 'pg': str(pg)})
+            with bind_runtime_request(page_request):
+                data = json.loads(spider_app.searchContent(runner, word, '0', str(pg)))
         except Exception:
             break
         items = data.get('list') or []
@@ -795,36 +846,100 @@ def _search_source_pages(runner, word, max_pages=50):
     return merged
 
 
-def aggregate_search(word, timeout=60):
-    """线程池并发搜索全部可搜站点（T38 起单源拉全部页，耗时变长放宽超时），
-    单源超时/异常不拖累整体。"""
-    merged = []
+def _iter_aggregate_search(word, timeout=20, max_inflight=16):
+    """按总预算和最大在途数产出单源结果。
+
+    Future 只代表协调线程；超时/取消时必须调用 Runner.cancel_active() 杀掉
+    实际 Worker。线程池不使用会隐式 wait=True 的上下文管理器。
+    """
     site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
     if not site_list or not word:
-        return {'list': merged}
-    with ThreadPoolExecutor(max_workers=min(8, len(site_list))) as pool:
-        futures = {
-            pool.submit(_search_source_pages, s.runner, word): s
-            for s in site_list
-        }
-        # as_completed + 整体 deadline（C3）：原先按提交顺序逐个 result(timeout)，
-        # 慢源在前时总耗时被放大为 timeout×N；改整体超时，先到先合并。
-        deadline = time.time() + timeout
-        done, pending = concurrent.futures.wait(
-            futures, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED)
-        for fut in done:
-            s = futures[fut]
-            try:
-                # 剩余预算交给 result（wait 返回的 done 集合正常已就绪，防御性保留）
-                items = fut.result(timeout=max(0.1, deadline - time.time()))
-                for item in items:
-                    item.setdefault('source', s.key)
-                    merged.append(item)
-            except Exception as e:
-                logger.warning('search source %s failed: %s', s.key, e)
-        for fut in pending:
-            fut.cancel()
-            logger.warning('search source %s timed out (%ss)', futures[fut].key, timeout)
+        return
+    parent_request = current_runtime_request()
+    if parent_request is not None:
+        timeout = min(float(timeout), max(0.001, parent_request.remaining_ms / 1000.0))
+    timeout = max(0.001, float(timeout))
+    # Reserve a small scheduler/serialization margin inside the advertised
+    # budget. Without it, returning exactly at the monotonic deadline can be
+    # observed a few milliseconds late by the caller under full-suite load.
+    return_margin = min(0.05, max(0.002, timeout * 0.025))
+    response_deadline = time.monotonic() + max(0.001, timeout - return_margin)
+    # Worker 强杀和进程树 join 也是调用总耗时的一部分，不能等业务预算耗尽后
+    # 再额外追加清理时间。短预算至少预留一半，常规 20s 预算预留至多 3.5s。
+    cleanup_reserve = min(3.5, max(0.1, timeout * 0.2), timeout * 0.5)
+    deadline = response_deadline - cleanup_reserve
+    limit = max(1, min(int(max_inflight), len(site_list)))
+    pool = ThreadPoolExecutor(max_workers=limit, thread_name_prefix='aggregate-search')
+    pending = {}
+    next_index = 0
+
+    def submit_available():
+        nonlocal next_index
+        while next_index < len(site_list) and len(pending) < limit:
+            site = site_list[next_index]
+            next_index += 1
+            request = RuntimeRequest.create(
+                site_key=site.key,
+                method='searchContent',
+                deadline_ms=max(1, int((deadline - time.monotonic()) * 1000)),
+                args={'word': word},
+            )
+            future = pool.submit(
+                _search_source_pages, site.runner, word, 50, deadline, site.key, request)
+            pending[future] = (site, request)
+
+    submit_available()
+    try:
+        while pending and time.monotonic() < deadline:
+            if parent_request is not None:
+                parent_request.raise_if_cancelled()
+            done, _ = concurrent.futures.wait(
+                tuple(pending), timeout=min(0.05, max(0, deadline - time.monotonic())),
+                return_when=concurrent.futures.FIRST_COMPLETED)
+            if not done:
+                continue
+            for future in done:
+                site, _request = pending.pop(future)
+                error = None
+                items = []
+                try:
+                    items = future.result()
+                except Exception as exc:
+                    error = exc
+                    logger.warning('search source %s failed: %s', site.key, exc)
+                yield site, items, error
+            submit_available()
+    finally:
+        reason = ('cancelled' if parent_request is not None and parent_request.cancelled
+                  else 'timeout')
+        terminators = []
+        for future, (site, request) in list(pending.items()):
+            request.cancel(reason)
+            cancel = getattr(site.runner, 'cancel_request', None)
+            if callable(cancel):
+                thread = threading.Thread(
+                    target=cancel, args=(request.request_id, reason), daemon=True,
+                    name='search-cancel-%s' % site.key)
+                thread.start()
+                terminators.append(thread)
+            # 只用来阻止尚未开始的协调任务；不把返回值当成 Worker 已结束。
+            future.cancel()
+        # 多个坏源并行强杀；总耗时取最慢进程树回收，而不是 N 倍串行累加。
+        for thread in terminators:
+            remaining = max(0.0, response_deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def aggregate_search(word, timeout=20):
+    """在整体预算内合并已完成健康结果，坏源不会拖住返回。"""
+    merged = []
+    for site, items, _error in _iter_aggregate_search(word, timeout=timeout):
+        for item in items:
+            item.setdefault('source', site.key)
+            merged.append(item)
     return {'list': merged}
 
 
@@ -970,14 +1085,40 @@ def create_app():
     kazumi_engine = RuleEngine(cookie_jar=kazumi_cookies)
     # FongMi localProxy（127.0.0.1:7944 go-proxy）兼容转发服务：网盘 jar 蜘蛛
     # 生成的播放地址指向该端口，PC 端需自建等价服务（见 go_proxy.py）
-    if not globals().get('_go_proxy_started'):
-        globals()['_go_proxy_started'] = True
+    try:
+        import go_proxy
+        go_proxy.start_go_proxy()
+    except Exception as e:
+        logger.warning('go-proxy start failed: %s', e)
+    def shutdown_runtime_resources():
+        """无论正常退出、设置重置还是测试关闭，都走同一回收链路。"""
+        destroy_sites = getattr(sites, 'destroy_all', None)
+        if callable(destroy_sites):
+            destroy_sites()
+        try:
+            from runtime.supervisor import destroy_all_supervisors
+            destroy_all_supervisors()
+        except Exception:
+            pass
+        try:
+            from jar_bridge import JarBridge
+            JarBridge.destroy_all()
+        except Exception:
+            pass
         try:
             import go_proxy
-            go_proxy.start_go_proxy()
-        except Exception as e:
-            logger.warning('go-proxy start failed: %s', e)
-    fastapi_app = FastAPI(title='video-pc backend')
+            go_proxy.stop_go_proxy()
+        except Exception:
+            pass
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            shutdown_runtime_resources()
+
+    fastapi_app = FastAPI(title='video-pc backend', lifespan=lifespan)
 
     @fastapi_app.middleware('http')
     async def token_auth(request: Request, call_next):
@@ -1012,11 +1153,20 @@ def create_app():
         except Exception:
             data = {}
         request_id = str((data or {}).get('requestId') or request.headers.get('x-request-id') or '')
-        cancelled = cancel_runtime_request(request_id, 'cancelled') if request_id else False
+        state = (cancel_runtime_request(request_id, 'cancelled') if request_id else
+                 {'registered': False, 'workerTerminated': False})
+        deadline = time.monotonic() + 1.5
+        while state['registered'] and _runtime_request_is_active(request_id) \
+                and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        completed = not _runtime_request_is_active(request_id)
         return JSONResponse({
             'ok': True,
             'requestId': request_id,
-            'cancelled': bool(cancelled),
+            'cancelled': bool(state['registered']),
+            'registered': bool(state['registered']),
+            'workerTerminated': bool(state['workerTerminated']),
+            'completed': bool(completed),
         })
 
     @fastapi_app.api_route('/danmaku', methods=['GET', 'POST'])
@@ -1048,31 +1198,14 @@ def create_app():
                 yield 'event: done\ndata: {}\n\n'
                 return
             yield f'event: meta\ndata: {json.dumps({"total": len(site_list)})}\n\n'
-            # 手动管理线程池（M-20）：shutdown(wait=False) 避免卡死的 worker
-            # 阻塞生成器退出导致 done 事件发不出去
-            pool = ThreadPoolExecutor(max_workers=min(8, len(site_list)))
-            try:
-                futures = {
-                    pool.submit(_search_source_pages, s.runner, word): s
-                    for s in site_list
-                }
-                try:
-                    # T38：单源拉全部页耗时变长，放宽到 120s；超时/异常也必须
-                    # 落到最后的 done 事件，防前端进度条挂死
-                    for fut in as_completed(futures, timeout=120):
-                        s = futures[fut]
-                        try:
-                            items = fut.result(timeout=0.1)
-                        except Exception as e:
-                            logger.warning('sse search source %s failed: %s', s.key, e)
-                            items = []
-                        payload = json.dumps({'source': s.key, 'name': s.name, 'list': items},
-                                             ensure_ascii=False)
-                        yield f'data: {payload}\n\n'
-                except Exception as e:
-                    logger.warning('sse search overall timeout: %s', e)
-            finally:
-                pool.shutdown(wait=False)
+            for site, items, error in _iter_aggregate_search(word, timeout=20):
+                payload = json.dumps({
+                    'source': site.key,
+                    'name': site.name,
+                    'list': items,
+                    'status': 'error' if error else ('success' if items else 'noresult'),
+                }, ensure_ascii=False)
+                yield f'data: {payload}\n\n'
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 

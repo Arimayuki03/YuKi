@@ -7,12 +7,15 @@
 """
 import os
 import logging
-from importlib.machinery import SourceFileLoader
+import hashlib
+import re
+from urllib.parse import urlparse
 
 import app as spider_app          # 恢复版插件入口（字节码校验一致）
 import hoststate
 from runner import Runner
 from runtime.health import SiteHealth
+from runtime.supervised_runner import SupervisedRunner
 
 logger = logging.getLogger('vpc.sites')
 
@@ -73,16 +76,41 @@ class SiteManager:
     def load_api(self, key, api, ext=''):
         """http 地址 / 内联源码 → 原 app.spider(cache, api) 协议。"""
         site = Site(key, api, ext)
-        spider = spider_app.spider(hoststate.get_plugins_dir(), api)
-        self._register(site, spider)
+        safe_key = re.sub(r'[^\w.-]', '_', str(key))[:48] or 'site'
+        basename = os.path.basename(urlparse(str(api)).path) if str(api).startswith('http') else 'inline.py'
+        basename = re.sub(r'[^\w.-]', '_', basename or 'spider.py')[:48]
+        digest = hashlib.sha256(str(api).encode('utf-8')).hexdigest()[:12]
+        path = os.path.realpath(os.path.join(
+            hoststate.get_plugins_dir(), f'{safe_key}-{digest}-{basename}'))
+        root = os.path.realpath(hoststate.get_plugins_dir()) + os.sep
+        if not path.startswith(root):
+            raise ValueError('bad site key: %s' % key)
+        spider_app.download(path, api)
+        site.runner = SupervisedRunner({
+            'kind': 'python', 'site_key': key, 'name': key, 'path': path,
+        })
+        site.runner.init(ext)
+        site.health.runtime = 'python'
+        site.health.compatibility = 'C1'
+        site.health.mark_built().mark_initialized().mark_healthy()
+        self.sites.append(site)
+        self.diagnostics.append(site.health)
         return site
 
     def load_local(self, key, path, ext=''):
         """本地 spiders/ 目录插件：模块顶层类名约定为 Spider。"""
         site = Site(key, path, ext)
-        name = os.path.splitext(os.path.basename(path))[0]
-        module = SourceFileLoader(name, path).load_module()
-        self._register(site, module.Spider())
+        site.runner = SupervisedRunner({
+            'kind': 'python', 'site_key': key,
+            'name': os.path.splitext(os.path.basename(path))[0],
+            'path': os.path.realpath(path),
+        })
+        site.runner.init(ext)
+        site.health.runtime = 'python'
+        site.health.compatibility = 'C1'
+        site.health.mark_built().mark_initialized().mark_healthy()
+        self.sites.append(site)
+        self.diagnostics.append(site.health)
         return site
 
     def get(self, key=None):
@@ -149,5 +177,10 @@ class SiteManager:
         try:
             from jar_bridge import JarBridge
             JarBridge.destroy_all()
+        except Exception:
+            pass
+        try:
+            from runtime.supervisor import destroy_all_supervisors
+            destroy_all_supervisors()
         except Exception:
             pass
