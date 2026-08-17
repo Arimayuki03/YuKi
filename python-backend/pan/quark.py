@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from .base import PanProvider
+from .cache import make_cache_key, signed_url_cache
 from .models import PlayUrl
 
 
@@ -25,6 +26,14 @@ class QuarkProvider(PanProvider):
     @staticmethod
     def _direct_personal_url(gp, file_id: str, headers: dict[str, str]) -> str:
         """我的网盘 fid：v2/play 失败时回退 file/download。"""
+        resolver = getattr(gp, '_quark_personal_play_url', None)
+        if callable(resolver):
+            try:
+                resolved = resolver(file_id, headers, retries=1)
+                if resolved:
+                    return resolved
+            except Exception:
+                pass
         try:
             url = gp._quark_v2play(file_id, headers)
         except Exception:
@@ -39,6 +48,9 @@ class QuarkProvider(PanProvider):
             data=json.dumps({'fids': [file_id]}), timeout=25, verify=True,
             allow_redirects=False,
         )
+        location = response.headers.get('Location', '') if getattr(response, 'headers', None) else ''
+        if isinstance(location, str) and location.startswith(('http://', 'https://')):
+            return location
         data = (response.json() or {}).get('data') or []
         entries = data if isinstance(data, list) else [data]
         for entry in entries:
@@ -49,7 +61,7 @@ class QuarkProvider(PanProvider):
                 return url
         return ''
 
-    def resolve_play_url(self, params: dict[str, Any], *, headers: dict[str, str]) -> PlayUrl | None:
+    def _resolve_uncached(self, params: dict[str, Any], *, headers: dict[str, str]) -> PlayUrl | None:
         gp = __import__('go_proxy')
         share_id = str(params.get('shareId') or '')
         file_id = str(params.get('fileId') or '')
@@ -75,4 +87,15 @@ class QuarkProvider(PanProvider):
                 resolved = gp._quark_v2play(file_id, headers) or ''
         if not resolved:
             return None
-        return PlayUrl(url=resolved, headers=dict(headers), file_id=file_id, provider=self.key)
+        return PlayUrl(url=resolved, headers=dict(headers), file_id=file_id,
+                       provider=self.key, request=dict(params))
+
+    def resolve_play_url(self, params: dict[str, Any], *, headers: dict[str, str],
+                         refresh: bool = False) -> PlayUrl | None:
+        request = dict(params or {})
+        key = make_cache_key(self.key, request, headers)
+        return signed_url_cache.resolve(
+            key,
+            lambda: self._resolve_uncached(request, headers=headers),
+            refresh=refresh,
+        )

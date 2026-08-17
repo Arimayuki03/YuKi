@@ -165,28 +165,84 @@ class ParseWindow {
         const list = (parses || []).filter((p) => p && p.url);
         if (!list.length) return { ok: false, reason: 'no-parses' };
 
-        // type=1 JSON 解析优先（无需窗口，快）
-        for (const p of list.filter((x) => parseInt(x.type, 10) === 1)) {
+        // FongMi 配置可显式给解析器 priority/order；未给时保持旧行为：
+        // JSON/扩展 JSON 优先，随后混合/iframe。type=4 解析器并发尝试，
+        // 但结果仍按配置优先级选择，避免“谁先返回谁覆盖高优先级”。
+        const ordered = list.map((parser, index) => ({ parser, index }))
+            .sort((a, b) => {
+                const typePriority = (item) => {
+                    const type = parseInt(item.parser.type, 10);
+                    if (Number.isFinite(Number(item.parser.priority))) return Number(item.parser.priority);
+                    if (Number.isFinite(Number(item.parser.order))) return Number(item.parser.order);
+                    if (type === 1 || type === 2) return 0;
+                    if (type === 4) return 1;
+                    return 2;
+                };
+                return typePriority(a) - typePriority(b) || a.index - b.index;
+            });
+        const parallel = ordered.filter((item) => parseInt(item.parser.type, 10) === 4);
+        let parallelDone = false;
+        for (const item of ordered) {
             if (abort && abort.requested) return { ok: false, reason: 'aborted' };
-            const r = await this._tryJson(p, targetUrl);
-            if (r) return r;
-        }
-        // iframe 型逐个尝试（跳过拼出畸形 scheme 的解析接口，防系统「打开方式」弹窗）
-        for (const p of list.filter((x) => parseInt(x.type, 10) !== 1)) {
-            if (abort && abort.requested) return { ok: false, reason: 'aborted' };
-            if (!isLoadableUrl(p.url + targetUrl)) continue;
-            const r = await this._tryIframe(p, targetUrl, IFRAME_TIMEOUT, legacy, abort);
-            if (r) return r;
+            const type = parseInt(item.parser.type, 10);
+            if (type === 4) {
+                if (parallelDone) continue;
+                parallelDone = true;
+                const results = await Promise.all(parallel.map((entry) =>
+                    this._tryParser(entry.parser, targetUrl, legacy, abort)));
+                for (const candidate of ordered) {
+                    if (parseInt(candidate.parser.type, 10) !== 4) continue;
+                    const result = results[parallel.findIndex((entry) => entry.index === candidate.index)];
+                    if (result) return result;
+                }
+                continue;
+            }
+            const result = await this._tryParser(item.parser, targetUrl, legacy, abort);
+            if (result) return result;
         }
         return { ok: false, reason: 'resolve-failed' };
     }
 
+    async _tryParser(parse, targetUrl, legacy, abort) {
+        const type = parseInt(parse.type, 10);
+        if (type === 1 || type === 2 || type === 4) {
+            const jsonResult = await this._tryJson(parse, targetUrl, abort);
+            if (jsonResult || type === 1 || type === 2) return jsonResult;
+        }
+        // iframe 型逐个尝试（跳过拼出畸形 scheme 的解析接口，防系统「打开方式」弹窗）
+        if (!isLoadableUrl(parse.url + targetUrl)) return null;
+        return this._tryIframe(parse, targetUrl, IFRAME_TIMEOUT, legacy, abort);
+    }
+
     /** type=1：GET parse.url+target，解析返回 JSON 里的直链（兼容多种字段名与 header 附带）。 */
-    async _tryJson(parse, targetUrl) {
+    async _tryJson(parse, targetUrl, abort) {
+        let cancelPoll = null;
+        let timeoutTimer = null;
+        let controller = null;
         try {
+            if (typeof AbortController === 'function') {
+                controller = new AbortController();
+                if (abort) {
+                    cancelPoll = setInterval(() => {
+                        if (abort.requested) controller.abort();
+                    }, 50);
+                }
+            }
+            let signal = controller ? controller.signal : undefined;
+            if (controller && typeof AbortSignal !== 'undefined'
+                && typeof AbortSignal.timeout === 'function') {
+                const deadline = AbortSignal.timeout(15000);
+                signal = typeof AbortSignal.any === 'function'
+                    ? AbortSignal.any([controller.signal, deadline]) : controller.signal;
+            } else if (controller) {
+                timeoutTimer = setTimeout(() => controller.abort(), 15000);
+            }
+            if (abort && abort.requested) return null;
             const api = parse.url + targetUrl;
-            const rsp = await fetch(api, { signal: AbortSignal.timeout(15000) });
+            const rsp = await fetch(api, signal ? { signal } : {});
+            if (abort && abort.requested) return null;
             const data = await rsp.json();
+            if (abort && abort.requested) return null;
             const d = data && data.data && typeof data.data === 'object' ? data.data : {};
             const url = data && (data.url || d.url || data.vurl || d.vurl || data.play_url || d.play_url);
             // 解出的是播放页（.html）而非媒体直链，视为失败交给下一种方式
@@ -198,7 +254,11 @@ class ParseWindow {
                 if (ua) header['User-Agent'] = ua;
                 return { ok: true, url, header, via: parse.name || 'json' };
             }
-        } catch (e) { /* 下一个接口 */ }
+        } catch (e) { /* 下一个接口；取消由调用方统一映射为 L4_PARSE_CANCELLED */
+        } finally {
+            if (cancelPoll) clearInterval(cancelPoll);
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+        }
         return null;
     }
 

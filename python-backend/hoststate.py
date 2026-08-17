@@ -8,14 +8,18 @@ import os
 import hmac
 
 _HOME = os.path.join(os.path.expanduser('~'), '.video-pc')
+_ENV_DATA_DIR = os.environ.get('VPC_DATA_DIR', '').strip()
+_ENV_CACHE_DIR = os.environ.get('VPC_CACHE_DIR', '').strip()
+_DATA_DIR = _ENV_DATA_DIR or _HOME
+_CACHE_DIR = _ENV_CACHE_DIR or os.path.join(_DATA_DIR, 'cache')
 
 _state = {
     'port': 0,
     'token': '',
-    'data_dir': _HOME,
-    'cache_dir': os.path.join(_HOME, 'cache'),
-    'plugins_dir': os.path.join(_HOME, 'cache', 'py'),  # 对应原 Android cacheDir/py
-    'log_dir': os.path.join(_HOME, 'logs'),
+    'data_dir': _DATA_DIR,
+    'cache_dir': _CACHE_DIR,
+    'plugins_dir': os.path.join(_CACHE_DIR, 'py'),  # 对应原 Android cacheDir/py
+    'log_dir': os.path.join(_DATA_DIR, 'logs'),
     'pan_fast_path': True,  # 任务三：网盘快路径开关（默认开：夸克文件前置短路；
                             # 关：全走 jar，兜底才用 go-proxy）
 }

@@ -20,6 +20,7 @@ import threading
 import re
 
 import http_client
+import hoststate
 from urllib.parse import quote
 
 import quickjs
@@ -37,7 +38,7 @@ BOOTSTRAP_JS = os.path.join(ENGINE_DIR, 'host_bootstrap.js')
 LOADER_JS = os.path.join(ENGINE_DIR, 'spider-loader.js')
 CAT_JS = os.path.join(ENGINE_DIR, 'lib', 'cat.js')
 
-LOCAL_KV_DIR = os.path.join(os.path.expanduser('~'), '.video-pc')
+LOCAL_KV_DIR = hoststate.get_data_dir()
 LOCAL_KV_FILE = os.path.join(LOCAL_KV_DIR, 'js_local.json')
 _local_kv_lock = threading.Lock()
 
@@ -229,7 +230,10 @@ class JsEngine:
     def _js2proxy(self, site_key, flag):
         """TVBox js2Proxy 桥：生成后端 /proxy 媒体代理 URL（query 透传给 localProxy）。"""
         port = self.proxy_port or 0
-        return f'http://127.0.0.1:{port}/proxy?do=js&site={quote(str(site_key))}&flag={quote(str(flag))}'
+        encoded_site = quote(str(site_key), safe='')
+        encoded_flag = quote(str(flag), safe='')
+        return (f'http://127.0.0.1:{port}/proxy?do=js&siteKey={encoded_site}'
+                f'&flag={encoded_flag}')
 
     def _eval_file(self, path):
         with open(path, encoding='utf-8') as f:

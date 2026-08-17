@@ -1,0 +1,4 @@
+{
+  "sites": [{"key": "offline_infinite", "name": "Offline Infinite", "type": 3,
+    "api": "./infinite_spider.py"}]
+}

@@ -107,7 +107,9 @@ const App = {
             let t = null;
             try { t = await doAction('configTask', {}); } catch (e) { /* 后端未就绪，以 configState 为准 */ }
             if (t && t.status === 'loading') busy = true;
-            if (t && t.status === 'done' && t.summary && t.summary.sites > 0) loaded = t.summary.sites;
+            if (t && t.status === 'done' && t.summary && Number(t.summary.healthy ?? t.summary.sites) > 0) {
+                loaded = Number(t.summary.healthy ?? t.summary.sites);
+            }
             if (!busy) break;
             showLoading();
             await new Promise((r) => setTimeout(r, 1000));

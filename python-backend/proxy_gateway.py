@@ -15,6 +15,10 @@ from urllib.parse import urlencode
 
 def _site_key(params: dict[str, Any], sites: Any, do: str) -> tuple[str | None, bool]:
     """返回 ``(site_key, explicit)``，兼容 siteKey/site 两种命名。"""
+    if do == 'pan':
+        # do=pan 的 site/siteKey 属于 Provider/旧 URL 上下文，不应把网盘
+        # 请求误当成 SiteManager 站点代理。
+        return None, False
     raw = params.pop('siteKey', None)
     if raw in (None, ''):
         legacy = params.get('site')

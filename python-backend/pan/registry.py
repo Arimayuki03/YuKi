@@ -28,12 +28,12 @@ class PanProviderRegistry:
     def keys(self) -> list[str]:
         return sorted(self._providers)
 
-    def resolve(self, key: str, params: dict, *, headers: dict[str, str]) -> PlayUrl | None:
+    def resolve(self, key: str, params: dict, *, headers: dict[str, str],
+                refresh: bool = False) -> PlayUrl | None:
         provider = self.get(key)
         if provider is None:
             return None
-        return provider.resolve_play_url(params, headers=headers)
+        return provider.resolve_play_url(params, headers=headers, refresh=refresh)
 
 
 registry = PanProviderRegistry()
-

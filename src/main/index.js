@@ -12,7 +12,7 @@
  * config URL 自动重载 + 播放偏好）、VIP 解析隐藏窗口（parse-window.js）。
  * UX 批次：弹幕轮询已移除（用户不再需要）；启动自动重载状态经
  * vpc:config-state 提供给渲染层（修复首屏停留示例源需手动刷新）；
- * 直播支持备用线路：起播后未真正开播则自动切换下一条地址。
+ * 播放失败只返回失败原因和实际播放地址，不自动切换其它线路。
  */
 const { app, BrowserWindow, ipcMain, dialog, Notification, Tray, nativeImage, shell, session } = require('electron');
 const fs = require('fs');
@@ -161,6 +161,7 @@ const dlna = new DlnaCaster();
 let fileMgr = null;    // app ready 后初始化（依赖 userData 路径）
 let settings = null;   // app ready 后初始化（bridge 启动前，供读缓存目录等）
 let parseWin = null;   // 同上
+const runtimeAborts = new Map(); // requestId -> ParseWindow abort marker
 let win = null;
 let tray = null;       // 托盘图标（关闭→缩小至托盘时应用驻留）
 let isQuitting = false; // 真正退出标志（托盘菜单“退出”置位，关窗拦截据此放行）
@@ -212,40 +213,69 @@ function afterPlay() {
     }
 }
 
-/**
- * 起播健康检测：等待 mpv 真正开播（core-idle=false）。
- * 返回 true=已开播；false=进程退出或始终未开播；null=超时未知（慢网络，不触发重试）。
- */
-async function mpvStartedOk(timeoutMs = 8000) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-        await new Promise((r) => setTimeout(r, 800));
-        if (!mpv.playing) return false;   // 进程已退出
-        try {
-            if ((await mpv.getProperty('core-idle')) === false) return true;
-        } catch (e) { /* IPC 未就绪或属性暂不可用，继续等 */ }
+// 网盘首次解析/转存可能等待数秒；必须等到 mpv 真正加载媒体再向渲染层
+// 返回成功，否则 502/404 会被误报成“已在 mpv 播放”。
+const MPV_START_TIMEOUT_MS = 30000;
+
+async function verifyMpvStart(result, timeoutMs = MPV_START_TIMEOUT_MS) {
+    if (!result || !result.ok) return result || { ok: false, reason: 'mpv-start-failed' };
+    const expectedGen = (typeof result.controlGen === 'number') ? result.controlGen : null;
+    const ready = await mpv.waitForReady(result.sessionId, timeoutMs);
+    if (ready && ready.ok) return { ...result, started: true };
+    // waitForReady 期间如果用户另起了播放，当前请求已失去所有权；不能因为旧请求
+    // 的超时再 stop()/重新接管播放，把用户刚点播的新内容杀掉。
+    const active = mpv._activeSession;
+    const activeIsAnotherRequest = !!(active && active.id !== result.sessionId);
+    const generationChanged = expectedGen !== null && mpv.controlGen !== expectedGen;
+    // active=null 且代际未变通常是本次 mpv 自己退出/异步 spawn-error，仍应把
+    // 原始失败原因返回；只有检测到新会话或 controlGen 变化才视为用户取消。
+    if (activeIsAnotherRequest || generationChanged) {
+        return {
+            ...result,
+            ok: false,
+            reason: 'play-cancelled',
+            error: '',
+        };
     }
-    return null;
+    // 只停止仍属于本次会话的进程，避免旧 IPC/旧请求误杀用户刚启动的新会话。
+    mpv.stop();
+    return {
+        ...result,
+        ok: false,
+        reason: (ready && ready.reason) || 'mpv-start-failed',
+        error: (ready && ready.error) || '',
+    };
 }
 
-/**
- * 直播备用线路：首播未开播则逐条重试 meta.fallbackUrls，
- * 经 vpc:play-retry / vpc:play-failed 通知渲染层提示。
- * gen 为播放控制代际（mpv.controlGen）：用户主动停止/直接关掉 mpv 窗口/另起播放
- * 都会推进代际，循环据此立即退出，不再抢着重播下一条线路。
- */
-async function watchLiveFallbacks(title, alts, header, gen) {
-    if ((await mpvStartedOk(8000)) !== false) return;
-    for (const u of alts) {
-        if (mpv.controlGen !== gen) return; // 用户已停止或另起播放
-        send('vpc:play-retry', { title, url: u });
-        const r = mpv.play([{ url: u, title }], { title, header, resume: false });
-        if (!r.ok) return;
-        gen = mpv.controlGen; // 本次切换是循环自己发起：重置代际基准继续监控新会话
-        afterPlay();
-        if ((await mpvStartedOk(8000)) !== false) return;
+function playerErrorCode(reason) {
+    if (reason === 'mpv-missing') return 'L6_PLAYER_MISSING';
+    if (reason === 'mpv-start-timeout') return 'L6_PLAYER_START_TIMEOUT';
+    if (reason === 'play-cancelled') return 'L6_PLAYER_CANCELLED';
+    return 'L6_PLAYER_START_FAILED';
+}
+
+function withPlayerTrace(result, meta = {}) {
+    const value = (result && typeof result === 'object') ? { ...result } : { ok: false, reason: 'mpv-start-failed' };
+    if (meta.requestId) value.requestId = String(meta.requestId);
+    if (meta.playSessionId) value.playSessionId = String(meta.playSessionId);
+    if (!value.ok) {
+        const code = playerErrorCode(String(value.reason || ''));
+        value.runtimeError = {
+            code, stage: 'player', retryable: !['L6_PLAYER_MISSING'].includes(code),
+            message: String(value.error || value.reason || '播放器启动失败').slice(0, 240),
+        };
     }
-    if (mpv.controlGen === gen) send('vpc:play-failed', { title });
+    return value;
+}
+
+function traceLocalProxy(url, meta = {}) {
+    try {
+        const parsed = new URL(String(url || ''));
+        if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname) || parsed.pathname !== '/proxy') return url;
+        if (meta.requestId) parsed.searchParams.set('requestId', String(meta.requestId));
+        if (meta.playSessionId) parsed.searchParams.set('playSessionId', String(meta.playSessionId));
+        return parsed.toString();
+    } catch (e) { return url; }
 }
 
 function createWindow() {
@@ -662,58 +692,63 @@ app.whenReady().then(() => {
     //     （外部播放器拿不到结束事件，故选 A：只交首集、不起自动连播。）
     //  b) 否则内置 mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
     ipcMain.handle('vpc:play', async (_e, payload) => {
+        const meta = (payload && payload.meta) || {};
         // L-1：URL 协议白名单——本地文件播放走 vpc:dl-play / vpc:file-push 专用通道，
         // 此处仅放行网络协议，拒绝 file://、edl:// 等可直接触碰本地文件的 scheme
         // （渲染层 playUrl 调用点已确认均为网络直链：站点剧集/直播源/直链播放）
         {
             const protoOk = (u) => /^(https?|rtmps?|rtsp|magnet):/i.test(String(u || ''));
-            const meta0 = (payload && payload.meta) || {};
+            const meta0 = meta;
             const bad = (payload && payload.url && !protoOk(payload.url))
                 || (Array.isArray(meta0.playlist) && meta0.playlist.some((e) => e && e.url && !protoOk(e.url)));
-            if (bad) return { ok: false, reason: 'bad url protocol' };
+            if (bad) return withPlayerTrace({ ok: false, reason: 'bad url protocol' }, meta);
         }
         // 外部播放器为主：直接转交，不再走内置 mpv（mpv 缺失时也能用外部播放器起播）
         const extPrimary = primaryExternalPlayer();
         if (extPrimary) {
-            const meta = payload.meta || {};
             const firstUrl = (payload && payload.url) ? String(payload.url) : '';
             if (!/^(https?|rtmp|rtsp):\/\//i.test(firstUrl)) {
-                return { ok: false, reason: 'bad url', via: 'external' };
+                return withPlayerTrace({ ok: false, reason: 'bad url', via: 'external' }, meta);
             }
             const r = launchExternalPlayer(extPrimary, firstUrl, meta.header);
-            return { ...r, viaExternal: true };
+            return withPlayerTrace({ ...r, viaExternal: true }, meta);
         }
         if (!mpv.isAvailable()) {
-            return { ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器，或 设置 → 组件状态 指定外部播放器' };
+            return withPlayerTrace({ ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器，或 设置 → 组件状态 指定外部播放器' }, meta);
         }
-        const meta = payload.meta || {};
         const title = [meta.title, meta.subtitle].filter(Boolean).join(' · ');
         // 连播已改渲染层驱动（每次只交单集，播完由 Player._onExit 推进下一集）；
         // meta.playlist 仅作历史兼容兜底，正常链路不会携带
-        const episodes = Array.isArray(meta.playlist) && meta.playlist.length
+        const episodes = (Array.isArray(meta.playlist) && meta.playlist.length
             ? meta.playlist
-            : [{ url: payload.url, title }];
+            : [{ url: payload.url, title }]).map((episode) => ({
+                ...episode, url: traceLocalProxy(episode.url, meta),
+            }));
         // Anime4K 开关/档位实时生效（播放途中可切换，下次起播注入着色器）
         mpv.anime4kShaders = anime4kChainFromSettings();
         // 断流重试上下文：记录本次会话首部 URL/标题/请求头（exit 时未播完可自动重连）
         mpv._lastUrls = episodes.map((e) => e.url);
         mpv._lastTitle = title;
         mpv._lastHeader = meta.header;
+        mpv._lastRequestId = meta.requestId || '';
+        mpv._lastPlaySessionId = meta.playSessionId || '';
         mpv._stallRetried = false;
-        // 直播备用线路：首播失败时自动切换（异步监控，不阻塞返回）
-        const alts = Array.isArray(meta.fallbackUrls)
-            ? meta.fallbackUrls.filter((u) => u && u !== episodes[0].url)
-            : [];
-        const r = mpv.play(episodes, {
-            title, header: meta.header, resume: !alts.length, speed: meta.speed,
+        // 不自动切换线路；只等待当前 URL 真正 file-loaded，再向渲染层返回成功。
+        // 这样失败时会保留当前地址和错误原因，由用户手动选择其它线路。
+        const first = mpv.play(episodes, {
+            title, header: meta.header, resume: true, speed: meta.speed,
             fullscreen: meta.fullscreen, format: meta.format,
             subs: meta.subs, position: meta.position,
+            requestId: meta.requestId, playSessionId: meta.playSessionId,
         });
+        let r = first;
+        if (first.ok) {
+            r = await verifyMpvStart(first, MPV_START_TIMEOUT_MS);
+        }
         if (r.ok) {
             // 非连播会话（本地文件/推送）：sessionId 取负，渲染层据此不触碰连播链
             if (meta.noSeq) r.sessionId = -Math.abs(r.sessionId);
             afterPlay();
-            if (alts.length) watchLiveFallbacks(title, alts, meta.header, mpv.controlGen).catch(() => { });
             r.anime4k = !!mpv.anime4kShaders; // 渲染层 toast 提示 Anime4K 是否生效
             // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
             // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放
@@ -747,7 +782,7 @@ app.whenReady().then(() => {
                 } catch (e) { /* 静默跳过：播放优先 */ }
             }
         }
-        return r;
+        return withPlayerTrace(r, meta);
     });
 
     // 播放控制（渲染层备用；mpv 窗口自带默认快捷键）
@@ -816,14 +851,18 @@ app.whenReady().then(() => {
     });
 
     // 本地媒体播放（视频/音频）：相对路径 → 白名单内绝对路径 → 复用 mpv-player
-    fileIpc('vpc:file-push', (rel) => {
+    fileIpc('vpc:file-push', async (rel) => {
         if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
         const abs = fileMgr.resolveSafe(rel);
         if (!fileMgr.isMedia(abs)) return { ok: false, reason: 'not-video' };
         const title = path.basename(abs);
         const r = mpv.play([{ url: abs, title }], { title, noSeq: true });
-        if (r.ok) afterPlay();
-        return r;
+        if (!r.ok) return r;
+        const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
+        if (!started.ok) return started;
+        started.sessionId = -Math.abs(started.sessionId);
+        afterPlay();
+        return started;
     });
 
     // ---- Phase 7 推送 / 解析 / 设置 ----
@@ -842,14 +881,17 @@ app.whenReady().then(() => {
         }
         const title = `推送播放 · ${source}`;
         const r = mpv.play([{ url: playUrl, title }], { title, header, noSeq: true });
-        if (r.ok) {
+        if (!r.ok) return r;
+        const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
+        if (started.ok) {
+            started.sessionId = -Math.abs(started.sessionId);
             afterPlay();
             send('vpc:push-received', { url, source });
             if (Notification.isSupported()) {
                 new Notification({ title: '推送播放', body: url.slice(0, 80) }).show();
             }
         }
-        return r;
+        return started;
     }
 
     ipcMain.handle('vpc:push-url', async (_e, url) => {
@@ -860,40 +902,102 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:push-info', () => pushServer.info());
 
     ipcMain.handle('vpc:parse', async (_e, url) => {
+        const payload = (url && typeof url === 'object') ? url : { url };
+        const requestId = String(payload.requestId || '');
+        const playSessionId = String(payload.playSessionId || '');
+        const trace = { ...(requestId ? { requestId } : {}), ...(playSessionId ? { playSessionId } : {}) };
         try {
-            const payload = (url && typeof url === 'object') ? url : { url };
             const targetUrl = String(payload.url || '');
             const parses = Array.isArray(payload.parses) ? payload.parses : undefined;
             const legacy = !!payload.legacy;
             // 25s 安全超时 + 取消传播：超时置 abort 标记，解析窗口立即作废并释放槽位
             // （此前只 race 返回 null，后台解析仍占着槽位，连续超时会耗尽解析池）
-            const abort = { requested: false };
+            const abort = { requested: false, reason: '' };
+            if (requestId) runtimeAborts.set(requestId, abort);
             let timer = null;
             try {
-                return await Promise.race([
+                const result = await Promise.race([
                     parseWin.resolve(targetUrl, parses, legacy, abort),
-                    new Promise((res) => { timer = setTimeout(() => { abort.requested = true; res(null); }, 25000); }),
+                    new Promise((res) => { timer = setTimeout(() => {
+                        abort.requested = true;
+                        abort.reason = 'timeout';
+                        res({ ok: false, reason: 'parse-timeout',
+                            error: { code: 'L4_PARSE_TIMEOUT', stage: 'parse', retryable: true,
+                                message: '播放地址解析超时' }, ...trace });
+                    }, 25000); }),
                 ]);
-            } finally { clearTimeout(timer); }
-        } catch (err) { return { ok: false, reason: err.message }; }
+                if (abort.requested) {
+                    const timedOut = abort.reason === 'timeout';
+                    return { ok: false, reason: timedOut ? 'parse-timeout' : 'parse-cancelled',
+                        error: { code: timedOut ? 'L4_PARSE_TIMEOUT' : 'L4_PARSE_CANCELLED',
+                            stage: 'parse', retryable: true,
+                            message: timedOut ? '播放地址解析超时' : '播放地址解析已取消' }, ...trace };
+                }
+                return result ? { ...result, ...trace } : {
+                    ok: false, reason: 'parse-failed',
+                    error: { code: 'L4_PARSE_FAILED', stage: 'parse', retryable: true,
+                        message: '播放地址解析失败' }, ...trace,
+                };
+            } finally {
+                clearTimeout(timer);
+                if (requestId && runtimeAborts.get(requestId) === abort) runtimeAborts.delete(requestId);
+            }
+        } catch (err) {
+            return { ok: false, reason: 'parse-failed',
+                error: { code: 'L4_PARSE_FAILED', stage: 'parse', retryable: true,
+                    message: String(err && err.message || '播放地址解析失败').slice(0, 240) }, ...trace };
+        }
     });
 
     // 无解析接口（或解析失败）时的兜底：隐藏窗口直开链接抓媒体请求（share 分享页自带播放器）
     ipcMain.handle('vpc:capture-direct', async (_e, payload) => {
+        const requestId = String(payload && typeof payload === 'object' ? payload.requestId || '' : '');
+        const playSessionId = String(payload && typeof payload === 'object' ? payload.playSessionId || '' : '');
+        const trace = { ...(requestId ? { requestId } : {}), ...(playSessionId ? { playSessionId } : {}) };
         try {
             // 兼容两种调用：字符串 url（旧）或 {url, legacy}（Kazumi 旧解析器）
             const url = (payload && typeof payload === 'object') ? String(payload.url || '') : String(payload || '');
             const legacy = !!(payload && typeof payload === 'object' && payload.legacy);
             // 25s 安全超时 + 取消传播：超时置 abort 标记，隐藏窗口作废并释放槽位
-            const abort = { requested: false };
+            const abort = { requested: false, reason: '' };
+            if (requestId) runtimeAborts.set(requestId, abort);
             let timer = null;
-            const r = await Promise.race([
-                parseWin.captureDirect(url, undefined, legacy, abort),
-                new Promise((res) => { timer = setTimeout(() => { abort.requested = true; res(null); }, 25000); }),
-            ]);
-            clearTimeout(timer);
-            return (r && r.ok) ? r : { ok: false, reason: 'capture-failed' };
-        } catch (err) { return { ok: false, reason: err.message }; }
+            let timedOut = false;
+            try {
+                const r = await Promise.race([
+                    parseWin.captureDirect(url, undefined, legacy, abort),
+                    new Promise((res) => { timer = setTimeout(() => {
+                        timedOut = true; abort.requested = true; abort.reason = 'timeout'; res(null);
+                    }, 25000); }),
+                ]);
+                if (timedOut) return { ok: false, reason: 'parse-timeout',
+                    error: { code: 'L4_PARSE_TIMEOUT', stage: 'parse', retryable: true,
+                        message: '播放地址解析超时' }, ...trace };
+                if (abort.requested) {
+                    const timedOut = abort.reason === 'timeout';
+                    return { ok: false, reason: timedOut ? 'parse-timeout' : 'parse-cancelled',
+                        error: { code: timedOut ? 'L4_PARSE_TIMEOUT' : 'L4_PARSE_CANCELLED',
+                            stage: 'parse', retryable: true,
+                            message: timedOut ? '播放地址解析超时' : '播放地址解析已取消' }, ...trace };
+                }
+                return (r && r.ok) ? { ...r, ...trace } : { ok: false, reason: 'capture-failed',
+                    error: { code: 'L4_PARSE_FAILED', stage: 'parse', retryable: true,
+                        message: '播放页面未捕获到媒体地址' }, ...trace };
+            } finally {
+                clearTimeout(timer);
+                if (requestId && runtimeAborts.get(requestId) === abort) runtimeAborts.delete(requestId);
+            }
+        } catch (err) { return { ok: false, reason: 'capture-failed',
+            error: { code: 'L4_PARSE_FAILED', stage: 'parse', retryable: true,
+                message: String(err && err.message || '播放地址解析失败').slice(0, 240) }, ...trace }; }
+    });
+
+    ipcMain.handle('vpc:runtime-cancel', async (_e, context) => {
+        const requestId = String(context && context.requestId || '');
+        const abort = requestId && runtimeAborts.get(requestId);
+        if (abort) { abort.requested = true; abort.reason = 'cancelled'; }
+        const backend = await bridge.cancelRuntime(context || {});
+        return { ...backend, ok: backend.ok !== false, cancelled: !!abort || !!backend.cancelled, requestId };
     });
 
     // 验证码源验证（T73）：可见窗口供用户交互，关闭/超时后收割 Cookie 交给后端持久化
@@ -924,7 +1028,7 @@ app.whenReady().then(() => {
         // 各列表页每页条数（panels.js 动态 key 写入）
         'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
-        'probedSites', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat',
+        'probedSites', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
         'useMisansFont', 'wallpaper', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
         'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
@@ -1801,7 +1905,7 @@ app.whenReady().then(() => {
     });
 
     // 下载完成一键播放：直接播本地产出文件（来源为下载任务的 files，均在下载目录内）
-    ipcMain.handle('vpc:dl-play', (_e, filePath) => {
+    ipcMain.handle('vpc:dl-play', async (_e, filePath) => {
         try {
             if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
             const abs = path.resolve(String(filePath || ''));
@@ -1818,8 +1922,10 @@ app.whenReady().then(() => {
             if (!fileMgr.isVideo(abs)) return { ok: false, reason: 'not-video' };
             const title = path.basename(abs);
             const r = mpv.play([{ url: abs, title }], { title });
-            if (r.ok) afterPlay();
-            return r;
+            if (!r.ok) return r;
+            const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
+            if (started.ok) afterPlay();
+            return started;
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
@@ -1875,6 +1981,8 @@ app.whenReady().then(() => {
             fullscreen: (info && typeof info.fullscreen === 'boolean') ? info.fullscreen : null,
             speed: (info && typeof info.speed === 'number') ? info.speed : null,
             wallWatched: (info && typeof info.wallWatched === 'number') ? info.wallWatched : null,
+            requestId: (info && info.requestId) || '',
+            playSessionId: (info && info.playSessionId) || '',
             quit: userStopped, // 用户主动关闭（stop() 或 mpv 窗口关闭）：渲染层据此不等待断流重连、不连播
         });
         // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
@@ -1886,7 +1994,7 @@ app.whenReady().then(() => {
         const dur = info && typeof info.duration === 'number' ? info.duration : null;
         if (pos == null || dur == null || !(dur > 0)) return;
         const left = dur - pos;
-        // 剩 <8s 视为正常播完；开播不到 15s 就退是起播失败（另有直播备用线路处理）
+        // 剩 <8s 视为正常播完；开播不到 15s 就退是起播失败（不自动切换线路）
         if (left < 8 || pos < 15) return;
         const url = mpv._lastUrls && mpv._lastUrls[0];
         if (!url || !MEDIA_URL.test(String(url))) return; // 仅媒体直链重试
@@ -1894,14 +2002,18 @@ app.whenReady().then(() => {
         if (Notification.isSupported()) {
             new Notification({ title: 'YuKi', body: '播放被中断，正在自动重连…' }).show();
         }
-        setTimeout(() => {
+        setTimeout(async () => {
             if (mpv.playing) return; // 用户已另起播放
             const t = mpv._lastTitle || '重连播放';
-            const r = mpv.play([{ url, title: t }], { title: t, header: mpv._lastHeader });
-            if (r.ok) {
+            const r = mpv.play([{ url, title: t }], { title: t, header: mpv._lastHeader,
+                requestId: mpv._lastRequestId, playSessionId: mpv._lastPlaySessionId });
+            if (!r.ok) return;
+            const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
+            if (started.ok) {
                 afterPlay();
                 // 同步新会话号：重连集播完后渲染层仍能匹配并推进连播
-                send('vpc:player-session', { sessionId: r.sessionId });
+                send('vpc:player-session', { sessionId: started.sessionId, url: started.url,
+                    requestId: started.requestId || '', playSessionId: started.playSessionId || '' });
             }
         }, 1000);
     });
@@ -1948,8 +2060,8 @@ app.whenReady().then(() => {
                                 body: 'do=configTask',
                             }).then((x) => x.json()).catch(() => null);
                             if (!t || t.status === 'loading') continue;
-                            if (t.status === 'done' && t.summary && t.summary.sites > 0) {
-                                finishReload(true, t.summary.sites);
+                            if (t.status === 'done' && t.summary && Number(t.summary.healthy ?? t.summary.sites) > 0) {
+                                finishReload(true, Number(t.summary.healthy ?? t.summary.sites));
                             } else {
                                 console.warn('[config] auto reload failed:', (t && t.msg) || '0 sites');
                                 finishReload(false);
@@ -1959,7 +2071,7 @@ app.whenReady().then(() => {
                         console.warn('[config] auto reload timeout');
                         finishReload(false);
                     } else if (body && body.code === 200 && body.summary) {
-                        finishReload(true, body.summary.sites);
+                        finishReload(true, Number(body.summary.healthy ?? body.summary.sites));
                     } else {
                         console.warn('[config] auto reload failed:', (body && body.msg) || 'unknown');
                         finishReload(false);

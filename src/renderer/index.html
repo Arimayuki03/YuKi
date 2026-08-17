@@ -706,6 +706,11 @@
                         <button onclick="setting()" class="md-btn md-btn-filled">载入配置</button>
                     </div>
                     <div class="tool-card" data-setcat="source">
+                        <div class="tool-card-title">站点诊断</div>
+                        <div class="tip-line pad0">内容页只展示健康站点；此处保留未建成、未初始化和需要 Android 运行时的原因。</div>
+                        <div id="config_diagnostics" class="history-list"></div>
+                    </div>
+                    <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">视频历史源</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
@@ -784,6 +789,17 @@
                                 <button id="pan_qr_close" class="md-dialog-btn">关闭</button>
                             </div>
                         </div>
+                    </div>
+                    <div class="tool-card" data-setcat="source">
+                        <div class="tool-card-title">源自动检测</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">开启后，首页会在后台检测源是否有内容，并隐藏被判定为空的源和分类；关闭后不会自动探测、隐藏或屏蔽源，历史上被屏蔽的源也会恢复显示。</div>
+                            </div>
+                        </div>
+                        <label class="md-switch" title="后台检测源内容并自动隐藏无内容源"><input type="checkbox" id="set_source_autodetect" checked><span class="md-switch-track"></span><span class="md-switch-label">后台自动检测源</span></label>
+                        <div class="tip-line pad0">关闭后，源是否可用由你手动判断，不影响点击源和播放。</div>
                     </div>
                     <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">屏蔽源</div>

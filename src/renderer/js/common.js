@@ -10,6 +10,16 @@
 
 let backend = { base: '', token: '' };
 
+/** 控制面统一追踪 ID；不包含用户数据，可跨 /action、解析和播放器传递。 */
+function createRuntimeId(prefix = 'req') {
+    try {
+        if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+            return `${prefix}-${globalThis.crypto.randomUUID()}`;
+        }
+    } catch (e) { /* fallback below */ }
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 /** 后端重启（如更换缓存目录）后端口/令牌会变，主进程经 backend-ready 推新值。 */
 function setBackendInfo(info) {
     if (info && info.base) backend = info;
@@ -38,14 +48,38 @@ async function waitBackend() {
  *  path 默认 '/action'，Kazumi 引擎调用传 '/kazumi/action'；
  *  timeoutMs 可覆盖超时（源探测等慢操作传 60000）。 */
 async function doAction(action, kv, path, timeoutMs) {
-    const rsp = await fetch(apiUrl(path || '/action'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ ...kv, do: action }).toString(),
-        signal: AbortSignal.timeout(timeoutMs || 30000),
-    });
-    const text = await rsp.text();
-    try { return JSON.parse(text); } catch (e) { return text; }
+    const options = (timeoutMs && typeof timeoutMs === 'object') ? timeoutMs : {};
+    const limit = (typeof timeoutMs === 'number' ? timeoutMs : options.timeoutMs) || 30000;
+    const requestId = String(options.requestId || (kv && kv.requestId) || createRuntimeId());
+    const playSessionId = String(options.playSessionId || (kv && kv.playSessionId) || '');
+    const timeoutSignal = AbortSignal.timeout(limit);
+    const signal = options.signal
+        ? (typeof AbortSignal.any === 'function'
+            ? AbortSignal.any([options.signal, timeoutSignal]) : options.signal)
+        : timeoutSignal;
+    const fields = { ...(kv || {}), do: action, requestId };
+    if (playSessionId) fields.playSessionId = playSessionId;
+    try {
+        const rsp = await fetch(apiUrl(path || '/action'), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Request-Id': requestId,
+            },
+            body: new URLSearchParams(fields).toString(),
+            signal,
+        });
+        const text = await rsp.text();
+        try { return JSON.parse(text); } catch (e) { return text; }
+    } catch (error) {
+        // AbortController only stops the browser fetch.  Notify the backend
+        // separately so cooperative Spider/JAR calls can stop at their next
+        // runtime boundary; hard Worker termination remains an S1 concern.
+        if (error && error.name === 'AbortError' && window.vpc && window.vpc.cancelRuntime) {
+            try { await window.vpc.cancelRuntime({ requestId, playSessionId }); } catch (e) { /* best effort */ }
+        }
+        throw error;
+    }
 }
 
 /** GET 请求并尽量解析 JSON；30s 超时。 */

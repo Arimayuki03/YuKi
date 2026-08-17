@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import threading
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 from base.spider import Spider
 import hoststate
@@ -138,19 +138,97 @@ class JarSpider(Spider):
                           {'list': []})
 
     @staticmethod
-    def _quark_folder_id(id):
-        """从 vodId 提取我的夸克网盘文件 fid。
+    def _quark_play_params(id):
+        """从夸克 vodId 提取统一 do=pan 参数。
 
-        我的网盘文件 vodId 是 [{"folder":"<fid>","shareId":"",...}]（shareId 空）。
-        返回 (folder, share_id)；非该结构返回 ('', '')。
+        不同夸克 JAR 会把同一份信息编码成 JSON 数组、JSON 对象或 URL 编码
+        的 JSON；同时字段名可能是 folder/fid/fileId、shareId/share_id。
+        统一归一后由 go-proxy 负责真正解析短期播放地址。
+        """
+        raw = str(id or '').strip()
+        if not raw:
+            return None
+        if 'pan.quark.cn/s/' in raw:
+            return {'fileId': raw}
+
+        decoded = raw
+        for _ in range(2):
+            try:
+                candidate = unquote(decoded)
+            except Exception:
+                break
+            if candidate == decoded:
+                break
+            decoded = candidate
+        try:
+            value = json.loads(decoded)
+        except (TypeError, ValueError):
+            return None
+
+        def objects(node):
+            if isinstance(node, dict):
+                yield node
+                for child in node.values():
+                    yield from objects(child)
+            elif isinstance(node, list):
+                for child in node:
+                    yield from objects(child)
+
+        for item in objects(value):
+            def pick(*keys):
+                for key in keys:
+                    val = item.get(key)
+                    if val is not None and str(val).strip():
+                        return str(val).strip()
+                return ''
+
+            file_id = pick('folder', 'fileId', 'file_id', 'fid')
+            if not file_id:
+                continue
+            share_id = pick('shareId', 'share_id', 'shareid')
+            file_token = pick('fileToken', 'file_token', 'shareToken',
+                              'share_token', 'share_fid_token', 'fid_token')
+            return {'fileId': file_id, 'shareId': share_id,
+                    'fileToken': file_token}
+        return None
+
+    @staticmethod
+    def _quark_folder_id(id):
+        """兼容旧调用方：返回 (file_id, share_id)。"""
+        params = JarSpider._quark_play_params(id) or {}
+        return str(params.get('fileId') or ''), str(params.get('shareId') or '')
+
+    @staticmethod
+    def _quark_pan_url(params):
+        if not params or not params.get('fileId'):
+            return None
+        query = [('do', 'pan'), ('site', 'quark')]
+        for key in ('shareId', 'fileId', 'fileToken'):
+            value = str(params.get(key) or '')
+            if value:
+                query.append((key, value))
+        return 'http://127.0.0.1:9978/proxy?' + urlencode(query, quote_via=quote)
+
+    @staticmethod
+    def _is_legacy_go_proxy_url(url):
+        """判断 JAR 返回的旧版 ``7944/?url=...&proxytype=go`` 地址。
+
+        这类地址包着夸克短期签名 URL，缓存或转存稍有延迟就会变成
+        HTTP 412。能识别出同一集的统一 pan 参数时，应交给当前 Provider
+        动态重新申请地址，而不是把旧 CDN 地址继续交给 mpv。
         """
         try:
-            vid = json.loads(id) if isinstance(id, str) and id.lstrip().startswith('[') else None
-            if isinstance(vid, list) and vid and isinstance(vid[0], dict):
-                return str(vid[0].get('folder') or ''), str(vid[0].get('shareId') or '')
-        except Exception:
-            pass
-        return '', ''
+            parts = urlsplit(str(url or ''))
+            if (parts.scheme.lower() not in ('http', 'https')
+                    or (parts.hostname or '').lower() not in ('127.0.0.1', 'localhost')
+                    or (parts.port or (443 if parts.scheme.lower() == 'https' else 80))
+                    not in (7944, 9978, 1314)):
+                return False
+            query = parse_qs(parts.query, keep_blank_values=True)
+            return (str(query.get('proxytype', [''])[0]).lower() == 'go'
+                    and bool(query.get('url', [''])[0]))
+        except (TypeError, ValueError):
+            return False
 
     def playerContent(self, flag, id, vipFlags):
         # 端口泛化拦截（任务二机制A）：所有 jar 播放地址的单一流经点
@@ -169,13 +247,15 @@ class JarSpider(Spider):
         # - 新实现：jar 优先 → 失败/退化时兜底拼 go-proxy URL
         # - 快路径开关 pan_fast_path（默认 True 保持现有行为，False 全走 jar）
         import hoststate
-        folder, share_id = self._quark_folder_id(id)
-        pan_url = None
-        if folder and not share_id:
-            pan_url = 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=%s' % quote(str(folder), safe='')
-            # 快路径：前置短路（现有行为，现有用户零感知）
-            if hoststate.get_pan_fast_path():
-                return {'url': pan_url, 'parse': 0, 'header': {}}
+        # 新一次播放先清理同线程上一次 JAR 错误；有效的 pan 回退不应被
+        # server._attach_jar_error 转成 error，阻断前端继续播放。
+        self.last_error = ''
+        pan_params = self._quark_play_params(id)
+        pan_url = self._quark_pan_url(pan_params)
+        if pan_url and hoststate.get_pan_fast_path():
+            # 快路径覆盖个人文件和分享文件，绕开依赖 Android Context/chmod
+            # 的 JAR 取流实现，统一交给 PC 侧 Quark Provider。
+            return {'url': pan_url, 'parse': 0, 'header': {}}
 
         # jar 优先路径：先走 jar playerContent
         raw = self._call('playerContent', flag, id, list(vipFlags) if vipFlags else [])
@@ -187,9 +267,20 @@ class JarSpider(Spider):
             result = {'url': id, 'parse': 1}
 
         # 兜底：jar 失败/退化（url 空/[] 或仍是原样 id）且命中网盘格式 → go-proxy URL
-        url = (result or {}).get('url')
-        if pan_url and (not url or (isinstance(url, str) and url == id)):
-            result = {'url': pan_url, 'parse': 0, 'header': result.get('header') or {}}
+        url = (result or {}).get('url') if isinstance(result, dict) else None
+        # 旧 JAR 可能已经返回了 7944 go-proxy 地址。即使它看起来是完整
+        # URL，也只是一次性的 CDN 签名；替换为 do=pan 后，go-proxy 才能
+        # 在 401/403/404/410/412 时刷新 Provider 地址。
+        if pan_url and isinstance(url, str) and self._is_legacy_go_proxy_url(url):
+            self.last_error = ''
+            result = dict(result) if isinstance(result, dict) else {}
+            result.update({'url': pan_url, 'parse': 0})
+            result['header'] = result.get('header') or {}
+        elif pan_url and (not url or (isinstance(url, str) and url == id)):
+            self.last_error = ''
+            header = result.get('header') if isinstance(result, dict) else {}
+            result = dict(result) if isinstance(result, dict) else {}
+            result.update({'url': pan_url, 'parse': 0, 'header': header or {}})
         return result
 
     def liveContent(self, url):

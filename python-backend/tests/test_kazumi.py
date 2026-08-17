@@ -6,13 +6,22 @@
 import os
 import sys
 import json
-import tempfile
+import uuid
 import unittest
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.dirname(BASE_DIR)
 sys.path.insert(0, BACKEND_DIR)
-os.environ['VPC_DATA_DIR'] = tempfile.mkdtemp()
+TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BACKEND_DIR, '.test-runtime')
+os.makedirs(TEST_ROOT, exist_ok=True)
+
+
+def test_file(prefix='vpc-test-'):
+    return os.path.join(TEST_ROOT, prefix + uuid.uuid4().hex + '.json')
+
+
+os.environ['VPC_DATA_DIR'] = os.path.join(TEST_ROOT, 'kazumi-data')
+os.makedirs(os.environ['VPC_DATA_DIR'], exist_ok=True)
 
 import hoststate
 hoststate.configure(data_dir=os.environ['VPC_DATA_DIR'])
@@ -435,7 +444,7 @@ class TestCookieJar(unittest.TestCase):
     """Cookie 持久化（PluginCookieManager 对齐）。"""
 
     def setUp(self):
-        self.jar = CookieJar(file_path=os.path.join(tempfile.mkdtemp(), 'cookies.json'))
+        self.jar = CookieJar(file_path=test_file('cookies-'))
 
     def test_set_and_header(self):
         self.jar.set_domain_cookies('example.com', [
@@ -473,7 +482,7 @@ class TestRuleEngineCookie(unittest.TestCase):
         from kazumi.models import PreparedRuleRequest
         import kazumi.rule_engine as re_mod
 
-        jar = CookieJar(file_path=os.path.join(tempfile.mkdtemp(), 'cookies.json'))
+        jar = CookieJar(file_path=test_file('cookies-'))
         jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'xyz'}])
         engine = RuleEngine(cookie_jar=jar)
 

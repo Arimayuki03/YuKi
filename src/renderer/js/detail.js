@@ -1390,36 +1390,13 @@ const Detail = {
         if (!src) return;
         const ep = src.episodes[idx];
         if (!ep) return;
-        const startSrc = this.activeSource;
-        let tried = 0;
-        while (tried < this.sources.length) {
-            const curSrc = this.sources[this.activeSource];
-            const curEp = curSrc.episodes[idx];
-            if (!curEp) { this._advanceSource(); tried++; continue; }
-            if (tried > 0) {
-                warnToast(`线路「${curSrc.from}」尝试中…`);
-                $('#detail-tab-content .play-src').removeClass('active');
-                $(`#detail-tab-content .play-src[data-idx="${this.activeSource}"]`).addClass('active');
-                this.renderEpisodes();
-                this._saveLastSource();
-            }
-            const result = await Player.play(
-                this.site, curSrc.from, curEp.url,
-                this.vodName || '', curEp.name,
-                curSrc.episodes, idx,
-            );
-            if (result && result.ok) return;
-            if (result && result.reason === 'mpv-missing') return;
-            this._advanceSource();
-            tried++;
-        }
-        warnToast(`全部 ${this.sources.length} 条线路均播放失败`);
-        if (this.activeSource !== startSrc) this.selectSource(startSrc);
-    },
-
-    _advanceSource() {
-        if (this.sources.length <= 1) return;
-        this.activeSource = (this.activeSource + 1) % this.sources.length;
+        // 播放失败只反馈当前线路的地址和错误，不自动切换其它线路；线路选择
+        // 由用户手动完成，避免当前线路失败后悄悄播放了另一条线路。
+        await Player.play(
+            this.site, src.from, ep.url,
+            this.vodName || '', ep.name,
+            src.episodes, idx,
+        );
     },
 
     toggleEpOrder() {
@@ -1477,36 +1454,15 @@ const Detail = {
             .map(function () { return parseInt($(this).data('idx'), 10); })
             .get().sort((a, b) => a - b);
         if (!idxs.length) { warnToast('请先勾选要播放的集'); return; }
-        const firstIdx = idxs[0];
-        const startSrc = this.activeSource;
-        let tried = 0;
-        let ok = false;
-        while (tried < this.sources.length) {
-            const curSrc = this.sources[this.activeSource];
-            const curEp = curSrc.episodes[firstIdx];
-            if (!curEp) { this._advanceSource(); tried++; continue; }
-            if (tried > 0) {
-                warnToast(`线路「${curSrc.from}」尝试中…`);
-                $('#detail-tab-content .play-src').removeClass('active');
-                $(`#detail-tab-content .play-src[data-idx="${this.activeSource}"]`).addClass('active');
-                this.renderEpisodes();
-                this._saveLastSource();
-            }
-            const eps = idxs.map((i) => curSrc.episodes[i]).filter(Boolean);
-            if (!eps.length) { this._advanceSource(); tried++; continue; }
-            const first = eps[0];
-            let autoNext = true;
-            try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
-            if (eps.length > 1) {
-                warnToast(autoNext ? `已加入播放列表 ${eps.length} 集，将自动连播` : '自动连播已关闭，仅播放勾选的第一集');
-            }
-            const result = await Player.play(this.site, curSrc.from, first.url, this.vodName || '', first.name, eps, 0);
-            if (result && result.ok) { ok = true; break; }
-            if (result && result.reason === 'mpv-missing') break;
-            this._advanceSource();
-            tried++;
+        const eps = idxs.map((i) => src.episodes[i]).filter(Boolean);
+        if (!eps.length) { warnToast('当前线路没有对应剧集'); return; }
+        const first = eps[0];
+        let autoNext = true;
+        try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
+        if (eps.length > 1) {
+            warnToast(autoNext ? `已加入播放列表 ${eps.length} 集，将自动连播` : '自动连播已关闭，仅播放勾选的第一集');
         }
-        if (!ok && this.activeSource !== startSrc) this.selectSource(startSrc);
+        await Player.play(this.site, src.from, first.url, this.vodName || '', first.name, eps, 0);
     },
 
     downloadSelected() {

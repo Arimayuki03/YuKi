@@ -36,4 +36,4 @@ class PlayUrl:
     expire_at: float = 0.0
     file_id: str = ''
     provider: str = ''
-
+    request: dict[str, Any] = field(default_factory=dict)

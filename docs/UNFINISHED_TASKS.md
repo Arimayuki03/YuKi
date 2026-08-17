@@ -18,6 +18,7 @@
 | 任务 | 当前状态 | 来源 |
 |---|---|---|
 | TVBox 兼容性 Phase A–F | 仍在推进，包含兼容套件、端口泛化、夸克降级、FongMi 契约审计、分层诊断 | [PROGRESS.md](../PROGRESS.md), [TVBOX_COMPAT_PLAN_REMAINING.md](TVBOX_COMPAT_PLAN_REMAINING.md) |
+| TVBox/FongMi 实际播放一致性 | 待执行：进程隔离、硬超时、drpy、Android Worker、媒体探测与首帧验收 | [TVBOX_FONGMI_PARITY_TASKS.md](TVBOX_FONGMI_PARITY_TASKS.md) |
 | macOS/Linux 实际打包与运行测试 | 未完成 | [PROGRESS.md](../PROGRESS.md) |
 | Windows 安装后首次冷启动验证、打包后资源、离线/慢网和多窗口尺寸实测 | 未完成 | [PROGRESS.md](../PROGRESS.md) |
 | 自动更新（`electron-updater`） | 基础链路已接入；发布源/签名待确定 | [PROGRESS.md](../PROGRESS.md) |

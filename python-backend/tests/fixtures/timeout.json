@@ -1,0 +1,4 @@
+{
+  "sites": [{"key": "offline_timeout", "name": "Offline Timeout", "type": 3,
+    "api": "./timeout_spider.py"}]
+}

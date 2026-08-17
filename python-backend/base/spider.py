@@ -12,6 +12,9 @@ from importlib.machinery import SourceFileLoader
 
 class Spider(metaclass=ABCMeta):
     _instance = None
+    # 由站点工厂注入；生成的 proxy URL 带 siteKey 后，多个站点并发时
+    # 不再依赖全局 recent loader。
+    site_key = ''
 
     def __init__(self):
         self.extend = ''
@@ -113,7 +116,10 @@ class Spider(metaclass=ABCMeta):
         return json.dumps(obj, ensure_ascii=False)
 
     def getProxyUrl(self, local=True):
-        return f"{hoststate.get_proxy_url(local)}?do=py"
+        params = {'do': 'py'}
+        if getattr(self, 'site_key', ''):
+            params['siteKey'] = str(self.site_key)
+        return hoststate.get_proxy_url(local) + '?' + urllib.parse.urlencode(params)
 
     def log(self, msg):
         if isinstance(msg, dict) or isinstance(msg, list):

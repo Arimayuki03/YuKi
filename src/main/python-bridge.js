@@ -132,6 +132,24 @@ class PythonBridge extends EventEmitter {
         });
     }
 
+    /** Notify the backend that a traced /action request was abandoned. */
+    async cancelRuntime(context = {}) {
+        const info = this.info;
+        const requestId = String((context && context.requestId) || '');
+        if (!info || !requestId) return { ok: true, cancelled: false, requestId };
+        try {
+            const rsp = await fetch(`${info.base}/runtime/cancel?token=${encodeURIComponent(info.token)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId },
+                body: JSON.stringify({ requestId }),
+                signal: AbortSignal.timeout(1500),
+            });
+            return await rsp.json();
+        } catch (e) {
+            return { ok: false, cancelled: false, requestId, reason: String(e && e.message || e) };
+        }
+    }
+
     stop() {
         this.stopping = true;
         this._stopHealthCheck();

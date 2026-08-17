@@ -15,6 +15,7 @@ file-manager IPC，后端不再提供该组端点。
 import os
 import sys
 import json
+import asyncio
 import time
 import socket
 import secrets
@@ -70,6 +71,12 @@ from proxy_contract import (
 )
 from proxy_gateway import dispatch as dispatch_proxy
 from play_contract import normalize_play_result
+from runtime.contracts import RuntimeRequest, RuntimeResponse, bind_runtime_request, current_runtime_request
+from runtime.errors import (
+    RuntimeError as RuntimeContractError,
+    error_from_exception,
+    redact_sensitive,
+)
 
 logger = logging.getLogger('vpc.server')
 
@@ -95,12 +102,93 @@ _DANMAKU_QUEUE_MAX = 5000
 # 配置加载异步任务（多仓扫描可达分钟级，不能阻塞 /action 请求）
 _config_task = {'status': 'idle', 'summary': None, 'msg': ''}
 
-# playerContent 结果缓存（key=site|flag|id → {result, ts}，60s 有效期）
-# 换线路又切回原线路时避免重复解析
+# playerContent 稳定结果缓存（key=site|flag|id → {result, ts}，60s 有效期）。
+# 带签名的 CDN/旧 go-proxy 地址不缓存，避免换集后继续拿到 412。
 _player_content_cache = {}
 _PLAYER_CACHE_TTL = 60
 # 清理路径的并发保护（L-19）：多线程 dispatch 同时触发清理时锁内迭代淘汰
 _player_cache_lock = threading.Lock()
+
+# 当前控制面请求登记表。它只负责把客户端取消/超时信号送到正在运行的
+# Spider/JAR 调用；真正的进程隔离和失控 Worker 终止仍属于 S1。
+_active_runtime_requests = {}
+_active_runtime_lock = threading.Lock()
+
+
+def _register_runtime_request(request):
+    with _active_runtime_lock:
+        _active_runtime_requests[request.request_id] = request
+
+
+def _unregister_runtime_request(request):
+    with _active_runtime_lock:
+        if _active_runtime_requests.get(request.request_id) is request:
+            _active_runtime_requests.pop(request.request_id, None)
+
+
+def cancel_runtime_request(request_id, reason='cancelled'):
+    with _active_runtime_lock:
+        request = _active_runtime_requests.get(str(request_id or ''))
+    if request is None:
+        return False
+    request.cancel(reason)
+    return True
+
+
+def _runtime_control_error(request, timed_out=False):
+    code = 'L3_RUNTIME_TIMEOUT' if timed_out else 'L3_RUNTIME_CANCELLED'
+    error = RuntimeContractError(code).with_request(request)
+    return error.http_status, json.dumps(
+        RuntimeResponse.failure(request, error, runtime='runtime').to_dict(),
+        ensure_ascii=False)
+
+
+async def _watch_action_disconnect(request, runtime_request):
+    """Poll client disconnects while a synchronous Spider runs in a thread.
+
+    The event is cooperative: the running call observes it at the Runner and
+    dispatch boundaries.  S1 remains responsible for killing a non-cooperative
+    Worker; G0 must nevertheless stop returning false success after a client
+    has gone away.
+    """
+    while True:
+        try:
+            if await request.is_disconnected():
+                runtime_request.cancel('cancelled')
+                return 'cancelled'
+        except Exception:
+            # A transport exception is equivalent to a disconnected client.
+            runtime_request.cancel('cancelled')
+            return 'cancelled'
+        await asyncio.sleep(0.05)
+
+
+def _is_ephemeral_play_result(result):
+    """判断 playerContent 是否包含不能复用的短期播放地址。
+
+    夸克 CDN 签名地址和旧 go-proxy 地址都可能在几十秒内失效；缓存它们
+    会让下一次点击继续拿到 412。统一 ``do=pan`` 地址本身稳定，可以缓存，
+    因为真正的 CDN 地址由 Provider 在取流时动态解析。
+    """
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+        url = str((data or {}).get('url') or '') if isinstance(data, dict) else ''
+        if not url:
+            return False
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or '').lower()
+        query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+        if str(query.get('proxytype', [''])[0]).lower() == 'go':
+            return True
+        if host in ('127.0.0.1', 'localhost'):
+            return False
+        if host.endswith('.quark.cn') or host.endswith('.myquark.cn'):
+            return True
+        volatile = {'auth_key', 'token', 'sign', 'signature', 'expires',
+                    'expire', 'expire_at', 'expires_at', 'deadline'}
+        return any(str(key).lower() in volatile for key in query)
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 # /cache KV 目录总量配额（H-5c）：超 512MB 拒绝新写入；检查结果缓存 60s
 # 避免每次写入都全目录统计
@@ -123,7 +211,7 @@ class _RedactingFormatter(logging.Formatter):
         text = super().format(record)
         for pattern, replacement in self._patterns:
             text = pattern.sub(replacement, text)
-        return text
+        return redact_sensitive(text, 16000)
 
 
 def _setup_logging():
@@ -162,6 +250,10 @@ def _setup_logging():
 def _empty_config_summary(parse_errors=0):
     return {
         'sites': 0,
+        'configured': 0,
+        'built': 0,
+        'initialized': 0,
+        'healthy': 0,
         'sites_built': 0,
         'skipped': [],
         'parse_errors': int(parse_errors),
@@ -224,12 +316,49 @@ def _danmaku_push(text):
 def _site_or_error(form):
     site = sites.get(form.get('site') or None)
     if site is None:
-        raise ValueError('no site loaded')
+        raise RuntimeContractError(
+            'L2_SITE_NOT_FOUND', site_key=str(form.get('site') or ''))
     return site
+
+
+def _runtime_site_call(site, capability, callback):
+    """执行一次 Spider 调用并把结果写回 SiteHealth。"""
+    request = current_runtime_request()
+    if request is not None:
+        request.raise_if_cancelled()
+    try:
+        result = callback()
+        # A synchronous Spider may return after the request deadline or after
+        # the client cancelled it.  Do not turn that late result into a
+        # successful health sample.
+        if request is not None:
+            request.raise_if_cancelled()
+        spider = getattr(getattr(site, 'runner', None), 'spider', None)
+        last_error = str(getattr(spider, 'last_error', '') or '')
+        if last_error:
+            raise RuntimeContractError(
+                'L3_RUNTIME_CALL_FAILED',
+                site_key=site.key,
+                runtime=site.health.runtime,
+                raw_error=last_error,
+            )
+        site.health.record_success(capability)
+        return result
+    except Exception as exc:
+        error = error_from_exception(
+            exc, stage='runtime', request=request,
+            site_key=site.key, runtime=site.health.runtime)
+        site.health.record_failure(error)
+        raise error from exc
 
 
 def _bool(v):
     return str(v).lower() in ('1', 'true', 'yes')
+
+
+def _is_timeout_text(value):
+    text = str(value or '').lower()
+    return 'timeout' in text or 'timed out' in text or 'deadline exceeded' in text
 
 
 def _cache_paths():
@@ -348,32 +477,41 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
     """jar 蜘蛛最近一次调用失败时，把错误原因附加到响应 JSON 的 error 字段，
     前端可据此提示「站点接口异常」而非笼统的「暂无内容/未取得详情」。
 
-    ensure_list=True（detailContent 用）：失败时要保证 body 含 list（空数组），
-    使前端「无 vod + 有 error」可稳定判定，且严格返回 200 + {list: [], error}，
-    绝不走 dispatch 的 500 分支。
+    ensure_list=True（detailContent 用）：失败时要保证内部结果含 list（空数组），
+    使旧调用方仍可诊断「无 vod + 有 error」。HTTP 端点随后会把结构化
+    error 提升为非 2xx RuntimeResponse，避免 200 假成功。
     """
     sp = getattr(ru, 'spider', None)
     err = getattr(sp, 'last_error', '') if sp is not None else ''
     fallback = (err and _friendly_jar_error(err)) or '站点接口异常或风控，暂时无法获取内容'
+
+    def _error_payload(code, raw=''):
+        error = RuntimeContractError(code, runtime='jar', raw_error=raw)
+        return error.to_dict()
+
     try:
         data = json.loads(body)
         if isinstance(data, dict):
             if err:
-                data['error'] = _friendly_jar_error(err)
+                code = 'L3_RUNTIME_TIMEOUT' if 'timeout' in str(err).lower() else 'L3_RUNTIME_CALL_FAILED'
+                data['error'] = _error_payload(code, err)
             elif data.get('parse') in (1, '1', True) and not _parse_matches_flag(flag):
                 # L4：让配置缺少 parses（或没有匹配当前 flag）变成可诊断响应，
                 # 而不是让渲染层只能看到一个泛化的播放失败。
-                data['error'] = '当前配置未含匹配该线路的解析接口（parse=1）'
+                data['error'] = _error_payload(
+                    'L4_PARSE_UNAVAILABLE', 'parse=1 without matching parser')
             if ensure_list:
                 data.setdefault('list', [])
             return json.dumps(data, ensure_ascii=False)
         if ensure_list:
             # 非 dict 响应（蜘蛛异常后桥接返回奇怪类型）→ 归一为 {list:[], error}
-            return json.dumps({'list': [], 'error': fallback}, ensure_ascii=False)
+            return json.dumps({'list': [], 'error': _error_payload(
+                'L3_RUNTIME_CALL_FAILED', fallback)}, ensure_ascii=False)
     except (TypeError, ValueError):
         if ensure_list:
             # 完全无法解析为 JSON 时仍返回规范结构，避免前端拿到裸串无从判断
-            return json.dumps({'list': [], 'error': fallback}, ensure_ascii=False)
+            return json.dumps({'list': [], 'error': _error_payload(
+                'L3_RUNTIME_CALL_FAILED', fallback)}, ensure_ascii=False)
     return body
 
 
@@ -391,10 +529,29 @@ def _normalize_play_result(body, flag='', site=None, original_id=''):
 _SPIDER_SEMAPHORE = threading.BoundedSemaphore(16)
 
 
-def dispatch_action(form):
+def dispatch_action(form, runtime_request=None):
     """返回 (status_code, body_text)。spider 调用均为同步阻塞，由调用方放线程池。"""
-    with _SPIDER_SEMAPHORE:
-        return _dispatch_action_inner(form)
+    request = runtime_request or RuntimeRequest.from_action(form)
+    _register_runtime_request(request)
+    with bind_runtime_request(request):
+        try:
+            request.raise_if_cancelled()
+            with _SPIDER_SEMAPHORE:
+                return _dispatch_action_inner(form)
+        except RuntimeContractError as error:
+            logger.warning(
+                'runtime request failed requestId=%s code=%s site=%s raw=%s',
+                request.request_id, error.code, request.site_key,
+                redact_sensitive(error.raw_error, 800))
+            response = RuntimeResponse.failure(request, error, runtime=error.runtime)
+            return error.http_status, json.dumps(response.to_dict(), ensure_ascii=False)
+        except Exception as exc:
+            error = error_from_exception(exc, request=request, site_key=request.site_key)
+            logger.exception('runtime request failed requestId=%s', request.request_id)
+            response = RuntimeResponse.failure(request, error, runtime=error.runtime)
+            return error.http_status, json.dumps(response.to_dict(), ensure_ascii=False)
+        finally:
+            _unregister_runtime_request(request)
 
 
 def _dispatch_action_inner(form):
@@ -412,15 +569,19 @@ def _dispatch_action_inner(form):
             text = form.get('text', '')
             if name in ('config', '配置') and text:
                 if _config_load_async(text) is None:
-                    return 409, '{"code":409,"msg":"config loading in progress"}'
+                    raise RuntimeContractError('L1_CONFIG_BUSY')
                 return 200, '{"code":202,"msg":"config loading"}'
             logger.info('setting: %s=%s', name, text)
             return 200, '{"code":200,"msg":"setting received"}'
         if do == 'loadConfig':
             if _config_load_async(form.get('url', '')) is None:
-                return 409, '{"code":409,"msg":"config loading in progress"}'
+                raise RuntimeContractError('L1_CONFIG_BUSY')
             return 200, '{"code":202,"msg":"config loading"}'
         if do == 'configTask':
+            if _config_task.get('status') == 'error':
+                msg = str(_config_task.get('msg') or 'config task failed')
+                code = 'L1_CONFIG_TIMEOUT' if _is_timeout_text(msg) else 'L1_CONFIG_PARSE_FAILED'
+                raise RuntimeContractError(code, raw_error=msg)
             return 200, json.dumps({'code': 200, **_config_task},
                                    ensure_ascii=False, default=str)
         if do == 'cacheSize':
@@ -454,9 +615,19 @@ def _dispatch_action_inner(form):
                                    ensure_ascii=False)
         if do == 'fetchText':
             # 直播源等外部文本拉取（渲染层直接 fetch 会被 CORS 拦截）
-            from config import fetch_text
-            text = fetch_text(form.get('url', ''))
-            return 200, json.dumps({'code': 200, 'text': text[:500000]}, ensure_ascii=False)
+            from config import fetch_text_diagnostics
+            fetched = fetch_text_diagnostics(form.get('url', ''))
+            text = fetched.pop('text', '')
+            upstream_error = fetched.get('error') or ''
+            upstream_status = int(fetched.get('status') or 0)
+            if upstream_error or upstream_status >= 400 or not text.strip():
+                code = 'L1_CONFIG_TIMEOUT' if _is_timeout_text(upstream_error) else 'L1_CONFIG_FETCH_FAILED'
+                raise RuntimeContractError(
+                    code,
+                    raw_error=upstream_error or ('upstream HTTP %s' % upstream_status),
+                    details={'upstream': {k: fetched.get(k) for k in ('status', 'finalUrl', 'failureDomain')}})
+            return 200, json.dumps({'code': 200, 'text': text[:500000],
+                                    'upstream': fetched}, ensure_ascii=False)
         if do == 'panCookie':
             # 网盘 Cookie 配置（JAR 网盘源播放用）：act=get 读取 / act=set 保存
             from pan_cookies import load_pan_cookies, save_pan_cookies, PAN_COOKIE_KEYS, _PROVIDER_NAMES
@@ -469,7 +640,9 @@ def _dispatch_action_inner(form):
                 try:
                     cookies = json.loads(form.get('cookies', '{}'))
                 except ValueError:
-                    return 400, '{"code":400,"msg":"cookies 需为 JSON 对象"}'
+                    raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='cookies must be a JSON object')
+                if not isinstance(cookies, dict):
+                    raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='cookies must be a JSON object')
                 saved, warnings = save_pan_cookies(cookies)
                 return 200, json.dumps({'code': 200, 'cookies': saved, 'warnings': warnings},
                                        ensure_ascii=False)
@@ -481,8 +654,7 @@ def _dispatch_action_inner(form):
                     return 200, json.dumps({'code': 200, **info}, ensure_ascii=False)
                 except Exception as e:
                     logger.warning('pan qr create failed: %s', e)
-                    return 200, json.dumps({'code': 500, 'msg': '获取二维码失败：%s' % str(e)[:100]},
-                                           ensure_ascii=False)
+                    raise RuntimeContractError('L3_RUNTIME_CALL_FAILED', raw_error=str(e)) from e
             if act == 'qrPoll':
                 # 轮询扫码状态；成功时后端已自动保存 Cookie
                 from pan_login import quark_qr_poll
@@ -492,18 +664,16 @@ def _dispatch_action_inner(form):
                     return 200, json.dumps({'code': 200, **res}, ensure_ascii=False)
                 except Exception as e:
                     logger.warning('pan qr poll failed: %s', e)
-                    return 200, json.dumps({'code': 500, 'status': 'error',
-                                            'message': '轮询失败：%s' % str(e)[:100]},
-                                           ensure_ascii=False)
+                    raise RuntimeContractError('L3_RUNTIME_CALL_FAILED', raw_error=str(e)) from e
             if act == 'qrRender':
                 # 渲染二维码 PNG（主进程扫码登录模式：token 由主进程 Chromium 获取）
                 from pan_login import render_qr_png
                 text = form.get('text', '')
                 if not text:
-                    return 400, '{"code":400,"msg":"缺少 text"}'
+                    raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='missing text')
                 png = render_qr_png(text)
                 return 200, json.dumps({'code': 200, 'qr_png': png}, ensure_ascii=False)
-            return 400, '{"code":400,"msg":"unknown panCookie act"}'
+            raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='unknown panCookie act')
         if do == 'file':
             logger.info('file play: %s', form.get('path'))
             return 200, '{"code":200,"msg":"file received"}'
@@ -519,20 +689,25 @@ def _dispatch_action_inner(form):
 
         # ---- Spider 内容 API（契约见 PHASE0_依赖矩阵.md 第 3 节）----
         if do == 'homeContent':
-            return 200, _attach_jar_error(ru, spider_app.homeContent(ru, _bool(form.get('filter', 'false'))))
+            return 200, _attach_jar_error(ru, _runtime_site_call(
+                site, 'home', lambda: spider_app.homeContent(ru, _bool(form.get('filter', 'false')))))
         if do == 'homeVideoContent':
-            return 200, _attach_jar_error(ru, spider_app.homeVideoContent(ru, form.get('pg', '1')))
+            return 200, _attach_jar_error(ru, _runtime_site_call(
+                site, 'home', lambda: spider_app.homeVideoContent(ru, form.get('pg', '1'))))
         if do == 'categoryContent':
-            return 200, _attach_jar_error(ru, spider_app.categoryContent(
-                ru, form.get('tid', ''), form.get('pg', '1'),
-                _bool(form.get('filter', 'false')), form.get('extend', '{}')))
+            return 200, _attach_jar_error(ru, _runtime_site_call(
+                site, 'category', lambda: spider_app.categoryContent(
+                    ru, form.get('tid', ''), form.get('pg', '1'),
+                    _bool(form.get('filter', 'false')), form.get('extend', '{}'))))
         if do == 'detailContent':
-            return 200, _attach_jar_error(ru, spider_app.detailContent(
-                ru, form.get('ids', '[]')))
+            return 200, _attach_jar_error(ru, _runtime_site_call(
+                site, 'detail', lambda: spider_app.detailContent(
+                    ru, form.get('ids', '[]'))))
         if do == 'searchContent':
-            return 200, spider_app.searchContent(
-                ru, form.get('word', form.get('key', '')),
-                form.get('quick', '0'), form.get('pg', '1'))
+            return 200, _runtime_site_call(
+                site, 'search', lambda: spider_app.searchContent(
+                    ru, form.get('word', form.get('key', '')),
+                    form.get('quick', '0'), form.get('pg', '1')))
         if do == 'playerContent':
             # 60s 缓存：换线路又切回原线路时跳过重复解析
             vip_raw = form.get('vipFlags', '[]')
@@ -542,39 +717,53 @@ def _dispatch_action_inner(form):
                 vip_key = str(vip_raw)
             cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}|{vip_key}"
             cached = _player_content_cache.get(cache_key)
-            if cached and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL:
+            if (cached and not _is_ephemeral_play_result(cached.get('result'))
+                    and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL):
                 return 200, cached['result']
-            raw_result = spider_app.playerContent(
-                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]'))
+            # 旧版本进程可能已经把一次性 CDN 地址放进内存缓存；命中时先删掉，
+            # 让本次请求重新调用 JAR/Provider 获取可用地址。
+            if cached and _is_ephemeral_play_result(cached.get('result')):
+                with _player_cache_lock:
+                    _player_content_cache.pop(cache_key, None)
+            raw_result = _runtime_site_call(
+                site, 'player', lambda: spider_app.playerContent(
+                    ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')))
             result = _normalize_play_result(raw_result, form.get('flag', ''), site,
                                             form.get('id', ''))
             result = _attach_jar_error(ru, result, flag=form.get('flag', ''))
-            with _player_cache_lock:
-                _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
-                # 防无限增长：超过 1024 项先清过期；仍无过期项则按 ts 淘汰最旧 10%
-                if len(_player_content_cache) > 1024:
-                    now = time.time()
-                    stale = [k for k, v in _player_content_cache.items()
-                             if (now - v['ts']) > _PLAYER_CACHE_TTL]
-                    for k in stale:
-                        del _player_content_cache[k]
+            if not _is_ephemeral_play_result(result):
+                with _player_cache_lock:
+                    _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
+                    # 防无限增长：超过 1024 项先清过期；仍无过期项则按 ts 淘汰最旧 10%
                     if len(_player_content_cache) > 1024:
-                        drop = max(1, len(_player_content_cache) // 10)
-                        oldest = sorted(_player_content_cache,
-                                        key=lambda k: _player_content_cache[k]['ts'])[:drop]
-                        for k in oldest:
+                        now = time.time()
+                        stale = [k for k, v in _player_content_cache.items()
+                                 if (now - v['ts']) > _PLAYER_CACHE_TTL]
+                        for k in stale:
                             del _player_content_cache[k]
+                        if len(_player_content_cache) > 1024:
+                            drop = max(1, len(_player_content_cache) // 10)
+                            oldest = sorted(_player_content_cache,
+                                            key=lambda k: _player_content_cache[k]['ts'])[:drop]
+                            for k in oldest:
+                                del _player_content_cache[k]
             return 200, result
         if do == 'liveContent':
-            return 200, spider_app.liveContent(ru, form.get('url', ''))
+            return 200, _runtime_site_call(
+                site, 'live', lambda: spider_app.liveContent(ru, form.get('url', '')))
         if do == 'action':
-            return 200, spider_app.action(ru, form.get('action', '{}'))
-        return 400, '{"code":400,"msg":"unknown do: %s"}' % json.dumps(do)
+            return 200, _runtime_site_call(
+                site, 'action', lambda: spider_app.action(ru, form.get('action', '{}')))
+        raise RuntimeContractError('L3_RUNTIME_INVALID_REQUEST', raw_error='unknown do: %s' % do)
+    except RuntimeContractError:
+        raise
     except ValueError as e:
-        return 404, '{"code":404,"msg":"%s"}' % e
+        raise RuntimeContractError(
+            'L2_SITE_INVALID', raw_error=str(e), site_key=str(form.get('site') or '')) from e
     except Exception as e:
-        logger.exception('dispatch error do=%s', do)
-        return 500, '{"code":500,"msg":"%s"}' % str(e).replace('"', "'")
+        raise error_from_exception(
+            e, stage='runtime', request=current_runtime_request(),
+            site_key=str(form.get('site') or '')) from e
 
 
 def _search_source_pages(runner, word, max_pages=50):
@@ -705,6 +894,72 @@ def build_proxy_response(result):
                 pass
 
 
+def _decorate_action_body(status, body, request):
+    """成功保持 CatVod 扁平结果；失败保持 RuntimeResponse 包络。"""
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return status, body
+    if not isinstance(payload, dict):
+        return status, body
+    if payload.get('ok') is False and isinstance(payload.get('error'), dict):
+        # dispatch_action already produced a RuntimeResponse failure.  Keep
+        # its status and envelope intact (including cancellation/deadline
+        # codes) instead of wrapping it a second time.
+        return status, json.dumps(payload, ensure_ascii=False)
+    if status < 400 and isinstance(payload.get('error'), dict):
+        # Legacy Spider/JAR methods may return a normal CatVod object with an
+        # ``error`` field.  It is still a runtime failure: HTTP 200 would make
+        # callers treat the response as a successful content result.  Promote
+        # the embedded L1-L6 code to the uniform error envelope.
+        embedded = payload.get('error') or {}
+        code = str(embedded.get('code') or 'L3_RUNTIME_CALL_FAILED')
+        try:
+            error = RuntimeContractError(
+                code,
+                stage=str(embedded.get('stage') or ''),
+                retryable=embedded.get('retryable'),
+                site_key=request.site_key,
+                runtime=(sites.get(request.site_key).health.runtime
+                         if request.site_key and sites.get(request.site_key) else ''),
+                raw_error=json.dumps(embedded, ensure_ascii=False),
+                details=embedded.get('details') or {},
+            ).with_request(request)
+        except ValueError:
+            error = RuntimeContractError(
+                'L3_RUNTIME_CALL_FAILED', site_key=request.site_key,
+                raw_error=json.dumps(embedded, ensure_ascii=False)).with_request(request)
+        response = RuntimeResponse.failure(request, error, runtime=error.runtime)
+        return error.http_status, json.dumps(response.to_dict(), ensure_ascii=False)
+    site = sites.get(request.site_key) if request.site_key else None
+    runtime_methods = {
+        'homeContent', 'homeVideoContent', 'categoryContent', 'searchContent',
+        'detailContent', 'playerContent', 'liveContent', 'action',
+    }
+    if status < 400 and request.method in runtime_methods and payload.get('error'):
+        raw = payload.get('error')
+        error = RuntimeContractError(
+            'L3_RUNTIME_CALL_FAILED',
+            site_key=request.site_key,
+            runtime=site.health.runtime if site is not None else '',
+            raw_error=json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw),
+        ).with_request(request)
+        response = RuntimeResponse.failure(request, error, runtime=error.runtime)
+        return error.http_status, json.dumps(response.to_dict(), ensure_ascii=False)
+    payload.setdefault('requestId', request.request_id)
+    if request.play_session_id:
+        payload.setdefault('playSessionId', request.play_session_id)
+    payload.setdefault('ok', status < 400)
+    payload.setdefault('runtime', site.health.runtime if site is not None else '')
+    payload.setdefault('elapsedMs', request.elapsed_ms)
+    return status, json.dumps(payload, ensure_ascii=False)
+
+
+def _dispatch_proxy_with_context(param, request):
+    with bind_runtime_request(request):
+        return do_local_proxy(param)
+
+
 # ---------------------------------------------------------------- 应用装配
 
 def create_app():
@@ -743,6 +998,26 @@ def create_app():
     @fastapi_app.get('/sites')
     def sites_state():
         return config_mgr.state()
+
+    @fastapi_app.api_route('/runtime/cancel', methods=['POST'])
+    async def runtime_cancel_endpoint(request: Request):
+        """Cancel a registered /action request by requestId.
+
+        This is a control-plane acknowledgement; it does not claim that an
+        arbitrary Python thread has already stopped.  Cooperative runtimes
+        observe the request event, while S1 will provide hard Worker kills.
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        request_id = str((data or {}).get('requestId') or request.headers.get('x-request-id') or '')
+        cancelled = cancel_runtime_request(request_id, 'cancelled') if request_id else False
+        return JSONResponse({
+            'ok': True,
+            'requestId': request_id,
+            'cancelled': bool(cancelled),
+        })
 
     @fastapi_app.api_route('/danmaku', methods=['GET', 'POST'])
     def danmaku_endpoint(do: str = Query('poll'), text: str = Form('')):
@@ -915,20 +1190,96 @@ def create_app():
                for value in supplied_tokens):
             return JSONResponse({'code': 401, 'msg': 'invalid proxy token'}, status_code=401)
         param = merge_request_params(query, dict(request.headers), form, raw_body)
+        runtime_request = RuntimeRequest.create(
+            request_id=param.get('requestId') or request.headers.get('x-request-id', ''),
+            play_session_id=param.get('playSessionId', ''),
+            site_key=param.get('siteKey', ''), method='proxy', args=param,
+        )
         try:
-            result = await run_in_threadpool(do_local_proxy, param)
+            result = await run_in_threadpool(
+                _dispatch_proxy_with_context, param, runtime_request)
         except Exception as exc:
-            logger.warning('proxy dispatch failed: %s', exc, exc_info=True)
-            result = (502, 'text/plain; charset=utf-8',
-                      f'proxy dispatch failed: {str(exc)[:240]}'.encode('utf-8'), {})
-        return build_proxy_response(result)
+            error = error_from_exception(
+                exc, stage='media', request=runtime_request,
+                site_key=runtime_request.site_key)
+            logger.warning('proxy dispatch failed requestId=%s code=%s: %s',
+                           runtime_request.request_id, error.code,
+                           redact_sensitive(error.raw_error), exc_info=True)
+            payload = RuntimeResponse.failure(
+                runtime_request, error, runtime='proxy').to_dict()
+            headers = {'X-Request-Id': runtime_request.request_id}
+            if runtime_request.play_session_id:
+                headers['X-Play-Session-Id'] = runtime_request.play_session_id
+            return JSONResponse(payload, status_code=error.http_status, headers=headers)
+        response = build_proxy_response(result)
+        response.headers['X-Request-Id'] = runtime_request.request_id
+        if runtime_request.play_session_id:
+            response.headers['X-Play-Session-Id'] = runtime_request.play_session_id
+        return response
 
     @fastapi_app.api_route('/action', methods=['POST'])
     async def action_endpoint(request: Request):
         form = {k: v for k, v in (await request.form()).items()}
-        status, body = await run_in_threadpool(dispatch_action, form)
+        runtime_request = RuntimeRequest.from_action(
+            form, request_id=request.headers.get('x-request-id', ''))
+        form['requestId'] = runtime_request.request_id
+        if runtime_request.play_session_id:
+            form['playSessionId'] = runtime_request.play_session_id
+        action_task = asyncio.create_task(run_in_threadpool(
+            dispatch_action, form, runtime_request))
+        disconnect_task = asyncio.create_task(
+            _watch_action_disconnect(request, runtime_request))
+        try:
+            done, _ = await asyncio.wait(
+                {action_task, disconnect_task},
+                timeout=runtime_request.deadline_ms / 1000.0,
+                return_when=asyncio.FIRST_COMPLETED)
+            if action_task in done:
+                try:
+                    status, body = action_task.result()
+                except asyncio.CancelledError:
+                    # The thread-pool wrapper may be cancelled at the same
+                    # boundary as the deadline/disconnect watcher.  Convert
+                    # that race into the same structured contract instead of
+                    # letting Starlette emit an unstructured 500.
+                    status, body = _runtime_control_error(
+                        runtime_request,
+                        timed_out=runtime_request.deadline_exceeded)
+                except RuntimeContractError as error:
+                    error = error.with_request(runtime_request)
+                    status = error.http_status
+                    body = json.dumps(RuntimeResponse.failure(
+                        runtime_request, error, runtime=error.runtime).to_dict(),
+                        ensure_ascii=False)
+                except Exception as exc:
+                    error = error_from_exception(
+                        exc, request=runtime_request,
+                        site_key=runtime_request.site_key)
+                    status = error.http_status
+                    body = json.dumps(RuntimeResponse.failure(
+                        runtime_request, error, runtime=error.runtime).to_dict(),
+                        ensure_ascii=False)
+            elif disconnect_task in done:
+                runtime_request.cancel('cancelled')
+                action_task.cancel()
+                status, body = _runtime_control_error(runtime_request, timed_out=False)
+            else:
+                runtime_request.expire()
+                action_task.cancel()
+                status, body = _runtime_control_error(runtime_request, timed_out=True)
+        finally:
+            disconnect_task.cancel()
+            if not action_task.done():
+                # The worker may still be unwinding cooperatively.  Consume a
+                # late exception without holding the HTTP request open.
+                action_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        status, body = _decorate_action_body(status, body, runtime_request)
+        headers = {'X-Request-Id': runtime_request.request_id}
+        if runtime_request.play_session_id:
+            headers['X-Play-Session-Id'] = runtime_request.play_session_id
         return PlainTextResponse(body, status_code=status,
-                                 media_type='application/json; charset=utf-8')
+                                 media_type='application/json; charset=utf-8',
+                                 headers=headers)
 
     # ------------------------------------------------------------ Kazumi 规则引擎端点
 

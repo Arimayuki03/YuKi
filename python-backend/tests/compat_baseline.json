@@ -1,0 +1,480 @@
+{
+ "generated_at": "2026-08-18 03:05:17",
+ "aggregate": {
+  "repos": 4,
+  "fetch_rate": 1.0,
+  "parse_rate": 1.0,
+  "avg_build_rate": 1.0,
+  "avg_home_rate": 0.25,
+  "skipped_total": 0,
+  "configured_total": 4,
+  "built_total": 4,
+  "initialized_total": 4,
+  "healthy_total": 1,
+  "forced_terminations": 2,
+  "stage_passed": {
+   "S0": 4,
+   "S1": 4,
+   "S2": 4,
+   "S3": 1,
+   "S4": 1,
+   "S5": 1,
+   "S6": 0
+  },
+  "skipped_reasons": {},
+  "offline": false,
+  "mode": "offline"
+ },
+ "repos": [
+  {
+   "name": "offline-normal",
+   "tags": [
+    "offline",
+    "normal"
+   ],
+   "fetch": 1,
+   "parse": 1,
+   "sites": 1,
+   "skipped_n": 0,
+   "configured": 1,
+   "built": 1,
+   "initialized": 1,
+   "healthy": 1,
+   "skipped": [],
+   "build_errors": {
+    "type_unsupported": 0,
+    "jar_failed": 0,
+    "js_failed": 0,
+    "cms_failed": 0,
+    "py_failed": 0,
+    "other": 0
+   },
+   "parse_errors": 0,
+   "build_rate": 1.0,
+   "home_ok": 1,
+   "home_total": 1,
+   "home_rate": 1.0,
+   "sites_detail": [
+    {
+     "siteKey": "offline_normal",
+     "runtime": "python",
+     "compatibility": "C1",
+     "state": "healthy",
+     "capabilities": [
+      "detail",
+      "home",
+      "player",
+      "proxy",
+      "search"
+     ],
+     "configured": true,
+     "built": true,
+     "initialized": true,
+     "healthy": true,
+     "lastSuccessAt": 1786993501061,
+     "lastError": null,
+     "consecutiveFailures": 0,
+     "circuitOpenUntil": 0,
+     "home": {
+      "state": "passed",
+      "reason": ""
+     },
+     "play": {
+      "state": "passed",
+      "reason": ""
+     },
+     "media": {
+      "state": "passed",
+      "reason": ""
+     }
+    }
+   ],
+   "stages": {
+    "S0": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S1": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S2": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S3": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S4": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S5": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S6": {
+     "state": "not_tested",
+     "reason": "Python compatibility suite does not launch mpv"
+    }
+   },
+   "networkExit": "loopback",
+   "failureDomains": [],
+   "upstreamHttp": [
+    200
+   ],
+   "note": "",
+   "elapsed": 2.2,
+   "termination": {
+    "mode": "natural",
+    "forced": false
+   }
+  },
+  {
+   "name": "offline-error",
+   "tags": [
+    "offline",
+    "error"
+   ],
+   "fetch": 1,
+   "parse": 1,
+   "sites": 1,
+   "skipped_n": 0,
+   "configured": 1,
+   "built": 1,
+   "initialized": 1,
+   "healthy": 0,
+   "skipped": [],
+   "build_errors": {
+    "type_unsupported": 0,
+    "jar_failed": 0,
+    "js_failed": 0,
+    "cms_failed": 0,
+    "py_failed": 0,
+    "other": 0
+   },
+   "parse_errors": 0,
+   "build_rate": 1.0,
+   "home_ok": 0,
+   "home_total": 1,
+   "home_rate": 0.0,
+   "sites_detail": [
+    {
+     "siteKey": "offline_error",
+     "runtime": "python",
+     "compatibility": "C1",
+     "state": "failed",
+     "capabilities": [
+      "detail",
+      "home",
+      "player",
+      "proxy",
+      "search"
+     ],
+     "configured": true,
+     "built": true,
+     "initialized": true,
+     "healthy": false,
+     "lastSuccessAt": 1786993503284,
+     "lastError": {
+      "code": "L3_RUNTIME_CALL_FAILED",
+      "stage": "runtime",
+      "retryable": true,
+      "siteKey": "offline_error",
+      "runtime": "python",
+      "message": "L3_RUNTIME_CALL_FAILED"
+     },
+     "consecutiveFailures": 1,
+     "circuitOpenUntil": 0,
+     "home": {
+      "state": "failed",
+      "reason": "L3_RUNTIME_CALL_FAILED"
+     },
+     "play": {
+      "state": "not_tested",
+      "reason": ""
+     },
+     "media": {
+      "state": "not_tested",
+      "reason": ""
+     }
+    }
+   ],
+   "stages": {
+    "S0": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S1": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S2": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S3": {
+     "state": "failed",
+     "reason": "no home probe passed"
+    },
+    "S4": {
+     "state": "not_tested",
+     "reason": "no routable fixture episode"
+    },
+    "S5": {
+     "state": "not_tested",
+     "reason": "no media URL reached"
+    },
+    "S6": {
+     "state": "not_tested",
+     "reason": "Python compatibility suite does not launch mpv"
+    }
+   },
+   "networkExit": "loopback",
+   "failureDomains": [],
+   "upstreamHttp": [
+    200
+   ],
+   "note": "",
+   "elapsed": 2.2,
+   "termination": {
+    "mode": "natural",
+    "forced": false
+   }
+  },
+  {
+   "name": "offline-timeout",
+   "tags": [
+    "offline",
+    "timeout"
+   ],
+   "fetch": 1,
+   "parse": 1,
+   "sites": 1,
+   "skipped_n": 0,
+   "configured": 1,
+   "built": 1,
+   "initialized": 1,
+   "healthy": 0,
+   "skipped": [],
+   "build_errors": {
+    "type_unsupported": 0,
+    "jar_failed": 0,
+    "js_failed": 0,
+    "cms_failed": 0,
+    "py_failed": 0,
+    "other": 0
+   },
+   "parse_errors": 0,
+   "build_rate": 1.0,
+   "home_ok": 0,
+   "home_total": 1,
+   "home_rate": 0.0,
+   "sites_detail": [
+    {
+     "siteKey": "offline_timeout",
+     "runtime": "python",
+     "compatibility": "C1",
+     "state": "timeout",
+     "capabilities": [
+      "detail",
+      "home",
+      "player",
+      "proxy",
+      "search"
+     ],
+     "configured": true,
+     "built": true,
+     "initialized": true,
+     "healthy": false,
+     "lastSuccessAt": 1786993505540,
+     "lastError": {
+      "code": "L3_RUNTIME_TIMEOUT",
+      "stage": "runtime",
+      "retryable": true,
+      "siteKey": "offline_timeout",
+      "runtime": "python",
+      "message": "HTTPConnectionPool(host='127.0.0.1', port=9103): Read timed out. (read timeout=0.5)"
+     },
+     "consecutiveFailures": 1,
+     "circuitOpenUntil": 0,
+     "home": {
+      "state": "timeout",
+      "reason": "HTTPConnectionPool(host='127.0.0.1', port=9103): Read timed out. (read timeout=0.5)"
+     },
+     "play": {
+      "state": "not_tested",
+      "reason": ""
+     },
+     "media": {
+      "state": "not_tested",
+      "reason": ""
+     }
+    }
+   ],
+   "stages": {
+    "S0": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S1": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S2": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S3": {
+     "state": "timeout",
+     "reason": "no home probe passed"
+    },
+    "S4": {
+     "state": "not_tested",
+     "reason": "no routable fixture episode"
+    },
+    "S5": {
+     "state": "not_tested",
+     "reason": "no media URL reached"
+    },
+    "S6": {
+     "state": "not_tested",
+     "reason": "Python compatibility suite does not launch mpv"
+    }
+   },
+   "networkExit": "loopback",
+   "failureDomains": [],
+   "upstreamHttp": [
+    200
+   ],
+   "note": "parent process tree terminated after 6.0s",
+   "termination": {
+    "mode": "process_tree",
+    "forced": true,
+    "descendantPids": [
+     15056
+    ],
+    "descendantsAlive": false
+   },
+   "elapsed": 6.5
+  },
+  {
+   "name": "offline-infinite",
+   "tags": [
+    "offline",
+    "infinite-loop",
+    "cancel"
+   ],
+   "fetch": 1,
+   "parse": 1,
+   "sites": 1,
+   "skipped_n": 0,
+   "configured": 1,
+   "built": 1,
+   "initialized": 1,
+   "healthy": 0,
+   "skipped": [],
+   "build_errors": {
+    "type_unsupported": 0,
+    "jar_failed": 0,
+    "js_failed": 0,
+    "cms_failed": 0,
+    "py_failed": 0,
+    "other": 0
+   },
+   "parse_errors": 0,
+   "build_rate": 1.0,
+   "home_ok": 0,
+   "home_total": 1,
+   "home_rate": 0.0,
+   "sites_detail": [
+    {
+     "siteKey": "offline_infinite",
+     "runtime": "python",
+     "compatibility": "C1",
+     "state": "timeout",
+     "capabilities": [
+      "detail",
+      "home",
+      "player",
+      "proxy",
+      "search"
+     ],
+     "configured": true,
+     "built": true,
+     "initialized": true,
+     "healthy": false,
+     "lastSuccessAt": 1786993512053,
+     "lastError": {
+      "code": "L3_RUNTIME_TIMEOUT",
+      "stage": "runtime",
+      "retryable": true,
+      "siteKey": "offline_infinite",
+      "runtime": "python",
+      "message": "HTTPConnectionPool(host='127.0.0.1', port=9147): Read timed out. (read timeout=0.5)"
+     },
+     "consecutiveFailures": 1,
+     "circuitOpenUntil": 0,
+     "home": {
+      "state": "timeout",
+      "reason": "HTTPConnectionPool(host='127.0.0.1', port=9147): Read timed out. (read timeout=0.5)"
+     },
+     "play": {
+      "state": "not_tested",
+      "reason": ""
+     },
+     "media": {
+      "state": "not_tested",
+      "reason": ""
+     }
+    }
+   ],
+   "stages": {
+    "S0": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S1": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S2": {
+     "state": "passed",
+     "reason": ""
+    },
+    "S3": {
+     "state": "timeout",
+     "reason": "no home probe passed"
+    },
+    "S4": {
+     "state": "not_tested",
+     "reason": "no routable fixture episode"
+    },
+    "S5": {
+     "state": "not_tested",
+     "reason": "no media URL reached"
+    },
+    "S6": {
+     "state": "not_tested",
+     "reason": "Python compatibility suite does not launch mpv"
+    }
+   },
+   "networkExit": "loopback",
+   "failureDomains": [],
+   "upstreamHttp": [
+    200
+   ],
+   "note": "parent process tree terminated after 6.0s",
+   "termination": {
+    "mode": "process_tree",
+    "forced": true,
+    "descendantPids": [
+     28088
+    ],
+    "descendantsAlive": false
+   },
+   "elapsed": 6.5
+  }
+ ]
+}

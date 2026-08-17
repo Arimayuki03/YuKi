@@ -27,6 +27,13 @@ const ROOT = (() => {
 })();
 const WIN = process.platform === 'win32';
 
+function traceFields(value) {
+    const result = {};
+    if (value && value.requestId) result.requestId = String(value.requestId);
+    if (value && value.playSessionId) result.playSessionId = String(value.playSessionId);
+    return result;
+}
+
 /** 校验 mpv 二进制真实可用：spawnSync --version（规避损坏/占位 exe），返回版本首行或 null。 */
 function mpvVersion(p) {
     try {
@@ -97,7 +104,7 @@ class MpvPlayer extends EventEmitter {
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
         this._lastSp = 1;          // 播放期间倍速（实时追踪，exit 时无需查询）
         this._activeSession = null; // {id, proc, pos, duration, fullscreen, speed}，退出时使用缓存
-        this.controlGen = 0;        // 播放控制代际：stop()/用户关闭/新起播时自增，供直播备用线路循环检测退出
+        this.controlGen = 0;        // 播放控制代际：stop()/用户关闭/新起播时自增，供断流重连检测退出
         this._frontTimer = null;   // 前台抢焦重试定时器（Windows foreground lock 兜底）
         this._frontTries = 0;
     }
@@ -125,13 +132,14 @@ class MpvPlayer extends EventEmitter {
     /** 播放首项并装载播放列表。episodes: [{url, title}]；opts.header 注入 HTTP 头（解析直链常需 Referer） */
     play(episodes, opts = {}) {
         this.stop();
-        if (!this.binary) return { ok: false, reason: 'mpv-missing' };
+        const trace = traceFields(opts);
+        if (!this.binary) return { ok: false, reason: 'mpv-missing', ...trace };
         // 起播前二次校验二进制真实存在：findMpv() 发现后文件被删（如安装时取消内置播放器、
         // 或卸载补装目录被清）会让 spawn 抛异步 ENOENT。此处提前拦截，返回可用错误而非崩溃。
         if (!fs.existsSync(this.binary)) {
             console.warn(`[mpv] 二进制已不存在，标记为不可用：${this.binary}`);
             this.binary = null;
-            return { ok: false, reason: 'mpv-missing' };
+            return { ok: false, reason: 'mpv-missing', ...trace };
         }
         if (!episodes || !episodes.length) return { ok: false, reason: 'empty playlist' };
         this._danmakuLines = [];
@@ -242,7 +250,20 @@ class MpvPlayer extends EventEmitter {
         this._lastFs = !!opts.fullscreen;
         this._lastSp = (speed && speed > 0) ? speed : 1;
         const sessionId = ++this._sessionId; // 闭包捕获：进程退出时附带，区分新旧会话
-        const proc = spawn(this.binary, args, { stdio: 'ignore' });
+        let proc;
+        try {
+            // stderr 不能再丢弃：网络地址/解码失败时 mpv 会把唯一可读原因
+            // 写到 stderr；同时持续消费 pipe，避免缓冲区塞满后卡住进程。
+            proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        } catch (err) {
+            console.error(`[mpv] spawn 异常：${err && err.message || err}`);
+            return {
+                ok: false,
+                reason: 'mpv-spawn-failed',
+                error: err && err.message ? err.message : String(err || 'spawn failed'),
+                ...trace,
+            };
+        }
         // 起播即带入前台：前置(ontop)保证不被主窗遮住，激活兜底尽可能抢到输入焦点。
         // （务必在 proc 赋值后调用；fire-and-forget，不阻塞起播。）
         this._frontTimer = null;
@@ -257,14 +278,23 @@ class MpvPlayer extends EventEmitter {
             speed: this._lastSp,
             endReason: null,    // 最近一次 end-file reason（eof/quit/stop/error…），用于区分断流与用户关闭
             userStopped: false, // 应用主动 stop() 置位：退出时不得断流重连
+            ready: false,       // 已收到 file-loaded / core-idle=false，才算真正开始播放
+            stderr: '',         // 最近一段 mpv 错误输出（避免错误日志无限增长）
             // 观看时长统计（墙钟）：累计播放器运行时长（打开播放器后运行了多久，含暂停）。
             playStartMs: Date.now(),
             pausedMs: 0,        // 累计暂停时长（毫秒）
             paused: false,
             pauseSince: 0,
+            ...trace,
         };
         this.proc = proc;
         this._activeSession = session;
+        if (proc.stderr) {
+            proc.stderr.on('data', (chunk) => {
+                const text = String(chunk || '');
+                session.stderr = (session.stderr + text).slice(-8192);
+            });
+        }
         // spawn 异步错误兜底：文件在 existsSync 之后被删/损坏/无执行权限时，Node 会异步
         // 触发 'error'（ENOENT/EACCES）而非抛同步异常；不监听则进程崩溃。捕获后清理并
         // 广播 mpv-missing，让渲染层给出友好提示而非静默失败。
@@ -281,27 +311,132 @@ class MpvPlayer extends EventEmitter {
             const info = {
                 code,
                 sessionId,
+                ...traceFields(session),
                 pos: typeof session.pos === 'number' ? session.pos : null,
                 duration: typeof session.duration === 'number' ? session.duration : null,
                 wallWatched,   // 播放器运行时长（墙钟，含暂停）：观看统计以此累计
                 fullscreen: session.fullscreen,
                 speed: session.speed,
                 endReason: session.endReason || null,
+                ready: !!session.ready,
+                stderr: session.stderr ? session.stderr.trim().slice(-8192) : null,
                 // 用户主动关闭：应用 stop() 标记，或 mpv 自己 end-file reason=quit/stop（点窗口关闭键）
                 userStopped: session.userStopped || session.endReason === 'quit' || session.endReason === 'stop',
             };
-            // 用户直接关掉 mpv 窗口（未走应用 stop()）：同样自增代际，备用线路循环不再接手重播
+            // 用户直接关掉 mpv 窗口（未走应用 stop()）：同样自增代际，断流重连不再接手重播
             if (info.userStopped) this.controlGen++;
             // 只清理该会话；旧进程延迟退出时不能误清掉刚起播的新会话。
             this._teardown(sessionId);
             this.emit('exit', info);
         });
         this._connectIpc(0, sessionId);
-        return { ok: true, sessionId };
+        return {
+            ok: true,
+            sessionId,
+            ...trace,
+            controlGen: this.controlGen,
+            // 调用方需要把实际交给 mpv 的地址回传给渲染层/日志，便于复制和诊断。
+            url: episodes[0].url,
+            urls: episodes.map((episode) => episode.url),
+        };
+    }
+
+    /**
+     * 等待当前会话真正装载媒体。
+     * spawn 成功只代表进程创建成功；file-loaded 或 core-idle=false 才代表
+     * mpv 已经接受并打开了媒体。进程提前退出时返回 stderr/end-file 原因。
+     */
+    waitForReady(sessionId, timeoutMs = 30000) {
+        const id = Math.abs(Number(sessionId) || 0);
+        const active = this._activeSession;
+        if (!id || !this.proc || !active || active.id !== id) {
+            return Promise.resolve({ ok: false, reason: 'mpv-exited', sessionId: id });
+        }
+        if (active.ready) return Promise.resolve({ ok: true, sessionId: id, ...traceFields(active) });
+
+        return new Promise((resolve) => {
+            let settled = false;
+            let checking = false;
+            let pollTimer = null;
+            let timeoutTimer = null;
+
+            const finish = (result) => {
+                if (settled) return;
+                settled = true;
+                if (pollTimer) clearInterval(pollTimer);
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                this.removeListener('ready', onReady);
+                this.removeListener('exit', onExit);
+                this.removeListener('spawn-error', onSpawnError);
+                resolve(result);
+            };
+            const onReady = (info) => {
+                if (info && info.sessionId === id) finish({ ok: true, sessionId: id, ...traceFields(active) });
+            };
+            const onExit = (info) => {
+                if (!info || info.sessionId === id) {
+                    finish({
+                        ok: false,
+                        reason: 'mpv-exited-before-playback',
+                        sessionId: id,
+                        ...traceFields(active),
+                        error: info && (info.stderr || info.endReason || (info.code != null ? `exit ${info.code}` : '')),
+                    });
+                }
+            };
+            const onSpawnError = (info) => {
+                if (!info || info.sessionId === id) {
+                    finish({
+                        ok: false,
+                    reason: 'mpv-spawn-failed',
+                    sessionId: id,
+                    ...traceFields(active),
+                        error: info && (info.message || info.code || 'spawn failed'),
+                    });
+                }
+            };
+            const check = async () => {
+                if (settled || checking) return;
+                const current = this._activeSession;
+                if (!this.proc || !current || current.id !== id) {
+                    finish({ ok: false, reason: 'mpv-exited-before-playback', sessionId: id });
+                    return;
+                }
+                if (current.ready) {
+                    finish({ ok: true, sessionId: id });
+                    return;
+                }
+                if (!this._connected) return;
+                checking = true;
+                try {
+                    if ((await this.getProperty('core-idle')) === false) {
+                        current.ready = true;
+                        finish({ ok: true, sessionId: id });
+                    }
+                } catch (e) {
+                    // IPC 仍在连接/媒体仍在打开，继续等待；真正失败会由 exit 事件给出。
+                } finally {
+                    checking = false;
+                }
+            };
+
+            this.on('ready', onReady);
+            this.on('exit', onExit);
+            this.on('spawn-error', onSpawnError);
+            pollTimer = setInterval(check, 250);
+            timeoutTimer = setTimeout(() => finish({
+                ok: false,
+                    reason: 'mpv-start-timeout',
+                    sessionId: id,
+                    ...traceFields(active),
+                error: active.stderr ? active.stderr.trim().slice(-8192) : '',
+            }), Math.max(1000, Number(timeoutMs) || 30000));
+            check();
+        });
     }
 
     stop() {
-        this.controlGen++; // 用户/应用主动停止：代际自增，监控循环（直播备用线路）据此立即退出
+        this.controlGen++; // 用户/应用主动停止：代际自增，断流重连监控据此立即退出
         const sessionId = this._activeSession ? this._activeSession.id : null;
         const proc = this.proc;
         if (proc) {
@@ -434,6 +569,14 @@ class MpvPlayer extends EventEmitter {
             }
             return;
         }
+        if (msg.event === 'file-loaded') {
+            const active = this._activeSession;
+            if (active) {
+                active.ready = true;
+                this.emit('ready', { sessionId: active.id, ...traceFields(active) });
+            }
+            return;
+        }
         if (msg.event === 'end-file') {
             const active = this._activeSession;
             // 记录退出原因：eof=播完/断流；quit/stop=用户关闭；error=出错
@@ -442,7 +585,8 @@ class MpvPlayer extends EventEmitter {
                 if (active && typeof active.duration === 'number') active.pos = active.duration;
                 const playlistPos = (typeof msg.playlist_pos === 'number') ? msg.playlist_pos : -1;
                 // 附带队列长度：渲染层据此区分「mpv 队列自动推进」与「队列末尾播完」（接力连播用）
-                this.emit('ended', { sessionId: active ? active.id : null, playlistPos, queueLen: this._queueLen });
+                this.emit('ended', { sessionId: active ? active.id : null,
+                    ...(active ? traceFields(active) : {}), playlistPos, queueLen: this._queueLen });
             }
         }
     }

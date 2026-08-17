@@ -202,6 +202,32 @@ test('_probeClasses：曾判空分类恢复内容后取消隐藏并更新持久�
     assert.deepEqual(JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes')).s.empty, ['b'], '持久化只保留仍空的 b');
 });
 
+test('源自动检测关闭：不执行源/分类探测，也不应用历史空分类结果', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H._autoProbeEnabled = false;
+    H._allSites = [{ key: 's' }];
+    H._emptyCls.s = new Set(['movie']);
+    H.classes = [{ type_id: 'movie', type_name: '电影' }];
+    let calls = 0;
+    ctx.doAction = async () => { calls++; return { list: [] }; };
+    await H._probeSites();
+    await H._probeClasses();
+    assert.equal(calls, 0, '关闭后不应发起任何后台探测');
+    const html = renderWith(H.classes, H._emptyCls.s, '', false);
+    assert.match(html, /电影/, '关闭后历史空分类仍应显示');
+});
+
+test('_getBlocked：关闭源自动检测时忽略历史 blockedSites', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    const disabled = await H._getBlocked({ sourceAutoDetect: false, blockedSites: ['s'] });
+    const enabled = await H._getBlocked({ sourceAutoDetect: true, blockedSites: ['s'] });
+    assert.equal(disabled.length, 0);
+    assert.equal(enabled.length, 1);
+    assert.equal(enabled[0], 's');
+});
+
 // ---------------------------------------------------------------- 全源后台探测（T60）
 
 test('_probeAllClasses：后台为多个源补齐分类空态探测并落盘', async () => {
@@ -469,10 +495,11 @@ test('_startProbe：total<=0 不计入进度', () => {
 
 // ---------------------------------------------------------------- renderClass 过滤（T60）
 
-function renderWith(classes, emptySet, activeTid) {
+function renderWith(classes, emptySet, activeTid, autoProbeEnabled) {
     const ctx = loadHome();
     const H = home(ctx);
     H.site = 's';
+    if (autoProbeEnabled !== undefined) H._autoProbeEnabled = autoProbeEnabled;
     H.classes = classes;
     if (emptySet) H._emptyCls.s = emptySet;
     let captured = '';

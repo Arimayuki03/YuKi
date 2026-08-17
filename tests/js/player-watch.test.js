@@ -35,6 +35,7 @@ function loadPlayer(settings, extras = {}) {
             },
         },
     };
+    if (extras.vpc) Object.assign(context.window.vpc, extras.vpc);
     // 注入可选的全局 mock（Records / Kazumi / Detail 等）
     if (extras.Records) context.Records = extras.Records;
     if (extras.Kazumi) context.Kazumi = extras.Kazumi;
@@ -243,6 +244,20 @@ test('_awaitTimeout：解析 IPC 挂起时超时返回 null（loading 不会卡�
     // 正常 promise 不受影响
     const ok = await player._awaitTimeout(Promise.resolve({ ok: true }), 60);
     assert.deepEqual(ok, { ok: true });
+});
+
+test('_awaitTimeout：解析超时通知主进程取消并携带 requestId', async () => {
+    const cancelled = [];
+    const player = loadPlayer({}, {
+        vpc: { cancelRuntime: async (context) => { cancelled.push(context); } },
+    });
+    await player._awaitTimeout(new Promise(() => {}), 20, {
+        requestId: 'parse-timeout-0001', playSessionId: 'session-timeout-0001',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(cancelled, [{
+        requestId: 'parse-timeout-0001', playSessionId: 'session-timeout-0001',
+    }]);
 });
 
 test('Kazumi 源播放退出后写入历史记录（recordPlay 被调用，含 site/kazumiSrc/episode）', async () => {

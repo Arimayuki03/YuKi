@@ -24,6 +24,8 @@ import hoststate
 from runner import Runner
 from site_manager import Site
 from js_spider import make_js_spider_class
+from runtime.errors import RuntimeError as RuntimeContractError, error_from_exception, redact_sensitive
+from runtime.health import infer_site_health, android_worker_enabled
 
 logger = logging.getLogger('vpc.config')
 
@@ -43,12 +45,26 @@ def fetch_text(url, timeout=15):
     - gzip 压缩：自动解压；
     - 常规 JSON/直播源：原样返回文本。
     """
+    return fetch_text_diagnostics(url, timeout=timeout)['text']
+
+
+def fetch_text_diagnostics(url, timeout=15):
+    """与 :func:`fetch_text` 同路径，同时返回兼容报告需要的上游诊断。"""
+    from urllib.parse import urlsplit
+    result = {
+        'text': '', 'status': 0, 'finalUrl': '',
+        'failureDomain': (urlsplit(str(url)).hostname or ''), 'error': '',
+    }
     try:
         from app import redirect
         import gzip
         rsp = redirect(url)
         if rsp is None:
-            return ''
+            result['error'] = 'empty response'
+            return result
+        result['status'] = int(getattr(rsp, 'status_code', 0) or 0)
+        result['finalUrl'] = str(getattr(rsp, 'url', '') or url)
+        result['failureDomain'] = urlsplit(result['finalUrl']).hostname or result['failureDomain']
         raw = rsp.content
 
         # gzip 解压：检测魔数 \x1f\x8b
@@ -61,11 +77,14 @@ def fetch_text(url, timeout=15):
 
         img_cfg = _image_tail_config(raw)
         if img_cfg is not None:
-            return img_cfg
-        return raw.decode('utf-8', errors='replace')
+            result['text'] = img_cfg
+        else:
+            result['text'] = raw.decode('utf-8', errors='replace')
+        return result
     except Exception as e:
         logger.warning('fetch_text %s failed: %s', url, str(e)[:80])
-        return ''
+        result['error'] = str(e)[:240]
+        return result
 
 
 def _image_tail_config(raw):
@@ -322,6 +341,10 @@ class ConfigManager:
         """
         summary = {
             'sites': 0,
+            'configured': 0,
+            'built': 0,
+            'initialized': 0,
+            'healthy': 0,
             'sites_built': 0,
             'skipped': [],
             'parse_errors': 0,
@@ -345,7 +368,9 @@ class ConfigManager:
         if cfg.get('spider'):
             logger.info('config.spider=%s → shared jar: %s', cfg['spider'], spider_jar or '(not a jar / unresolved)')
         new_sites = []
+        diagnostics = []
         items = cfg.get('sites') or []
+        summary['configured'] = len(items)
         # 站点构建并发化（jar 下载/子蜘蛛抓取耗时为主，串行会让导入明显卡顿）
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(self._build_site, item, base_url, spider_jar) for item in items]
@@ -354,21 +379,54 @@ class ConfigManager:
                     site = fut.result()
                     if site:
                         new_sites.append(site)
+                        diagnostics.append(site.health)
                         summary['sites'] += 1
                         summary['sites_built'] += 1
+                        summary['built'] += int(site.health.built)
+                        summary['initialized'] += int(site.health.initialized)
+                        summary['healthy'] += int(site.health.healthy)
                         # 统计网盘源：api 包含 quark/uc/baidu/tianyi 等关键词
                         api_lower = str(item.get('api', '')).lower()
                         if any(kw in api_lower for kw in ['quark', 'uc', 'baidu', 'tianyi', '123pan', 'xunlei']):
                             summary['panSites'] += 1
                     else:
+                        # A configured entry that cannot produce a Site object
+                        # is still a diagnostic entry.  Omitting it makes the
+                        # configured count collapse to "objects built" and
+                        # lets an import look healthier than it is.
+                        health = infer_site_health(item)
+                        error = RuntimeContractError(
+                            'L2_SITE_BUILD_FAILED', site_key=health.site_key,
+                            runtime=health.runtime,
+                            raw_error='site entry could not be built')
+                        health.record_failure(error, stage='site')
+                        diagnostics.append(health)
                         summary['skipped'].append(
-                            f"{item.get('key', '?')}: [L2:site] site entry could not be built")
+                            f"{item.get('key', '?')}: [L2:site] site entry could not be built "
+                            f"[{error.code}] {error.message}")
+                        summary['build_errors']['other'] += 1
                 except Exception as e:
                     err_msg = str(e)
                     logger.exception('load site %s failed: %s', item.get('key'), e)
-                    summary['skipped'].append(f"{item.get('key', '?')}: {err_msg}")
+                    health = infer_site_health(item)
+                    error = e if isinstance(e, RuntimeContractError) else error_from_exception(
+                        e, stage='site', site_key=health.site_key, runtime=health.runtime)
+                    if isinstance(error, RuntimeContractError) and error.runtime == 'android':
+                        health.runtime = 'android'
+                        health.compatibility = 'C2'
+                    if isinstance(error, RuntimeContractError) and error.details.get('built'):
+                        health.mark_built()
+                    health.record_failure(error, stage='site')
+                    diagnostics.append(health)
+                    summary['built'] += int(health.built)
+                    summary['sites_built'] += int(health.built)
+                    # 过渡期保留既有 [L2:type]/[L3:js] 细分类，后接稳定 L1-L6
+                    # 错误码；原始文本先脱敏并限长，诊断页仍能解释 drpy/JS 等根因。
+                    legacy = redact_sensitive(err_msg, 240)
+                    summary['skipped'].append(
+                        f"{item.get('key', '?')}: {legacy} [{error.code}] {error.message}")
                     # 任务五：按层级标签聚合错误计数
-                    if '[L2:type]' in err_msg:
+                    if error.code in ('L2_SITE_UNSUPPORTED', 'L2_SITE_REQUIRES_ANDROID') or '[L2:type]' in err_msg:
                         summary['build_errors']['type_unsupported'] += 1
                     elif '[L3:jar]' in err_msg:
                         summary['build_errors']['jar_failed'] += 1
@@ -394,6 +452,7 @@ class ConfigManager:
             'wallpaper': cfg.get('wallpaper') or '',
             'source_url': source if str(source).startswith('http') else '(inline)',
             'summary': summary,
+            'diagnostics': diagnostics,
         }
 
     def _apply(self, prepared):
@@ -417,6 +476,7 @@ class ConfigManager:
         self.lives = prepared['lives']
         self.wallpaper = prepared['wallpaper']
         self.source_url = prepared['source_url']
+        self.sites.diagnostics[:] = prepared.get('diagnostics') or []
         for s in old:
             try:
                 s.runner.destroy()
@@ -466,6 +526,11 @@ class ConfigManager:
         self._merge_sites(prepared, sub_cfgs)
         prepared['summary']['lives'] = len(prepared['lives'])
         prepared['summary']['sites'] = len(prepared['sites'])
+        prepared['summary']['built'] = sum(int(s.health.built) for s in prepared['sites'])
+        prepared['summary']['initialized'] = sum(int(s.health.initialized) for s in prepared['sites'])
+        prepared['summary']['healthy'] = sum(int(s.health.healthy) for s in prepared['sites'])
+        prepared['summary']['sites_built'] = prepared['summary']['built']
+        prepared['summary']['configured'] = len(prepared.get('diagnostics') or [])
 
     @staticmethod
     def _iter_live_urls(l):
@@ -510,10 +575,40 @@ class ConfigManager:
                     site = self._build_site(item, url, sub_spider_jar)
                     if site:
                         prepared['sites'].append(site)
+                        prepared.setdefault('diagnostics', []).append(site.health)
                         existing.add(key)
                         added += 1
+                    else:
+                        health = infer_site_health(item)
+                        error = RuntimeContractError(
+                            'L2_SITE_BUILD_FAILED', site_key=health.site_key,
+                            runtime=health.runtime,
+                            raw_error='site entry could not be built')
+                        health.record_failure(error, stage='site')
+                        prepared.setdefault('diagnostics', []).append(health)
+                        prepared.setdefault('summary', {}).setdefault('skipped', []).append(
+                            f"{key}: [L2:site] site entry could not be built "
+                            f"[{error.code}] {error.message}")
+                        prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
+                            'other', 0)
+                        prepared['summary']['build_errors']['other'] += 1
                 except Exception as e:
                     logger.warning('multi-repo merge site [%s] failed: %s', key, str(e)[:60])
+                    health = infer_site_health(item)
+                    error = e if isinstance(e, RuntimeContractError) else error_from_exception(
+                        e, stage='site', site_key=health.site_key, runtime=health.runtime)
+                    if error.code == 'L2_SITE_REQUIRES_ANDROID':
+                        health.runtime = 'android'
+                        health.compatibility = 'C2'
+                    if error.details.get('built'):
+                        health.mark_built()
+                    health.record_failure(error, stage='site')
+                    prepared.setdefault('diagnostics', []).append(health)
+                    prepared.setdefault('summary', {}).setdefault('skipped', []).append(
+                        f"{key}: {redact_sensitive(str(e), 240)} [{error.code}] {error.message}")
+                    prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
+                        'other', 0)
+                    prepared['summary']['build_errors']['other'] += 1
         if added:
             logger.info('multi-repo merge: +%d sites from other entries', added)
 
@@ -557,6 +652,7 @@ class ConfigManager:
             raise ValueError(f"[L2:type] invalid type for {key or '?'}") from e
         api = str(item.get('api') or '')
         ext = item.get('ext') or ''
+        health = infer_site_health(item)
         if not key or not api:
             raise ValueError('[L2:site] site entry requires key and api')
 
@@ -565,6 +661,7 @@ class ConfigManager:
             if not base_url:
                 raise ValueError('[L1:resolve] relative api without config URL')
             api = urljoin(base_url, api)
+        ext = self._resolve_ext(ext, base_url)
 
         # 站点级独立 jar（TVBox 站点条目 `jar` 字段；可带 ;md5）。相对路径按配置源解析。
         site_jar = str(item.get('jar') or '').strip()
@@ -582,7 +679,9 @@ class ConfigManager:
             if spider is None:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
                 raise ValueError('[L3:jar] jar runtime unavailable or no shared jar')
+            ext = self._resolve_ext(ext, base_url)
             site = Site(key, api, ext)
+            site.health = health
             site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
             site.runner = Runner(spider)
@@ -591,11 +690,11 @@ class ConfigManager:
             site.filterable = bool(item.get('filterable', 1))
             # 把 ext 配置存到蜘蛛实例上，自动 init 时使用正确的 ext（关键！）
             # 相对路径（./lib/x.json，如 Bili 系蜘蛛的 json 配置）相对配置源 URL 解析为绝对地址
-            ext = self._resolve_ext(ext, base_url)
             if ext:
                 ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
                 if ext_str:
                     spider._ext = ext_str
+            self._initialize_site(site, ext)
             logger.info('site built: %s (%s, type=jar)', key, name)
             return site
 
@@ -606,18 +705,20 @@ class ConfigManager:
             if spider is None:
                 logger.info('skip site %s: jar runtime unavailable (java not found)', key)
                 raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
+            ext = self._resolve_ext(ext, base_url)
             site = Site(key, api, ext)
+            site.health = health
             site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
             site.runner = Runner(spider)
             site.searchable = bool(item.get('searchable', 1))
             site.quick_search = bool(item.get('quickSearch', 1))
             site.filterable = bool(item.get('filterable', 1))
-            ext = self._resolve_ext(ext, base_url)
             if ext:
                 ext_str = ext if isinstance(ext, str) else json.dumps(ext, ensure_ascii=False) if ext else ''
                 if ext_str:
                     spider._ext = ext_str
+            self._initialize_site(site, ext)
             logger.info('site built: %s (%s, type=jar-url)', key, name)
             return site
 
@@ -639,7 +740,14 @@ class ConfigManager:
             logger.info('skip site %s: unsupported type %s', key, stype)
             raise ValueError(f'[L2:type] unsupported type {stype}')
 
+        # 代理地址必须携带站点上下文；否则多个 JS/Python/CMS 源同时播放
+        # 时，旧的 recent loader 选择会把请求送到另一站点。
+        try:
+            spider.site_key = key
+        except Exception:
+            pass
         site = Site(key, api, ext)
+        site.health = health
         site.headers = item.get('headers') or item.get('header') or {}
         # 供统一 /proxy 在缺少 siteKey 时按 FongMi 的 recent loader
         # 语义选择 JS/Python/CMS Spider。JAR 分支在上方已显式标记。
@@ -648,9 +756,37 @@ class ConfigManager:
         site.searchable = bool(item.get('searchable', 1))
         site.quick_search = bool(item.get('quickSearch', 1))
         site.filterable = bool(item.get('filterable', 1))
-        site.runner.init(ext)
+        self._initialize_site(site, ext)
         logger.info('site built: %s (%s, type=%s)', key, name, stype)
         return site
+
+    @staticmethod
+    def _initialize_site(site, ext=''):
+        """完成建站与 init 探测；对象存在不能直接等同 healthy。"""
+        site.health.mark_built()
+        try:
+            site.runner.init(ext)
+            spider = getattr(site.runner, 'spider', None)
+            last_error = str(getattr(spider, 'last_error', '') or '')
+            if last_error:
+                raise RuntimeContractError(
+                    'L3_RUNTIME_INIT_FAILED',
+                    site_key=site.key,
+                    runtime=site.health.runtime,
+                    raw_error=last_error,
+                    details={'built': True},
+                )
+            site.health.mark_initialized().mark_healthy()
+        except RuntimeContractError:
+            raise
+        except Exception as exc:
+            raise RuntimeContractError(
+                'L3_RUNTIME_INIT_FAILED',
+                site_key=site.key,
+                runtime=site.health.runtime,
+                raw_error=str(exc),
+                details={'built': True},
+            ) from exc
 
     def _resolve_ext(self, ext, base_url):
         """把 ext 配置中的相对路径（./lib/x.json）解析为相对配置源的绝对 URL。
@@ -727,8 +863,6 @@ class ConfigManager:
         无 java 运行时或无法定位 jar 时返回 None（调用方跳过该站点）；其余异常向上抛。
         """
         import java_probe
-        if not java_probe.find_java():
-            return None
         from jar_bridge import JarBridge
         from jar_spider import make_jar_spider_class
         try:
@@ -741,12 +875,22 @@ class ConfigManager:
                 if not jar_url:
                     logger.info('skip site %s: csp_ class but no shared spider jar', key)
                     return None
-            jar_path = JarBridge.download_jar(jar_url, md5, site_key=key)
+            jar_path = JarBridge.download_jar(
+                jar_url, md5, site_key=key,
+                portable_only=not android_worker_enabled())
+            # Download and scan before checking Java.  This lets a machine
+            # without a JRE report ``L2_SITE_REQUIRES_ANDROID`` for Dex/native
+            # sources instead of collapsing the capability reason into a
+            # generic "JAR runtime unavailable" error.
+            if not java_probe.find_java():
+                raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
             class_name = JarBridge.map_class_name(jar_path, class_name)
             # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
             bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
             return make_jar_spider_class(key, bridge, name, class_name)
+        except RuntimeContractError:
+            raise
         except Exception as e:
             # 任务五：jar 相关错误统一添加 [L3:jar] 标签
             err_msg = str(e)
@@ -757,6 +901,8 @@ class ConfigManager:
     # ------------------------------------------------------------ 查询
 
     def state(self):
+        healthy_sites = [s for s in self.sites.sites if s.health.healthy]
+        diagnostics = [h.to_dict() for h in self.sites.diagnostics]
         return {
             'source': self.source_url,
             'repo': self.last_repo_name,
@@ -764,7 +910,15 @@ class ConfigManager:
             'flags': self.flags,
             'lives': self.lives,
             'wallpaper': self.wallpaper,
+            'summary': {
+                'configured': len(diagnostics),
+                'built': sum(int(h.get('built', False)) for h in diagnostics),
+                'initialized': sum(int(h.get('initialized', False)) for h in diagnostics),
+                'healthy': sum(int(h.get('healthy', False)) for h in diagnostics),
+            },
             'sites': [{'key': s.key, 'name': s.name, 'searchable': s.searchable,
-                       'spiderType': getattr(s, 'spider_type', '')}
-                      for s in self.sites.sites],
+                       'spiderType': getattr(s, 'spider_type', ''),
+                       **s.health.to_dict()}
+                      for s in healthy_sites],
+            'diagnostics': diagnostics,
         }

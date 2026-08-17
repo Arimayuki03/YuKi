@@ -12,6 +12,7 @@ from importlib.machinery import SourceFileLoader
 import app as spider_app          # 恢复版插件入口（字节码校验一致）
 import hoststate
 from runner import Runner
+from runtime.health import SiteHealth
 
 logger = logging.getLogger('vpc.sites')
 
@@ -31,6 +32,7 @@ class Site:
         self.searchable = True      # config 的 searchable 标志
         self.quick_search = True    # quickSearch
         self.filterable = True      # filterable
+        self.health = SiteHealth(key)
 
     @property
     def name(self):
@@ -45,12 +47,25 @@ class Site:
 class SiteManager:
     def __init__(self):
         self.sites = []
+        # 包含未建成/不兼容站点，供诊断页展示；内容页只消费 healthy sites。
+        self.diagnostics = []
         self._recent_key = None
 
     def _register(self, site, spider):
+        try:
+            spider.site_key = site.key
+        except Exception:
+            pass
         site.runner = Runner(spider)
         site.runner.init(site.ext)
+        # Direct demo/plugin registration predates ConfigManager's staged
+        # builder.  Give it the same health lifecycle so a Site object is not
+        # silently usable while `/sites` reports it as uninitialized.
+        site.health.runtime = 'python'
+        site.health.compatibility = 'C1'
+        site.health.mark_built().mark_initialized().mark_healthy()
         self.sites.append(site)
+        self.diagnostics.append(site.health)
         if self._recent_key is None:
             self._recent_key = site.key
         logger.info('site loaded: %s (%s)', site.key, site.name)
@@ -129,6 +144,7 @@ class SiteManager:
             except Exception:
                 pass
         self.sites.clear()
+        self.diagnostics.clear()
         self._recent_key = None
         try:
             from jar_bridge import JarBridge

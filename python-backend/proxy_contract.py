@@ -355,7 +355,10 @@ def normalize_proxy_url(
     values: dict[str, str] = {}
     for key, value in pairs:
         values[str(key)] = str(value)
-    if site_key and not any(k.lower() == 'sitekey' for k in values):
+    # do=pan 的 site 是 Provider 名称（quark/uc 等），不是 SiteManager key；
+    # 把 jar 的站点 key 塞进去会让 FastAPI 把网盘请求误派回该 Spider。
+    do_value = str(values.get('do') or '').lower()
+    if site_key and do_value != 'pan' and not any(k.lower() == 'sitekey' for k in values):
         values['siteKey'] = str(site_key)
     if proxy_token and not any(k.lower() == 'token' for k in values):
         values['token'] = str(proxy_token)

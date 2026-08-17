@@ -1,5 +1,15 @@
 {
   "_comment": "影视仓兼容性语料（TVBOX_COMPAT_PLAN 任务一）。新增规则：用户报告的新仓库修复后必须录入本清单（修复进套件 = 回归保护）。tags 记录特征便于失败归因。",
+  "offline": [
+    { "name": "offline-normal", "url": "fixture://normal.json", "fixture": "normal.json", "tags": ["offline", "normal"],
+      "expect": {"S0": "passed", "S1": "passed", "S2": "passed", "S3": "passed", "S4": "passed", "S5": "passed", "S6": "not_tested"} },
+    { "name": "offline-error", "url": "fixture://error.json", "fixture": "error.json", "tags": ["offline", "error"],
+      "expect": {"S0": "passed", "S1": "passed", "S2": "passed", "S3": "failed"} },
+    { "name": "offline-timeout", "url": "fixture://timeout.json", "fixture": "timeout.json", "tags": ["offline", "timeout"],
+      "expect": {"S0": "passed", "S1": "passed", "S2": "passed", "S3": "timeout"} },
+    { "name": "offline-infinite", "url": "fixture://infinite.json", "fixture": "infinite.json", "tags": ["offline", "infinite-loop", "cancel"],
+      "expect": {"S0": "passed", "S1": "passed", "S2": "passed", "S3": "timeout"} }
+  ],
   "repos": [
     { "name": "饭太硬", "url": "http://www.饭太硬.net/tv", "tags": ["idn", "jpeg-disguise"] },
     { "name": "肥猫", "url": "http://肥猫.net", "tags": ["idn"] },

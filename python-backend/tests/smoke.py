@@ -127,7 +127,7 @@ def main():
 
     # 7. getProxyUrl 形态
     check('spider.getProxyUrl',
-          sp.getProxyUrl() == f'http://127.0.0.1:{PORT}/proxy?do=py', sp.getProxyUrl())
+          sp.getProxyUrl() == f'http://127.0.0.1:{PORT}/proxy?do=py&siteKey=demo', sp.getProxyUrl())
 
     print()
     print(f'RESULT: {len(PASSED)} passed, {len(FAILED)} failed')

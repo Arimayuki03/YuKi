@@ -52,6 +52,7 @@ const Home = {
     _clsTs: {},      // T60：site → 上次完整探测完成的时间戳（EMPTY_CLS_TTL 内不重复探测）
     _probingAll: false, // T60：全源后台探测是否在途（防并发重复扫描）
     _probeBar: null,    // T81：首页探测进度条 { total, done, active, shown, showTimer, doneTimer }
+    _autoProbeEnabled: true, // 源自动检测开关；兼容旧配置默认开启
 
     async init() {
         if (this._inited) return;
@@ -124,6 +125,10 @@ const Home = {
     },
 
     async loadSites() {
+        // 先读取开关，再拉取源列表：即使 /sites 瞬时失败，也要保证关闭自动检测时
+        // 不会继续使用历史 blockedSites 过滤源。
+        const settings = await this._getSourceSettings();
+        this.setAutoProbeEnabled(settings.sourceAutoDetect !== false);
         // T77：配置/源集合变更 → 作废分类内容缓存（页缓存 + 合并窗口），回到页面立即生效
         this.invalidatePageCaches();
         let all = [];
@@ -138,6 +143,10 @@ const Home = {
         // 网络失败（all 空）时：若已有缓存预渲染的站点，保留其展示，不重置探测/屏蔽、不清空页面
         // （否则冷启动预渲染 + 瞬时网络异常会误清 blockedSites 并显示「尚未载入配置」）。
         if (!all.length && this._allSites.length) {
+            // 开关刚关闭时，即使 /sites 本轮失败，也要立刻取消历史 blockedSites 过滤。
+            const blocked = await this._getBlocked(settings);
+            this.sites = this._allSites.filter((s) => blocked.indexOf(s.key) < 0);
+            this._renderSiteSelect();
             return;
         }
         // 源集合变更（配置自动重载后 key 集不同，多仓漂移常见）：旧探测/屏蔽记录
@@ -156,7 +165,9 @@ const Home = {
             this._probingAll = false; // 全源探测在途锁随源集合变更释放
         }
         this._allSites = all;
-        const blocked = await this._getBlocked();
+        // 关闭自动检测时暂时忽略历史自动屏蔽记录；重新打开后仍可按原记录过滤，
+        // 用户可通过“恢复被屏蔽的源”清除这些记录。
+        const blocked = await this._getBlocked(settings);
         this.sites = all.filter((s) => blocked.indexOf(s.key) < 0);
         this._renderSiteSelect();
         if (!this.sites.length) {
@@ -169,9 +180,9 @@ const Home = {
         $('#site-select').val(this.site);
         await this.loadHome();
         // 首屏就绪后后台探测未探测过的源，自动屏蔽无内容源
-        this._probeSites();
+        if (this._autoProbeEnabled) this._probeSites();
         // T60：后台为所有源补齐分类空态探测（切换任意源即可直接过滤空分类）
-        this._probeAllClasses();
+        if (this._autoProbeEnabled) this._probeAllClasses();
     },
 
     _renderSiteSelect() {
@@ -184,10 +195,22 @@ const Home = {
         sel.append(this.sites.map((s) => `<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}</option>`).join(''));
     },
 
-    async _getBlocked() {        try {
-            const s = (await window.vpc.settingsGet()) || {};
-            return Array.isArray(s.blockedSites) ? s.blockedSites : [];
-        } catch (e) { return []; }
+    async _getSourceSettings() {
+        try { return (await window.vpc.settingsGet()) || {}; } catch (e) { return {}; }
+    },
+
+    /** 设置自动检测状态并使进行中的一轮探测失效。 */
+    setAutoProbeEnabled(enabled) {
+        const next = enabled !== false;
+        if (this._autoProbeEnabled === next) return;
+        this._autoProbeEnabled = next;
+        this._probeToken++;
+    },
+
+    async _getBlocked(settings) {
+        const s = settings || await this._getSourceSettings();
+        if (s.sourceAutoDetect === false) return [];
+        return Array.isArray(s.blockedSites) ? s.blockedSites : [];
     },
 
     // ------------------------------------------------ 首页探测进度条（T81）
@@ -260,12 +283,13 @@ const Home = {
      * 结果持久化（可在源配置里恢复）。
      */
     async _probeSites() {
-        if (this._probing || !this._allSites.length) return;
+        if (!this._autoProbeEnabled || this._probing || !this._allSites.length) return;
         this._probing = true;
         const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
         let started = false; // 进度条是否计入本轮（T81）
         try {
             const s = (await window.vpc.settingsGet()) || {};
+            if (s.sourceAutoDetect === false || !this._autoProbeEnabled) return;
             const probed = {};
             (Array.isArray(s.probedSites) ? s.probedSites : []).forEach((k) => { probed[k] = 1; });
             const blocked = new Set(Array.isArray(s.blockedSites) ? s.blockedSites : []);
@@ -307,7 +331,7 @@ const Home = {
                 while (idx < pending.length) { await probeOne(pending[idx++]); }
             };
             await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
-            if (token !== this._probeToken) return; // 源集合已换（配置重载），旧结果不再适用
+            if (token !== this._probeToken || !this._autoProbeEnabled) return; // 源集合/开关已变更，旧结果不再适用
             await window.vpc.settingsSet('probedSites', Object.keys(probed));
             if (changed) {
                 await window.vpc.settingsSet('blockedSites', Array.from(blocked));
@@ -389,7 +413,7 @@ const Home = {
             hideLoading();
         }
         // T60：后台探测分类，隐藏无影片的分类（不阻塞首屏；结果不丢进度，见 _probeClasses）
-        this._probeClasses();
+        if (this._autoProbeEnabled) this._probeClasses();
     },
 
     /**
@@ -785,7 +809,8 @@ const Home = {
 
     renderClass(activeTid) {
         const box = $('#home-class').empty();
-        const emptySet = this._emptyCls[this.site] || null;
+        // 关闭自动检测时不应用历史分类空态结果，避免“关了开关但分类仍被隐藏”。
+        const emptySet = this._autoProbeEnabled ? (this._emptyCls[this.site] || null) : null;
         // T65：分类标签拼串一次性写入（替代逐个 append）
         const tabs = [`<span class="class-tab ${activeTid === '' ? 'active' : ''}" data-tid="">全部</span>`];
         this.classes.forEach((c) => {
@@ -811,6 +836,7 @@ const Home = {
      * ④仅在仍停留在该源时重渲分类栏，避免覆盖其他源的栏。
      */
     async _probeClassesFor(site, cls) {
+        if (!this._autoProbeEnabled) return;
         if (this._clsProbed[site] || this._clsBusy[site]) return;
         if (!cls.length) return;
         if (!this._okCls[site]) this._okCls[site] = new Set();
@@ -872,7 +898,7 @@ const Home = {
      * 配置重载（源集合变更）后本轮作废，由 loadSites 重新发起。
      */
     async _probeAllClasses() {
-        if (this._probingAll || !this._allSites.length) return;
+        if (!this._autoProbeEnabled || this._probingAll || !this._allSites.length) return;
         this._probingAll = true;
         const token = this._probeToken;
         let started = false; // 进度条是否计入本轮（T81）

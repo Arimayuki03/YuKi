@@ -1,6 +1,6 @@
 # FongMi 功能实现实施文档
 
-更新时间：2026-08-17
+更新时间：2026-08-18
 
 本文是把当前 Electron + Python + JVM 项目逐步收敛到 FongMi/TVBox 运行时能力的实施方案。重点是：
 
@@ -61,6 +61,18 @@ FongMi 主应用并没有把所有网盘 API 硬编码在 `app` 模块中。它�
 | FongMi Pan JAR | 外部 JAR + 夸克 host 快路径 | 夸克快路径可用；静态 JAR Proxy 流桥已接入，真实 Provider 仍需验收 |
 
 当前配置、Spider、播放链路的总览见 [ARCHITECTURE.md](ARCHITECTURE.md)，差距审计见 [TVBOX_CONTRACT_GAPS.md](TVBOX_CONTRACT_GAPS.md)。
+
+### 1.3 G0 运行时基线（2026-08-18）
+
+G0.1-G0.3 已完成并通过确定性离线验收。统一运行时请求/响应/错误/健康模型已落地，
+配置导入不再把“站点对象创建”当成健康：
+摘要分别报告 configured、built、initialized、healthy，JAR 必须通过 init；检测到 Dex、
+Android API、native 或 DRM 而 Android Worker 未启用时，站点保留在诊断清单并显示需要
+Android 运行时。播放请求的 requestId/playSessionId 已贯穿 `/action`、JAR RPC、解析、
+本地代理和 mpv。确定性基线只依赖 loopback 夹具，公共仓仅作带网络元数据的趋势报告。
+
+本节只记录 G0；进程 Supervisor、生产 Worker 进程隔离/硬终止和熔断仍属于 S1，未在本轮提前实现。
+验收证据与受管环境的 Node 子进程权限说明见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)。
 
 ## 2. 目标架构
 
@@ -811,11 +823,11 @@ Python localProxy(params) -> 同等结构
 
 ### Phase 0：冻结契约和基线
 
-- [ ] 保存当前可工作的夸克快路径行为；
-- [ ] 固定 `playerContent`、`/action`、`/proxy` 的请求/响应样例；
-- [ ] 建立 JAR、JS、Python 三种代理夹具；
-- [ ] 记录当前测试基线和真实网络测试账号要求；
-- [ ] 明确桌面端不支持的 Android 原生模块。
+- [x] 保存当前可工作的夸克快路径行为；
+- [x] 固定 `playerContent`、`/action`、`/proxy` 的请求/响应样例；
+- [x] 建立 JAR、JS、Python 三种离线代理夹具；
+- [x] 记录当前测试基线和真实网络测试账号要求；
+- [x] 明确桌面端不支持的 Android 原生模块。
 
 ### Phase 1：统一代理数据面
 
@@ -826,7 +838,7 @@ Python localProxy(params) -> 同等结构
 - [x] 增加 `siteKey/do=js/do=py/do=pan` 路由；
 - [x] 增加可选代理 token/签名（保留旧无 token 地址兼容）；
 - [x] 完成基础 JAR 流代理夹具；
-- [ ] 完成 JS/Python 真实网络代理夹具。
+- [x] 完成 JS/Python 本地 HTTP/流式代理夹具；真实网络验收仍需用户资源。
 
 ### Phase 2：补齐 JAR Proxy
 
@@ -835,7 +847,7 @@ Python localProxy(params) -> 同等结构
 - [x] 增加二进制流桥；
 - [x] 增加 JVM 请求取消和超时；
 - [x] 补齐常用 CatVod Stub（Init/Json/Util/Path）；
-- [ ] 对 DEX/JVM JAR 做兼容性分级。
+- [x] 对 DEX/JVM JAR 做 L0-L4 兼容性分级诊断。
 
 ### Phase 3：播放契约
 
@@ -844,7 +856,7 @@ Python localProxy(params) -> 同等结构
 - [x] 完善 Header 合并（包括 JAR/Python 返回的 JSON header）；
 - [x] `json:<url>`/`parse:<name>` 精确选择指定解析器；
 - [x] 保留 `format/subs/drm/position`，并对 DRM 明确报错；
-- [ ] 增加多解析器并发和优先级测试；
+- [x] 增加多解析器并发和优先级测试；
 - [x] 对 mpv 不支持的 DRM 明确报错。
 
 ### Phase 4：Provider
@@ -853,8 +865,8 @@ Python localProxy(params) -> 同等结构
 - [x] 抽取 Quark（复用现有 API 实现并接入注册表）；
 - [ ] 接入 UC；
 - [ ] 验证百度、天翼、123、迅雷的 JAR Proxy；
-- [ ] 增加签名 URL 缓存和 single-flight 刷新；
-- [ ] 加密 Cookie。
+- [x] 增加签名 URL 缓存和 single-flight 刷新；
+- [x] 加密 Cookie。
 
 ### Phase 5：远程网盘浏览
 
@@ -876,11 +888,11 @@ Python localProxy(params) -> 同等结构
 - [x] `InputStream` 不经过 JSON 字符串化；
 - [x] 9978 `/proxy` 能将 query、请求头和 POST body 传给 Spider；
 - [x] 代理契约覆盖 200/206/302/416 和 Range 行为；真实 CDN 仍需验收；
-- [ ] JAR/JS/Python 三种代理夹具全部通过；
+- [x] JAR/JS/Python 三种离线代理夹具全部通过；真实网络仍需验收；
 - [x] `playerContent` 的 `parse/jx/playUrl/header/vipFlags` 行为通过；
 - [ ] 夸克分享和个人文件可以真实播放；
-- [ ] Cookie 失效时不会卡死或泄漏；
-- [ ] 多站点并发时不会串 Cookie、串 JAR 或串错误。
+- [x] Cookie 失效时的本地错误、一次刷新、密文存储和日志脱敏契约通过；真实账号仍需验收；
+- [x] 显式站点并发时不会串 Cookie、串 JAR 或串错误；无上下文的旧 recent URL 仍只作兼容路径。
 
 ### 远程网盘浏览完成
 
@@ -939,3 +951,5 @@ Python localProxy(params) -> 同等结构
 - [数据地图](DATA_MAP.md)
 
 本文件只定义实现路径，不把尚未完成的真实网络、JAR 和 Provider 验收标记为已支持。
+
+离线契约基线与夹具说明见 [FONGMI_CONTRACT_BASELINE.md](FONGMI_CONTRACT_BASELINE.md)。

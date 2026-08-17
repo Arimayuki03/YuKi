@@ -30,6 +30,7 @@
 | [代码审查修复任务清单](../CODE_REVIEW_FIX_TASKS.md) | 修复步骤、工作流和验收记录 | 执行或复核修复 |
 | [改进优化任务清单](../IMPROVEMENT_PLAN.md) | 测试、工程化、性能和发布待办 | 规划后续工作 |
 | [TVBox 兼容性计划](TVBOX_COMPAT_PLAN.md) | 兼容性收敛方案和任务拆分 | 兼容性开发入口 |
+| [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 下一阶段主执行入口 |
 | [当前未完成任务清单](UNFINISHED_TASKS.md) | 跨文档汇总当前仍开放的事项 | 先看这一份 |
 | [TVBox 剩余工作计划](TVBOX_COMPAT_PLAN_REMAINING.md) | 未完成项、验收要求和执行顺序 | 当前继续开发入口 |
 | [兼容性测试仓库清单](../test-repos.md) | 兼容性测试语料和手动测试步骤 | 执行兼容性测试 |

@@ -23,6 +23,8 @@ import logging
 
 
 import hoststate
+from runtime.errors import RuntimeError as RuntimeContractError
+from runtime.health import android_worker_enabled
 import http_client
 import java_probe
 
@@ -83,6 +85,20 @@ def _next_id():
     with _id_lock:
         _id_counter += 1
         return _id_counter
+
+
+def _runtime_trace_fields():
+    try:
+        from runtime.contracts import current_runtime_request
+        request = current_runtime_request()
+        if request is not None:
+            return {
+                'requestId': request.request_id,
+                'playSessionId': request.play_session_id,
+            }
+    except Exception:
+        pass
+    return {'requestId': '', 'playSessionId': ''}
 
 
 def _is_md5(s):
@@ -161,6 +177,77 @@ def _scan_jar_ports(jar_path):
     return ports
 
 
+def classify_jar_compatibility(jar_path):
+    """按可观测字节特征给 JAR/DEX 做 L0-L4 兼容性分级。
+
+    这是加载前的诊断，不把猜测当成成功：L2/L3/L4 仍允许进入 Runner，
+    但会在报告中明确指出可能需要 Android/WebView/原生/DRM 能力。
+    """
+    import zipfile
+
+    signals = set()
+    has_dex = False
+    has_native = False
+
+    def scan(blob):
+        nonlocal has_native
+        lowered = bytes(blob).lower()
+        if b'android/webkit' in lowered or b'android.app' in lowered:
+            signals.add('android-ui-or-webview')
+        if (b'android/view' in lowered or b'android/widget' in lowered
+                or b'android/content/context' in lowered):
+            signals.add('android-api')
+        if any(token in lowered for token in (b'widevine', b'playready', b'drm', b'media-drms')):
+            signals.add('drm-or-device-license')
+        if b'.so' in lowered or b'libjnidispatch' in lowered or b'jnidispatch' in lowered:
+            has_native = True
+            signals.add('native-library')
+
+    try:
+        with zipfile.ZipFile(jar_path) as archive:
+            names = archive.namelist()
+            has_dex = any(name.lower().endswith('.dex') for name in names)
+            has_native = any(name.lower().endswith(('.so', '.aar')) for name in names)
+            if has_dex:
+                signals.add('dex')
+            if has_native:
+                signals.add('native-library')
+            for info in archive.infolist():
+                if info.is_dir() or info.file_size > (8 << 20):
+                    continue
+                try:
+                    scan(archive.read(info.filename))
+                except Exception:
+                    continue
+    except Exception:
+        try:
+            with open(jar_path, 'rb') as f:
+                raw = f.read(8 << 20)
+                if raw[:4] == b'dex\n':
+                    has_dex = True
+                    signals.add('dex')
+                scan(raw)
+        except OSError:
+            signals.add('unreadable')
+
+    if 'drm-or-device-license' in signals:
+        level = 'L4'
+    elif has_native or 'native-library' in signals:
+        level = 'L3'
+    elif 'android-ui-or-webview' in signals:
+        level = 'L2'
+    elif has_dex or 'android-api' in signals:
+        level = 'L1'
+    else:
+        level = 'L0'
+    return {
+        'level': level,
+        'signals': sorted(signals),
+        'hasDex': bool(has_dex),
+        'hasNative': bool(has_native),
+    }
+
+
 # 全局 jar 桥缓存：key = jar_path → JarBridge 实例
 _jar_bridges = {}
 _jar_bridges_lock = threading.Lock()
@@ -198,6 +285,8 @@ class JarBridge:
                     go_proxy.ensure_listener(p)
             except Exception:
                 pass
+            report = classify_jar_compatibility(jar_path)
+            logger.info('jar compatibility %s: %s', os.path.basename(jar_path), report)
             b = JarBridge(jar_path, runner_jar=runner_jar)
             _jar_bridges[jar_path] = b
             return b
@@ -254,7 +343,7 @@ class JarBridge:
         return jar_url, md5, class_name
 
     @staticmethod
-    def download_jar(jar_url, md5='', site_key='', jar_dir=None):
+    def download_jar(jar_url, md5='', site_key='', jar_dir=None, portable_only=False):
         """下载 jar 到本地缓存目录（幂等，带 md5 校验），返回本机路径。
 
         若下载的 jar 包含 Android DEX（classes.dex），自动转换为 JVM .class jar
@@ -262,12 +351,14 @@ class JarBridge:
         按 URL 加锁：站点构建并发化后同一 jar 可能被多线程同时下载/转换。
         """
         with _jar_download_lock(jar_url):
-            return JarBridge._download_jar_locked(jar_url, md5, site_key, jar_dir)
+            return JarBridge._download_jar_locked(
+                jar_url, md5, site_key, jar_dir, portable_only=portable_only)
 
     @staticmethod
-    def _download_jar_locked(jar_url, md5='', site_key='', jar_dir=None):
+    def _download_jar_locked(jar_url, md5='', site_key='', jar_dir=None,
+                             portable_only=False):
         import hashlib
-        jar_dir = jar_dir or os.path.join(os.path.expanduser('~'), '.video-pc', 'cache', 'jar')
+        jar_dir = jar_dir or os.path.join(hoststate.get_cache_dir(), 'jar')
         try:
             os.makedirs(jar_dir, exist_ok=True)
         except OSError:
@@ -279,6 +370,7 @@ class JarBridge:
         dest = os.path.join(jar_dir, fname)
         if os.path.isfile(dest):
             if not md5 or _file_md5(dest) == md5:
+                JarBridge._require_available_runtime(dest, site_key, portable_only)
                 return JarBridge._ensure_jvm_compatible(dest, md5)
         raw = requests_get_jar(jar_url)
         if not raw or len(raw) < 4:
@@ -291,7 +383,32 @@ class JarBridge:
             raise ValueError(f'[L3:jar] jar md5 mismatch: {jar_url}')
         with open(dest, 'wb') as f:
             f.write(raw)
+        JarBridge._require_available_runtime(dest, site_key, portable_only)
         return JarBridge._ensure_jvm_compatible(dest, md5)
+
+    @staticmethod
+    def _require_available_runtime(jar_path, site_key='', portable_only=False):
+        """已知 Android/Dex/native JAR 不得在无 Android Worker 时假装 PC 健康。"""
+        if not portable_only or android_worker_enabled():
+            return
+        report = classify_jar_compatibility(jar_path)
+        signals = set(report.get('signals') or [])
+        requires_android = bool(
+            report.get('hasDex') or report.get('hasNative') or
+            signals.intersection({'android-api', 'android-ui-or-webview',
+                                  'native-library', 'drm-or-device-license'}))
+        if requires_android:
+            raise RuntimeContractError(
+                'L2_SITE_REQUIRES_ANDROID',
+                site_key=site_key,
+                runtime='android',
+                details={
+                    'compatibility': 'C2',
+                    'jarLevel': report.get('level'),
+                    'signals': sorted(signals),
+                    'androidWorkerEnabled': False,
+                },
+            )
 
     @staticmethod
     def proxy_java_args():
@@ -387,6 +504,11 @@ class JarBridge:
         """检查 jar 是否含 DEX；如果是，转为 JVM .class jar 并缓存。"""
         if not os.path.isfile(jar_path):
             return jar_path
+        report = classify_jar_compatibility(jar_path)
+        if report.get('level') in ('L2', 'L3', 'L4'):
+            logger.warning('jar %s compatibility %s (%s)',
+                           os.path.basename(jar_path), report.get('level'),
+                           ', '.join(report.get('signals') or []))
         # 快速检查：zip 中是否有 classes.dex
         import zipfile
         try:
@@ -681,7 +803,8 @@ class JarBridge:
             params['pan_cookies'] = pan_cookies
 
         rid = _next_id()
-        req = json.dumps({'id': rid, 'method': m, 'params': params}, ensure_ascii=False) + '\n'
+        req = json.dumps({'id': rid, **_runtime_trace_fields(),
+                          'method': m, 'params': params}, ensure_ascii=False) + '\n'
         fut = threading.Event()
         result = {}
 
@@ -763,7 +886,8 @@ class JarBridge:
             request_params['pan_cookies'] = pan_cookies
 
         rid = _next_id()
-        req = json.dumps({'id': rid, 'method': 'proxy', 'params': request_params},
+        req = json.dumps({'id': rid, **_runtime_trace_fields(),
+                          'method': 'proxy', 'params': request_params},
                          ensure_ascii=False, default=str) + '\n'
         fut = threading.Event()
         result = {}

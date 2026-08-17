@@ -99,6 +99,9 @@ BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 MAX_THREADS = 32
 SEG_CHUNK = 262144
 QUEUE_DEPTH = 24  # 每段在途 chunk 上限（背压：下载过快时阻塞下载线程）
+# 夸克签名直链失效/尚未完成转存时，Provider 可以重新申请播放地址。
+# 412 是当前 CDN 对失效签名最常见的响应之一，不能只按 401/403 处理。
+_REFRESHABLE_UPSTREAM_STATUSES = frozenset((401, 403, 404, 410, 412))
 # 分享转存结果缓存：pwd_id → 转存后的文件 fid（转存一次，后续播放秒开）。
 # 持久化到磁盘：后端重启不重复转存、也不占用网盘空间（转存一次永久可用）。
 _SAVE_CACHE = {}
@@ -118,7 +121,8 @@ def _save_cache_file():
     global _SAVE_CACHE_FILE
     if _SAVE_CACHE_FILE is None:
         try:
-            d = os.path.join(os.path.expanduser('~'), '.video-pc', 'cache')
+            import hoststate
+            d = os.path.join(hoststate.get_cache_dir())
             os.makedirs(d, exist_ok=True)
             _SAVE_CACHE_FILE = os.path.join(d, 'quark_save_cache.json')
         except Exception:
@@ -293,6 +297,64 @@ def _quark_v2play(fid, headers):
     return found[0]
 
 
+def _quark_personal_download_url(fid, headers):
+    """用个人网盘文件 fid 请求 download 直链。
+
+    夸克的 v2/play 对部分转存文件会返回 21001，但 file/download 仍能
+    返回有效的 download_url；两条接口都尝试才能避免“转存成功但不能播”。
+    """
+    if not fid:
+        return None
+    import json as _json
+    try:
+        r = _qpost(
+            'https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc&uc_param_str=',
+            headers={**headers, 'Content-Type': 'application/json'},
+            data=_json.dumps({'fids': [str(fid)]}), timeout=25, verify=True,
+            allow_redirects=False)
+        location = r.headers.get('Location', '') if getattr(r, 'headers', None) else ''
+        if isinstance(location, str) and location.startswith(('http://', 'https://')):
+            return location
+        try:
+            payload = r.json() or {}
+        except Exception:
+            return None
+        entries = payload.get('data') or []
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get('download_url') or entry.get('url') or ''
+            if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                return url
+    except Exception:
+        return None
+    return None
+
+
+def _quark_personal_play_url(fid, headers, retries=1):
+    """解析个人 fid 的可播放 URL，兼容转存任务刚完成的短暂延迟。"""
+    import time as _time
+    attempts = max(1, int(retries) + 1)
+    for attempt in range(attempts):
+        try:
+            url = _quark_v2play(str(fid), headers)
+        except Exception:
+            url = None
+        if url:
+            return url
+        try:
+            url = _quark_personal_download_url(str(fid), headers)
+        except Exception:
+            url = None
+        if url:
+            return url
+        if attempt + 1 < attempts:
+            _time.sleep(min(3.0, 0.6 * (attempt + 1)))
+    return None
+
+
 def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
     """转存分享文件：sharepage/save → 轮询任务 → 新 fid（网盘内）。
 
@@ -348,6 +410,15 @@ def _quark_share_play_url(pwd_id, headers):
     for attempt in range(3):
         try:
             now = _time.time()
+            # 转存结果持久化后必须真正验证 fid；旧版本只写不读，且失效
+            # fid 会一直留在缓存中，导致每次播放都拿到坏地址。
+            cached_fid = str(_SAVE_CACHE.get(pwd_id) or '')
+            if cached_fid:
+                cached_url = _quark_personal_play_url(cached_fid, headers, retries=1)
+                if cached_url:
+                    return cached_url
+                _SAVE_CACHE.pop(pwd_id, None)
+                _persist_save_cache()
             sc = _SHARE_CACHE.get(pwd_id)
             if sc and (now - sc.get('ts', 0)) >= _SHARE_CACHE_TTL:
                 sc = _SHARE_CACHE.pop(pwd_id, None)   # 过期即清（C2：原先只跳过）
@@ -398,7 +469,10 @@ def _quark_share_play_url(pwd_id, headers):
             if new_fid:
                 _SAVE_CACHE[pwd_id] = new_fid
                 _persist_save_cache()
-            return _quark_v2play(new_fid, headers)
+            playable = _quark_personal_play_url(new_fid, headers, retries=4)
+            if playable:
+                return playable
+            raise ValueError('saved file has no playable URL')
         except Exception as e:
             last_err = e
             if attempt < 2:
@@ -599,7 +673,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # 旧 7944/9978/1314 端口也必须能承载 JS/Python/JAR 的
             # localProxy。网盘 do=pan 与 url= 直链仍由下方的高吞吐实现处理。
             spider_params = {k: (v[-1] if len(v) == 1 else v) for k, v in q.items()}
-            if do in ('js', 'py', 'jar') or spider_params.get('siteKey'):
+            if do in ('js', 'py', 'jar') or (spider_params.get('siteKey') and do != 'pan'):
                 self._handle_spider_proxy(spider_params, body, head_only)
                 return
 
@@ -653,6 +727,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             total = None
             ctype = 'video/mp4'
             try:
+                if probe.status_code not in (200, 206):
+                    status = int(probe.status_code or 502)
+                    logger.warning('go-proxy 上游 HTTP %d（旧 url 代理探测失败）', status)
+                    body = ('upstream HTTP %d' % status).encode('ascii', 'replace')
+                    self.send_response(status if 400 <= status <= 599 else 502)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(body)
+                    return
                 cr = probe.headers.get('Content-Range', '')
                 if '/' in cr:
                     total = int(cr.rsplit('/', 1)[1])
@@ -814,10 +899,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     'fileToken': file_token,
                 }, headers=headers)
                 if play is None or not play.url:
+                    logger.warning('quark play URL unavailable: share=%s file=%s',
+                                   bool(share_id), file_id[:80])
+                    body = b'quark play URL unavailable'
                     self.send_response(502)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
+                    if not head_only:
+                        self.wfile.write(body)
                     return
-                self._stream_forward(play.url, play.headers or headers, head_only)
+                def refresh_play():
+                    fresh = provider.resolve_play_url({
+                        'shareId': share_id,
+                        'fileId': file_id,
+                        'fileToken': file_token,
+                    }, headers=headers, refresh=True)
+                    if fresh is None or not fresh.url:
+                        return None
+                    return fresh.url, (fresh.headers or headers)
+
+                self._stream_forward(play.url, play.headers or headers, head_only,
+                                     refresh=refresh_play)
                 return
             if site != 'quark':
                 self.send_response(400)
@@ -872,14 +975,42 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _stream_forward(self, url, headers, head_only):
+    def _stream_forward(self, url, headers, head_only, refresh=None):
         """通用取流转发：探测长度 → 分段并发/单线程 → 写回。
 
         并发上限 8：实测夸克 CDN 8 并发即达带宽峰值（12MB/s），更高并发
         只增加连接开销反而略降。小 Range（<32MB）用单连接透传，避免分
         段过多退化。
         """
-        probe = _fetch(url, headers, 0, 0, timeout=30)
+        # 签名 URL 过期时，先用 Provider single-flight 刷新一次；不要在
+        # 后续 Range 分段里无限重试，避免把 401/403 变成隐形死循环。
+        probe = None
+        for attempt in range(2):
+            probe = _fetch(url, headers, 0, 0, timeout=30)
+            # CDN 签名过期通常是 401/403/412；夸克转存文件刚切换完成或旧
+            # fid 被回收时也可能返回 404/410，此时同样刷新一次播放地址。
+            if (probe.status_code not in _REFRESHABLE_UPSTREAM_STATUSES
+                    or not callable(refresh) or attempt):
+                break
+            try:
+                replacement = refresh()
+            finally:
+                probe.close()
+            if not replacement:
+                probe = _fetch(url, headers, 0, 0, timeout=30)
+                break
+            url, headers = replacement
+        if probe is None:
+            self.send_response(502)
+            self.end_headers()
+            return
+        if probe.status_code not in (200, 206):
+            status = int(probe.status_code or 502)
+            probe.close()
+            self.send_response(status if 400 <= status <= 599 else 502)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         total = None
         ctype = 'video/mp4'
         try:

@@ -5,15 +5,15 @@
 """
 import json
 import os
-import shutil
 import sys
-import tempfile
 import time
 import unittest
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, 'js-engine'))
+TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+os.makedirs(TEST_ROOT, exist_ok=True)
 
 from cache_store import CacheStore  # noqa: E402
 
@@ -21,11 +21,14 @@ from cache_store import CacheStore  # noqa: E402
 class TestCacheStore(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='vpc-cache-test-')
+        self.dir = TEST_ROOT
         self.store = CacheStore(self.dir)
+        # 受管运行器可能复用 TEST_ROOT；先清掉上一次进程留下的 JSON，
+        # 保持原来每个测试独立目录的语义。
+        self.store.clear()
 
     def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
+        self.store.clear()
 
     def test_set_get_roundtrip_and_mem_layer(self):
         self.store.set('k1', 'v1')
@@ -94,7 +97,10 @@ class TestCacheStore(unittest.TestCase):
         name = self.store._name_of('legacy')
         with open(os.path.join(self.dir, name), 'w', encoding='utf-8') as f:
             json.dump({'value': 'x', 'exp': 0}, f)
-        total, entries, _ = self.store.stats()
+        # setUp 为隔离旧文件已执行过一次 clear，重新实例化以验证“首次扫描”
+        # 能发现外部预先存在的条目。
+        store = CacheStore(self.dir)
+        total, entries, _ = store.stats()
         self.assertEqual(entries, 1)
         self.assertGreater(total, 0)
 
@@ -105,12 +111,19 @@ class TestJsLocalKvScoping(unittest.TestCase):
     def setUp(self):
         import quickjs_host as qh
         self.qh = qh
-        self.tmpdir = tempfile.mkdtemp(prefix='vpc-kv-test-')
+        self.tmpdir = TEST_ROOT
         qh.LOCAL_KV_DIR = self.tmpdir
-        qh.LOCAL_KV_FILE = os.path.join(self.tmpdir, 'js_local.json')
+        qh.LOCAL_KV_FILE = os.path.join(self.tmpdir, 'js_local-test.json')
+        try:
+            os.remove(qh.LOCAL_KV_FILE)
+        except OSError:
+            pass
 
     def tearDown(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        try:
+            os.remove(self.qh.LOCAL_KV_FILE)
+        except OSError:
+            pass
 
     def test_site_isolation(self):
         set_a = self.qh._native_local_set('siteA')

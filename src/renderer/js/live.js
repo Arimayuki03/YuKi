@@ -7,10 +7,9 @@
  * do=fetchText 取回 txt/m3u 文本 → 解析为「分组 + 频道」渲染，
  * 点击频道交主进程 mpv 播放。
  * 支持格式：
- * - TXT：分组行「组名,#genre#」+ 频道行「频道名,地址1,地址2...」（多地址作备用线路）
+ * - TXT：分组行「组名,#genre#」+ 频道行「频道名,地址1,地址2...」（多地址保留在频道数据）
  * - M3U：#EXTINF:-1 group-title="组名",频道名 后跟地址行
- * 播放：首地址交主进程 mpv；未真正开播时主进程自动切换备用线路
- * （vpc:play-retry/failed 事件提示）。
+ * 播放：首地址交主进程 mpv；失败时返回当前地址和错误，不自动切换线路。
  */
 /* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar */
 
@@ -62,7 +61,6 @@ const Live = {
             window.vpc.playUrl(urls[0], {
                 title: ch.name,
                 subtitle: ch.group && ch.group !== '未分组' ? ch.group : '',
-                fallbackUrls: urls.slice(1),
             }).then((r) => {
                 if (r && r.ok) warnToast(`正在播放：${ch.name}`);
                 else if (r && r.reason === 'mpv-missing') warnToast('直播播放失败：mpv 未安装（node scripts/download-binaries.js mpv）');
@@ -71,13 +69,6 @@ const Live = {
                 else warnToast(`直播播放失败${r && r.reason ? `（${r.reason}）` : ''}`);
             }).catch(() => warnToast('直播播放失败：未知错误'));
         });
-        // 备用线路切换提示（主进程检测到首播未开播时自动重试）
-        if (window.vpc.onPlayRetry) {
-            window.vpc.onPlayRetry(() => warnToast('当前线路无法播放，正在切换备用线路…'));
-        }
-        if (window.vpc.onPlayFailed) {
-            window.vpc.onPlayFailed(() => warnToast('该频道所有线路均无法播放'));
-        }
     },
 
     /** 中文域名（IDN）转 punycode：浏览器 URL 自动转换 hostname，后端拉取才不会失败。 */
@@ -323,7 +314,7 @@ const Live = {
         } catch (e) { /* 写缓存失败不影响本次探测结果展示 */ }
     },
 
-    /** TXT 直播源：组名,#genre# 为分组行；频道名,url[,url...] 为频道行（多地址留作备用线路）。 */
+    /** TXT 直播源：组名,#genre# 为分组行；频道名,url[,url...] 为频道行（多地址保留）。 */
     parseTxt(text) {
         const out = [];
         let group = '未分组';

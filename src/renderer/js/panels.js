@@ -7,7 +7,7 @@
  * 缓存清理前先展示占用大小；本地文件管理逻辑保持不变。
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
-/* global $, doAction, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
+/* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
@@ -92,8 +92,16 @@ async function setting() {
 
 /** 根据加载摘要提示并（成功时）持久化 URL + 刷新站点列表。 */
 function applyConfigResult(sm, text) {
-    if (sm.sites > 0) {
-        const parts = [`已载入 ${sm.sites} 个站点、${sm.parses} 个解析`];
+    renderConfigDiagnostics(sm);
+    const configured = Number(sm.configured ?? sm.sites ?? 0);
+    const built = Number(sm.built ?? sm.sites_built ?? sm.sites ?? 0);
+    const initialized = Number(sm.initialized ?? built);
+    const healthy = Number(sm.healthy ?? sm.sites ?? 0);
+    if (healthy > 0) {
+        const parts = [
+            `配置 ${configured} · 建成 ${built} · 初始化 ${initialized} · 健康 ${healthy}`,
+            `${sm.parses} 个解析`,
+        ];
         if (sm.skipped && sm.skipped.length) parts.push(`跳过 ${sm.skipped.length} 个`);
         const jarN = sm.jarSites || 0;
         if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
@@ -122,8 +130,33 @@ function applyConfigResult(sm, text) {
         if (typeof Home !== 'undefined' && Home.loadSites) Home.loadSites();
         if (typeof Live !== 'undefined' && Live.load) Live.load();
     } else {
-        const hint = '此配置可能仅含 drpy 源或需 JRE 的 jar 源（csp_XXX，请在设置→扩展安装 Java 运行环境）。若你粘贴的是直播源（.txt/.m3u），请改到「设置→源设置→直播源」添加。';
-        warnToast(`载入 0 个站点：${hint}`);
+        const hint = `配置 ${configured} · 建成 ${built} · 初始化 ${initialized} · 健康 0。` +
+            '此配置可能仅含 drpy 源、需要 Android Worker 的 Dex/native JAR，或需 JRE 的 portable JAR。若你粘贴的是直播源（.txt/.m3u），请改到「设置→源设置→直播源」添加。';
+        warnToast(`配置已解析但没有可用站点：${hint}`);
+    }
+}
+
+function renderConfigDiagnostics(data) {
+    const box = $('#config_diagnostics').empty();
+    const summary = data && data.summary ? data.summary : data || {};
+    const diagnostics = Array.isArray(data && data.diagnostics) ? data.diagnostics : [];
+    const skipped = Array.isArray(summary.skipped) ? summary.skipped : [];
+    const configured = Number(summary.configured ?? diagnostics.length ?? 0);
+    const built = Number(summary.built ?? 0);
+    const initialized = Number(summary.initialized ?? 0);
+    const healthy = Number(summary.healthy ?? diagnostics.filter((item) => item.healthy).length);
+    $('<div class="history-item"></div>')
+        .text(`configured ${configured} · built ${built} · initialized ${initialized} · healthy ${healthy}`)
+        .appendTo(box);
+    const unavailable = diagnostics.filter((item) => item && !item.healthy).map((item) => {
+        const error = item.lastError || {};
+        return `${item.siteKey || '?'} · ${item.state || 'unavailable'} · ${error.code || ''} ${error.message || ''}`.trim();
+    });
+    [...skipped, ...unavailable].slice(0, 50).forEach((reason) => {
+        $('<div class="history-item"></div>').text(String(reason)).appendTo(box);
+    });
+    if (!skipped.length && !unavailable.length) {
+        $('<div class="tip-line"></div>').text(healthy ? '当前没有不可用站点' : '尚无配置诊断').appendTo(box);
     }
 }
 
@@ -982,6 +1015,7 @@ function initSettingsPanel() {
         const list = Array.isArray(s.configHistory) ? s.configHistory : [];
         window._cfgHistoryCache = list;
         renderConfigHistory(list);
+        getJson('/sites').then(renderConfigDiagnostics).catch(() => {});
         // 自定义直播源列表
         renderLiveSources(Array.isArray(s.customLives) ? s.customLives : []);
         // 外观：各选项回填 + 壁纸路径缓存
@@ -1009,6 +1043,8 @@ function initSettingsPanel() {
         if (s.pageSizeLive) $('#set_pagesize_live').val(s.pageSizeLive);
         if (s.pageSizePopular) $('#set_pagesize_popular').val(s.pageSizePopular);
         $('#set_pan_fast_path').prop('checked', s.panFastPath !== false);
+        // 源设置：后台自动检测/屏蔽无内容源（默认沿用旧行为）
+        $('#set_source_autodetect').prop('checked', s.sourceAutoDetect !== false);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -1232,6 +1268,31 @@ function initSettingsPanel() {
             warnToast('设置已保存，后端将在下次启动时生效');
         }
     });
+    // 源自动检测：关闭后停止后台探测，并恢复展示历史上被自动屏蔽的源
+    $('#set_source_autodetect').on('change', async function () {
+        const enabled = this.checked;
+        let saved = false;
+        try {
+            if (typeof Home !== 'undefined' && Home.setAutoProbeEnabled) Home.setAutoProbeEnabled(enabled);
+            await window.vpc.settingsSet('sourceAutoDetect', enabled);
+            saved = true;
+            const s = (await window.vpc.settingsGet()) || {};
+            s.sourceAutoDetect = enabled;
+            updateBlockedLine(s);
+            if (typeof Home !== 'undefined' && Home._inited) await Home.loadSites();
+            warnToast(enabled
+                ? '已开启源自动检测（可能自动隐藏无内容源）'
+                : '已关闭源自动检测，历史被屏蔽的源已恢复显示');
+        } catch (e) {
+            if (!saved) {
+                this.checked = !enabled;
+                if (typeof Home !== 'undefined' && Home.setAutoProbeEnabled) Home.setAutoProbeEnabled(!enabled);
+                warnToast('源自动检测设置保存失败');
+            } else {
+                warnToast('源自动检测已保存，但源列表刷新失败');
+            }
+        }
+    });
     // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）
     $('#set_anime4k').on('change', function () {
@@ -1436,13 +1497,14 @@ function initSettingsPanel() {
     });
     // 屏蔽源：恢复并重新探测
     $('#blocked_restore').on('click', async () => {
-        if (!await confirmDialog('确定恢复全部被屏蔽的源？恢复后这些源会重新加入源列表，并触发一次重新探测。', { okText: '恢复' })) return;
+        if (!await confirmDialog('确定恢复全部被屏蔽的源？恢复后这些源会重新加入源列表；若开启自动检测，之后会再次探测。', { okText: '恢复' })) return;
         try {
             await window.vpc.settingsSet('blockedSites', []);
             await window.vpc.settingsSet('probedSites', []);
-            updateBlockedLine({});
+            const s = (await window.vpc.settingsGet()) || {};
+            updateBlockedLine(s);
             if (typeof Home !== 'undefined' && Home._inited) Home.loadSites();
-            warnToast('已恢复全部源，将重新探测');
+            warnToast(s.sourceAutoDetect === false ? '已恢复全部源（自动检测已关闭）' : '已恢复全部源，将重新探测');
         } catch (e) { warnToast('恢复失败'); }
     });
     $('#cache_clear').on('click', clearCache);
@@ -1713,6 +1775,12 @@ async function pickCacheDir() {
 /** 屏蔽源计数行。 */
 function updateBlockedLine(s) {
     const n = Array.isArray(s && s.blockedSites) ? s.blockedSites.length : 0;
+    if (s && s.sourceAutoDetect === false) {
+        $('#blocked_line').text(n > 0
+            ? `自动检测已关闭；${n} 个历史屏蔽源当前全部显示。`
+            : '自动检测已关闭；不会后台探测、隐藏或屏蔽源。');
+        return;
+    }
     $('#blocked_line').text(n > 0
         ? `已自动屏蔽 ${n} 个无内容源；恢复后会重新探测。`
         : '自动屏蔽探测后无内容的源，避免下拉里出现空源。');

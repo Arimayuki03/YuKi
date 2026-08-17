@@ -1,6 +1,6 @@
 # 影视 PC 系统架构
 
-> 更新时间：2026-08-09
+> 更新时间：2026-08-18
 >
 > 本文描述当前有效架构。历史方案、详细批次和踩坑记录见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
@@ -127,7 +127,21 @@ FastAPI Python 后端
 
 完整恢复背景、方法签名和字节码陷阱保留在 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md#5-spider-引擎契约phase-0-固化结论勿重做)。
 
-## 10. 构建与验证
+## 10. 运行时控制面与站点健康
+
+- `/action` 为每个请求建立 `RuntimeRequest`，包含 requestId、playSessionId、siteKey、
+  method、deadlineMs 和 args；Runner 与 JAR RPC 复用同一上下文。
+- 错误按 L1 配置、L2 站点、L3 运行时、L4 解析、L5 媒体、L6 播放器分层；运行时错误
+  返回非 2xx HTTP 和结构化 `RuntimeResponse`，UI 文本与日志均脱敏限长。
+- 客户端断连、deadline 和主动取消通过 `/runtime/cancel` 传播到协作式 Spider/JAR/解析请求；
+  解析超时会销毁隐藏窗口并释放槽位。非协作式生产 Worker 的强制终止不在 G0 保证内。
+- `SiteHealth` 分别记录 configured、built、initialized、healthy。`/sites.sites` 是内容页
+  可用清单，`/sites.diagnostics` 保存包括不兼容站点在内的完整诊断。
+- 普通 JVM 仅接收 portable JAR；Dex、Android API、native 与 DRM 信号在 Android Worker
+  未启用时标记 C2 / `requires_android`，不得计入 healthy。
+- 当前 G0 仍以进程外的兼容测试子进程作为硬退出边界；生产 Worker Supervisor 属于 S1。
+
+## 11. 构建与验证
 
 ```powershell
 npm run test:all

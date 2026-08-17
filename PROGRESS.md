@@ -1,6 +1,6 @@
 # YuKi（原影视 PC） — 当前开发状态
 
-> 更新时间：2026-08-17
+> 更新时间：2026-08-18
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
 
@@ -16,7 +16,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.video-pc/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复已完成；2A、2B 及当前 UI/观看统计批次已完成；下一阶段重点为 TVBox 兼容性验收与发布环境验证 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3 已验收；S1 与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -67,6 +67,16 @@
 - 2A：移除运行时 MiSans 动态下载/注入和画中画入口；关于内容迁入设置一级分类；系统页移除版本号；设置固定在左侧功能项底部。
 - Windows NSIS 安装包和自定义图标。
 
+### TVBox / FongMi G0 基线、契约与健康模型（2026-08-18）
+
+- 兼容基线默认使用 loopback 正常、异常、超时和无限循环夹具；父进程按预算终止进程树，
+  并验证后代 Python 已回收；公共 21 仓仅通过显式 `--public` 运行。
+- `RuntimeRequest`、`RuntimeResponse`、L1-L6 `RuntimeError` 和 `SiteHealth` 已接入 `/action`、
+  Runner、JAR RPC、解析窗口、本地代理和 mpv；异常响应统一为非 2xx 结构化错误。
+- 配置摘要严格区分 configured/built/initialized/healthy；Android/Dex/native/DRM JAR 在
+  Android Worker 未完成 enabled+ready 握手时保持 `L2_SITE_REQUIRES_ANDROID`，不计 healthy。
+- 生产 Worker Supervisor、进程隔离硬杀、重启和熔断属于 S1，本轮未实现。
+
 ### 2026-08-09 2A 改动记录
 
 - `src/renderer/index.html`：删除左侧独立“关于”入口和独立视图，将关于卡片迁入“设置 → 关于”；版本号仅保留在关于分类；系统页删除画中画控件和系统页版本号；设置保持在左侧功能项末尾，收缩按钮位于其下方。
@@ -85,7 +95,9 @@
 - [x] 后续产品整理：“我的”页最近观看与左侧历史的整合方式已确认（历史保留左侧独立视图，最近观看并入“我的 → 最近观看”，收藏入口整合到“我的 → 我的收藏”，左侧独立收藏入口已删除）。
 - [x] Kazumi/UI 后续：规则页布局优化（T55）、首页推荐功能（T62）均已完成。
 - [x] 时间表后续：完整对齐 Kazumi 时间表——完整季节索引（近 20 年）、封面排名角标、排序/收藏过滤、点击进入二级详情页（T57/T58）。
-- [ ] TVBox 兼容性 Phase A–F：兼容套件、端口泛化验收、夸克降级验收、FongMi 契约审计和分层诊断，按 [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
+- [x] TVBox/FongMi G0.1-G0.3：兼容基线、统一运行时错误契约、站点能力模型和确定性离线验收。
+- [ ] TVBox 兼容性 S1 及真实公共仓/发布环境验收：按 [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 与
+  [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
 - [x] 自动更新基础链路已接入 `electron-updater`（打包模式检查/下载/退出安装）；GitHub 发布仓库、签名和 tag 发布 CI 仍待确定。
@@ -136,6 +148,11 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-08-18 G0.1-G0.3 验收：`npm run test:all` 在允许 Node 子进程的权限下通过；Python `run_all.py`
+全部阶段通过并编译 57 个文件，离线兼容矩阵 4/4 通过（超时/无限循环强制终止 2/2、后代
+Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 error，Ruff 通过。
+默认受管 Node 测试会因 `spawn EPERM` 失败，该环境限制已与代码断言失败分开记录。
 
 2026-08-17 回归入口补全 + 配置解析回归修复：`test_kazumi.py`（83 用例）接入 `run_all.py` STAGES，Python 回归从 38 项扩到 121 项（smoke 13 + phase3 25 + kazumi 83），`npm run test:py` 全绿。接入后即捕获一处 HEAD 回归：7816695 的 `_strip_json_comment_lines` 无条件先剥行内 `//`，损坏内嵌 JS spider 源码（phase3 `ijs` 站点加载失败）——已改为严格 JSON 先行解析、注释剥除仅兜底（aa9002f）。同批：夸克 Cookie 误入库处置（214a8c8，DuoDuo/.quark 解除跟踪 + jar JVM cwd 固定到 `<cache>/jar-runtime`）。改进任务清单见 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)。
 

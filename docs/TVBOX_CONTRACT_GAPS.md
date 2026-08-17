@@ -1,6 +1,6 @@
 # TVBox / FongMi 契约差距审计
 
-更新时间：2026-08-17
+更新时间：2026-08-18
 
 本文只记录宿主契约层的差距，不把某个仓库或某个 JAR 的特例当成通用修复。FongMi 对照源码位于本仓库的 `TV-fongmi/`，运行时行为以配置随源携带、宿主只负责契约为准。
 
@@ -98,3 +98,22 @@ Python `Runner` 保持六方法入口；JAR、JS、Python、CMS 均归一为 `ur
 2. 为 `parse-window.js` 增加 type 0/type 1/`jx`/legacy iframe 的离线响应夹具。
 3. 取得真实 type 15/16 配置和 FongMi 对应 parser 后，再实现 L2 契约，不按编号猜测。
 4. 兼容套件报告继续按 `[L1:*]`、`[L2:*]`、`[L3:*]` 聚合 skipped 原因。
+
+## 2026-08-18 G0 契约收敛
+
+- 已建立 `RuntimeRequest`、`RuntimeResponse`、`RuntimeError`、`SiteHealth`；错误层固定为
+  L1 配置、L2 站点、L3 运行时、L4 解析、L5 媒体、L6 播放器。旧的
+  `[L2:type]` / `[L3:js]` 细类仅作为脱敏诊断附加信息保留。
+- `/action` 的 `requestId/playSessionId` 已贯穿 Runner、JAR RPC、解析窗口、本地代理和
+  mpv 会话；运行时失败使用非 2xx HTTP + 结构化错误，不再以裸字符串表示失败。
+- 配置摘要改为 configured/built/initialized/healthy。内容页只消费 healthy 站点，设置页
+  的站点诊断仍展示跳过原因。
+- Dex、Android API、native library 和 DRM JAR 在 Android Worker 缺失时固定为
+  `L2_SITE_REQUIRES_ANDROID` / C2，不再进入普通 JVM 路径并误报 healthy。
+- 兼容基线默认使用 loopback 正常/异常/超时/无限循环夹具；21 仓公共语料改为显式
+  `--public`，外网失败不参与确定性成功判定。
+- 兼容套件超时由父进程执行进程树终止，并在离线夹具中验证后代 Python 进程已回收；
+  `Future.cancel()` 只用于停止等待，不作为硬终止证据。
+- `/action` 端点覆盖正常、异常、deadline、客户端断连和资源登记清理；解析 JSON/iframe
+  取消会中止请求、销毁隐藏窗口并释放解析槽位。JAR/Spider 内嵌错误会被提升为非 2xx
+  结构化响应，不再以 HTTP 200 + 字符串 error 表示失败。

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if BASE not in sys.path:
@@ -78,8 +79,27 @@ class TestProxyGateway(unittest.TestCase):
         self.assertIn('site=quark', result)
         self.assertIn('fileId=fid', result)
 
+    def test_pan_site_key_is_not_a_spider_context(self):
+        sites = Sites()
+        result = dispatch({'do': 'pan', 'siteKey': 'py-site', 'site': 'quark', 'fileId': 'fid'}, sites)
+        self.assertIn('do=pan', result)
+        self.assertEqual(sites.items['py-site'].runner.local_calls, [])
+
     def test_health_check_does_not_require_site(self):
         self.assertEqual(dispatch({'do': 'ck'}, Sites()), 'ok')
+
+    def test_explicit_site_context_isolated_under_concurrency(self):
+        sites = Sites()
+        requests = [
+            {'siteKey': 'js-site', 'do': 'js', 'x': 'a'},
+            {'siteKey': 'py-site', 'do': 'py', 'x': 'b'},
+        ] * 8
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda item: dispatch(item, sites), requests))
+        self.assertEqual(results.count('js-site:local'), 8)
+        self.assertEqual(results.count('py-site:local'), 8)
+        self.assertTrue(all(call['x'] == 'a' for call in sites.items['js-site'].runner.local_calls))
+        self.assertTrue(all(call['x'] == 'b' for call in sites.items['py-site'].runner.local_calls))
 
 
 if __name__ == '__main__':

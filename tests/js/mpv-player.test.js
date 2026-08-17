@@ -141,6 +141,48 @@ test('stop() 标记当前会话 userStopped（退出时不得断流重连）', (
     assert.equal(session.userStopped, true);
 });
 
+// ---------------------------------------------------------------- 真正起播确认
+
+test('waitForReady(): 收到 file-loaded/ready 事件后返回成功', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._activeSession = { id: 21, ready: false, stderr: '', requestId: 'play-normal-0001', playSessionId: 'session-normal-0001' };
+    p.proc = {};
+    p._connected = false;
+    const pending = p.waitForReady(21, 1000);
+    setImmediate(() => p.emit('ready', { sessionId: 21 }));
+    const result = await pending;
+    assert.deepEqual(result, { ok: true, sessionId: 21,
+        requestId: 'play-normal-0001', playSessionId: 'session-normal-0001' });
+});
+
+test('waitForReady(): 会话提前退出时返回明确失败原因', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._activeSession = { id: 22, ready: false, stderr: '', requestId: 'play-error-0001' };
+    p.proc = {};
+    p._connected = false;
+    const pending = p.waitForReady(22, 1000);
+    setImmediate(() => p.emit('exit', {
+        sessionId: 22, endReason: 'error', stderr: 'HTTP 404', code: 1,
+    }));
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'mpv-exited-before-playback');
+    assert.equal(result.requestId, 'play-error-0001');
+    assert.match(result.error, /HTTP 404/);
+});
+
+test('waitForReady(): 未收到加载事件时超时', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._activeSession = { id: 23, ready: false, stderr: 'network error', requestId: 'play-timeout-0001' };
+    p.proc = {};
+    p._connected = false;
+    const result = await p.waitForReady(23, 1000);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'mpv-start-timeout');
+    assert.equal(result.requestId, 'play-timeout-0001');
+    assert.match(result.error, /network error/);
+});
+
 // ---------------------------------------------------------------- 无内置播放器（mpv 缺失）健壮性
 
 test('play(): binary=null 时返回 mpv-missing，不 spawn、不抛异常', () => {

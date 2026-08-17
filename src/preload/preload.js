@@ -30,8 +30,10 @@ contextBridge.exposeInMainWorld('vpc', {
     /**
      * 播放入口（Phase 4 起由 mpv 接管）。
      * 连播由渲染层驱动：每次只交单集，播完经 onPlayerExit 推进下一集。
-     * 返回 { ok, sessionId } —— ok=true 表示 mpv 已接管；
-     * ok=false 且 reason='mpv-missing' 时渲染层走 <video> 预览兜底。
+     * 返回 { ok, started, sessionId, url, urls, error }：ok=true 表示媒体已被
+     * mpv 真正加载并开始播放，url 是实际交给 mpv 的地址；ok=false 时附带
+     * mpv-start-timeout/mpv-exited-before-playback 等可诊断原因，渲染层保留 url
+     * 供复制或交外部播放器。reason='mpv-missing' 时渲染层走 <video> 预览兜底。
      */
     playUrl: (url, meta) => ipcRenderer.invoke('vpc:play', { url, meta }),
     /** 播放控制：cmd ∈ pause/resume/toggle/seek/volume/speed/quit */
@@ -46,11 +48,11 @@ contextBridge.exposeInMainWorld('vpc', {
     onPlayerExit: (cb) => {
         ipcRenderer.on('vpc:player-exit', (_e, info) => cb(info));
     },
-    /** 断流重连起播新会话 {sessionId}：渲染层更新会话号，重连集播完仍可继续连播 */
+    /** 断流重连起播新会话 {sessionId, url}：渲染层更新会话号与实际播放地址 */
     onPlayerSession: (cb) => {
         ipcRenderer.on('vpc:player-session', (_e, info) => cb(info));
     },
-    /** 直播备用线路切换中 / 全部失败 */
+    /** 旧版线路切换事件兼容接口；当前播放失败不再自动切换，正常不会触发 */
     onPlayRetry: (cb) => {
         ipcRenderer.on('vpc:play-retry', (_e, info) => cb(info));
     },
@@ -92,11 +94,14 @@ contextBridge.exposeInMainWorld('vpc', {
     /** 局域网推送到达事件（mpv 已由主进程接管） */
     onPushReceived: (cb) => ipcRenderer.on('vpc:push-received', (_e, info) => cb(info)),
     /** VIP 解析：目标地址 → 直链；可选 parses 用于 FongMi json:/parse:<name> 精确路由。 */
-    resolveParse: (url, parses) => ipcRenderer.invoke('vpc:parse',
-        (parses === undefined ? url : { url, parses })),
+    resolveParse: (url, parses, context) => ipcRenderer.invoke('vpc:parse',
+        (parses === undefined && !context ? url : { url, parses, ...(context || {}) })),
     /** 无解析接口时的兜底：隐藏窗口直开链接抓播放器发出的媒体请求（share 分享页）。
      *  legacy=true 走旧解析器（useLegacyParser）：监听 iframe src 并跟随。 */
-    captureDirect: (url, legacy) => ipcRenderer.invoke('vpc:capture-direct', { url, legacy: !!legacy }),
+    captureDirect: (url, legacy, context) => ipcRenderer.invoke('vpc:capture-direct',
+        { url, legacy: !!legacy, ...(context || {}) }),
+    /** 取消仍在解析窗口中的旧播放请求。 */
+    cancelRuntime: (context) => ipcRenderer.invoke('vpc:runtime-cancel', context || {}),
     /** 验证码源验证（T73）：可见窗口供用户交互，关闭后收割 Cookie 交由后端持久化 */
     captchaVerify: (url) => ipcRenderer.invoke('vpc:captcha-verify', { url }),
     /** 换肤：选择本地图片作壁纸（系统文件对话框，返回路径） */
