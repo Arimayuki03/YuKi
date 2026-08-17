@@ -88,7 +88,7 @@
 - [ ] TVBox 兼容性 Phase A–F：兼容套件、端口泛化验收、夸克降级验收、FongMi 契约审计和分层诊断，按 [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
-- [ ] 自动更新；当前未接入 `electron-updater`。
+- [x] 自动更新基础链路已接入 `electron-updater`（打包模式检查/下载/退出安装）；GitHub 发布仓库、签名和 tag 发布 CI 仍待确定。
 - [ ] 代码签名与 CI/CD，可在发布流程确定后补齐。
 
 ### 明确不作为当前待办
@@ -138,6 +138,8 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 ## 7. 最近验证结果
 
 2026-08-17 回归入口补全 + 配置解析回归修复：`test_kazumi.py`（83 用例）接入 `run_all.py` STAGES，Python 回归从 38 项扩到 121 项（smoke 13 + phase3 25 + kazumi 83），`npm run test:py` 全绿。接入后即捕获一处 HEAD 回归：7816695 的 `_strip_json_comment_lines` 无条件先剥行内 `//`，损坏内嵌 JS spider 源码（phase3 `ijs` 站点加载失败）——已改为严格 JSON 先行解析、注释剥除仅兜底（aa9002f）。同批：夸克 Cookie 误入库处置（214a8c8，DuoDuo/.quark 解除跟踪 + jar JVM cwd 固定到 `<cache>/jar-runtime`）。改进任务清单见 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)。
+
+2026-08-17 TVBox Phase A–E 代码收口：兼容套件 S1/S2/S4 改走真实 FastAPI `/action`，新增重试、离线 SKIP、JSON 报告和分层 skipped 原因聚合；新增端口泛化与夸克降级行为测试；`VPC_PAN_FAST_PATH` 接入设置页；L1-L4 诊断、QuickJS 缺失全局警告和配置导入摘要完成；新增 [TVBOX_CONTRACT_GAPS.md](docs/TVBOX_CONTRACT_GAPS.md) 与 [DATA_MAP.md](docs/DATA_MAP.md)。渲染层 17 个脚本完成 `VPC.<module>` 导出，兼容浏览器与 VM 测试环境。验证：Python 全量回归 ALL PASS、JS 单元 206/206、JS 语法 40/40、ESLint 0 错误、Ruff PASS。21 仓网络基线与实机/发布验收仍待外部环境。
 
 2026-08-10 全量功能测试（已完成）：自动化测试共 **200 项全部通过**——JS 单元 60/60、Python 38/38（smoke 13 + phase3 25）、JS 语法 34 文件 0 错误、真实界面验收 10 个脚本 **102/102** 检查项（内容页/系统页/时间表/推荐/详情卡/我的页/观看统计/Kazumi 布局/分页滚动条/MiSans）。完整功能测试矩阵、自动化明细与需用户实测清单见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 

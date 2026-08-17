@@ -18,6 +18,9 @@ STAGES = [
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
     ('cache', [PY, os.path.join(HERE, 'test_cache_store.py')]),
+    ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
+    ('port-generalization', [PY, os.path.join(HERE, 'test_port_generalization.py')]),
+    ('quark-pan', [PY, os.path.join(HERE, 'test_quark_pan.py')]),
     ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
     ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
 ]

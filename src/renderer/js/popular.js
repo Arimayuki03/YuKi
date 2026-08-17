@@ -182,3 +182,8 @@ const Popular = {
         });
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.popular = Popular;
+}(typeof window !== 'undefined' ? window : globalThis));

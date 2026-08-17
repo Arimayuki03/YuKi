@@ -14,22 +14,25 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const BACKEND = path.join(ROOT, 'python-backend');
 const DIST = path.join(ROOT, 'python-dist');
-const VENV_PYTHON = path.join(BACKEND, '.venv', 'Scripts', 'python.exe');
-const VENV_PIP = path.join(BACKEND, '.venv', 'Scripts', 'pip.exe');
+const VENV_BIN = process.platform === 'win32' ? 'Scripts' : 'bin';
+const VENV_PYTHON = path.join(BACKEND, '.venv', VENV_BIN,
+    process.platform === 'win32' ? 'python.exe' : 'python');
+const VENV_PIP = path.join(BACKEND, '.venv', VENV_BIN,
+    process.platform === 'win32' ? 'pip.exe' : 'pip');
+const BUILD_REQUIREMENTS = path.join(BACKEND, 'requirements-build.txt');
+const DATA_SEPARATOR = process.platform === 'win32' ? ';' : ':';
 
 function run(cmd, cwd) {
     console.log(`> ${cmd}`);
     execSync(cmd, { cwd: cwd || ROOT, stdio: 'inherit' });
 }
 
-// 1. 确保 PyInstaller 已安装
-console.log('[build-python] 检查 PyInstaller…');
-try {
-    execSync(`"${VENV_PYTHON}" -c "import PyInstaller"`, { stdio: 'ignore' });
-} catch (e) {
-    console.log('[build-python] 安装 PyInstaller…');
-    run(`"${VENV_PIP}" install pyinstaller`);
+// 1. 按构建锁文件安装/校准 PyInstaller，避免构建环境漂移。
+console.log('[build-python] 按 requirements-build.txt 校准 PyInstaller…');
+if (!fs.existsSync(BUILD_REQUIREMENTS)) {
+    throw new Error(`缺少构建依赖锁文件：${BUILD_REQUIREMENTS}`);
 }
+run(`"${VENV_PIP}" install -r "${BUILD_REQUIREMENTS}"`);
 
 // 2. 清理旧产物
 console.log('[build-python] 清理旧产物…');
@@ -49,10 +52,10 @@ const cmd = [
     '--name', 'video-pc-backend',
     '--distpath', `"${distDir}"`,
     '--workpath', `"${workDir}"`,
-    '--add-data', `"js-engine;js-engine"`,
-    '--add-data', `"spiders;spiders"`,
-    '--add-data', `"base;base"`,
-    '--add-data', `"kazumi/assets;kazumi/assets"`,
+    '--add-data', `"js-engine${DATA_SEPARATOR}js-engine"`,
+    '--add-data', `"spiders${DATA_SEPARATOR}spiders"`,
+    '--add-data', `"base${DATA_SEPARATOR}base"`,
+    '--add-data', `"kazumi/assets${DATA_SEPARATOR}kazumi/assets"`,
     '--hidden-import', 'uvicorn.logging',
     '--hidden-import', 'uvicorn.loops.auto',
     '--hidden-import', 'uvicorn.protocols.http.auto',

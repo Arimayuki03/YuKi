@@ -588,3 +588,8 @@ const Player = {
         }
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.player = Player;
+}(typeof window !== 'undefined' ? window : globalThis));

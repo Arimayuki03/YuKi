@@ -38,6 +38,7 @@ const { formatAndValidateProxyUrl, setManualProxySource, invalidateCache } = req
 const PanQr = require('./pan-qr');
 const PanQrWindow = require('./pan-qr-window');
 const misans = require('./misans');
+const { setupAutoUpdater } = require('./updater');
 
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -1233,6 +1234,15 @@ app.whenReady().then(() => {
         try { bridge.stop(); bridge.start(); } catch (e) { /* 重启失败下次自愈 */ }
         return { ok: true };
     });
+
+    // 夸克网盘 JAR 快路径开关：环境变量在后端进程启动时读取，因此修改后重启后端。
+    ipcMain.handle('vpc:set-pan-fast-path', (_e, enabled) => {
+        const fast = !!enabled;
+        settings.set('panFastPath', fast);
+        bridge.extraEnv.VPC_PAN_FAST_PATH = fast ? '1' : '0';
+        try { bridge.stop(); bridge.start(); return { ok: true, enabled: fast }; }
+        catch (e) { return { ok: false, reason: e.message }; }
+    });
     // 代理连通性测试:走给定代理访问测试 URL（不改变持久化设置）。
     // 原生实现（不依赖第三方 proxy-agent 包）：
     //   - http 目标：绝对形式请求行（完整 URL）经代理转发，收到响应即视为链路可用。
@@ -1966,6 +1976,7 @@ app.whenReady().then(() => {
     const cacheDir = settings.get('cacheDir');
     if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
     bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
+    bridge.extraEnv.VPC_PAN_FAST_PATH = settings.get('panFastPath') === false ? '0' : '1';
     // 日志级别 + 定时清空日志：启动时按持久化设置生效（可在设置页调整）
     setLogLevel(settings.get('logLevel'));
     (function applyScheduledLogCleanup() {
@@ -2027,6 +2038,7 @@ app.whenReady().then(() => {
     pushServer.on('push', ({ url }) => playPushedUrl(url, '局域网'));
     pushServer.start();
     createWindow();
+    setupAutoUpdater(() => win);
     initTray();
 
     // SyncPlay 事件转发到渲染层

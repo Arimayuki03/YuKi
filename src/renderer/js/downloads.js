@@ -244,3 +244,8 @@ const Downloads = {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.downloads = Downloads;
+}(typeof window !== 'undefined' ? window : globalThis));

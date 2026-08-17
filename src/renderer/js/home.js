@@ -981,3 +981,8 @@ function vodCard(v, src, eager) {
         <div class="vod-remarks">${escHtml(v.vod_remarks || '')}</div>
     </div>`;
 }
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.home = Home;
+}(typeof window !== 'undefined' ? window : globalThis));

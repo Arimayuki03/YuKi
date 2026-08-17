@@ -149,6 +149,27 @@ def _setup_logging():
     logger.info('Python backend logging started: %s', log_dir)
 
 
+def _empty_config_summary(parse_errors=0):
+    return {
+        'sites': 0,
+        'sites_built': 0,
+        'skipped': [],
+        'parse_errors': int(parse_errors),
+        'parses': 0,
+        'flags': 0,
+        'lives': 0,
+        'panSites': 0,
+        'build_errors': {
+            'type_unsupported': 0,
+            'jar_failed': 0,
+            'js_failed': 0,
+            'cms_failed': 0,
+            'py_failed': 0,
+            'other': 0,
+        },
+    }
+
+
 def _config_load_worker(text):
     try:
         summary = config_mgr.load(text)
@@ -156,7 +177,12 @@ def _config_load_worker(text):
         logger.info('config load done: %s sites', summary.get('sites'))
     except Exception as e:
         logger.exception('config load failed')
-        _config_task.update({'status': 'error', 'summary': None, 'msg': str(e)})
+        message = str(e)
+        _config_task.update({
+            'status': 'error',
+            'summary': _empty_config_summary(1 if '[L1:parse]' in message else 0),
+            'msg': message,
+        })
 
 
 def _config_load_async(text):
@@ -286,7 +312,29 @@ def _friendly_jar_error(err):
     return e[:120]
 
 
-def _attach_jar_error(ru, body, ensure_list=False):
+def _parse_matches_flag(flag):
+    """判断 config parses 是否至少有一个可能处理当前线路的解析器。"""
+    parses = getattr(config_mgr, 'parses', None) or []
+    if not parses:
+        return False
+    if not flag:
+        return True
+    for item in parses:
+        if not isinstance(item, dict):
+            return True
+        values = []
+        for key in ('flag', 'flags', 'name', 'id'):
+            value = item.get(key)
+            if isinstance(value, (list, tuple)):
+                values.extend(str(v) for v in value)
+            elif value is not None:
+                values.append(str(value))
+        if not values or str(flag) in values:
+            return True
+    return False
+
+
+def _attach_jar_error(ru, body, ensure_list=False, flag=''):
     """jar 蜘蛛最近一次调用失败时，把错误原因附加到响应 JSON 的 error 字段，
     前端可据此提示「站点接口异常」而非笼统的「暂无内容/未取得详情」。
 
@@ -296,14 +344,16 @@ def _attach_jar_error(ru, body, ensure_list=False):
     """
     sp = getattr(ru, 'spider', None)
     err = getattr(sp, 'last_error', '') if sp is not None else ''
-    if not err and not ensure_list:
-        return body
     fallback = (err and _friendly_jar_error(err)) or '站点接口异常或风控，暂时无法获取内容'
     try:
         data = json.loads(body)
         if isinstance(data, dict):
             if err:
                 data['error'] = _friendly_jar_error(err)
+            elif data.get('parse') in (1, '1', True) and not _parse_matches_flag(flag):
+                # L4：让配置缺少 parses（或没有匹配当前 flag）变成可诊断响应，
+                # 而不是让渲染层只能看到一个泛化的播放失败。
+                data['error'] = '当前配置未含匹配该线路的解析接口（parse=1）'
             if ensure_list:
                 data.setdefault('list', [])
             return json.dumps(data, ensure_ascii=False)
@@ -471,7 +521,8 @@ def _dispatch_action_inner(form):
             if cached and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL:
                 return 200, cached['result']
             result = _attach_jar_error(ru, spider_app.playerContent(
-                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')))
+                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')),
+                flag=form.get('flag', ''))
             with _player_cache_lock:
                 _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
                 # 防无限增长：超过 1024 项先清过期；仍无过期项则按 ts 淘汰最旧 10%
@@ -1330,7 +1381,13 @@ def pick_free_port():
 def main():
     port = int(os.environ.get('VPC_PORT') or pick_free_port())
     token = os.environ.get('VPC_TOKEN') or secrets.token_hex(16)
-    hoststate.configure(port=port, token=token)
+    pan_fast_path = os.environ.get('VPC_PAN_FAST_PATH')
+    hoststate.configure(
+        port=port,
+        token=token,
+        **({'pan_fast_path': str(pan_fast_path).strip().lower() not in ('0', 'false', 'no', 'off')}
+           if pan_fast_path is not None else {}),
+    )
     # 自定义缓存目录（主进程设置页指定，经 VPC_CACHE_DIR 传入）；py 插件目录跟随
     cache_dir = os.environ.get('VPC_CACHE_DIR')
     if cache_dir:

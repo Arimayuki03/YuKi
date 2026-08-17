@@ -575,3 +575,7 @@ const BangumiSearch = {
     },
 };
 
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.bangumiSearch = BangumiSearch;
+}(typeof window !== 'undefined' ? window : globalThis));

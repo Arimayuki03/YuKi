@@ -409,3 +409,8 @@ const Timeline = {
         return bangumiCard(item);
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.timeline = Timeline;
+}(typeof window !== 'undefined' ? window : globalThis));

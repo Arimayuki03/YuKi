@@ -151,6 +151,8 @@ contextBridge.exposeInMainWorld('vpc', {
     mpvScreenshotDir: () => ipcRenderer.invoke('vpc:mpv-screenshot-dir'),
     /** 启动自动重载 lastConfigUrl 完成 */
     onConfigReloaded: (cb) => ipcRenderer.on('vpc:config-reloaded', (_e, info) => cb(info)),
+    /** 打包版自动更新状态：checking/available/downloading/downloaded/error */
+    onUpdateState: (cb) => ipcRenderer.on('vpc:update-state', (_e, info) => cb(info)),
     /** 鼠标侧键前进/后退事件 { dir: 'back'|'forward' }（渲染层维护视图历史栈） */
     onMouseNav: (cb) => ipcRenderer.on('vpc:mouse-nav', (_e, info) => cb(info)),
     /** 直播频道探活：批量检测 HTTP/HTTPS 流地址可达性，返回布尔数组 */
@@ -201,6 +203,8 @@ contextBridge.exposeInMainWorld('vpc', {
     shutdownTimer: (minutes) => ipcRenderer.invoke('vpc:shutdown-timer', minutes),
     /** 代理设置：{url, enable}；应用后重启后端使 Python requests 生效 */
     setProxy: (opts) => ipcRenderer.invoke('vpc:set-proxy', opts),
+    /** 夸克网盘 JAR 快路径开关；修改后重启 Python 后端生效 */
+    setPanFastPath: (enabled) => ipcRenderer.invoke('vpc:set-pan-fast-path', !!enabled),
     /** 代理连通性测试：{proxyUrl, url}；不改变持久化设置，返回 {ok, statusCode, elapsedMs, reason} */
     testProxy: (opts) => ipcRenderer.invoke('vpc:test-proxy', opts),
     /** 弹幕凭据：{appid, secret}；保存并重启后端使弹弹 play 弹幕生效 */

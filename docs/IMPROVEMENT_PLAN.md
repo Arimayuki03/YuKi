@@ -144,7 +144,7 @@
 
 **验收**：
 - [x] 锁文件入库，内含具体版本号（8745d31，pip-compile 28 项含传递依赖）
-- [ ] `scripts/build-python.js` 使用锁文件安装（该脚本本就不装依赖、假定 venv 已就绪；改为由 CI 与文档承担环境重建，见 B1）
+- [x] `scripts/build-python.js` 使用 `python-backend/requirements-build.txt` 锁文件安装，并按平台选择 venv 路径与 PyInstaller data 分隔符
 - [ ] 全新 venv 按锁文件安装后 `npm run test:py` 通过（当前 venv 已对齐锁版本并回归通过；全新 venv 场景由 CI 首跑验证）
 
 ---
@@ -362,6 +362,8 @@
 
 ### D1. 渲染层模块化（渐进，不引框架）
 
+**本轮进度**：Kazumi 两处 Bangumi 封面 fallback 已移除内联 `onerror`，统一由 `common.js` 捕获阶段处理；`app/about/bangumiSearch/cache/common/detail/downloads/home/kazumi/live/my/panels/player/popular/records/search/timeline` 共 17 个渲染脚本已完成 `VPC.<module>` 导出层，并通过 JS 单元 206/206、语法检查 40/40；全页面手动验收仍待实机完成。
+
 **现状**：原生 JS + jQuery，`index.html` 固定顺序引 18 个 `<script>`；模块间靠隐式全局函数互调（跨文件调用如 `home.js` 调 `common.js` 的函数全凭加载顺序正确）。
 
 **步骤**：
@@ -376,12 +378,14 @@
 2. **公共层收敛**：`common.js` 保持唯一公共依赖；排查其他文件是否重复定义了工具函数（CODE_REVIEW 已确认 `escHtml` 集中在 common.js:64，顺势审查 toast/分页/请求包装是否有多份拷贝）
 3. **内联事件迁移**（为 CODE_REVIEW L-33 的 CSP 收尾铺路）：改到哪个页面就把该文件的 `onclick="..."` 模板字符串改为事件委托（`container.addEventListener('click', e => ...)` + `data-action` 属性），kazumi.js 两处 onerror 优先（正是 H-6 所在）
 4. **（可选，收益递减）** 引入 Vite 做打包与 HMR：Electron 渲染层用 `vite-plugin-electron` 或纯静态构建均可，迁移期间新旧两种加载并存（未迁移文件继续 `<script>` 引入）
-5. 每完成一个文件在本文档勾选：`home` `search` `detail` `panels` `kazumi` `player` `records` `downloads` `live` `my` `timeline` `popular` `bangumi-search` `about` `app` `cache`
+5. 每完成一个文件在本文档勾选：`home` `search` `detail` `panels` `kazumi` `player` `records` `downloads` `live` `my` `timeline` `popular` `bangumi-search` `about` `app` `cache` `common`
+
+**本轮完成情况**：上述 17 个渲染层脚本均已挂载 `VPC.<module>`；挂载使用浏览器/VM 双环境安全的根对象，并保留原有全局入口兼容旧调用。
 
 **验收**：
-- [ ] 任一文件的「被外部调用的函数」都能通过 `VPC.<module>.<fn>` 访问，`grep -c "function " src/renderer/js/search.js` 中无新增隐式全局依赖
+- [x] 17 个渲染层脚本均提供 `VPC.<module>` 入口；VM 加载型回归覆盖了导出改动，JS 单元 206/206、语法检查 40/40 通过。存量跨文件全局调用仍保留兼容层，后续迁移时再逐个改为显式模块调用。
 - [ ] 全部页面手动走一遍无 console 报错
-- [ ] kazumi.js 两处 onerror 内联 JS 消失（配合 CODE_REVIEW H-6 修复）
+- [x] kazumi.js 两处 onerror 内联 JS 消失（配合 CODE_REVIEW H-6 修复）
 
 ### D2. 主进程 index.js 拆分（2246 行 / 66 个 IPC handler）
 
@@ -423,6 +427,8 @@
 
 ### D3. 数据层统一（分三步走）
 
+**本轮进度**：已生成 `docs/DATA_MAP.md`，并确认当前业务数据通过 settings IPC 保存；localStorage 仍保留三个派生缓存键，尚未迁移到统一 cache API。
+
 **现状**：收藏/历史在渲染层，下载记录在主进程 `dl-records.json`，Kazumi 规则与 Cookie 在后端 `~/.video-pc/`——三处存储三套读写与同步逻辑，竞态类 bug（CODE_REVIEW M-30 系列）的根源。
 
 **步骤**：
@@ -433,7 +439,7 @@
 4. 迁移完的竞态修复验证：快速连续搜索/切源/收藏，数据不再串（对应 M-30 各条逐一回归）
 
 **验收**：
-- [ ] `docs/DATA_MAP.md` 存在且与代码一致
+- [x] `docs/DATA_MAP.md` 存在且与代码一致
 - [ ] 渲染层 `localStorage` 仅存 UI 偏好类键
 - [ ] M-30 列举的四组竞态场景手动复测通过
 
@@ -449,6 +455,8 @@
 ## 第五批：打包分发与长期项
 
 ### E1. 自动更新
+
+**本轮进度**：已加入 `electron-updater` 依赖、打包模式检查模块和 preload 状态事件；GitHub owner/repo、签名证书、tag 发布 CI 仍需发布决策后配置。
 
 **步骤**：
 

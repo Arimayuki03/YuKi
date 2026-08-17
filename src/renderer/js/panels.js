@@ -102,6 +102,17 @@ function applyConfigResult(sm, text) {
         const panN = sm.panSites || 0;
         if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→源设置→网盘账号）`);
 
+        const build = sm.build_errors || {};
+        const diagnostics = [
+            ['L1 解析失败', sm.parse_errors],
+            ['L2 类型不支持', build.type_unsupported],
+            ['L3 JAR 失败', build.jar_failed],
+            ['L3 JS 失败', build.js_failed],
+            ['L3 Python 失败', build.py_failed],
+        ].filter(([, count]) => Number(count) > 0)
+            .map(([label, count]) => `${label} ${count}`);
+        if (diagnostics.length) parts.push(`诊断：${diagnostics.join('、')}`);
+
         warnToast(parts.join('、'));
         // 成功才持久化，下次启动自动重载；并记入历史源
         if (/^https?:\/\//i.test(text.trim())) {
@@ -997,6 +1008,7 @@ function initSettingsPanel() {
         if (s.pageSizeHistory) $('#set_pagesize_history').val(s.pageSizeHistory);
         if (s.pageSizeLive) $('#set_pagesize_live').val(s.pageSizeLive);
         if (s.pageSizePopular) $('#set_pagesize_popular').val(s.pageSizePopular);
+        $('#set_pan_fast_path').prop('checked', s.panFastPath !== false);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -1207,6 +1219,18 @@ function initSettingsPanel() {
     $('#set_hls_adfilter').on('change', function () {
         window.vpc.settingsSet('hlsAdFilter', this.checked);
         warnToast(this.checked ? '已开启 m3u8 广告过滤（实验性）' : '已关闭 m3u8 广告过滤');
+    });
+    $('#set_pan_fast_path').on('change', async function () {
+        const enabled = this.checked;
+        await window.vpc.settingsSet('panFastPath', enabled);
+        try {
+            const result = await window.vpc.setPanFastPath(enabled);
+            warnToast(result && result.ok
+                ? `已${enabled ? '开启' : '关闭'}夸克网盘快路径，后端正在重启`
+                : `设置已保存，但后端重启失败：${(result && result.reason) || '未知错误'}`);
+        } catch (e) {
+            warnToast('设置已保存，后端将在下次启动时生效');
+        }
     });
     // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）
@@ -1778,3 +1802,8 @@ async function refreshPlayerLine() {
         clearBtn.hide();
     }
 }
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.panels = { applyConfigResult, initAuxPanels, initSettingsPanel };
+}(typeof window !== 'undefined' ? window : globalThis));

@@ -495,3 +495,8 @@ const Search = {
             : { page: 1, pagecount: 1 });
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.search = Search;
+}(typeof window !== 'undefined' ? window : globalThis));

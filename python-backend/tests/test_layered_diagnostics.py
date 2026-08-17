@@ -5,11 +5,13 @@
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'js-engine')))
 
 import json
 import unittest
 from config import ConfigManager
 from site_manager import SiteManager
+from quickjs_host import JsEngine
 
 
 class TestLayeredDiagnostics(unittest.TestCase):
@@ -104,6 +106,37 @@ function badSpider() { return {}; }
         # 所有错误计数应为 0
         for count in summary['build_errors'].values():
             self.assertEqual(count, 0)
+
+    def test_l1_parse_error_is_tagged(self):
+        with self.assertRaisesRegex(ValueError, r'^\[L1:parse\]'):
+            self.cfg.load('{not-json')
+
+    def test_l1_fetch_error_is_exposed_in_task_summary(self):
+        # 直接覆盖 fetch 结果，避免该测试依赖网络。
+        import config as config_module
+        original = config_module.fetch_text
+        try:
+            config_module.fetch_text = lambda _url: ''
+            with self.assertRaisesRegex(ValueError, r'^\[L1:fetch\]'):
+                self.cfg.load('https://example.invalid/config.json')
+        finally:
+            config_module.fetch_text = original
+
+    def test_parse_one_without_parses_gets_l4_message(self):
+        import server
+        from server import _attach_jar_error
+
+        server.config_mgr.parses = []
+        body = _attach_jar_error(None, json.dumps({'url': 'https://example/video', 'parse': 1}), flag='f')
+        self.assertIn('当前配置未含匹配该线路的解析接口', body)
+
+    def test_quickjs_missing_global_is_logged(self):
+        engine = JsEngine(site_key='diagnostic-test')
+        src = 'export function __jsEvalReturn() { return { homeContent() { return missingHostGlobal; } }; }'
+        engine.load_spider(src)
+        with self.assertLogs('vpc.jsengine', level='WARNING') as logs:
+            engine.call('homeContent')
+        self.assertTrue(any('宿主未提供的全局 <missingHostGlobal>' in line for line in logs.output))
 
 
 if __name__ == '__main__':

@@ -363,3 +363,8 @@ const My = {
         try { closeDialog('bgmSyncProgressDialog'); } catch (e) { /* ignore */ }
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.my = My;
+}(typeof window !== 'undefined' ? window : globalThis));

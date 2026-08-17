@@ -17,6 +17,7 @@ import time
 import hashlib
 import logging
 import threading
+import re
 
 import http_client
 from urllib.parse import quote
@@ -214,6 +215,17 @@ class JsEngine:
         getattr(logger, level if level in ('info', 'warn', 'error', 'debug') else 'info')(
             '[js] %s', msg)
 
+    @staticmethod
+    def _warn_missing_global(error, source=''):
+        """把 QuickJS 深埋的 ReferenceError 转成可检索的宿主诊断。"""
+        text = str(error or '')
+        match = re.search(r"(?:ReferenceError:\s*)?([A-Za-z_$][\w$]*) is not defined", text)
+        if not match:
+            return
+        name = match.group(1)
+        suffix = f' ({source})' if source else ''
+        logger.warning('该 JS 源需要宿主未提供的全局 <%s>%s', name, suffix)
+
     def _js2proxy(self, site_key, flag):
         """TVBox js2Proxy 桥：生成后端 /proxy 媒体代理 URL（query 透传给 localProxy）。"""
         port = self.proxy_port or 0
@@ -236,9 +248,13 @@ class JsEngine:
     def load_spider(self, src):
         """加载 spider 源码（ESM），执行 spider.js 协议；返回是否成功。"""
         with self.lock:
-            self.ctx.eval(esm_to_script(src, ns='__MODULE_EXPORTS__'))
-            self._eval_file(LOADER_JS)
-            return self.ctx.eval('typeof globalThis.__JS_SPIDER__') == 'object'
+            try:
+                self.ctx.eval(esm_to_script(src, ns='__MODULE_EXPORTS__'))
+                self._eval_file(LOADER_JS)
+                return self.ctx.eval('typeof globalThis.__JS_SPIDER__') == 'object'
+            except Exception as e:
+                self._warn_missing_global(e, '加载')
+                raise
 
     def load_spider_url(self, entry_url, fetch_text):
         """加载多模块 ESM spider：递归抓取依赖，逐模块 IIFE 隔离执行。
@@ -271,6 +287,7 @@ class JsEngine:
                 try:
                     self.ctx.eval(script)
                 except Exception as e:
+                    self._warn_missing_global(e, url)
                     logger.warning('js module eval failed: %s (%s)', url, e)
                     raise
             last = len(bundle.modules) - 1
@@ -288,7 +305,11 @@ class JsEngine:
         try:
             fn = self.ctx.get('__VPC_CALL__')
             args_json = json.dumps(list(args), ensure_ascii=False)
-            ret = fn(method, args_json)
+            try:
+                ret = fn(method, args_json)
+            except Exception as e:
+                self._warn_missing_global(e, method)
+                raise
             if ret == '__PROMISE__':
                 ret = self._drain_promise()
             if not isinstance(ret, str):
@@ -296,6 +317,7 @@ class JsEngine:
             try:
                 parsed = json.loads(ret)
                 if isinstance(parsed, dict) and '__vpc_err__' in parsed:
+                    self._warn_missing_global(parsed['__vpc_err__'], method)
                     logger.warning('js %s error: %s', method, parsed['__vpc_err__'])
                     return None
             except ValueError:

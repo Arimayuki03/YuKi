@@ -155,12 +155,12 @@ def parse_config_json(text):
     except (json.JSONDecodeError, ValueError) as e:
         if _looks_like_live_source(text):
             raise ValueError(
-                '这是直播源（txt/m3u），不是配置。请到「设置 → 源设置 → 直播源」'
+                '[L1:parse] 这是直播源（txt/m3u），不是配置。请到「设置 → 源设置 → 直播源」'
                 '添加该地址，而不是从这里载入配置。'
             ) from e
         snippet = (text or '').strip()[:80].replace('\n', ' ')
         raise ValueError(
-            '配置不是有效的 JSON（无法解析）。请确认地址返回的是 CatVod 配置文件。'
+            '[L1:parse] 配置不是有效的 JSON（无法解析）。请确认地址返回的是 CatVod 配置文件。'
             '内容开头：%r' % snippet
         ) from e
 
@@ -290,7 +290,7 @@ class ConfigManager:
             self._save_repo_pref(item.get('name'))
             return prepared['summary']
         if not isinstance(cfg.get('sites'), list):
-            raise ValueError('invalid config: missing sites')
+            raise ValueError('[L1:parse] invalid config: missing sites')
         prepared = self._prepare(cfg, url_or_json)
         self._apply(prepared)
         return prepared['summary']
@@ -322,7 +322,9 @@ class ConfigManager:
         """
         summary = {
             'sites': 0,
+            'sites_built': 0,
             'skipped': [],
+            'parse_errors': 0,
             'parses': 0,
             'flags': 0,
             'lives': 0,
@@ -353,12 +355,14 @@ class ConfigManager:
                     if site:
                         new_sites.append(site)
                         summary['sites'] += 1
+                        summary['sites_built'] += 1
                         # 统计网盘源：api 包含 quark/uc/baidu/tianyi 等关键词
                         api_lower = str(item.get('api', '')).lower()
                         if any(kw in api_lower for kw in ['quark', 'uc', 'baidu', 'tianyi', '123pan', 'xunlei']):
                             summary['panSites'] += 1
                     else:
-                        summary['skipped'].append(item.get('key', '?'))
+                        summary['skipped'].append(
+                            f"{item.get('key', '?')}: [L2:site] site entry could not be built")
                 except Exception as e:
                     err_msg = str(e)
                     logger.exception('load site %s failed: %s', item.get('key'), e)
@@ -518,7 +522,10 @@ class ConfigManager:
     def _fetch_config(self, url_or_json):
         s = str(url_or_json).strip()
         if s.startswith('http'):
-            return fetch_text(s)
+            text = fetch_text(s)
+            if not text or not text.strip():
+                raise ValueError('[L1:fetch] 配置地址不可达或返回空内容')
+            return text
         if s.startswith('{'):
             return s
         if os.path.exists(s):
@@ -532,7 +539,7 @@ class ConfigManager:
                 except UnicodeDecodeError:
                     continue
             return raw.decode('utf-8', errors='replace')
-        raise ValueError('unsupported config source')
+        raise ValueError('[L1:fetch] unsupported config source')
 
     def _build_site(self, item, base_url='', spider_jar=''):
         """按 config 条目构建 Site（不注册）；不支持返回 None。
@@ -544,17 +551,19 @@ class ConfigManager:
         """
         key = item.get('key') or ''
         name = item.get('name') or key
-        stype = int(item.get('type', 0))
+        try:
+            stype = int(item.get('type', 0))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"[L2:type] invalid type for {key or '?'}") from e
         api = str(item.get('api') or '')
         ext = item.get('ext') or ''
         if not key or not api:
-            return None
+            raise ValueError('[L2:site] site entry requires key and api')
 
         # 相对路径 api（如 ./js/tiantian.js）：以 config 源 URL 为基址解析
         if api.startswith('./') or api.startswith('../'):
             if not base_url:
-                logger.info('skip site %s: relative api without base url', key)
-                return None
+                raise ValueError('[L1:resolve] relative api without config URL')
             api = urljoin(base_url, api)
 
         # 站点级独立 jar（TVBox 站点条目 `jar` 字段；可带 ;md5）。相对路径按配置源解析。

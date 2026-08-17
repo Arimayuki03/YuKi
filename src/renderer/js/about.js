@@ -40,3 +40,8 @@ const About = {
             `<div class="about-row"><span>${escHtml(k)}</span><span>${escHtml(v)}</span></div>`).join(''));
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.about = About;
+}(typeof window !== 'undefined' ? window : globalThis));

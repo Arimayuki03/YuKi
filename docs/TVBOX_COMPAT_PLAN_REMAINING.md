@@ -4,6 +4,19 @@
 - **状态**: 已批准待执行（Phase A–F 按序实施）
 - **配套**: `TVBOX_COMPAT_PLAN.md`（原计划）。旧版进度总结已并入本文件，后续只保留这一份执行记录。
 
+## 2026-08-17 本轮代码验收结果
+
+已在仓库内完成并通过本地回归：
+
+- Phase A：兼容套件 S1/S2/S4 改为真实 FastAPI `/action` 路径，S1/S2 各重试一次，增加离线 SKIP、结构化 `compat_report.json` 与 `[Lx:*]` skipped 原因聚合。
+- Phase B：新增 `test_port_generalization.py`，覆盖 7777 行为、保护端口、范围、16 个监听上限和 JAR 字节扫描。
+- Phase C：`VPC_PAN_FAST_PATH` 已接线，设置页提供夸克快路径开关；新增 `test_quark_pan.py` 覆盖快路径、JAR 优先和代理降级。
+- Phase D：`docs/TVBOX_CONTRACT_GAPS.md` 已落盘，记录 FongMi 对照路径、差距和后续任务。
+- Phase E：L1 fetch/parse、L2/L3 分层 skipped、L4 parse=1 提示、QuickJS 缺失全局警告和前端导入摘要已完成；分层诊断测试已接入 `run_all.py`。
+- `npm run test:py`：全部通过；`npm run test:jsunit`：206/206；`npm run test:js`：40/40；Ruff 通过。
+
+仍需外部环境完成：21 仓全量网络基线（含 `--update-baseline`）、真实生产 JAR 与已知端口吻合度、macOS/Linux 打包实测、安装后冷启动、签名/发布和 CI Actions 实际红绿验证。
+
 ## 背景：为什么说"五个任务已完成"不准确
 
 旧版“5 个任务已完成”的说法不准确。复核代码、产物与测试报告后，该结论不成立——多数任务只完成了代码主体，验收项未达成：

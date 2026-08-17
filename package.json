@@ -94,5 +94,8 @@
     "eslint": "^10.8.1",
     "globals": "^17.11.0"
   },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
   "license": "MIT"
 }

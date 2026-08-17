@@ -16,11 +16,12 @@
 (function () {
     'use strict';
 
+    const root = typeof window !== 'undefined' ? window : globalThis;
     const NS = 'vpc_cache::';           // 命名空间前缀
     const MAX_BYTES = 1.5 * 1024 * 1024; // 总容量上限 ~1.5MB（本命名空间内所有条目字符串长度之和）
 
     function _ls() {
-        try { return window.localStorage; } catch (e) { return null; }
+        try { return root.localStorage; } catch (e) { return null; }
     }
 
     /** 遍历本命名空间的所有条目键（不触碰其他 localStorage 键）。 */
@@ -136,8 +137,15 @@
     }
 
     // 挂到全局（脚本以 <script defer> 顺序加载，非模块化）
-    window.localCacheGet = localCacheGet;
-    window.localCacheSet = localCacheSet;
-    window.localCacheDel = localCacheDel;
-    window.localCacheClearAll = localCacheClearAll;
+    root.localCacheGet = localCacheGet;
+    root.localCacheSet = localCacheSet;
+    root.localCacheDel = localCacheDel;
+    root.localCacheClearAll = localCacheClearAll;
+    root.VPC = root.VPC || {};
+    root.VPC.cache = {
+        get: localCacheGet,
+        set: localCacheSet,
+        del: localCacheDel,
+        clearAll: localCacheClearAll,
+    };
 })();

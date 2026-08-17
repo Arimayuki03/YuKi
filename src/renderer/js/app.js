@@ -252,3 +252,8 @@ $(async function bootstrap() {
     // 后台预载推荐数据（本地缓存 + 刷新），点开推荐页即时显示、无首次网络等待
     if (typeof Popular !== 'undefined' && Popular.preload) Popular.preload();
 });
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.app = App;
+}(typeof window !== 'undefined' ? window : globalThis));

@@ -198,6 +198,21 @@ function coverChainNext(img) {
     img.classList.add('loaded');
 }
 
+// Bangumi/Kazumi 动态卡片使用 data-fb-src 声明单级镜像兜底；统一在捕获阶段
+// 处理 error，避免模板字符串继续拼接内联 JS（也兼容后续 CSP 收紧）。
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('error', (event) => {
+        const img = event.target;
+        if (!img || img.tagName !== 'IMG' || !img.dataset || !img.dataset.fbSrc) return;
+        if (!img.dataset.fbTried) {
+            img.dataset.fbTried = '1';
+            img.src = img.dataset.fbSrc;
+        } else {
+            img.style.display = 'none';
+        }
+    }, true);
+}
+
 /**
  * 封面多级兜底（T74）：按序尝试 pics（如 AniList 封面 → trace.moe 匹配帧），全部失败落占位图并淡入。
  * 用于以图搜番等封面来源可能被墙/不稳定的场景——onerror 走 coverChainNext 逐级切换，不留空框。
@@ -900,3 +915,11 @@ try {
 $(document).on('click', '.info-dot', function () {
     $(this).closest('.info-tip').toggleClass('open');
 });
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.common = {
+        escHtml, normalizePic, vodCoverImg, vodCoverChain, coverChainNext,
+        coverFadeIn, confirmDialog, showLoading, hideLoading,
+    };
+}(typeof window !== 'undefined' ? window : globalThis));

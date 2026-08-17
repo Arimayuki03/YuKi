@@ -767,3 +767,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
 
 const Favorites = makeRecordView('view-favorites', 'favorites', '暂无收藏。打开影片详情页点“收藏”按钮即可添加。', true, true, 'pageSizeFavorites');
 const HistoryView = makeRecordView('view-history', 'history', '暂无播放历史。打开影片详情页会自动记录。', true, false, 'pageSizeHistory');
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.records = Records;
+    root.VPC.favorites = Favorites;
+    root.VPC.history = HistoryView;
+}(typeof window !== 'undefined' ? window : globalThis));

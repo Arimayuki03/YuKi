@@ -415,3 +415,8 @@ const Live = {
         }
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.live = Live;
+}(typeof window !== 'undefined' ? window : globalThis));

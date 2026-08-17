@@ -1564,3 +1564,8 @@ const Detail = {
         return null;
     },
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.detail = Detail;
+}(typeof window !== 'undefined' ? window : globalThis));

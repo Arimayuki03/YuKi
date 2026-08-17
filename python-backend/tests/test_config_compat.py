@@ -32,6 +32,7 @@ CORPUS = os.path.join(HERE, 'compat_repos.json')
 BASELINE = os.path.join(HERE, 'compat_baseline.json')
 PROGRESS = os.path.join(HERE, 'compat_progress.jsonl')   # 逐仓增量落盘（随时可看/断点续跑）
 REPORT = os.path.join(HERE, 'compat_report.txt')
+REPORT_JSON = os.path.join(HERE, 'compat_report.json')
 
 REPO_TIMEOUT = 180       # 单仓子进程硬超时（秒）。原 420s 过长且 jar 密集仓
                          # 在 Windows PIPE 模式下因 pipe 缓冲区满而死锁——
@@ -42,6 +43,70 @@ RATE_TOLERANCE = 0.05    # 聚合率对比容差（±5pp 网络抖动）
 
 
 # ------------------------------------------------------------ 子进程模式：跑单仓
+
+def _start_http_backend(tmp):
+    """在子进程内启动生产 FastAPI 路径，返回 (server, base, token)。"""
+    import socket
+    import threading
+    import uvicorn
+    import hoststate
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(('127.0.0.1', 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    token = 'compat'
+    hoststate.configure(port=port, token=token,
+                        data_dir=tmp, cache_dir=os.path.join(tmp, 'cache'),
+                        plugins_dir=os.path.join(tmp, 'cache', 'py'),
+                        log_dir=os.path.join(tmp, 'logs'))
+    import server
+    app = server.create_app()
+    instance = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port,
+                                              log_level='error'))
+    thread = threading.Thread(target=instance.run, daemon=True, name='compat-http')
+    thread.start()
+    import requests
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            if requests.get(f'http://127.0.0.1:{port}/health', timeout=1).ok:
+                return instance, f'http://127.0.0.1:{port}', token
+        except Exception:
+            time.sleep(0.1)
+    instance.should_exit = True
+    raise RuntimeError('[L1:fetch] compat HTTP backend did not start')
+
+
+def _http_action(base, token, data, timeout=20):
+    import requests
+    rsp = requests.post(base + '/action', data=data,
+                        headers={'x-token': token}, timeout=timeout)
+    try:
+        payload = rsp.json()
+    except ValueError:
+        payload = {'code': rsp.status_code, 'msg': rsp.text[:200]}
+    if isinstance(payload, dict):
+        payload.setdefault('code', rsp.status_code)
+    return rsp.status_code, payload
+
+
+def _load_via_http(base, token, url):
+    """调用真实 loadConfig/configTask 链路，失败时由上层重试一次。"""
+    status, started = _http_action(base, token, {'do': 'loadConfig', 'url': url}, timeout=20)
+    if status not in (200, 202):
+        raise ValueError('[L1:fetch] loadConfig HTTP %s: %s' % (status, started))
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        status, task = _http_action(base, token, {'do': 'configTask'}, timeout=10)
+        if status != 200:
+            raise ValueError('[L1:fetch] configTask HTTP %s' % status)
+        if task.get('status') == 'done':
+            return task.get('summary') or {}
+        if task.get('status') == 'error':
+            raise ValueError(task.get('msg') or '[L1:parse] config task failed')
+        time.sleep(0.5)
+    raise TimeoutError('[L1:parse] configTask timeout')
 
 def run_one(repo):
     """进程内探测单个仓库，返回记录 dict。"""
@@ -64,64 +129,81 @@ def run_one(repo):
     rec = {
         'name': repo['name'], 'tags': repo.get('tags', []),
         'fetch': 0, 'parse': 0, 'sites': 0, 'skipped_n': 0,
+        'skipped': [], 'build_errors': {}, 'parse_errors': 0,
         'build_rate': 0.0, 'home_ok': 0, 'home_total': 0, 'home_rate': 0.0,
         'note': '',
     }
 
-    # ---- S1 拉取（真实 fetch_text 路径：IDN/JPEG·PNG 伪装/gzip/注释）----
-    text = ''
+    # ---- S1 拉取（真实 HTTP /action fetchText 路径）----
+    http_instance = None
     try:
-        from config import fetch_text
-        print('[compat] S1 fetch start', file=sys.stderr, flush=True)
-        text = fetch_text(repo['url']) or ''
-        print('[compat] S1 fetch done: %d chars' % len(text), file=sys.stderr, flush=True)
+        http_instance, base, token = _start_http_backend(tmp)
+        for attempt in range(2):
+            print('[compat] S1 fetch start (attempt %d)' % (attempt + 1), file=sys.stderr, flush=True)
+            try:
+                status, payload = _http_action(base, token,
+                                               {'do': 'fetchText', 'url': repo['url']}, timeout=20)
+                text = payload.get('text') or ''
+                if status == 200 and text.strip():
+                    rec['fetch'] = 1
+                    print('[compat] S1 fetch done: %d chars' % len(text), file=sys.stderr, flush=True)
+                    break
+                rec['note'] = '[L1:fetch] empty response (attempt %d)' % (attempt + 1)
+            except Exception as e:
+                rec['note'] = '[L1:fetch] %s' % str(e)[:120]
+            if attempt == 0:
+                time.sleep(0.3)
     except Exception as e:
-        rec['note'] = 'S1 fetch error: %s' % str(e)[:120]
-    if not text.strip():
-        return _finish(rec, tmp)
-    rec['fetch'] = 1
+        rec['note'] = '[L1:fetch] %s' % str(e)[:120]
+    if not rec['fetch']:
+        return _finish(rec, tmp, http_instance)
 
-    # ---- S2 解析 + 建站（config_mgr.load 真实路径：传 URL，与生产 loadConfig 一致）----
-    import server
+    # ---- S2 解析 + 建站（真实 HTTP loadConfig → configTask 轮询）----
     print('[compat] S2 load start', file=sys.stderr, flush=True)
-    try:
-        summary = server.config_mgr.load(repo['url'])
-    except Exception as e:
-        rec['note'] = 'S2 load error: %s' % str(e)[:120]
-        return _finish(rec, tmp)
+    summary = None
+    errors = []
+    for attempt in range(2):
+        try:
+            summary = _load_via_http(base, token, repo['url'])
+            if summary.get('sites', 0) or attempt == 1:
+                break
+        except Exception as e:
+            errors.append(str(e)[:120])
+            if attempt == 0:
+                time.sleep(0.3)
+    if summary is None:
+        rec['note'] = errors[-1] if errors else '[L1:parse] no summary'
+        return _finish(rec, tmp, http_instance)
     print('[compat] S2 load done', file=sys.stderr, flush=True)
     built = int(summary.get('sites') or 0)
     skipped = summary.get('skipped') or []
     rec['sites'] = built
     rec['skipped_n'] = len(skipped)
+    rec['skipped'] = [str(item) for item in skipped]
+    rec['build_errors'] = summary.get('build_errors') or {}
+    rec['parse_errors'] = int(summary.get('parse_errors') or 0)
     if built <= 0:
         rec['note'] = 'S2 no sites built; skipped=%s' % [str(s)[:60] for s in skipped[:3]]
-        return _finish(rec, tmp)
+        return _finish(rec, tmp, http_instance)
     rec['parse'] = 1
     rec['build_rate'] = built / max(1, built + len(skipped))
 
-    # ---- S4 首页冒烟（抽样：jar 站优先 4 个 + 其余按序补足）----
-    all_sites = list(server.sites.sites)
-    jar_sites = [s for s in all_sites if getattr(s, 'spider_type', '') == 'jar']
-    others = [s for s in all_sites if getattr(s, 'spider_type', '') != 'jar']
-    probe = jar_sites[:4]
-    for s in others:
-        if len(probe) >= HOME_PROBE_MAX:
-            break
-        probe.append(s)
-
-    import app as spider_app
+    # ---- S4 首页冒烟（通过真实 HTTP /action，抽样 jar 优先）----
+    import requests
+    state = requests.get(base + '/sites', headers={'x-token': token}, timeout=10).json()
+    all_sites = state.get('sites') or []
+    probe = ([s for s in all_sites if s.get('spiderType') == 'jar'][:4] +
+             [s for s in all_sites if s.get('spiderType') != 'jar'][:HOME_PROBE_MAX])[:HOME_PROBE_MAX]
 
     def probe_home(site):
         try:
-            r = spider_app.homeContent(site.runner, False)
-            if isinstance(r, str):
-                r = json.loads(r) if r.strip() else {}
+            _, r = _http_action(base, token, {'do': 'homeContent', 'site': site.get('key', '')},
+                                timeout=HOME_PROBE_TIMEOUT)
             if r and (r.get('list') or r.get('class')):
-                return site.key, True, ''
-            return site.key, False, 'empty home'
+                return site.get('key'), True, ''
+            return site.get('key'), False, 'empty home'
         except Exception as e:
-            return site.key, False, str(e)[:80]
+            return site.get('key'), False, str(e)[:80]
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futs = [pool.submit(probe_home, s) for s in probe]
@@ -135,16 +217,18 @@ def run_one(repo):
             rec['note'] = (rec['note'] + ' | ' if rec['note'] else '') + 'S4 timeout: %s' % str(e)[:60]
     if rec['home_total']:
         rec['home_rate'] = rec['home_ok'] / rec['home_total']
-    return _finish(rec, tmp)
+    return _finish(rec, tmp, http_instance)
 
 
-def _finish(rec, tmp):
+def _finish(rec, tmp, http_instance=None):
     """优雅关停 JVM 并清理临时目录（失败不影响结果上报）。"""
     try:
         from jar_bridge import JarBridge
         JarBridge.destroy_all()
     except Exception:
         pass
+    if http_instance is not None:
+        http_instance.should_exit = True
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     return rec
@@ -172,6 +256,8 @@ def run_corpus(repos, resume=False):
     if not done:
         open(PROGRESS, 'w', encoding='utf-8').close()   # 新一轮：清空进度
     results = []
+    first_fetch_failure_at = None
+    offline = False
     for i, repo in enumerate(repos):
         if repo['name'] in done:
             print('[%2d/%d] %s ...（resume 命中，跳过）' % (i + 1, len(repos), repo['name']), flush=True)
@@ -223,6 +309,13 @@ def run_corpus(repos, resume=False):
                     pass
         rec['elapsed'] = round(time.time() - t0, 1)
         results.append(rec)
+        if not rec.get('fetch'):
+            if first_fetch_failure_at is None:
+                first_fetch_failure_at = time.time()
+            if not any(r.get('fetch') for r in results) and time.time() - first_fetch_failure_at >= 30:
+                offline = True
+        else:
+            first_fetch_failure_at = None
         # 增量落盘：任何时刻中断，已完成仓库的结果不丢
         with open(PROGRESS, 'a', encoding='utf-8') as f:
             f.write(json.dumps(rec, ensure_ascii=False) + '\n')
@@ -230,11 +323,29 @@ def run_corpus(repos, resume=False):
             rec['fetch'], rec['parse'], rec['sites'], rec['build_rate'] * 100,
             rec['home_ok'], rec['home_total'],
             ('(%s)' % rec['note'][:70]) if rec.get('note') else ''), flush=True)
-    return results
+        if offline:
+            for skipped_repo in repos[i + 1:]:
+                results.append({
+                    'name': skipped_repo['name'], 'tags': skipped_repo.get('tags', []),
+                    'fetch': 0, 'parse': 0, 'sites': 0, 'skipped_n': 0,
+                    'skipped': [], 'build_errors': {}, 'parse_errors': 0,
+                    'build_rate': 0.0, 'home_ok': 0, 'home_total': 0,
+                    'home_rate': 0.0, 'note': 'SKIP: offline (all S1 fetches failed)',
+                    'elapsed': 0.0,
+                })
+            break
+    return results, offline
 
 
 def aggregate(results):
     n = len(results) or 1
+    reasons = {}
+    for record in results:
+        for reason in record.get('skipped', []) or []:
+            import re
+            match = re.search(r'\[L\d:[^\]]+\]', str(reason))
+            key = match.group(0) if match else 'unlabelled'
+            reasons[key] = reasons.get(key, 0) + 1
     return {
         'repos': n,
         'fetch_rate': sum(r['fetch'] for r in results) / n,
@@ -242,6 +353,8 @@ def aggregate(results):
         'avg_build_rate': sum(r['build_rate'] for r in results) / n,
         'avg_home_rate': sum(r['home_rate'] for r in results
                              if r['home_total']) / max(1, sum(1 for r in results if r['home_total'])),
+        'skipped_total': sum(r.get('skipped_n', 0) for r in results),
+        'skipped_reasons': dict(sorted(reasons.items())),
     }
 
 
@@ -258,6 +371,9 @@ def print_report(results, agg):
         sum(r['fetch'] for r in results), agg['repos'],
         sum(r['parse'] for r in results), agg['repos'],
         agg['avg_build_rate'] * 100, agg['avg_home_rate'] * 100))
+    if agg.get('skipped_reasons'):
+        print('---- skipped 原因: %s' % ' · '.join(
+            '%s=%d' % (key, value) for key, value in agg['skipped_reasons'].items()))
 
 
 def compare_baseline(results, agg):
@@ -306,8 +422,9 @@ def main():
     print('影视仓兼容性套件：%d 个仓库 · 单仓超时 %ds · 首页抽样 ≤%d 站%s\n' % (
         len(repos), REPO_TIMEOUT, HOME_PROBE_MAX,
         ' · resume 续跑' if args.resume else ''))
-    results = run_corpus(repos, resume=args.resume)
+    results, offline = run_corpus(repos, resume=args.resume)
     agg = aggregate(results)
+    agg['offline'] = offline
     print_report(results, agg)
     # 报告同步落盘（后台长跑时无需等终端缓冲）
     import io as _io
@@ -319,6 +436,15 @@ def main():
             print('\n基线对比: %s — %s' % ('PASS' if ok2 else 'FAIL', detail2))
         rf.write(buf.getvalue())
         print('\n（报告已写入 %s）' % REPORT)
+    with open(REPORT_JSON, 'w', encoding='utf-8') as rf:
+        json.dump({'generated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                   'offline': offline, 'aggregate': agg, 'repos': results},
+                  rf, ensure_ascii=False, indent=2)
+    print('（结构化报告已写入 %s）' % REPORT_JSON)
+
+    if offline:
+        print('\n兼容性套件：SKIP — 当前环境疑似离线，未将网络失败判为回归')
+        return
 
     if args.update_baseline:
         json.dump({'generated_at': time.strftime('%Y-%m-%d %H:%M:%S'),

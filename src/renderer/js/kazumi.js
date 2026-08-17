@@ -1537,7 +1537,7 @@ const Kazumi = {
             const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
             const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
             const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${escHtml(String(info.id))}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
-                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=this.dataset.fbSrc;}else{this.style.display='none'}">` : ''}
+                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}">` : ''}
                 <div class="kazumi-bangumi-info">
                     <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
                     <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
@@ -1633,7 +1633,7 @@ const Kazumi = {
         let html = `<div class="bangumi-info-card" style="margin-bottom:16px;">
             <div class="bangumi-info-title">${escHtml(name)}</div>
             <div class="bangumi-info-row">
-                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=this.dataset.fbSrc;}else{this.style.display='none'}"></div>` : ''}
+                ${cover ? `<div class="bangumi-info-cover"><img src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}"></div>` : ''}
                 <div class="bangumi-info-meta">
                     <div class="bi-label">放送开始</div>
                     <div class="bi-value">${escHtml(airDate || '—')}</div>
@@ -2071,6 +2071,11 @@ Kazumi.loadDanmaku = async function (title, episode) {
         return 0;
     }
 };
+
+(function (root) {
+    root.VPC = root.VPC || {};
+    root.VPC.kazumi = Kazumi;
+}(typeof window !== 'undefined' ? window : globalThis));
 
 // ---------------------------------------------------------------- 以图搜番（trace.moe）
 
