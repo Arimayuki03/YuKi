@@ -316,8 +316,26 @@ class ConfigManager:
         return head + (';' + tail.strip() if sep else '')
 
     def _prepare(self, cfg, source):
-        """纯构建：解析 config 并构建新站点列表，不触碰现有全局状态。"""
-        summary = {'sites': 0, 'skipped': [], 'parses': 0, 'flags': 0, 'lives': 0, 'panSites': 0}
+        """纯构建：解析 config 并构建新站点列表，不触碰现有全局状态。
+
+        任务五：summary 增加分层诊断字段 build_errors（按层级聚合错误计数）。
+        """
+        summary = {
+            'sites': 0,
+            'skipped': [],
+            'parses': 0,
+            'flags': 0,
+            'lives': 0,
+            'panSites': 0,
+            'build_errors': {
+                'type_unsupported': 0,  # [L2:type] 不支持的 type
+                'jar_failed': 0,        # [L3:jar] jar 相关失败
+                'js_failed': 0,         # [L3:js] JS spider 失败
+                'cms_failed': 0,        # [L3:cms] CMS spider 失败
+                'py_failed': 0,         # [L3:py] Python spider 失败
+                'other': 0,             # 其他未分类错误
+            }
+        }
         base_url = source if str(source).startswith('http') else ''
         # TVBox 标准：顶层 spider 是所有 csp_ 站点共享的 jar；解析出 http 地址后
         # 供 type=3 且 api 为类名（csp_XXX）的站点加载（见 _build_site）。
@@ -342,8 +360,22 @@ class ConfigManager:
                     else:
                         summary['skipped'].append(item.get('key', '?'))
                 except Exception as e:
+                    err_msg = str(e)
                     logger.exception('load site %s failed: %s', item.get('key'), e)
-                    summary['skipped'].append(f"{item.get('key', '?')}: {e}")
+                    summary['skipped'].append(f"{item.get('key', '?')}: {err_msg}")
+                    # 任务五：按层级标签聚合错误计数
+                    if '[L2:type]' in err_msg:
+                        summary['build_errors']['type_unsupported'] += 1
+                    elif '[L3:jar]' in err_msg:
+                        summary['build_errors']['jar_failed'] += 1
+                    elif '[L3:js]' in err_msg:
+                        summary['build_errors']['js_failed'] += 1
+                    elif '[L3:cms]' in err_msg:
+                        summary['build_errors']['cms_failed'] += 1
+                    elif '[L3:py]' in err_msg:
+                        summary['build_errors']['py_failed'] += 1
+                    else:
+                        summary['build_errors']['other'] += 1
         parses = cfg.get('parses') or []
         flags = cfg.get('flags') or []
         lives = cfg.get('lives') or []
@@ -622,22 +654,25 @@ class ConfigManager:
         return ext
 
     def _load_python_spider(self, key, api):
-        if api.startswith('http'):
-            return spider_app.spider(hoststate.get_plugins_dir(), api)
-        # 内联源码：直接落盘后加载（原 app.spider 对非 http 会按文件名处理，
-        # 内联源码无文件名，这里显式以 key 命名）
-        # H-4：key 来自远端配置，白名单化防路径穿越（../、..\、C:\ 等；
-        # Windows 上 os.path.join 遇绝对路径第二参数会直接采用后者）
-        import re as _re
-        safe_key = _re.sub(r'[^\w.-]', '_', str(key))[:64] or 'site'
-        path = os.path.join(hoststate.get_plugins_dir(), f'{safe_key}.py')
-        if not os.path.realpath(path).startswith(
-                os.path.realpath(hoststate.get_plugins_dir()) + os.sep):
-            raise ValueError(f'bad site key: {key}')
-        with open(path, 'wb') as f:
-            f.write(api.encode('utf-8'))
-        from importlib.machinery import SourceFileLoader
-        return SourceFileLoader(safe_key, path).load_module().Spider()
+        try:
+            if api.startswith('http'):
+                return spider_app.spider(hoststate.get_plugins_dir(), api)
+            # 内联源码：直接落盘后加载（原 app.spider 对非 http 会按文件名处理，
+            # 内联源码无文件名，这里显式以 key 命名）
+            # H-4：key 来自远端配置，白名单化防路径穿越（../、..\、C:\ 等；
+            # Windows 上 os.path.join 遇绝对路径第二参数会直接采用后者）
+            import re as _re
+            safe_key = _re.sub(r'[^\w.-]', '_', str(key))[:64] or 'site'
+            path = os.path.join(hoststate.get_plugins_dir(), f'{safe_key}.py')
+            if not os.path.realpath(path).startswith(
+                    os.path.realpath(hoststate.get_plugins_dir()) + os.sep):
+                raise ValueError(f'bad site key: {key}')
+            with open(path, 'wb') as f:
+                f.write(api.encode('utf-8'))
+            from importlib.machinery import SourceFileLoader
+            return SourceFileLoader(safe_key, path).load_module().Spider()
+        except Exception as e:
+            raise ValueError(f'[L3:py] python spider load failed: {e}') from e
 
     def _load_cms_spider(self, key, name, api, stype):
         from cms_spider import CmsSpider
@@ -646,20 +681,27 @@ class ConfigManager:
         return CmsSpider(key, api, stype, name)
 
     def _load_js_spider(self, key, name, api):
-        from quickjs_host import JsEngine   # js-engine 目录（server.py 已加入 sys.path）
-        engine = JsEngine(site_key=key)   # site_key：local KV 按站点隔离（M-24/C2）
-        engine.proxy_port = hoststate.get_port()   # js2Proxy 生成后端代理 URL 用
         try:
-            if api.startswith('http'):
-                # 多模块 ESM：递归抓取 import 依赖后展平执行（单文件也兼容）
-                ok = engine.load_spider_url(api, fetch_text)
-            else:
-                ok = engine.load_spider(api)
+            from quickjs_host import JsEngine   # js-engine 目录（server.py 已加入 sys.path）
+            engine = JsEngine(site_key=key)   # site_key：local KV 按站点隔离（M-24/C2）
+            engine.proxy_port = hoststate.get_port()   # js2Proxy 生成后端代理 URL 用
+            try:
+                if api.startswith('http'):
+                    # 多模块 ESM：递归抓取 import 依赖后展平执行（单文件也兼容）
+                    ok = engine.load_spider_url(api, fetch_text)
+                else:
+                    ok = engine.load_spider(api)
+            except Exception as e:
+                raise ValueError(f'[L3:js] spider load/execute failed: {e}')
+            if not ok:
+                raise ValueError('[L3:js] spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
+            return make_js_spider_class(key, engine, name)
         except Exception as e:
-            raise ValueError(f'[L3:js] spider load/execute failed: {e}')
-        if not ok:
-            raise ValueError('[L3:js] spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
-        return make_js_spider_class(key, engine, name)
+            # 任务五：确保所有 JS 相关错误都带有 [L3:js] 标签
+            err_msg = str(e)
+            if not err_msg.startswith('[L3:js]'):
+                raise ValueError(f'[L3:js] {err_msg}') from e
+            raise
 
     def _load_jar_spider(self, key, name, api, spider_jar=''):
         """装配 jar spider：jar 落盘（带 md5 校验）→ JarBridge → JarSpider 适配。
@@ -674,21 +716,28 @@ class ConfigManager:
             return None
         from jar_bridge import JarBridge
         from jar_spider import make_jar_spider_class
-        jar_url, md5, class_name = JarBridge.norm_jar_src(api)
-        if not jar_url:
-            # api 是纯类名（csp_XXX）：用 config 顶层共享 jar 下载，class 取 api。
-            if api.startswith('csp_') and spider_jar:
-                jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
-                class_name = api
+        try:
+            jar_url, md5, class_name = JarBridge.norm_jar_src(api)
             if not jar_url:
-                logger.info('skip site %s: csp_ class but no shared spider jar', key)
-                return None
-        jar_path = JarBridge.download_jar(jar_url, md5, site_key=key)
-        # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
-        class_name = JarBridge.map_class_name(jar_path, class_name)
-        # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
-        bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
-        return make_jar_spider_class(key, bridge, name, class_name)
+                # api 是纯类名（csp_XXX）：用 config 顶层共享 jar 下载，class 取 api。
+                if api.startswith('csp_') and spider_jar:
+                    jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
+                    class_name = api
+                if not jar_url:
+                    logger.info('skip site %s: csp_ class but no shared spider jar', key)
+                    return None
+            jar_path = JarBridge.download_jar(jar_url, md5, site_key=key)
+            # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
+            class_name = JarBridge.map_class_name(jar_path, class_name)
+            # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
+            bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
+            return make_jar_spider_class(key, bridge, name, class_name)
+        except Exception as e:
+            # 任务五：jar 相关错误统一添加 [L3:jar] 标签
+            err_msg = str(e)
+            if not err_msg.startswith('[L3:jar]'):
+                raise ValueError(f'[L3:jar] {err_msg}') from e
+            raise
 
     # ------------------------------------------------------------ 查询
 
