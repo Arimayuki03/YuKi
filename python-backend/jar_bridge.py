@@ -235,13 +235,13 @@ class JarBridge:
                 return JarBridge._ensure_jvm_compatible(dest, md5)
         raw = requests_get_jar(jar_url)
         if not raw or len(raw) < 4:
-            raise ValueError(f'jar download empty: {jar_url}')
+            raise ValueError(f'[L3:jar] jar download empty: {jar_url}')
         # 内容魔数校验：TVBox 生态 jar 常伪装成 .jpg/.png/.bin（防直链），
         # 必须以内容判断而非后缀。zip 魔数 PK\x03\x04 或 raw dex（dex\n035）。
         if not (raw[:2] == b'PK' or raw[:4] == b'dex\n'):
-            raise ValueError(f'downloaded content is not a jar archive (magic check failed): {jar_url}')
+            raise ValueError(f'[L3:jar] downloaded content is not a jar archive (magic check failed): {jar_url}')
         if md5 and hashlib.md5(raw).hexdigest() != md5:
-            raise ValueError(f'jar md5 mismatch: {jar_url}')
+            raise ValueError(f'[L3:jar] jar md5 mismatch: {jar_url}')
         with open(dest, 'wb') as f:
             f.write(raw)
         return JarBridge._ensure_jvm_compatible(dest, md5)
@@ -554,7 +554,7 @@ class JarBridge:
 
     def _call_inner(self, method, *args, class_name='', pan_cookies=None):
         if not self._ensure_alive():
-            raise RuntimeError(self._last_error or 'jar bridge unavailable')
+            raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable"}')
         # 构建 params dict
         params = {}
         m = method
@@ -583,7 +583,7 @@ class JarBridge:
         elif method == 'destroy':
             pass
         else:
-            raise ValueError(f'unknown jar method {method}')
+            raise ValueError(f'[L3:jar] unknown jar method {method}')
 
         # 注入 class_name 让 SpiderRunner 知道实例化哪个蜘蛛
         if class_name:
@@ -620,7 +620,7 @@ class JarBridge:
             except Exception:
                 pass
             if not self._ensure_alive():
-                raise RuntimeError(self._last_error or 'jar bridge unavailable after restart')
+                raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable after restart"}')
             with self._lock:
                 self._pending[rid] = (resolve, reject)
             try:
@@ -629,7 +629,7 @@ class JarBridge:
             except Exception as e2:
                 with self._lock:
                     self._pending.pop(rid, None)
-                raise RuntimeError(f'jar write after restart failed: {e2}')
+                raise RuntimeError(f'[L3:jar] jar write after restart failed: {e2}')
         if not fut.wait(CALL_TIMEOUT):
             with self._lock:
                 self._pending.pop(rid, None)
@@ -639,7 +639,7 @@ class JarBridge:
                 self._kill_proc()
             except Exception:
                 pass
-            raise TimeoutError(f'jar {method} timeout (bridge restarted)')
+            raise TimeoutError(f'[L3:jar] jar {method} timeout (bridge restarted)')
         if 'e' in result:
             raise result['e']
         self._crash_count = 0   # M-27a：调用成功视为进程健康，清零崩溃计数

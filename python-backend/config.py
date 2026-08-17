@@ -540,7 +540,7 @@ class ConfigManager:
             spider = self._load_jar_spider(key, name, api, effective_jar)
             if spider is None:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
-                return None
+                raise ValueError('[L3:jar] jar runtime unavailable or no shared jar')
             site = Site(key, api, ext)
             site.spider_type = 'jar'
             site.runner = Runner(spider)
@@ -563,7 +563,7 @@ class ConfigManager:
             spider = self._load_jar_spider(key, name, api)
             if spider is None:
                 logger.info('skip site %s: jar runtime unavailable (java not found)', key)
-                return None
+                raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             site = Site(key, api, ext)
             site.spider_type = 'jar'
             site.runner = Runner(spider)
@@ -581,7 +581,7 @@ class ConfigManager:
         if 'drpy' in api.lower():
             # drpy 框架源（依赖 drpy 服务端），PC 侧无 drpy 运行时，跳过
             logger.info('skip site %s: drpy source not supported on PC', key)
-            return None
+            raise ValueError('[L2:type] drpy not supported on PC')
 
         # JS 爬虫：type=4，或 type=3 且 api 为 http .js 直链（CatVod/TVBox JS 协议）
         is_js = stype == 4 or (stype == 3 and api.startswith('http') and api.split('?')[0].endswith('.js'))
@@ -594,7 +594,7 @@ class ConfigManager:
             spider = self._load_cms_spider(key, name, api, stype)
         else:
             logger.info('skip site %s: unsupported type %s', key, stype)
-            return None
+            raise ValueError(f'[L2:type] unsupported type {stype}')
 
         site = Site(key, api, ext)
         site.runner = Runner(spider)
@@ -642,7 +642,7 @@ class ConfigManager:
     def _load_cms_spider(self, key, name, api, stype):
         from cms_spider import CmsSpider
         if not api.startswith('http'):
-            raise ValueError('cms site needs http api')
+            raise ValueError('[L3:cms] cms site needs http api')
         return CmsSpider(key, api, stype, name)
 
     def _load_js_spider(self, key, name, api):
@@ -656,9 +656,9 @@ class ConfigManager:
             else:
                 ok = engine.load_spider(api)
         except Exception as e:
-            raise ValueError(f'js spider load/execute failed: {e}')
+            raise ValueError(f'[L3:js] spider load/execute failed: {e}')
         if not ok:
-            raise ValueError('js spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
+            raise ValueError('[L3:js] spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
         return make_js_spider_class(key, engine, name)
 
     def _load_jar_spider(self, key, name, api, spider_jar=''):
