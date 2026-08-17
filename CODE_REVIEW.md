@@ -390,13 +390,13 @@ merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.it
 |---|------|------|
 | L-1 | `src/main/index.js:1734-1741, 658-691` | `vpc:dl-play` 白名单外任意本地文件播放;`vpc:play` URL 无协议限制(mpv 支持 `file://`/`edl://`) |
 | L-2 | `src/main/index.js:887-895` | `vpc:probe-urls` 是内网探测原语(可探 `127.0.0.1`/`169.254.169.254`/内网 C 段,回传可达性) |
-| L-3 | `src/main/dlna-caster.js:110, 144-157` | SOAP 报文 XML 注入(`CurrentURI` 未转义)+ controlUrl 任意(内网任意 http 端点 POST 原语) |
-| L-4 | `src/main/index.js:2046-2047` | PotPlayer 分支 Referer/UA 值未转义引号,可注入额外命令行参数 |
+| L-3 | `src/main/dlna-caster.js:110, 144-157` | ✅ 已修复：SOAP `CurrentURI` XML 实体转义，cast/stop 仅允许 SSDP 已发现设备的 controlUrl |
+| L-4 | `src/main/index.js:2046-2047` | ✅ 已修复：PotPlayer Referer/UA 中的双引号按参数语义转义，阻断额外开关注入 |
 | L-5 | `src/main/index.js:1364-1365` + `settings.js:43-48` | dandanAppSecret、bangumiToken、夸克 Cookie 等凭据明文持久化于 settings.json(建议 `safeStorage`) |
 | L-6 | `src/main/index.js:844-861` | `vpc:parse` 超时不取消解析,槽位(3 个)可被"已放弃仍在跑"的解析占满 |
-| L-7 | `src/main/index.js:110-127` | `ensureAnime4k` 写文件前不 mkdir,目录缺失时静默全败且无法自愈 |
-| L-8 | `src/main/index.js:1410-1415, 1581-1585` | HLS 任务重启恢复时 header(Referer/UA)未持久化,恢复下载大概率 403 |
-| L-9 | `src/main/mpv-player.js:415-427` | 每条 IPC 的 5s 超时定时器应答后不 `clearTimeout`,高频命令下累积 |
+| L-7 | `src/main/index.js:110-127` | ✅ 已修复：Anime4K 文件写盘前递归创建父目录，目录缺失可自动恢复 |
+| L-8 | `src/main/index.js:1410-1415, 1581-1585` | ✅ 已修复：HLS header 随任务列表持久化，重启恢复时重新传给下载器 |
+| L-9 | `src/main/mpv-player.js:415-427` | ✅ 已修复：IPC 应答、同步写失败和 teardown 均清理对应超时定时器 |
 
 ### Python 后端
 
@@ -477,6 +477,15 @@ merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.it
 15. M-19/M-20/M-21/M-22/M-23/M-28:Kazumi 规则加载容错、SSE done、_SegStream 泄漏、cache key 编码、空插件保护、Cookie 原子写
 16. H-3/M-24:QuickJS 限额与 KV 隔离
 17. 其余低危按表批量处理(L-1 ~ L-33)
+
+---
+
+## 六、修复记录
+
+- **2026-08-17**：六个工作流 A/B/C/D/E/F 共 64 项完成收口；L-2（直播源可能合法访问内网）与 L-33（CSP 需先迁移全部内联事件）按计划有意跳过。
+- **工作流 E 收尾**：完成 L-3/L-4/L-7/L-8/L-9；修改 `src/main/dlna-caster.js`、`hls-downloader.js`、`index.js`、`mpv-player.js`。
+- **验证**：四个修改文件 `node --check` 通过；DLNA XML/端点限制、HLS header 输出、mpv timer 清理专项行为验证通过；`npm run test:all` 全链通过（JS 单测 206 项、JS 语法检查 39 文件、ESLint 0 错误、Ruff 通过）。
+- 详细实现与验收步骤见 `CODE_REVIEW_FIX_TASKS.md`。
 
 ---
 

@@ -10,15 +10,15 @@
 | 工作流 | 范围(文件归属) | 状态 |
 |--------|----------------|------|
 | A. go-proxy + server | `python-backend/go_proxy.py` `server.py` `base/spider.py` `cache_store.py` `pan_cookies.py` | ✅ **全部完成**(17 项,含并发/集成自测) |
-| E. Electron 主进程 | `src/main/*` `src/preload/*` | 🟡 主体完成(13 项),**剩 L-3/L-4/L-7/L-8/L-9 共 5 项** |
+| E. Electron 主进程 | `src/main/*` `src/preload/*` | ✅ **全部完成**(18 项，2026-08-17；L-3/L-4/L-7/L-8/L-9 已完成专项行为验证) |
 | F. 渲染层 | `src/renderer/js/*` | ✅ **全部完成**(13 项，2026-08-17；2.2 H-7/2.3 M-29 已由 B2 轮 ESLint 修复提前完成；L-32 季度语义测试断言同步更新) |
 | B. jar 桥系列 | `python-backend/jar_bridge.py` `jar_spider.py` `site_manager.py` `jar-runner/SpiderRunner.java` `jar_patch.py` | ✅ **全部完成**(12 项，2026-08-17；SpiderRunner 已重编译，行为级验证：destroy 词不杀 JVM、__shutdown 优雅退出、重启上限生效) |
 | C. config + QuickJS | `python-backend/config.py` `app.py` `runner.py` `cms_spider.py` `js-engine/quickjs_host.py` | ✅ **全部完成**(9 项，2026-08-17；4.4/4.5 由 C1/C2 批次提前覆盖，行为级验证：死循环拦截/恶意 key 清洗/ENTITY 拒绝/GBK 回退/签名预检) |
 | D. Kazumi 规则引擎 | `python-backend/kazumi/*` `scripts/build-python.js` | ✅ **全部完成**(6 项，2026-08-17；from_json 按 **kwargs 实际形态调整方案——非法记录显式 ValueError 由 _load 逐条跳过，行为级验证：坏记录不清空/路径注入双重中和/29 处 verify 收紧) |
 | V. 全局收尾验证 | 全部 | ✅ 完成（2026-08-17：Python 133 项 + JS 206 项 + Ruff/ESLint 0 错误 + jar 行为级验证全绿） |
 
-**当前已修改未提交的 14 个文件**:
-`python-backend/{base/spider.py, cache_store.py, go_proxy.py, pan_cookies.py, server.py}`、`src/main/{downloader.js, hls-downloader.js, index.js, mpv-player.js, pan-qr-window.js, parse-window.js, push-server.js, python-bridge.js, settings.js}`
+**工作流 E 收尾改动（当前工作树，未提交）**:
+`src/main/{dlna-caster.js,hls-downloader.js,index.js,mpv-player.js}`；状态同步到 `CODE_REVIEW.md` 与本文件。
 
 **有意跳过(不再执行)**:L-2 probe-urls(直播源可能含合法内网地址)、L-33 CSP(需先迁移全部内联事件,单独立项)。
 
@@ -33,7 +33,7 @@
 H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-22、M-23、M-28、L-14、L-15、L-16、L-17、L-18、L-19、L-21。
 要点:`_reject_browser()` 来源防御(恶意 Origin / `Sec-Fetch-Site: cross-site` → 403);`_cookie_host_allowed()` 夸克/UC 域名白名单;TOKEN_EXEMPT 精确匹配;`/cache` 配额(单值 1MB / 总量 512MB);无长度分支先发 200 + Content-Type;`_fetch` end=None 开放区间;三处原子写(同目录临时文件 + `os.replace`,Windows 并发已压测);SSE 改 `shutdown(wait=False)` + 超时仍发 done;`_qget/_qpost` 全局锁 + 每次响应后清 cookie jar。py_compile 全过。
 
-### 工作流 E(Electron 主进程)— 已完成 13 项
+### 工作流 E(Electron 主进程)— 全部完成 18 项
 - **M-1** settings-set 键白名单(`SETTINGS_SET_ALLOWED`;路径键 externalPlayerPath/playerCacheDir/dlDir 排除)——⚠️ 收尾仍需终核(见任务 6 第 2 步)
 - **M-2** addHls/hls.add 协议白名单 `/^https?:\/\//i`
 - **M-3** push-server 首页不回显 token
@@ -48,6 +48,11 @@ H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-2
 - **L-1** vpc:play 协议白名单 + vpc:dl-play 路径限制
 - **L-5** 敏感键 safeStorage 透明加解密
 - **L-6** parse/capture-direct 超时取消传播(parse-window.js 支持 abort)
+- **L-3** DLNA SOAP XML 转义 + controlUrl 限定为 SSDP 已发现设备
+- **L-4** PotPlayer Referer/UA 双引号转义
+- **L-7** Anime4K 写盘前递归创建父目录
+- **L-8** HLS Referer/UA 随任务持久化并在重启恢复时透传
+- **L-9** mpv IPC 应答、写失败与 teardown 路径清理超时定时器
 
 </details>
 
@@ -64,7 +69,9 @@ H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-2
 
 ---
 
-## 四、任务 1:E 剩余 5 项(Electron 主进程)
+## 四、任务 1:E 收尾 5 项(Electron 主进程，✅ 已完成)
+
+> 完成日期：2026-08-17。以下步骤保留为实现与验收记录；专项行为验证及 `npm run test:all` 均已通过。
 
 > 可改文件:`src/main/*`。以下行号为 2026-08-16 当前快照。
 

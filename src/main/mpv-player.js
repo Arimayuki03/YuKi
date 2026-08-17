@@ -302,7 +302,10 @@ class MpvPlayer extends EventEmitter {
         if (this.socket) { try { this.socket.destroy(); } catch (e) { /* ignore */ } this.socket = null; }
         this.proc = null;
         this._activeSession = null;
-        for (const [, p] of this._pending) p.reject(new Error('mpv stopped'));
+        for (const [, p] of this._pending) {
+            clearTimeout(p.timer); // L-9:teardown 时同步清理所有 IPC 超时定时器
+            p.reject(new Error('mpv stopped'));
+        }
         this._pending.clear();
     }
 
@@ -372,6 +375,7 @@ class MpvPlayer extends EventEmitter {
         if (msg.request_id && this._pending.has(msg.request_id)) {
             const p = this._pending.get(msg.request_id);
             this._pending.delete(msg.request_id);
+            clearTimeout(p.timer); // L-9:应答即清定时器，高频命令不累积
             if (msg.error && msg.error !== 'success') p.reject(new Error(msg.error));
             else p.resolve(msg.data);
             return;
@@ -420,14 +424,20 @@ class MpvPlayer extends EventEmitter {
         return new Promise((resolve, reject) => {
             if (!this._connected || !this.socket) return reject(new Error('mpv ipc not connected'));
             const id = ++this._reqId;
-            this._pending.set(id, { resolve, reject });
-            this.socket.write(JSON.stringify({ command: args, request_id: id }) + '\n');
-            setTimeout(() => {
+            const timer = setTimeout(() => {
                 if (this._pending.has(id)) {
                     this._pending.delete(id);
                     reject(new Error('mpv ipc timeout'));
                 }
             }, 5000);
+            this._pending.set(id, { resolve, reject, timer });
+            try {
+                this.socket.write(JSON.stringify({ command: args, request_id: id }) + '\n');
+            } catch (e) {
+                clearTimeout(timer);
+                this._pending.delete(id);
+                reject(e);
+            }
         });
     }
 

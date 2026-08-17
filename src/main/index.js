@@ -118,6 +118,8 @@ async function downloadAnime4kOne(dest, rel) {
             if (!res.ok) continue;
             const buf = Buffer.from(await res.arrayBuffer());
             if (buf.length < ANIME4K_MIN_SIZE || !buf.toString('utf8').includes('Anime4K')) continue;
+            // L-7:下载前确保父目录已建立,防 ENOENT
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, buf);
             console.log(`[anime4k] ${rel} <- ${toUrl(rel)}`);
             return true;
@@ -1457,6 +1459,7 @@ app.whenReady().then(() => {
                 gid: t.gid, kind: t.kind || 'aria2', name: t.name,
                 files: t.files || [], size: t.total || 0, done: t.done || 0,
                 percent: t.percent || 0, status: t.status, uri: t.uri || '',
+                header: t.kind === 'hls' ? (t.header || undefined) : undefined, // L-8:HLS Referer/UA 随记录持久化
                 completedAt: now,
             });
         }
@@ -1628,6 +1631,7 @@ app.whenReady().then(() => {
                             try {
                                 const gid = hls.add({
                                     url: rec.uri, out: rec.name,
+                                    header: rec.header || undefined, // L-8:恢复原任务的 Referer/UA，避免重启后 403
                                     adFilter: settings.get('hlsAdFilter'),
                                     concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
                                 });
@@ -2099,9 +2103,10 @@ app.whenReady().then(() => {
         if (kind === 'potplayer') {
             // PotPlayer 官方命令行开关：/referer="..." /user_agent="..."（http(s) 打开时生效）。
             // 值必须带双引号，因为 Referer/UA 含 :// ? & 空格等特殊字符，不带引号会被解析器截断。
+            // L-4:头值转义引号("→""),防第三方源数据闭合参数注入 PotPlayer 开关
             const args = [url];
-            if (referer) args.push(`/referer="${referer}"`);
-            if (ua) args.push(`/user_agent="${ua}"`);
+            if (referer) args.push(`/referer="${String(referer).replace(/"/g, '""')}"`);
+            if (ua) args.push(`/user_agent="${String(ua).replace(/"/g, '""')}"`);
             return { args, headerSupported: true };
         }
         // 其他播放器：命令行无通用 header 传参，仅传 URL

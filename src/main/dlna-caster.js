@@ -12,6 +12,13 @@ const dgram = require('dgram');
 const http = require('http');
 const { EventEmitter } = require('events');
 
+/** XML 实体转义(L-3):SOAP 报文插值防注入。 */
+function escXml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
 const SSDP_ADDR = '239.255.255.250';
 const SSDP_PORT = 1900;
 const SSDP_SEARCH = [
@@ -102,12 +109,16 @@ class DlnaCaster extends EventEmitter {
     /** 投屏：向设备发送 SetAVTransportURI + Play。 */
     cast(deviceControlUrl, mediaUrl, title) {
         return new Promise((resolve, reject) => {
+            // L-3:controlUrl 必须属于本次 SSDP search 发现的设备,拒绝向任意内网端点 POST
+            const known = Array.from(this.devices.values()).some((d) => d && d.controlUrl === deviceControlUrl);
+            if (!known) { reject(new Error('unknown dlna device')); return; }
+
             const soap = `<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
     <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
       <InstanceID>0</InstanceID>
-      <CurrentURI>${mediaUrl}</CurrentURI>
+      <CurrentURI>${escXml(mediaUrl)}</CurrentURI>
       <CurrentURIMetaData></CurrentURIMetaData>
     </u:SetAVTransportURI>
   </s:Body>
@@ -130,6 +141,10 @@ class DlnaCaster extends EventEmitter {
 
     /** 停止投屏。 */
     stop(deviceControlUrl) {
+        // L-3:controlUrl 必须属于本次 SSDP search 发现的设备,拒绝向任意内网端点 POST
+        const known = Array.from(this.devices.values()).some((d) => d && d.controlUrl === deviceControlUrl);
+        if (!known) { return Promise.reject(new Error('unknown dlna device')); }
+
         const soap = `<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>

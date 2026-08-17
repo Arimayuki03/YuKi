@@ -533,6 +533,7 @@ class HlsDownloader extends EventEmitter {
             speed: t.status === 'active' && Number.isFinite(t.speed) && t.speed > 0 ? t.speed : 0, connections: t._mode === 'concurrent' ? `${done}/${total}` : '',
             errorMessage: t.errorMessage, files: t.files,
             uri: t.url || '', // 原始 URL，用于重启后恢复下载
+            header: t.header || null, // L-8:Referer/UA 随任务输出，供持久化恢复
         };
     }
 
