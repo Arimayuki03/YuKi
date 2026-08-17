@@ -7,6 +7,8 @@
 
 > 行号为审查时快照,后续修改可能偏移。
 
+> **文档定位与当前结论**：本文是 2026-08-16 的原始审查基线，下面的问题章节保留“发现时的现状与风险”，不等同于当前仍未修复。当前修复处置以 [CODE_REVIEW_FIX_TASKS.md](CODE_REVIEW_FIX_TASKS.md) 的总体进度和修复记录为准：A–F 六个工作流共 64 项已完成收口，L-2 与 L-33 按计划跳过；项目级当前状态以 [PROGRESS.md](PROGRESS.md) 为准。
+
 ---
 
 ## 目录
@@ -450,7 +452,7 @@ merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.it
 
 ---
 
-## 五、修复优先级路线图
+## 五、修复优先级路线图（审查时建议）
 
 **第一批(安全止血,建议立即)**
 
@@ -486,6 +488,8 @@ merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.it
 - **工作流 E 收尾**：完成 L-3/L-4/L-7/L-8/L-9；修改 `src/main/dlna-caster.js`、`hls-downloader.js`、`index.js`、`mpv-player.js`。
 - **验证**：四个修改文件 `node --check` 通过；DLNA XML/端点限制、HLS header 输出、mpv timer 清理专项行为验证通过；`npm run test:all` 全链通过（JS 单测 206 项、JS 语法检查 39 文件、ESLint 0 错误、Ruff 通过）。
 - 详细实现与验收步骤见 `CODE_REVIEW_FIX_TASKS.md`。
+
+> 本节是当前处置摘要；若与前文“修复”建议措辞冲突，以本节和配套任务清单中的验收结果为准。未列入本轮修复的 L-2、L-33 不应被误记为遗漏：前者保留合法内网直播地址兼容性，后者需单独完成内联事件迁移后再收紧 CSP。
 
 ---
 

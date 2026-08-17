@@ -3,6 +3,8 @@
 > 配套文档: `CODE_REVIEW.md`(问题编号定义:H=高危 / M=中危 / L=低危)
 > 更新日期: 2026-08-17 · **全部六个工作流（A/B/C/D/E/F，64 项）已完成收口**；2 项按计划有意跳过（L-2/L-33）,每项含:定位 → 现状代码 → 修改步骤(带 before/after)→ 验证 → 注意事项
 
+> **文档定位**：本文是代码审查修复的实施与验收档案，不是新的待执行清单。当前项目状态见 [PROGRESS.md](PROGRESS.md)，原始风险描述见 [CODE_REVIEW.md](CODE_REVIEW.md)；后文的执行规范和命令保留用于追溯当时的验收过程。
+
 ---
 
 ## 一、总体进度
@@ -34,7 +36,7 @@ H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-2
 要点:`_reject_browser()` 来源防御(恶意 Origin / `Sec-Fetch-Site: cross-site` → 403);`_cookie_host_allowed()` 夸克/UC 域名白名单;TOKEN_EXEMPT 精确匹配;`/cache` 配额(单值 1MB / 总量 512MB);无长度分支先发 200 + Content-Type;`_fetch` end=None 开放区间;三处原子写(同目录临时文件 + `os.replace`,Windows 并发已压测);SSE 改 `shutdown(wait=False)` + 超时仍发 done;`_qget/_qpost` 全局锁 + 每次响应后清 cookie jar。py_compile 全过。
 
 ### 工作流 E(Electron 主进程)— 全部完成 18 项
-- **M-1** settings-set 键白名单(`SETTINGS_SET_ALLOWED`;路径键 externalPlayerPath/playerCacheDir/dlDir 排除)——⚠️ 收尾仍需终核(见任务 6 第 2 步)
+- **M-1** settings-set 键白名单(`SETTINGS_SET_ALLOWED`;路径键 externalPlayerPath/playerCacheDir/dlDir 排除)——已在全局收尾阶段完成终核
 - **M-2** addHls/hls.add 协议白名单 `/^https?:\/\//i`
 - **M-3** push-server 首页不回显 token
 - **M-4** pan-qr-window `contextIsolation: true, sandbox: true`
@@ -58,7 +60,7 @@ H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-2
 
 ---
 
-## 三、通用工作规范(每个执行者必读)
+## 三、通用工作规范（历史执行记录）
 
 1. **串行执行**:子代理一次只跑一个任务(1→2→3→4→5→6),文件归属不得越界。
 2. **先读后改**:动手前 Read 目标代码确认问题仍在;文中行号为快照,可能漂移 ±20 行,以"现状代码"特征定位为准。
@@ -910,7 +912,9 @@ if not name or not re.match(r'^[\w\u4e00-\u9fa5.-]+$', name):
 
 ---
 
-## 九、任务 6:V 全局收尾验证
+## 九、任务 6:V 全局收尾验证（已完成的历史核对清单）
+
+> 以下命令和人工冒烟项记录 2026-08-17 的收尾方法；结果以本文件“总体进度”及 `CODE_REVIEW.md`“修复记录”为准，不需要再次按本节从头执行。
 
 按序执行,每步记录结果(通过/失败/跳过+原因):
 
@@ -956,7 +960,7 @@ if not name or not re.match(r'^[\w\u4e00-\u9fa5.-]+$', name):
 
 ---
 
-## 十、执行顺序
+## 十、历史执行顺序
 
 **任务 1(E 剩余)→ 任务 2(F 渲染层)→ 任务 3(B jar)→ 任务 4(C config)→ 任务 5(D Kazumi)→ 任务 6(V 收尾)**。
 任务 1-5 文件互不相交、相互独立,可按序交给子代理**串行**执行(并发限制,一次一个);任务 3 内部 3.5 与 3.7 必须同批完成;任务 6 必须最后做。

@@ -16,7 +16,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.video-pc/` 与 Electron `userData` |
-| 项目状态 | 第一阶段修复已完成；2A 与「我的」页/观看统计代码及界面验收均通过；2B 及后续产品项待确认 |
+| 项目状态 | 第一阶段安全/稳定性修复已完成；2A、2B 及当前 UI/观看统计批次已完成；下一阶段重点为 TVBox 兼容性验收与发布环境验证 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -31,6 +31,10 @@
 | 最新运行异常与修复验证 | [docs/RUNTIME_ISSUES.md](docs/RUNTIME_ISSUES.md) |
 | 全量功能测试矩阵与测试结果 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) |
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
+| 代码审查及修复状态 | [CODE_REVIEW.md](CODE_REVIEW.md) / [CODE_REVIEW_FIX_TASKS.md](CODE_REVIEW_FIX_TASKS.md) |
+| 工程化改进待办 | [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) |
+| TVBox 兼容性总览 | [docs/TVBOX_COMPAT_PLAN.md](docs/TVBOX_COMPAT_PLAN.md) |
+| TVBox 兼容性执行计划 | [docs/TVBOX_COMPAT_PLAN_REMAINING.md](docs/TVBOX_COMPAT_PLAN_REMAINING.md) |
 
 状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
 
@@ -81,6 +85,7 @@
 - [x] 后续产品整理：“我的”页最近观看与左侧历史的整合方式已确认（历史保留左侧独立视图，最近观看并入“我的 → 最近观看”，收藏入口整合到“我的 → 我的收藏”，左侧独立收藏入口已删除）。
 - [x] Kazumi/UI 后续：规则页布局优化（T55）、首页推荐功能（T62）均已完成。
 - [x] 时间表后续：完整对齐 Kazumi 时间表——完整季节索引（近 20 年）、封面排名角标、排序/收藏过滤、点击进入二级详情页（T57/T58）。
+- [ ] TVBox 兼容性 Phase A–F：兼容套件、端口泛化验收、夸克降级验收、FongMi 契约审计和分层诊断，按 [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
 - [ ] 自动更新；当前未接入 `electron-updater`。
@@ -170,7 +175,11 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 此前的临时调试实例因浏览器控制连接中断未计为通过；本轮已重新启动独立实例完成实测。
 
-## 4.1 2026-08-09 用户任务整理与执行状态
+## 8. 历史批次摘要（已归档）
+
+> 本节保留早期会话的详细验收与 T/U 批次记录，仅用于追溯；当前状态、当前待办和最新测试口径以上方第 1–7 节及专项文档为准。完整历史见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
+
+### 8.1 2026-08-09 用户任务整理与执行状态
 
 ### 已完成（本轮已写入代码并通过 JavaScript 验证）
 

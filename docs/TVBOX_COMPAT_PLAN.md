@@ -36,7 +36,24 @@ L4 播放层   playerContent 语义（url/parse/headers）+ parses 路由 + 本�
 
 ---
 
+## 当前真实状态（2026-08-17 复核）
+
+> 本文件曾标记"五任务全部完成"，**复核后不准确**。当前执行入口见 [TVBOX_COMPAT_PLAN_REMAINING.md](TVBOX_COMPAT_PLAN_REMAINING.md)。
+> 多数任务只完成了代码主体，验收项未达成。剩余工作与已批准的执行计划见 **`TVBOX_COMPAT_PLAN_REMAINING.md`**。
+
+| 任务 | 状态 | 已落地 | 剩余工作 |
+|---|---|---|---|
+| 一 兼容套件 | 🟡 部分完成 | 测试器 `test_config_compat.py`、21 仓语料 `compat_repos.json`（`1f3d34b`） | 从未跑通（拉取 8/21、解析 3/21、无基线）；缺 HTTP 生产路径、重试去抖、离线判定、`compat_baseline.json`、`compat_report.json`、skipped 分布、敏感性验证、CI workflow_dispatch 声明 |
+| 二 端口泛化 | 🟡 代码完成、验收未完成 | `ensure_listener`/`_scan_jar_ports`/`_ensure_local_proxy_ports`（`7cbdb8b`） | 无验收测试：7777 行为级、保护端口、上限 16、真实 jar 扫描 |
+| 三 夸克降级 | 🟡 部分实现 | `pan_fast_path` + jar 优先/兜底（`16cd025`） | 无用户开关入口、无行为级测试；默认开仍前置短路 |
+| 四 FongMi 契约审计 | ❌ 未开始 | 无 | `docs/TVBOX_CONTRACT_GAPS.md` 未落盘；8 项待审计 |
+| 五 分层诊断 | 🟡 部分完成 | `build_errors` 聚合 + 单测（`bec8c89`） | 缺 L1 结构化、L4 打点、QuickJS 缺全局警告、前端展示、套件复用标签 |
+
+---
+
 ## 任务一：自动化兼容性套件（止血，最先做）
+
+**状态**: 🟡 部分完成（提交 `1f3d34b`；验收未达成，见上方状态表）
 
 **现状**: `test-repos.md` 记录了 21 个仓库的手工测试（全部「能导入」），但每次后端改动后的真实兼容性仍靠人工重测。21 个仓库的经验没有变成可回归的资产。
 
@@ -299,11 +316,11 @@ def ensure_listener(port):
 
 `test-repos.md` 的存在本身就是「打地鼠模式」的记录：每个仓修一轮、无资产沉淀。本计划把经验语料化（任务一）、机制通用化（任务二/三）、差距清单化（任务四/五），从根上切换到契约层修复模式。
 
-## 附录B：验收清单（总）
+## 附录B：验收清单（总）【2026-08-17 复核：多数未达成，见 `TVBOX_COMPAT_PLAN_REMAINING.md`】
 
-- [ ] 21 仓语料全量跑通并落基线；敏感性验证（故意破坏一处 → 套件变红）
-- [ ] 端口泛化：假 jar 7777 端口行为级验证 + 真实 jar 扫描吻合已知端口
-- [ ] 夸克降级：jar 优先/兜底两条路径行为级验证 + `pan_fast_path` 开关
-- [ ] `docs/TVBOX_CONTRACT_GAPS.md` 差距清单落盘，高影响项转任务
-- [ ] 分层诊断：L1-L4 标签在 configTask/日志/套件报告三处可见
-- [ ] 全量回归（Python 133 + JS 206 + 双 lint）+ `test:compat` 全绿
+- [ ] 21 仓语料全量跑通并落基线；敏感性验证（故意破坏一处 → 套件变红）—— ❌ 未达成（拉取 8/21、解析 3/21、无基线）
+- [ ] 端口泛化：假 jar 7777 端口行为级验证 + 真实 jar 扫描吻合已知端口 —— 🟡 代码完成，无验收测试
+- [ ] 夸克降级：jar 优先/兜底两条路径行为级验证 + `pan_fast_path` 开关 —— 🟡 代码在，无开关入口与测试
+- [ ] `docs/TVBOX_CONTRACT_GAPS.md` 差距清单落盘，高影响项转任务 —— ❌ 未开始
+- [ ] 分层诊断：L1-L4 标签在 configTask/日志/套件报告三处可见 —— 🟡 仅 build_errors 聚合
+- [ ] 全量回归（Python 133 + JS 206 + 双 lint）+ `test:compat` 全绿 —— 🟡 test:all 可绿；test:compat 未跑通
