@@ -21,6 +21,12 @@ STAGES = [
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
     ('port-generalization', [PY, os.path.join(HERE, 'test_port_generalization.py')]),
     ('quark-pan', [PY, os.path.join(HERE, 'test_quark_pan.py')]),
+    ('proxy-contract', [PY, os.path.join(HERE, 'test_proxy_contract.py')]),
+    ('proxy-gateway', [PY, os.path.join(HERE, 'test_proxy_gateway.py')]),
+    ('proxy-http', [PY, os.path.join(HERE, 'test_proxy_http.py')]),
+    ('play-contract', [PY, os.path.join(HERE, 'test_play_contract.py')]),
+    ('pan-provider', [PY, os.path.join(HERE, 'test_pan_provider.py')]),
+    ('jar-proxy', [PY, os.path.join(HERE, 'test_jar_proxy.py')]),
     ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
     ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
 ]

@@ -58,7 +58,7 @@ FongMi 主应用并没有把所有网盘 API 硬编码在 `app` 模块中。它�
 | `SiteApi.playerContent` | `python-backend/server.py` + `jar_spider.py` | 已有基本调用 |
 | NanoHTTPD `/proxy` | FastAPI `/proxy` + `go_proxy.py` | 已拆成两套，需统一 |
 | ExoPlayer | mpv | HTTP 播放可替代，Android 专属能力不完全等价 |
-| FongMi Pan JAR | 外部 JAR + 夸克 host 快路径 | 夸克可用基础，通用 JAR Proxy 未完成 |
+| FongMi Pan JAR | 外部 JAR + 夸克 host 快路径 | 夸克快路径可用；静态 JAR Proxy 流桥已接入，真实 Provider 仍需验收 |
 
 当前配置、Spider、播放链路的总览见 [ARCHITECTURE.md](ARCHITECTURE.md)，差距审计见 [TVBOX_CONTRACT_GAPS.md](TVBOX_CONTRACT_GAPS.md)。
 
@@ -140,9 +140,9 @@ destroy()
 
 ## 4. 当前关键差距
 
-### 4.1 JAR Proxy 无法传输二进制流
+### 4.1 JAR Proxy 二进制流（已补齐桥接层）
 
-当前 [SpiderRunner.java](../python-backend/jar-runner/SpiderRunner.java) 在处理所有方法时执行：
+上一版 [SpiderRunner.java](../python-backend/jar-runner/SpiderRunner.java) 在处理所有方法时执行：
 
 ```java
 Object result = invoke(spider, cls, method, params);
@@ -163,39 +163,50 @@ com.github.catvod.spider.Proxy.proxy(Map<String, String>)
 
 而不是当前项目只尝试调用 Spider 实例的 `proxy(String)`。
 
-### 4.2 9978 代理被拆成两条链路
+当前实现已增加两层兼容：
 
-当前：
+1. Runner 启动时加载 `com.github.catvod.spider.Proxy.proxy(Map)`；
+2. `JarBridge.call_proxy()` 用 JSON 控制帧返回状态/MIME/headers，并用一次性
+   `127.0.0.1` socket 传输 `InputStream`，Python 侧以 `JarProxyBody.read(size)`
+   暴露给 FastAPI。媒体主体不进入 JSON，也不整段读入内存。
 
-- FastAPI `/proxy`：调用 `site.runner.localProxy()`；
-- `go_proxy.py:9978`：处理 `do=ck`、`do=pan`、`url=` 直链转发；
-- 二者之间没有完整的 FongMi `BaseLoader.proxy()` 调度。
+旧 JAR 的实例 `proxy(String)` 仍由 `JarSpider.localProxy()` 保留；静态 Proxy
+   缺失时无站点代理会回退到该实例路径。
 
-结果是：
+### 4.2 9978/旧端口代理已统一调度，传输仍分层
 
-- 夸克专用快路径可以工作；
-- 依赖 JAR 自定义 `Proxy.proxy()` 的其他网盘源可能无法工作；
-- JS/Python `do=js/py` 和无 `siteKey` 的 JAR Proxy 语义不完整。
+当前已新增 `proxy_gateway.py` 作为唯一调度层：FastAPI `/proxy` 和
+7944/9978/1314 旧 HTTP 监听器都按 `siteKey → recent JS/Python → recent
+JAR static Proxy` 选择运行时，并合并 query、header、form/JSON body。
+`go_proxy.py` 仍保留为网盘/直链的高吞吐 Range 数据传输层；`do=pan` 在没有
+站点 JAR 时回到该层，不把夸克 Provider 名误当成 Spider key。
 
-### 4.3 FastAPI 当前代理结果不能保证流式
+还增加了可选 query token 校验。旧的无 token 地址继续可用，便于兼容外部 JAR；
+宿主新生成的 JAR Proxy URL 可带 token。
 
-当前 [server.py](../python-backend/server.py) 的 `build_proxy_response()` 主要处理字符串、JSON、字节内容和 `requests.Response.content`。FongMi 需要的是：
+### 4.3 FastAPI 代理结果流式化（已补齐）
+
+当前 [server.py](../python-backend/server.py) 的 `build_proxy_response()` 已按
+`ProxyResult` 处理字符串、JSON、字节内容、`requests.Response.raw` 和 JAR
+socket 流。FongMi 需要的是：
 
 - 直接转发 `InputStream`/可读对象；
 - 不缓存整部视频；
 - 透传 Range、Content-Length、Content-Range、Accept-Ranges；
 - 客户端断开后取消上游请求。
 
-### 4.4 `playerContent` 字段还不完整
+### 4.4 `playerContent` 已统一主要字段，桌面能力仍有边界
 
-当前播放器请求使用空 `vipFlags`，并主要消费 `url/parse/header`。需要补齐：
+当前后端和渲染层已归一化并消费：
 
 - `jx=1` 与 `parse=1` 等价；
-- `playUrl` 的 `json:`、`parse:` 前缀；
-- `flag`、`jxFrom`；
-- `click`；
-- `format`；
-- `subs`、`drm`、`position` 等可选字段。
+- `playUrl` 的 `json:`、`parse:` 精确解析器选择和普通前缀；
+- `flag`、`jxFrom`、`click`；
+- `format`、`subs`、`position`；
+- `drm` 保留并在 mpv 播放前给出明确“不支持”错误；
+- 配置 flags 继续作为真实 `vipFlags` 传入 Spider。
+
+仍需通过更多真实源验证 parser 的 type 2/3/4 行为和 click 脚本语义。
 
 ### 4.5 Cookie 字段不等于 Provider 能力
 
@@ -386,7 +397,21 @@ Method method = proxyClass.getMethod("proxy", Map.class);
 
 在 PC Runner 中保存每个 JAR 的静态 Proxy 方法，并在统一 `/proxy` 请求到达时调用。
 
-不要把 `InputStream` 转成 `String`。推荐新增“长度前缀二进制帧”桥：
+不要把 `InputStream` 转成 `String`。当前 PC 实现采用“JSON 控制帧 + 一次性回环
+流 socket”，原因是现有 JSON-RPC 控制面仍可复用，同时不会把二进制写入 stdout：
+
+```text
+请求 stdin：{"id":1,"method":"proxy","params":{"__static_proxy":true,...}}
+响应 stdout：{"id":1,"proxy":{
+  "status":206,"mime":"video/mp4","headers":{...},
+  "stream":{"host":"127.0.0.1","port":12345,"token":"..."}
+}}
+socket 握手：<token>\n
+socket 后续：InputStream 原始字节，EOF 表示结束
+```
+
+小型 `byte[]`/文本响应直接在控制帧中以 base64 返回；媒体主体永远不进入
+JSON。若后续需要跨进程多路复用，再评估长度前缀二进制帧：
 
 ```text
 请求帧：4 字节 JSON 长度 + JSON 参数
@@ -418,7 +443,7 @@ Method method = proxyClass.getMethod("proxy", Map.class);
 
 ## 7. P1：统一播放结果和解析路由
 
-### 7.1 归一化 Result
+### 7.1 归一化 Result（已落地）
 
 在 Python 后端增加：
 
@@ -458,7 +483,7 @@ normalize_play_result(raw, site, flag, original_id) -> PlayResult
 
 ### 7.2 传入正确的 `vipFlags`
 
-当前渲染层将 `vipFlags` 传为空数组。应改成：
+渲染层现在从 `/sites` 读取配置 flags，再按以下链路传入：
 
 ```text
 config.flags -> action(playerContent) -> Runner -> JAR/JS/Python
@@ -472,7 +497,7 @@ config.flags -> action(playerContent) -> Runner -> JAR/JS/Python
 - 当前线路匹配 flag；
 - 当前线路不匹配 flag 时的降级行为。
 
-### 7.3 `playUrl` 路由
+### 7.3 `playUrl` 路由（主要语义已落地）
 
 实现以下语义：
 
@@ -537,6 +562,12 @@ class PanProvider:
     def resolve_play_url(self, file: PanFile, *, headers: dict) -> PlayUrl: ...
     def refresh_play_url(self, play: PlayUrl) -> PlayUrl: ...
 ```
+
+当前已落地 `python-backend/pan/` 的模型、注册表和夸克 Provider 适配器；
+Provider 未注册的网盘会明确返回“不支持”，不会用空成功响应伪装已实现。
+
+个人文件的 native 快路径为 `v2/play` 优先、`file/download` 回退；即使
+`v2/play` 因权限或接口版本抛异常，也会继续尝试下载接口。
 
 ### 8.2 Quark 迁移策略
 
@@ -701,6 +732,8 @@ POST /pan/{provider}/refresh
 
 ```text
 python-backend/tests/test_proxy_contract.py
+python-backend/tests/test_jar_proxy.py
+python-backend/tests/test_proxy_http.py
 python-backend/tests/test_proxy_stream.py
 python-backend/tests/test_pan_provider.py
 python-backend/tests/test_play_result.py
@@ -709,7 +742,7 @@ tests/js/player-contract.test.js
 
 覆盖：
 
-- `proxy://` URL 归一化；
+- JAR query 形 `proxy://` URL 归一化到当前 FastAPI `/proxy`；
 - `siteKey/do=js/do=py/do=pan` 调度；
 - 200/206/302/416；
 - Range 越界；
@@ -786,36 +819,38 @@ Python localProxy(params) -> 同等结构
 
 ### Phase 1：统一代理数据面
 
-- [ ] 新增 `proxy_contract.py`；
-- [ ] 新增 `proxy_gateway.py`；
-- [ ] 把 9978/7944/1314 旧协议接入统一调度；
-- [ ] 增加 `StreamingResponse` 和断开取消；
-- [ ] 增加 `siteKey/do=js/do=py/do=pan` 路由；
-- [ ] 增加代理 token/签名；
-- [ ] 完成 JAR/JS/Python 代理夹具。
+- [x] 新增 `proxy_contract.py`；
+- [x] 新增独立 `proxy_gateway.py`；
+- [x] 把 9978/7944/1314 旧协议接入统一调度；
+- [x] 增加 `StreamingResponse` 和断开取消；
+- [x] 增加 `siteKey/do=js/do=py/do=pan` 路由；
+- [x] 增加可选代理 token/签名（保留旧无 token 地址兼容）；
+- [x] 完成基础 JAR 流代理夹具；
+- [ ] 完成 JS/Python 真实网络代理夹具。
 
 ### Phase 2：补齐 JAR Proxy
 
-- [ ] 增加 `com.github.catvod.Proxy` Stub；
-- [ ] 增加静态 `com.github.catvod.spider.Proxy` 加载；
-- [ ] 增加二进制流桥；
-- [ ] 增加 JVM 请求取消和超时；
-- [ ] 补齐常用 CatVod Stub；
+- [x] 增加 `com.github.catvod.Proxy` Stub；
+- [x] 增加静态 `com.github.catvod.spider.Proxy` 加载；
+- [x] 增加二进制流桥；
+- [x] 增加 JVM 请求取消和超时；
+- [x] 补齐常用 CatVod Stub（Init/Json/Util/Path）；
 - [ ] 对 DEX/JVM JAR 做兼容性分级。
 
 ### Phase 3：播放契约
 
-- [ ] 传递真实 `vipFlags`；
-- [ ] 实现 `jx/parse/playUrl`；
-- [ ] 完善 Header 合并；
-- [ ] 保留 `format/subs/drm/position`；
+- [x] 传递配置中的真实 `vipFlags`；
+- [x] 兼容 `jx=1`、`json:`/`parse:`、普通 `playUrl` 前缀和 `parse=1`；
+- [x] 完善 Header 合并（包括 JAR/Python 返回的 JSON header）；
+- [x] `json:<url>`/`parse:<name>` 精确选择指定解析器；
+- [x] 保留 `format/subs/drm/position`，并对 DRM 明确报错；
 - [ ] 增加多解析器并发和优先级测试；
-- [ ] 对 mpv 不支持的 DRM 明确报错。
+- [x] 对 mpv 不支持的 DRM 明确报错。
 
 ### Phase 4：Provider
 
-- [ ] 抽取 `PanProvider`；
-- [ ] 抽取 Quark；
+- [x] 抽取 `PanProvider`；
+- [x] 抽取 Quark（复用现有 API 实现并接入注册表）；
 - [ ] 接入 UC；
 - [ ] 验证百度、天翼、123、迅雷的 JAR Proxy；
 - [ ] 增加签名 URL 缓存和 single-flight 刷新；
@@ -837,12 +872,12 @@ Python localProxy(params) -> 同等结构
 
 满足以下条件才可以标记完成：
 
-- [ ] 一个标准 JAR 的静态 `Proxy.proxy(Map)` 可以被调用；
-- [ ] `InputStream` 不经过 JSON 字符串化；
-- [ ] 9978 `/proxy` 能将所有参数、请求头和 POST body 传给 Spider；
-- [ ] 200/206/302/416 和 Range 播放行为正确；
+- [x] 一个标准 JAR 的静态 `Proxy.proxy(Map)` 可以被调用；
+- [x] `InputStream` 不经过 JSON 字符串化；
+- [x] 9978 `/proxy` 能将 query、请求头和 POST body 传给 Spider；
+- [x] 代理契约覆盖 200/206/302/416 和 Range 行为；真实 CDN 仍需验收；
 - [ ] JAR/JS/Python 三种代理夹具全部通过；
-- [ ] `playerContent` 的 `parse/jx/playUrl/header/vipFlags` 行为通过；
+- [x] `playerContent` 的 `parse/jx/playUrl/header/vipFlags` 行为通过；
 - [ ] 夸克分享和个人文件可以真实播放；
 - [ ] Cookie 失效时不会卡死或泄漏；
 - [ ] 多站点并发时不会串 Cookie、串 JAR 或串错误。
@@ -880,7 +915,12 @@ Python localProxy(params) -> 同等结构
 ### 首批修改入口
 
 - `python-backend/server.py`：统一 `/proxy` 调度和流式响应；
+- `python-backend/proxy_gateway.py`：FastAPI/旧端口共用的 Spider 选择；
+- `python-backend/proxy_contract.py`：参数、流和代理 URL 契约；
+- `python-backend/tests/test_proxy_http.py`：FastAPI 与旧端口的本地 HTTP 代理夹具；
+- `python-backend/play_contract.py`：`playerContent` 结果归一化；
 - `python-backend/go_proxy.py`：保留通用 Range 转发，抽取 Quark Provider；
+- `python-backend/pan/`：Provider 模型、注册表和夸克适配器；
 - `python-backend/jar_spider.py`：去除长期特定 vodId 假设，保留兼容快路径；
 - `python-backend/jar_bridge.py`：JVM 启动参数、端口和流桥；
 - `python-backend/jar-runner/SpiderRunner.java`：静态 Proxy 和二进制桥；

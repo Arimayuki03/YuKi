@@ -91,8 +91,9 @@ contextBridge.exposeInMainWorld('vpc', {
     pushInfo: () => ipcRenderer.invoke('vpc:push-info'),
     /** 局域网推送到达事件（mpv 已由主进程接管） */
     onPushReceived: (cb) => ipcRenderer.on('vpc:push-received', (_e, info) => cb(info)),
-    /** VIP 解析：目标地址 → 直链 {ok, url, header, via} | {ok:false, reason} */
-    resolveParse: (url) => ipcRenderer.invoke('vpc:parse', url),
+    /** VIP 解析：目标地址 → 直链；可选 parses 用于 FongMi json:/parse:<name> 精确路由。 */
+    resolveParse: (url, parses) => ipcRenderer.invoke('vpc:parse',
+        (parses === undefined ? url : { url, parses })),
     /** 无解析接口时的兜底：隐藏窗口直开链接抓播放器发出的媒体请求（share 分享页）。
      *  legacy=true 走旧解析器（useLegacyParser）：监听 iframe src 并跟随。 */
     captureDirect: (url, legacy) => ipcRenderer.invoke('vpc:capture-direct', { url, legacy: !!legacy }),

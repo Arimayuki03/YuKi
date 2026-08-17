@@ -11,13 +11,15 @@
  *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records */
+/* global $, doAction, getJson, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records */
 
 // 媒体直链后缀：已是直链则无需解析（share/播放页等才需解析）
 const DIRECT_MEDIA_RE = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 
 const Player = {
     _mpvMissingToastShown: false,
+    _vipFlags: null,
+    _vipFlagsAt: 0,
     _seq: null,      // 连播上下文 {site, flag, title, episodes, index}（mpv 退出后推进）
     _endedAt: 0,     // 最近一次 ended（单集播完）时间戳，无会话号时的「看完」兜底判据
     _endedSessions: new Map(), // sessionId → ended 时间戳；退出判定按会话匹配，旧集 ended 不误判新集
@@ -392,8 +394,9 @@ const Player = {
         showLoading();
         let rsp;
         try {
+            const vipFlags = await this.getVipFlags();
             rsp = await doAction('playerContent', {
-                site, flag, id, vipFlags: JSON.stringify([]),
+                site, flag, id, vipFlags: JSON.stringify(vipFlags),
             });
         } catch (e) {
             hideLoading();
@@ -409,19 +412,40 @@ const Player = {
             warnToast(String(data.error));
             return { ok: false, reason: 'play-error', error: String(data.error) };
         }
-        const url = data.url || id;
-        const parse = parseInt(data.parse, 10) || 0;
+        const rawUrl = String(data.url || '').trim();
+        const route = await this._resolvePlayerRoute(data, rawUrl);
+        if (!route.ok) {
+            this._seq = null;
+            const note = route.reason || '播放地址为空';
+            this._showDialog(title, subtitle, '', rawUrl, note, data.header);
+            return { ok: false, reason: note };
+        }
+        const url = route.url;
+        const parse = route.parse;
+        const playHeader = (data.header && typeof data.header === 'object') ? data.header : {};
+
+        // mpv 没有 Android ExoPlayer 的 Widevine/PlayReady 设备 DRM 能力。
+        if (data.drm) {
+            this._seq = null;
+            const note = '该播放源需要 DRM，桌面版 mpv 暂不支持';
+            this._showDialog(title, subtitle, '', url, note, playHeader);
+            return { ok: false, reason: 'drm-not-supported' };
+        }
 
         // parse=1：后台自动解析出直链并起播（单集；下一集由 _onExit 连播推进）
         if (parse === 1) {
             // 已是媒体直链则无需解析（部分源 parse 标记不准）
             if (DIRECT_MEDIA_RE.test(url.split('?')[0])) {
-                return await this._playDirect(url, { title, subtitle, flag, speed: carrySpeed, fullscreen: carryFullscreen });
+                return await this._playDirect(url, {
+                    title, subtitle, flag, header: playHeader,
+                    speed: carrySpeed, fullscreen: carryFullscreen,
+                    format: data.format, subs: data.subs, position: data.position,
+                });
             }
             showLoading();
             warnToast('正在后台解析播放地址…');
             let resolved = null;
-            try { resolved = await this._awaitTimeout(window.vpc.resolveParse(url)); } catch (e) { /* 解析异常 */ }
+            try { resolved = await this._awaitTimeout(window.vpc.resolveParse(url, route.parsers)); } catch (e) { /* 解析异常 */ }
             if (!(resolved && resolved.ok)) {
                 // captureDirect 兜底：无解析接口时缩短超时，避免用户等太久
                 const fallbackMs = (resolved && resolved.reason === 'no-parses') ? 10000 : 15000;
@@ -433,9 +457,10 @@ const Player = {
             hideLoading();
             if (resolved && resolved.ok) {
                 try {
-                    const mergedHeader = { ...(resolved.header || {}) };
+                    const mergedHeader = { ...playHeader, ...(resolved.header || {}) };
                     const r = await window.vpc.playUrl(resolved.url, {
                         title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
+                        format: data.format, subs: data.subs, position: data.position,
                     });
                     if (r && r.ok) { this._rememberSession(r); this._lastUrl = resolved.url; this._mpvToast(r, `解析成功（${resolved.via || ''}），已在 mpv 播放`); return { ok: true }; }
                     if (r && r.reason === 'mpv-missing') { warnToast('解析成功但未安装 mpv，无法播放直链'); return { ok: false, reason: 'mpv-missing' }; }
@@ -447,14 +472,19 @@ const Player = {
             this._seq = null; // 本集未起播，连播链终止
             // 解析成功但 mpv 播放失败时，把解出的直链+头交给弹窗，用户可转外部播放器
             const dlgUrl = (resolved && resolved.ok && resolved.url) ? resolved.url : url;
-            const dlgHeader = (resolved && resolved.ok) ? resolved.header : null;
+            const dlgHeader = (resolved && resolved.ok)
+                ? { ...playHeader, ...(resolved.header || {}) } : playHeader;
             this._showDialog(title, subtitle, '', dlgUrl, note, dlgHeader);
             return { ok: false, reason: note };
         }
 
         // 直链源：单集交 mpv（连播由渲染层在 mpv 退出后推进，不再依赖 mpv 队列）
         try {
-            const r = await window.vpc.playUrl(url, { title, subtitle, flag, parse, speed: carrySpeed, fullscreen: carryFullscreen });
+            const r = await window.vpc.playUrl(url, {
+                title, subtitle, flag, parse, header: playHeader,
+                speed: carrySpeed, fullscreen: carryFullscreen,
+                format: data.format, subs: data.subs, position: data.position,
+            });
             if (r && r.ok) { this._rememberSession(r); this._lastUrl = url; this._mpvToast(r, '已在 mpv 窗口播放'); return { ok: true }; }
             if (r && r.reason === 'mpv-missing' && !this._mpvMissingToastShown) {
                 this._mpvMissingToastShown = true;
@@ -468,8 +498,65 @@ const Player = {
         const note = parse === 1
             ? '该线路需要解析接口（parse=1）'
             : (isHls ? 'HLS(m3u8) 链接浏览器无法直播，建议安装 mpv 后重试' : '');
-        this._showDialog(title, subtitle, (isHls || parse === 1) ? '' : url, url, note);
+        this._showDialog(title, subtitle, (isHls || parse === 1) ? '' : url, url, note, playHeader);
         return { ok: false, reason: 'mpv-missing' };
+    },
+
+    /**
+     * CatVod/FongMi 配置顶层 flags 会作为 playerContent 的 vipFlags 传给
+     * Spider。旧版 PC 固定传空数组，夸克/解析类 JAR 因此拿不到线路白名单。
+     * 结果缓存 30 秒，配置热更新后自然刷新，不把完整配置写入播放记录。
+     */
+    async getVipFlags() {
+        const now = Date.now();
+        if (Array.isArray(this._vipFlags) && now - this._vipFlagsAt < 30000) {
+            return this._vipFlags.slice();
+        }
+        try {
+            const state = await getJson('/sites');
+            const flags = state && Array.isArray(state.flags) ? state.flags : [];
+            this._vipFlags = flags.filter((v) => v !== null && v !== undefined).map((v) => String(v));
+            this._vipFlagsAt = now;
+        } catch (e) {
+            this._vipFlags = [];
+            this._vipFlagsAt = now;
+        }
+        return this._vipFlags.slice();
+    },
+
+    /** 对齐 FongMi ParseJob.setParse 的 json:/parse:<name> 选择语义。 */
+    async _resolvePlayerRoute(data, rawUrl) {
+        if (!rawUrl) return { ok: false, reason: data.error || '播放地址为空' };
+        const playUrl = String(data.playUrl || '').trim();
+        if (/^json:/i.test(playUrl)) {
+            const parserUrl = playUrl.slice(5).trim();
+            if (!/^https?:\/\//i.test(parserUrl)) return { ok: false, reason: 'json 解析器地址无效' };
+            return { ok: true, url: rawUrl, parse: 1,
+                parsers: [{ url: parserUrl, type: 1, name: 'json' }] };
+        }
+        if (/^parse:/i.test(playUrl)) {
+            const name = playUrl.slice(6).trim();
+            const state = await getJson('/sites').catch(() => ({}));
+            const parses = state && Array.isArray(state.parses) ? state.parses : [];
+            const parser = parses.find((item) => {
+                if (!item || typeof item !== 'object') return false;
+                const names = [item.name, item.id, item.key, item.flag]
+                    .filter((v) => v !== undefined && v !== null).map(String);
+                return names.includes(name);
+            });
+            if (!parser || !parser.url) return { ok: false, reason: `解析器不存在：${name}` };
+            return { ok: true, url: rawUrl, parse: 1, parsers: [parser] };
+        }
+        return {
+            ok: true,
+            url: playUrl ? playUrl + rawUrl : rawUrl,
+            parse: parseInt(data.parse, 10) === 1 ? 1 : 0,
+        };
+    },
+
+    resetVipFlags() {
+        this._vipFlags = null;
+        this._vipFlagsAt = 0;
     },
 
     /** 起播成功提示；外部播放器模式 | 开启 Anime4K/边下边播时额外标注状态。 */

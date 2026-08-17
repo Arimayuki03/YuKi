@@ -4,6 +4,7 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * TVBox JAR spider 的 PC 端 JVM 宿主。
@@ -24,6 +25,12 @@ public class SpiderRunner {
     static final Map<String, Object> spiders = new ConcurrentHashMap<>();
     static URLClassLoader loader = null;
     static String jarPath = "";
+    /**
+     * FongMi 的 JAR Proxy 是每个 jar 一个静态类，不属于具体 Spider 实例。
+     * 旧桥只会反射实例的 proxy(String)，因此无法处理 Object[]{status,mime,
+     * InputStream,headers}。启动时缓存静态方法，普通内容请求仍走实例路径。
+     */
+    static Method staticProxyMethod = null;
 
     public static void main(String[] argv) throws Exception {
         if (argv.length < 2) {
@@ -37,6 +44,16 @@ public class SpiderRunner {
         Runtime.getRuntime().addShutdownHook(new Thread(SpiderRunner::deleteCacheDir));
         loader = new ChildFirstLoader(new URL[]{new File(jarPath).toURI().toURL()},
                                       SpiderRunner.class.getClassLoader());
+
+        // 与 FongMi JarLoader.load() 对齐：先注入 Init，再尝试加载 jar 级静态
+        // com.github.catvod.spider.Proxy。没有该类的旧/简化 jar 不影响内容 API。
+        seedSpiderContext();
+        try {
+            Class<?> proxyCls = Class.forName("com.github.catvod.spider.Proxy", true, loader);
+            staticProxyMethod = proxyCls.getMethod("proxy", Map.class);
+        } catch (Throwable e) {
+            staticProxyMethod = null;
+        }
 
         // 预加载默认 spider 类（可选：多个 className 在请求时按 params.className 动态加载）
         try {
@@ -58,7 +75,18 @@ public class SpiderRunner {
             String resp;
             long rid = extractId(line);
             try {
-                resp = handle(line.trim());
+                Map<String,Object> request = (Map<String,Object>) parseValue(line.trim());
+                Map<String,Object> requestParams = request == null
+                        ? null : (Map<String,Object>) request.get("params");
+                String requestMethod = request == null ? "" : String.valueOf(request.getOrDefault("method", ""));
+                // __static_proxy 是 Python JarBridge.call_proxy 的内部标记，
+                // 避免影响旧的实例 proxy(String) 调用。
+                if ("proxy".equals(requestMethod) && requestParams != null
+                        && Boolean.TRUE.equals(requestParams.get("__static_proxy"))) {
+                    resp = handleStaticProxy(request);
+                } else {
+                    resp = handle(line.trim());
+                }
             } catch (Throwable t) {
                 StringWriter sw = new StringWriter();
                 t.printStackTrace(new PrintWriter(sw));
@@ -127,6 +155,175 @@ public class SpiderRunner {
         return "{\"id\":" + id + ",\"result\":" + jsonEscape(resultStr) + "}";
     }
 
+    /**
+     * 调用 jar 级静态 Proxy.proxy(Map)，并把 InputStream 放到独立回环 socket。
+     * 控制帧仍是换行 JSON，媒体主体不进入 stdout，避免二进制污染 JSON-RPC
+     * 串或被 String/byte[] 一次性缓存。
+     */
+    @SuppressWarnings("unchecked")
+    static String handleStaticProxy(Map<String,Object> request) throws Exception {
+        long id = ((Number) request.getOrDefault("id", 0)).longValue();
+        if (staticProxyMethod == null) {
+            throw new NoSuchMethodException("com.github.catvod.spider.Proxy.proxy(Map) not found");
+        }
+        Object rawParams = request.getOrDefault("params", new LinkedHashMap<>());
+        Map<String,Object> source = rawParams instanceof Map
+                ? (Map<String,Object>) rawParams : new LinkedHashMap<>();
+        Map<String,String> params = new LinkedHashMap<>();
+        for (Map.Entry<String,Object> entry : source.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.startsWith("__") || "class_name".equals(key)
+                    || "class".equals(key) || "pan_cookies".equals(key)) continue;
+            Object value = entry.getValue();
+            if (value == null) continue;
+            if (value instanceof byte[]) {
+                value = new String((byte[]) value, StandardCharsets.UTF_8);
+            }
+            params.put(key, String.valueOf(value));
+        }
+
+        Object raw = staticProxyMethod.invoke(null, params);
+        ProxyEnvelope envelope = ProxyEnvelope.from(raw);
+        return "{\"id\":" + id + ",\"proxy\":" + envelope.toJson() + "}";
+    }
+
+    /** 代理响应的控制帧；body 为小数据时 base64，大数据由 socket 描述符表示。 */
+    static final class ProxyEnvelope {
+        int status = 200;
+        String mime = "application/octet-stream";
+        Map<String,String> headers = new LinkedHashMap<>();
+        String bodyBase64 = null;
+        ProxyStream stream = null;
+
+        static ProxyEnvelope from(Object raw) throws Exception {
+            ProxyEnvelope out = new ProxyEnvelope();
+            if (raw == null) {
+                out.status = 404;
+                out.mime = "text/plain; charset=utf-8";
+                return out;
+            }
+            if (raw instanceof Object[]) {
+                Object[] rs = (Object[]) raw;
+                if (rs.length < 3) throw new IllegalArgumentException("invalid proxy response");
+                out.status = toStatus(rs[0]);
+                out.mime = rs[1] == null ? out.mime : String.valueOf(rs[1]);
+                if (rs.length > 3 && rs[3] instanceof Map) {
+                    for (Map.Entry<?,?> e : ((Map<?,?>) rs[3]).entrySet()) {
+                        if (e.getKey() != null && e.getValue() != null) {
+                            out.headers.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+                        }
+                    }
+                }
+                out.setBody(rs[2]);
+                return out;
+            }
+            // 少数简化 Proxy 直接返回 URL；按 FongMi 旧行为转成重定向。
+            if (raw instanceof String) {
+                out.status = 302;
+                out.mime = "text/plain; charset=utf-8";
+                out.headers.put("Location", (String) raw);
+                return out;
+            }
+            throw new IllegalArgumentException("unsupported proxy response: "
+                    + raw.getClass().getName());
+        }
+
+        static int toStatus(Object value) {
+            if (value instanceof Number) return ((Number) value).intValue();
+            try { return Integer.parseInt(String.valueOf(value)); }
+            catch (Exception e) { return 502; }
+        }
+
+        void setBody(Object body) throws Exception {
+            if (body == null) {
+                bodyBase64 = "";
+            } else if (body instanceof InputStream) {
+                stream = ProxyStream.open((InputStream) body);
+            } else if (body instanceof byte[]) {
+                bodyBase64 = Base64.getEncoder().encodeToString((byte[]) body);
+            } else if (body instanceof File) {
+                stream = ProxyStream.open(new FileInputStream((File) body));
+            } else {
+                bodyBase64 = Base64.getEncoder().encodeToString(
+                        String.valueOf(body).getBytes(StandardCharsets.UTF_8));
+            }
+        }
+
+        String toJson() {
+            StringBuilder sb = new StringBuilder("{\"status\":").append(status)
+                    .append(",\"mime\":").append(jsonEscape(mime))
+                    .append(",\"headers\":").append(mapJson(headers));
+            if (stream != null) {
+                sb.append(",\"stream\":{\"host\":\"127.0.0.1\",\"port\":")
+                        .append(stream.port).append(",\"token\":")
+                        .append(jsonEscape(stream.token)).append("}");
+            } else {
+                sb.append(",\"body\":").append(jsonEscape(bodyBase64 == null ? "" : bodyBase64))
+                        .append(",\"encoding\":\"base64\"");
+            }
+            return sb.append('}').toString();
+        }
+    }
+
+    /** 一个请求一个一次性回环监听器；客户端断开会关闭 JAR 的 InputStream。 */
+    static final class ProxyStream {
+        final ServerSocket server;
+        final InputStream input;
+        final int port;
+        final String token;
+
+        private ProxyStream(ServerSocket server, InputStream input, String token) {
+            this.server = server;
+            this.input = input;
+            this.port = server.getLocalPort();
+            this.token = token;
+        }
+
+        static ProxyStream open(InputStream input) throws IOException {
+            ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+            server.setReuseAddress(true);
+            String token = UUID.randomUUID().toString().replace("-", "");
+            ProxyStream result = new ProxyStream(server, input, token);
+            Thread thread = new Thread(result::serve, "jar-proxy-stream-" + result.port);
+            thread.setDaemon(true);
+            thread.start();
+            return result;
+        }
+
+        void serve() {
+            try (ServerSocket ss = server) {
+                ss.setSoTimeout((int) TimeUnit.SECONDS.toMillis(60));
+                try (Socket socket = ss.accept()) {
+                    socket.setTcpNoDelay(true);
+                    // 不能用 BufferedReader：readLine() 可能预读 token 后面的
+                    // 媒体字节，随后直接从 socket InputStream 读取会丢掉这段
+                    // 已进入 Reader buffer 的视频头部。
+                    InputStream socketIn = socket.getInputStream();
+                    StringBuilder received = new StringBuilder();
+                    int ch;
+                    while (received.length() <= token.length() + 1
+                            && (ch = socketIn.read()) >= 0) {
+                        if (ch == '\n') break;
+                        if (ch != '\r') received.append((char) ch);
+                    }
+                    if (!token.equals(received.toString())) return;
+                    OutputStream out = new BufferedOutputStream(socket.getOutputStream(), 64 * 1024);
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = input.read(buf)) >= 0) {
+                        if (n == 0) continue;
+                        out.write(buf, 0, n);
+                        out.flush();
+                    }
+                }
+            } catch (Throwable ignored) {
+                // 客户端中断/上游断开是正常的媒体生命周期，不污染控制台 JSON。
+            } finally {
+                try { input.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
     static Object getSpiderInstance(String className) throws Exception {
         if (className.isEmpty()) {
             throw new IllegalArgumentException("className is required in params");
@@ -148,16 +345,27 @@ public class SpiderRunner {
 
     /** 向 jar 内 Init 注入 stub Application 全局 Context（对应 TVBox 宿主启动时的 Init.init(context)）。 */
     static void seedSpiderContext() {
-        try {
-            Class<?> initCls = Class.forName("com.github.catvod.spider.Init", true, loader);
+        android.content.Context context = new android.app.Application();
+        // 上游 CatVod 使用 com.github.catvod.Init；部分 FongMi 旧 jar 把
+        // 相同入口放在 com.github.catvod.spider.Init。两者都尝试，且兼容
+        // set(Context)/init(Context) 两种命名。
+        for (String name : new String[]{"com.github.catvod.Init", "com.github.catvod.spider.Init"}) {
             try {
-                java.lang.reflect.Method m = initCls.getMethod("init", android.content.Context.class);
-                m.invoke(null, new android.app.Application());
-            } catch (NoSuchMethodException ignore) {
-                // 部分 jar 的 Init 无 init(Context)（如自加载型），跳过
+                Class<?> initCls = Class.forName(name, true, loader);
+                boolean invoked = false;
+                for (String method : new String[]{"init", "set"}) {
+                    try {
+                        initCls.getMethod(method, android.content.Context.class).invoke(null, context);
+                        invoked = true;
+                        break;
+                    } catch (NoSuchMethodException ignored) {
+                        // 尝试下一个兼容命名
+                    }
+                }
+                if (invoked) return;
+            } catch (Throwable ignore) {
+                // 无该 Init 类或其静态初始化失败：继续尝试另一个入口。
             }
-        } catch (Throwable ignore) {
-            // 无 Init 类（标准 TVBox spider 无此依赖）或初始化失败：不影响蜘蛛加载
         }
     }
 
@@ -609,6 +817,20 @@ public class SpiderRunner {
         }
         sb.append('"');
         return sb.toString();
+    }
+
+    /** 代理 headers 专用 JSON 编码（值均已归一为字符串）。 */
+    static String mapJson(Map<String,String> map) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        if (map != null) {
+            for (Map.Entry<String,String> e : map.entrySet()) {
+                if (!first) sb.append(',');
+                first = false;
+                sb.append(jsonEscape(e.getKey())).append(':').append(jsonEscape(e.getValue()));
+            }
+        }
+        return sb.append('}').toString();
     }
 
     // ---- Child-First URLClassLoader ----

@@ -704,7 +704,11 @@ app.whenReady().then(() => {
         const alts = Array.isArray(meta.fallbackUrls)
             ? meta.fallbackUrls.filter((u) => u && u !== episodes[0].url)
             : [];
-        const r = mpv.play(episodes, { title, header: meta.header, resume: !alts.length, speed: meta.speed, fullscreen: meta.fullscreen });
+        const r = mpv.play(episodes, {
+            title, header: meta.header, resume: !alts.length, speed: meta.speed,
+            fullscreen: meta.fullscreen, format: meta.format,
+            subs: meta.subs, position: meta.position,
+        });
         if (r.ok) {
             // 非连播会话（本地文件/推送）：sessionId 取负，渲染层据此不触碰连播链
             if (meta.noSeq) r.sessionId = -Math.abs(r.sessionId);
@@ -857,13 +861,17 @@ app.whenReady().then(() => {
 
     ipcMain.handle('vpc:parse', async (_e, url) => {
         try {
+            const payload = (url && typeof url === 'object') ? url : { url };
+            const targetUrl = String(payload.url || '');
+            const parses = Array.isArray(payload.parses) ? payload.parses : undefined;
+            const legacy = !!payload.legacy;
             // 25s 安全超时 + 取消传播：超时置 abort 标记，解析窗口立即作废并释放槽位
             // （此前只 race 返回 null，后台解析仍占着槽位，连续超时会耗尽解析池）
             const abort = { requested: false };
             let timer = null;
             try {
                 return await Promise.race([
-                    parseWin.resolve(String(url || ''), undefined, undefined, abort),
+                    parseWin.resolve(targetUrl, parses, legacy, abort),
                     new Promise((res) => { timer = setTimeout(() => { abort.requested = true; res(null); }, 25000); }),
                 ]);
             } finally { clearTimeout(timer); }

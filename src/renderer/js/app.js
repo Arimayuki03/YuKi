@@ -215,6 +215,7 @@ $(async function bootstrap() {
     if (window.vpc.onConfigReloaded) {
         window.vpc.onConfigReloaded((info) => {
             if (!info || !info.ok) return;
+            if (typeof Player !== 'undefined' && Player.resetVipFlags) Player.resetVipFlags();
             if (typeof Home !== 'undefined' && Home._inited) Home.loadSites();
             if (typeof Live !== 'undefined' && Live._inited) Live.load();
         });

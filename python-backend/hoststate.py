@@ -5,6 +5,7 @@
 PC 端统一由本模块提供；server.py 启动时调用 configure() 写入。
 """
 import os
+import hmac
 
 _HOME = os.path.join(os.path.expanduser('~'), '.video-pc')
 
@@ -30,6 +31,13 @@ def get_port():
 
 def get_token():
     return _state['token']
+
+
+def valid_proxy_token(value):
+    """校验可选的数据面 token；空 token 保持旧 FongMi 地址兼容。"""
+    supplied = str(value or '')
+    expected = str(_state.get('token') or '')
+    return not supplied or (bool(expected) and hmac.compare_digest(supplied, expected))
 
 
 def get_data_dir():

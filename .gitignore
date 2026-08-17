@@ -9,6 +9,10 @@ python-backend/**/__pycache__/
 python-backend/smoke_result.txt
 tmp/
 tmp_spiders/
+.build-tmp/
+.test-tmp/
+.test-home/
+.test-home2/
 /nul
 *.log
 .DS_Store
@@ -32,6 +36,11 @@ analysis-tmp/
 python-backend/jar-runner/runner.jar
 python-backend/jar-runner/test-spider.jar
 python-backend/jar-runner/test-build/
+python-backend/jar-runner/build-tmp/
+python-backend/jar-runner/test-build-runner/
+python-backend/jar-runner/test-proxy-build/
+python-backend/jar-runner/runner-test.jar
+python-backend/jar-runner/test-proxy.jar
 
 # 兼容性套件过程产物（基线 compat_baseline.json 入库，过程文件不入库）
 python-backend/tests/compat_progress.jsonl

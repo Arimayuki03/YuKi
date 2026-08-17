@@ -1551,15 +1551,18 @@ const Detail = {
 
     async _resolveDownloadUrl(flag, url) {
         try {
+            const vipFlags = (typeof Player !== 'undefined' && Player.getVipFlags)
+                ? await Player.getVipFlags() : [];
             const rsp = await doAction('playerContent', {
-                site: this.site, flag, id: url, vipFlags: JSON.stringify([]),
+                site: this.site, flag, id: url, vipFlags: JSON.stringify(vipFlags),
             });
             const data = (rsp && typeof rsp === 'object') ? rsp : {};
             const u = data.url || url;
-            if (parseInt(data.parse, 10) !== 1) return { url: u };
-            if (/\.(mp4|flv|mov|mkv|webm|ts|m3u8)(\?|#|$)/i.test(u.split('?')[0])) return { url: u };
+            const header = (data.header && typeof data.header === 'object') ? data.header : {};
+            if (parseInt(data.parse, 10) !== 1) return { url: u, header };
+            if (/\.(mp4|flv|mov|mkv|webm|ts|m3u8)(\?|#|$)/i.test(u.split('?')[0])) return { url: u, header };
             const r = await window.vpc.resolveParse(u);
-            if (r && r.ok) return { url: r.url, header: r.header };
+            if (r && r.ok) return { url: r.url, header: { ...header, ...(r.header || {}) } };
         } catch (e) { /* 单集失败不阻断批量 */ }
         return null;
     },

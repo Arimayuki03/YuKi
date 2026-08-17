@@ -60,6 +60,16 @@ from kazumi.plugin_manager import PluginManager
 from kazumi.plugin import Plugin
 from kazumi.rule_engine import RuleEngine
 from kazumi.cookie_jar import CookieJar
+from proxy_contract import (
+    decode_proxy_body,
+    iter_body,
+    is_streaming,
+    merge_request_params,
+    normalize_proxy_result,
+    proxy_token_values,
+)
+from proxy_gateway import dispatch as dispatch_proxy
+from play_contract import normalize_play_result
 
 logger = logging.getLogger('vpc.server')
 
@@ -367,6 +377,14 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
     return body
 
 
+def _normalize_play_result(body, flag='', site=None, original_id=''):
+    """归一化 FongMi ``playerContent``，未知扩展字段全部保留。"""
+    site_headers = getattr(site, 'headers', {}) if site is not None else {}
+    data = normalize_play_result(body, site_headers=site_headers,
+                                 flag=flag, original_id=original_id)
+    return json.dumps(data, ensure_ascii=False)
+
+
 # 全局 spider 并发上限（C3）：阻塞 spider 调用经 anyio 默认线程池（~40 线程）
 # 无节制执行；超载请求在此排队而非线程暴涨/雪崩。16 = 线程池容量的 40%。
 # 注意：aggregate_search 内部的 8 线程池不经此信号量（自身已限），无嵌套死锁。
@@ -496,6 +514,7 @@ def _dispatch_action_inner(form):
             return 200, json.dumps(aggregate_search(word), ensure_ascii=False)
 
         site = _site_or_error(form)
+        sites.set_recent(site.key)
         ru = site.runner
 
         # ---- Spider 内容 API（契约见 PHASE0_依赖矩阵.md 第 3 节）----
@@ -516,13 +535,20 @@ def _dispatch_action_inner(form):
                 form.get('quick', '0'), form.get('pg', '1'))
         if do == 'playerContent':
             # 60s 缓存：换线路又切回原线路时跳过重复解析
-            cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}"
+            vip_raw = form.get('vipFlags', '[]')
+            try:
+                vip_key = json.dumps(json.loads(vip_raw), ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                vip_key = str(vip_raw)
+            cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}|{vip_key}"
             cached = _player_content_cache.get(cache_key)
             if cached and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL:
                 return 200, cached['result']
-            result = _attach_jar_error(ru, spider_app.playerContent(
-                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')),
-                flag=form.get('flag', ''))
+            raw_result = spider_app.playerContent(
+                ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]'))
+            result = _normalize_play_result(raw_result, form.get('flag', ''), site,
+                                            form.get('id', ''))
+            result = _attach_jar_error(ru, result, flag=form.get('flag', ''))
             with _player_cache_lock:
                 _player_content_cache[cache_key] = {'result': result, 'ts': time.time()}
                 # 防无限增长：超过 1024 项先清过期；仍无过期项则按 ts 淘汰最旧 10%
@@ -614,11 +640,8 @@ def aggregate_search(word, timeout=60):
 
 
 def do_local_proxy(param):
-    param = dict(param)
-    site = sites.get(param.pop('site', None))
-    if site is None:
-        return None
-    return site.runner.localProxy(param)
+    """统一代理调度入口（保留旧导入名，便于现有测试/插件调用）。"""
+    return dispatch_proxy(param, sites)
 
 
 def _guess_image_type(raw):
@@ -637,23 +660,49 @@ def _guess_image_type(raw):
 
 
 def build_proxy_response(result):
-    if result is None:
-        return Response(status_code=404)
-    if isinstance(result, str):
-        return RedirectResponse(result, status_code=302)
-    if isinstance(result, (list, tuple)) and len(result) >= 2:
-        code = int(result[0])
-        mime = result[1]
-        body = result[2] if len(result) > 2 else b''
-        if hasattr(body, 'content'):      # requests.Response
-            body = body.content
-        elif isinstance(body, str):
+    """把 Spider/JAR proxy 返回值转换成 HTTP 响应。
+
+    FongMi 的 proxy body 可能是 InputStream/requests raw，不能调用
+    ``.content`` 或 ``bytes(...)`` 将整部视频读入内存。小型 bytes/JSON
+    仍走普通 Response；可读对象和 iterator 走 StreamingResponse。
+    """
+    normalized = normalize_proxy_result(result)
+    headers = dict(normalized.headers or {})
+    status = int(normalized.status or 200)
+    mime = normalized.mime or headers.get('Content-Type') or 'application/octet-stream'
+
+    location = headers.get('Location') or headers.get('location')
+    if 300 <= status < 400 and location:
+        return RedirectResponse(location, status_code=status, headers=headers)
+
+    if is_streaming(normalized):
+        def stream():
+            try:
+                yield from iter_body(normalized.body)
+            finally:
+                if callable(normalized.close):
+                    try:
+                        normalized.close()
+                    except Exception:
+                        pass
+
+        return StreamingResponse(stream(), status_code=status, media_type=mime, headers=headers)
+
+    body = normalized.body
+    try:
+        if isinstance(body, str):
             body = body.encode('utf-8')
-        headers = result[3] if len(result) > 3 and isinstance(result[3], dict) else None
-        return Response(content=body, status_code=code, media_type=mime, headers=headers)
-    if isinstance(result, dict):
-        return JSONResponse(result)
-    return Response(content=str(result).encode('utf-8'))
+        elif body is None:
+            body = b''
+        elif not isinstance(body, (bytes, bytearray, memoryview)):
+            body = str(body).encode('utf-8', 'replace')
+        return Response(content=bytes(body), status_code=status, media_type=mime, headers=headers)
+    finally:
+        if callable(normalized.close):
+            try:
+                normalized.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------- 应用装配
@@ -833,10 +882,45 @@ def create_app():
         # 浏览器来源防御（H-5b）：同 /cache
         if _browser_origin_rejected(request):
             return JSONResponse({'code': 403, 'msg': 'forbidden'}, status_code=403)
-        param = dict(request.query_params)
+        query = dict(request.query_params)
+        supplied_proxy_token = query.get('token', '')
+        if supplied_proxy_token and not hoststate.valid_proxy_token(supplied_proxy_token):
+            return JSONResponse({'code': 401, 'msg': 'invalid proxy token'}, status_code=401)
+        form = {}
+        raw_body = None
         if request.method == 'POST':
-            param.update(dict(await request.form()))
-        result = await run_in_threadpool(do_local_proxy, param)
+            # FongMi /proxy 会把 POST 参数并入 params。multipart 上传文件
+            # 不属于媒体代理控制面，文件字段只保留文件名，避免把 UploadFile
+            # 对象塞进 JS/JVM JSON 桥。
+            content_type = request.headers.get('content-type', '')
+            body = await request.body()
+            # urlencoded/JSON body 先走契约解码；multipart 仍由 Starlette
+            # 处理文件字段，避免 UploadFile 对象进入 JSON/JVM 桥。
+            decoded, raw_body = decode_proxy_body(body, content_type)
+            form.update(decoded)
+            if not decoded and content_type.lower().startswith('multipart/form-data'):
+                try:
+                    form_data = await request.form()
+                    for key, value in form_data.items():
+                        form[key] = getattr(value, 'filename', None) or value
+                    raw_body = None
+                except Exception:
+                    pass
+        # 兼容 POST 代理时，token 也可能放在 JSON/form 或专用请求头中。
+        # /proxy 为旧 FongMi 地址保留免 token 入口，但只要调用方主动
+        # 携带 token，就必须在所有传输位置执行相同的校验，不能靠把 token
+        # 从 query 移到 body 绕过数据面鉴权。
+        supplied_tokens = proxy_token_values(query, request.headers, form)
+        if any(value and not hoststate.valid_proxy_token(value)
+               for value in supplied_tokens):
+            return JSONResponse({'code': 401, 'msg': 'invalid proxy token'}, status_code=401)
+        param = merge_request_params(query, dict(request.headers), form, raw_body)
+        try:
+            result = await run_in_threadpool(do_local_proxy, param)
+        except Exception as exc:
+            logger.warning('proxy dispatch failed: %s', exc, exc_info=True)
+            result = (502, 'text/plain; charset=utf-8',
+                      f'proxy dispatch failed: {str(exc)[:240]}'.encode('utf-8'), {})
         return build_proxy_response(result)
 
     @fastapi_app.api_route('/action', methods=['POST'])

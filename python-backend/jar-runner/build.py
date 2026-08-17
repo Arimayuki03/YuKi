@@ -9,13 +9,16 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(HERE, '..', '..')
 VENDOR_DIR = os.path.join(BASE, 'vendor')
 OUTPUT_JAR = os.path.join(HERE, 'runner.jar')
+# Windows 桌面沙箱/企业策略有时会把 %TEMP% 新建目录标成不可写，导致
+# ``tempfile.TemporaryDirectory`` 在 javac 前就失败。构建目录只存放 class
+# 中间产物，位于源码目录且已在 .gitignore 中排除，构建完成后清理。
+BUILD_ROOT = os.path.join(HERE, 'build-tmp')
 
 # 查找 javac
 def find_javac():
@@ -57,9 +60,10 @@ def main():
         print('ERROR: no source files found')
         sys.exit(1)
 
-    with tempfile.TemporaryDirectory(prefix='spider-runner-') as tmpdir:
-        build_dir = os.path.join(tmpdir, 'build')
-        os.makedirs(build_dir, exist_ok=True)
+    build_dir = BUILD_ROOT
+    shutil.rmtree(build_dir, ignore_errors=True)
+    os.makedirs(build_dir, exist_ok=True)
+    try:
         # 编译：stub 源码可引用 dexdeps（okhttp3/org.json 等），
         # 使 Spider.safeDns()/client() 等方法的签名与 jar 期望完全一致
         deps_dir = os.path.join(VENDOR_DIR, 'dexdeps')
@@ -102,6 +106,8 @@ def main():
         vendor_dest = os.path.join(VENDOR_DIR, 'spider-runner.jar')
         shutil.copy2(OUTPUT_JAR, vendor_dest)
         print(f'copied to: {vendor_dest}')
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
 
 if __name__ == '__main__':

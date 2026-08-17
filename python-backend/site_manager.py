@@ -22,6 +22,12 @@ class Site:
         self.api = api
         self.ext = ext
         self.runner = None
+        # 运行时类型（jar/js/py/cms）。FongMi /proxy 在没有 siteKey 时
+        # 需要按最近使用的同类 Spider 分发 do=js/do=py。
+        self.spider_type = ''
+        # 配置站点级请求头；playerContent 结果归一化时按
+        # site → Spider → parser 的顺序合并，避免站点默认 UA/Referer 丢失。
+        self.headers = {}
         self.searchable = True      # config 的 searchable 标志
         self.quick_search = True    # quickSearch
         self.filterable = True      # filterable
@@ -39,11 +45,14 @@ class Site:
 class SiteManager:
     def __init__(self):
         self.sites = []
+        self._recent_key = None
 
     def _register(self, site, spider):
         site.runner = Runner(spider)
         site.runner.init(site.ext)
         self.sites.append(site)
+        if self._recent_key is None:
+            self._recent_key = site.key
         logger.info('site loaded: %s (%s)', site.key, site.name)
 
     def load_api(self, key, api, ext=''):
@@ -71,6 +80,45 @@ class SiteManager:
                 return site
         return None
 
+    def set_recent(self, key):
+        """记录最近一次进入内容/播放链路的站点。
+
+        FongMi 的 JAR/JS/Python 本地代理在部分 URL 中不带 siteKey，
+        BaseLoader 会使用最近的 loader。PC 端用显式 key 保存这一状态，
+        避免并发请求依赖列表顺序。
+        """
+        if key and any(site.key == key for site in self.sites):
+            self._recent_key = key
+
+    @staticmethod
+    def _kind(site):
+        kind = str(getattr(site, 'spider_type', '') or '').lower()
+        if kind:
+            return kind
+        spider = getattr(getattr(site, 'runner', None), 'spider', None)
+        module = str(getattr(getattr(spider, '__class__', None), '__module__', '')).lower()
+        if 'jar_spider' in module:
+            return 'jar'
+        if 'js_spider' in module:
+            return 'js'
+        if 'cms_spider' in module:
+            return 'cms'
+        return 'py'
+
+    def recent(self, kind=None):
+        """返回最近站点；kind 可为 jar/js/py/cms。"""
+        ordered = []
+        if self._recent_key:
+            current = self.get(self._recent_key)
+            if current is not None:
+                ordered.append(current)
+        ordered.extend(site for site in reversed(self.sites) if site not in ordered)
+        wanted = str(kind or '').lower()
+        for site in ordered:
+            if not wanted or self._kind(site) == wanted:
+                return site
+        return None
+
     def destroy_all(self):
         # M-17：spider 级 destroy 只做清理不退进程（SpiderRunner 不再有
         # destroy=终态语义）；全部站点卸载后再统一关停 JVM 进程并清桥缓存，
@@ -81,6 +129,7 @@ class SiteManager:
             except Exception:
                 pass
         self.sites.clear()
+        self._recent_key = None
         try:
             from jar_bridge import JarBridge
             JarBridge.destroy_all()

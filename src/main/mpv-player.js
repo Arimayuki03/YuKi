@@ -174,6 +174,33 @@ class MpvPlayer extends EventEmitter {
         // 倍速：优先使用连播延续的当前速度，其次用设置的默认倍速
         const speed = (opts.speed && opts.speed > 0) ? opts.speed : this.defaultSpeed;
         if (speed && speed !== 1) args.push(`--speed=${speed}`);
+        // FongMi position 使用毫秒；mpv --start 使用秒。仅接受有限的非负数，
+        // 防止源配置把任意字符串拼进播放器参数。
+        if (Number.isFinite(Number(opts.position)) && Number(opts.position) > 0) {
+            args.push(`--start=${Math.max(0, Number(opts.position) / 1000)}`);
+        }
+        // 外置字幕：Result.subs 的 url/src 字段映射到 mpv --sub-file。
+        // DRM/特殊自定义轨道仍由上层保留并明确提示，不把未知对象拼进 argv。
+        if (Array.isArray(opts.subs)) {
+            for (const sub of opts.subs) {
+                const subUrl = typeof sub === 'string' ? sub : (sub && (sub.url || sub.src));
+                if (/^https?:\/\//i.test(String(subUrl || ''))) args.push(`--sub-file=${subUrl}`);
+            }
+        }
+        // Result.format 是 MIME 或容器提示；映射到 libavformat 名称，
+        // 只接受白名单字符，未知值仍保留在调用元数据而不污染 argv。
+        if (opts.format) {
+            const format = String(opts.format).toLowerCase();
+            const formatMap = {
+                'application/x-mpegurl': 'hls',
+                'application/vnd.apple.mpegurl': 'hls',
+                'application/dash+xml': 'dash',
+                'video/mp4': 'mp4',
+                'video/webm': 'webm',
+            };
+            const lavf = formatMap[format] || (/^[a-z0-9_+-]{1,32}$/.test(format) ? format : '');
+            if (lavf) args.push(`--demuxer-lavf-format=${lavf}`);
+        }
         // 全屏：连播延续上一集的全屏状态
         if (opts.fullscreen) args.push('--fs');
         // 语言偏好：多音轨/内嵌字幕时按设定语言优先选择（设置页可调）

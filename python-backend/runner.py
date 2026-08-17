@@ -45,6 +45,13 @@ class Runner:
     def localProxy(self, param):
         return self.spider.localProxy(param)
 
+    def proxy(self, param):
+        """统一 FongMi proxy 入口：JAR 优先使用静态 Proxy.proxy(Map)。"""
+        static = getattr(self.spider, 'proxy_static', None)
+        if callable(static):
+            return static(param)
+        return self.spider.localProxy(param)
+
     def isVideoFormat(self, url):
         return self.spider.isVideoFormat(url)
 

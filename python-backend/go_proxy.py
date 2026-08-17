@@ -548,6 +548,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle()
 
+    def do_POST(self):
+        self._handle()
+
     def do_HEAD(self):
         self._handle(head_only=True)
 
@@ -563,8 +566,42 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if not head_only:
                     self.wfile.write(body)
                 return
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query,
+                                      keep_blank_values=True)
             do = q.get('do', [''])[0]
+            supplied_token = q.get('token', [''])[0]
+            if supplied_token:
+                try:
+                    import hoststate
+                    if not hoststate.valid_proxy_token(supplied_token):
+                        body = b'invalid proxy token'
+                        self.send_response(401)
+                        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                        self.send_header('Content-Length', str(len(body)))
+                        self.end_headers()
+                        if not head_only:
+                            self.wfile.write(body)
+                        return
+                except Exception:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+
+            body = None
+            if self.command == 'POST':
+                try:
+                    length = int(self.headers.get('Content-Length', '0') or 0)
+                except (TypeError, ValueError):
+                    length = 0
+                if 0 < length <= 8 * 1024 * 1024:
+                    body = self.rfile.read(length)
+
+            # 旧 7944/9978/1314 端口也必须能承载 JS/Python/JAR 的
+            # localProxy。网盘 do=pan 与 url= 直链仍由下方的高吞吐实现处理。
+            spider_params = {k: (v[-1] if len(v) == 1 else v) for k, v in q.items()}
+            if do in ('js', 'py', 'jar') or spider_params.get('siteKey'):
+                self._handle_spider_proxy(spider_params, body, head_only)
+                return
 
             # FongMi 本地代理协议：健康检查（蜘蛛启动时扫描端口用）
             if do == 'ck':
@@ -682,6 +719,62 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _handle_spider_proxy(self, query, body=None, head_only=False):
+        """在旧数据面端口复用统一 Python Spider/JAR 调度和流桥。"""
+        try:
+            from proxy_contract import (decode_proxy_body, iter_body,
+                                        merge_request_params, normalize_proxy_result,
+                                        proxy_token_values)
+            from proxy_gateway import dispatch
+            import server
+
+            fields, raw_body = decode_proxy_body(body, self.headers.get('Content-Type', ''))
+            supplied_tokens = proxy_token_values(query, self.headers, fields)
+            import hoststate
+            if any(value and not hoststate.valid_proxy_token(value)
+                   for value in supplied_tokens):
+                body = b'invalid proxy token'
+                self.send_response(401)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+                return
+            params = merge_request_params(query, dict(self.headers), fields,
+                                           raw_body if raw_body is not None else None)
+            result = normalize_proxy_result(dispatch(params, server.sites))
+            headers = dict(result.headers or {})
+            headers.setdefault('Content-Type', result.mime or 'application/octet-stream')
+            self.send_response(int(result.status or 200))
+            for key, value in headers.items():
+                if value is not None:
+                    self.send_header(str(key), str(value))
+            self.end_headers()
+            if head_only:
+                return
+            try:
+                for chunk in iter_body(result.body):
+                    if chunk:
+                        self.wfile.write(chunk)
+            finally:
+                if callable(result.close):
+                    try:
+                        result.close()
+                    except Exception:
+                        pass
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception as e:
+            logger.warning('legacy proxy gateway failed: %s', e, exc_info=True)
+            if not getattr(self, '_headers_sent', False):
+                try:
+                    self.send_response(502)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.end_headers()
+                except Exception:
+                    pass
+
     def _handle_pan(self, q, head_only=False):
         """网盘分享取流：do=pan&site=quark&shareId=&fileId=&fileToken=...
 
@@ -710,6 +803,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
+            # Provider registry 是新的抽象入口；下面保留旧分支作为兼容
+            # fallback，便于第三方站点/老测试在迁移期间继续工作。
+            from pan.registry import registry
+            provider = registry.get(site)
+            if provider is not None:
+                play = provider.resolve_play_url({
+                    'shareId': share_id,
+                    'fileId': file_id,
+                    'fileToken': file_token,
+                }, headers=headers)
+                if play is None or not play.url:
+                    self.send_response(502)
+                    self.end_headers()
+                    return
+                self._stream_forward(play.url, play.headers or headers, head_only)
+                return
             if site != 'quark':
                 self.send_response(400)
                 self.end_headers()
@@ -927,4 +1036,3 @@ def ensure_listener(port):
         _extra_servers[port] = srv
         logger.info('go-proxy 泛化监听已启动: 127.0.0.1:%d', port)
         return True
-

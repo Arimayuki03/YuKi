@@ -583,6 +583,7 @@ class ConfigManager:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
                 raise ValueError('[L3:jar] jar runtime unavailable or no shared jar')
             site = Site(key, api, ext)
+            site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
             site.runner = Runner(spider)
             site.searchable = bool(item.get('searchable', 1))
@@ -606,6 +607,7 @@ class ConfigManager:
                 logger.info('skip site %s: jar runtime unavailable (java not found)', key)
                 raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             site = Site(key, api, ext)
+            site.headers = item.get('headers') or item.get('header') or {}
             site.spider_type = 'jar'
             site.runner = Runner(spider)
             site.searchable = bool(item.get('searchable', 1))
@@ -638,6 +640,10 @@ class ConfigManager:
             raise ValueError(f'[L2:type] unsupported type {stype}')
 
         site = Site(key, api, ext)
+        site.headers = item.get('headers') or item.get('header') or {}
+        # 供统一 /proxy 在缺少 siteKey 时按 FongMi 的 recent loader
+        # 语义选择 JS/Python/CMS Spider。JAR 分支在上方已显式标记。
+        site.spider_type = 'js' if is_js else ('py' if stype == 3 else 'cms')
         site.runner = Runner(spider)
         site.searchable = bool(item.get('searchable', 1))
         site.quick_search = bool(item.get('quickSearch', 1))

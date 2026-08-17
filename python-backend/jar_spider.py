@@ -15,6 +15,8 @@ import threading
 from urllib.parse import quote
 
 from base.spider import Spider
+import hoststate
+from proxy_contract import normalize_proxy_url
 
 logger = logging.getLogger('vpc.jarspider')
 
@@ -49,12 +51,39 @@ def _ensure_local_proxy_ports(result):
     return result
 
 
+def _normalize_proxy_scheme(result, site_key=''):
+    """把 CatVod/FongMi 的 ``proxy://`` 播放地址转为 PC HTTP 网关。
+
+    直播源常见 ``proxy://do=live&ext=...``，JAR 播放代理也可能返回同样
+    的 scheme。只处理可明确解析的 query 形式；其余 URL 原样保留，避免猜
+    测第三方自定义 scheme。
+    """
+    if not isinstance(result, dict):
+        return result
+    url = result.get('url')
+    if not isinstance(url, str) or not url.lower().startswith('proxy://'):
+        return result
+    suffix = url[len('proxy://'):].lstrip('?')
+    if not suffix or ('://' in suffix and '=' not in suffix):
+        return result
+    result['url'] = normalize_proxy_url(
+        'proxy://' + suffix,
+        site_key=site_key,
+        spider_type='jar',
+        proxy_base=hoststate.get_proxy_url(True),
+        proxy_token=hoststate.get_token(),
+    )
+    result.setdefault('parse', 0)
+    return result
+
+
 class JarSpider(Spider):
     """JAR spider 适配器。工厂注入 bridge / class_name / site_name 到子类。"""
 
     bridge = None
     class_name = ''
     site_name = ''
+    site_key = ''
 
     _inited = False
     _ext = ''
@@ -125,7 +154,8 @@ class JarSpider(Spider):
 
     def playerContent(self, flag, id, vipFlags):
         # 端口泛化拦截（任务二机制A）：所有 jar 播放地址的单一流经点
-        return _ensure_local_proxy_ports(self.playerContentRaw(flag, id, vipFlags))
+        result = _ensure_local_proxy_ports(self.playerContentRaw(flag, id, vipFlags))
+        return _normalize_proxy_scheme(result, self.site_key)
 
     def playerContentRaw(self, flag, id, vipFlags):
         # 任务三：夸克特判降级为协议层兜底。
@@ -173,6 +203,24 @@ class JarSpider(Spider):
             return json.loads(raw)
         except (TypeError, ValueError):
             return raw
+
+    def proxy_static(self, param):
+        """调用 FongMi jar 级静态 ``Proxy.proxy(Map)`` 数据面。
+
+        ``BaseLoader.proxy`` 在没有 siteKey 时走 JarLoader 的静态 Proxy；
+        服务器通过最近的 JarSpider 找到共享 bridge。没有静态类的旧 jar
+        退回实例 ``proxy(String)``，这样原有简化 jar 仍可工作。
+        """
+        if self.bridge is None:
+            return None
+        try:
+            return self.bridge.call_proxy(
+                param or {}, class_name=self.class_name,
+                pan_cookies=_load_pan_cookies())
+        except Exception as e:
+            logger.info('static jar proxy unavailable for %s, fallback instance: %s',
+                        self.class_name, e)
+            return self.localProxy(param)
 
     def isVideoFormat(self, url):
         return self._truthy(self._call('isVideoFormat', url))
@@ -248,6 +296,7 @@ def make_jar_spider_class(key, bridge, name, class_name):
         'bridge': bridge,
         'class_name': class_name,
         'site_name': name,
+        'site_key': key,
         '_ext': '',
     })
     return cls()

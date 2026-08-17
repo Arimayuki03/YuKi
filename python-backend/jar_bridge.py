@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import base64
+import socket
 import subprocess
 import threading
 import time
@@ -25,6 +27,51 @@ import http_client
 import java_probe
 
 logger = logging.getLogger('vpc.jar')
+
+
+class JarProxyBody:
+    """JVM ProxyStream 的 file-like 客体。
+
+    JVM 控制帧只返回一次性 loopback 端口；真正的视频字节在这里按 read(size)
+    拉取，因此 FastAPI/Starlette 不会把整部网盘视频缓存在 Python 内存。
+    """
+
+    def __init__(self, host, port, token, connect_timeout=15):
+        self._socket = socket.create_connection((host, int(port)), timeout=connect_timeout)
+        self._socket.settimeout(None)
+        self._file = self._socket.makefile('rb')
+        self._closed = False
+        self._socket.sendall((str(token) + '\n').encode('ascii'))
+
+    def read(self, size=-1):
+        if self._closed:
+            return b''
+        if size is None or size < 0:
+            chunks = []
+            while True:
+                chunk = self._file.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks)
+        return self._file.read(size)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._file.close()
+        except Exception:
+            pass
+        try:
+            self._socket.close()
+        except Exception:
+            pass
+
+    @property
+    def closed(self):
+        return self._closed
 
 CALL_TIMEOUT = 60
 _id_lock = threading.Lock()
@@ -272,6 +319,38 @@ class JarBridge:
             return []
 
     @staticmethod
+    def runtime_java_args():
+        """把 FongMi ``com.github.catvod.Proxy`` 指向 PC 本机代理端口。
+
+        该属性与上游站点的 HTTP 出站代理不同：前者是 JAR 生成播放 URL 时
+        使用的本地数据面地址，必须始终存在，即使系统没有配置网络代理。
+        """
+        # FongMi 的 Proxy.getUrl() 应该命中 FastAPI `/proxy` 调度器，才能
+        # 执行最近 JAR 的静态 Proxy；只有后端尚未绑定控制端口时才退回
+        # 9978（该端口仍由 go_proxy 负责旧的直链/夸克协议）。
+        try:
+            port = int(hoststate.get_port() or 0)
+        except Exception:
+            port = 0
+        if port <= 0:
+            try:
+                import go_proxy
+                port = int(getattr(go_proxy, 'PORT', 9978))
+            except Exception:
+                port = 9978
+        args = [
+            '-Dvpc.proxyHost=127.0.0.1',
+            '-Dvpc.proxyPort=' + str(port),
+        ]
+        try:
+            token = str(hoststate.get_token() or '')
+        except Exception:
+            token = ''
+        if token:
+            args.append('-Dvpc.proxyToken=' + token)
+        return args
+
+    @staticmethod
     def apply_jar_patches(jar_path):
         """应用已知 jar 字节码补丁（如蜘蛛失效 CSS 选择器修复），返回实际应加载的 jar 路径。
 
@@ -434,7 +513,7 @@ class JarBridge:
 
             # 判断是否为 DEX 转换后的 jar（需要 dexdeps；含补丁产物 -jvm.patched.jar）
             needs_deps = '-jvm' in self.jar_path.lower()
-            proxy_args = JarBridge.proxy_java_args()
+            proxy_args = JarBridge.proxy_java_args() + JarBridge.runtime_java_args()
             if needs_deps and os.path.isdir(DEXDEPS_DIR):
                 deps = [os.path.join(DEXDEPS_DIR, f) for f in os.listdir(DEXDEPS_DIR) if f.endswith('.jar')]
                 if deps:
@@ -520,6 +599,10 @@ class JarBridge:
         resolve, reject = p
         if 'error' in msg:
             reject(RuntimeError(str(msg.get('error', {}).get('message', 'jar error'))))
+        elif 'proxy' in msg:
+            # 静态 JAR Proxy 的响应是控制帧 + 独立 socket 描述符；不能只取
+            # 常规 JSON-RPC 的 result 字段。
+            resolve(msg)
         else:
             resolve(msg.get('result', ''))
 
@@ -580,6 +663,11 @@ class JarBridge:
             params['flag'] = str(args[0]) if args else ''
             params['id'] = str(args[1]) if len(args) > 1 else ''
             params['vipFlags'] = list(args[2]) if len(args) > 2 and isinstance(args[2], (list, tuple)) else []
+        elif method == 'proxy':
+            # 兼容旧的站点级 Spider.proxy(String)；无 siteKey 的静态
+            # com.github.catvod.spider.Proxy 走 call_proxy()，避免把 Map
+            # 当成字符串塞进实例方法。
+            params['param'] = str(args[0]) if args else '{}'
         elif method == 'destroy':
             pass
         else:
@@ -645,6 +733,102 @@ class JarBridge:
         self._crash_count = 0   # M-27a：调用成功视为进程健康，清零崩溃计数
         return result.get('v')
 
+    def call_proxy(self, params=None, class_name='', pan_cookies=None):
+        """调用 jar 级静态 ``com.github.catvod.spider.Proxy.proxy(Map)``。
+
+        返回 :class:`proxy_contract.ProxyResult`。小响应直接是 bytes；JAR
+        返回 ``InputStream`` 时，JVM 控制帧只携带 loopback socket 描述符，
+        body 由 ``JarProxyBody`` 按块读取。调用仍复用同一 JVM 的串行锁，
+        但视频主体不会经过 JSON-RPC stdout。
+        """
+        wait_started = time.time()
+        with self._call_lock:
+            waited = time.time() - wait_started
+            if waited > 2.0:
+                logger.info('[jar:%s] proxy queued %.1fs',
+                            self.jar_path and os.path.basename(self.jar_path), waited)
+            return self._call_proxy_inner(params or {}, class_name=class_name,
+                                          pan_cookies=pan_cookies)
+
+    def _call_proxy_inner(self, params, class_name='', pan_cookies=None):
+        from proxy_contract import ProxyResult
+
+        if not self._ensure_alive():
+            raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable"}')
+        request_params = dict(params or {})
+        request_params['__static_proxy'] = True
+        if class_name:
+            request_params['class_name'] = class_name
+        if pan_cookies:
+            request_params['pan_cookies'] = pan_cookies
+
+        rid = _next_id()
+        req = json.dumps({'id': rid, 'method': 'proxy', 'params': request_params},
+                         ensure_ascii=False, default=str) + '\n'
+        fut = threading.Event()
+        result = {}
+
+        def resolve(v):
+            result['v'] = v
+            fut.set()
+
+        def reject(e):
+            result['e'] = e
+            fut.set()
+
+        with self._lock:
+            self._pending[rid] = (resolve, reject)
+        try:
+            self.proc.stdin.write(req.encode('utf-8'))
+            self.proc.stdin.flush()
+        except Exception as e:
+            with self._lock:
+                self._pending.pop(rid, None)
+            logger.warning('jar proxy write failed, restarting bridge: %s', e)
+            self._kill_proc()
+            if not self._ensure_alive():
+                raise RuntimeError(f'[L3:jar] {self._last_error or "jar bridge unavailable after restart"}')
+            with self._lock:
+                self._pending[rid] = (resolve, reject)
+            try:
+                self.proc.stdin.write(req.encode('utf-8'))
+                self.proc.stdin.flush()
+            except Exception as e2:
+                with self._lock:
+                    self._pending.pop(rid, None)
+                raise RuntimeError(f'[L3:jar] jar proxy write after restart failed: {e2}')
+
+        if not fut.wait(CALL_TIMEOUT):
+            with self._lock:
+                self._pending.pop(rid, None)
+            self._kill_proc()
+            raise TimeoutError('[L3:jar] jar proxy timeout (bridge restarted)')
+        if 'e' in result:
+            raise result['e']
+        msg = result.get('v')
+        if not isinstance(msg, dict) or not isinstance(msg.get('proxy'), dict):
+            raise RuntimeError('[L3:jar] invalid static proxy response')
+        info = msg['proxy']
+        status = int(info.get('status', 200) or 200)
+        mime = str(info.get('mime') or 'application/octet-stream')
+        headers = {str(k): str(v) for k, v in (info.get('headers') or {}).items()
+                   if v is not None}
+        stream = info.get('stream')
+        close = None
+        if isinstance(stream, dict) and stream.get('port') and stream.get('token'):
+            body = JarProxyBody(stream.get('host') or '127.0.0.1', stream['port'],
+                                stream['token'])
+            close = body.close
+        else:
+            encoded = info.get('body') or ''
+            try:
+                body = base64.b64decode(encoded, validate=False)
+            except Exception as e:
+                raise RuntimeError(f'[L3:jar] invalid proxy body: {e}') from e
+        self._crash_count = 0
+        return ProxyResult(status=status, mime=mime, body=body,
+                           headers=headers, close=close)
+
     def _kill_proc(self):
         """强制结束当前 JVM 子进程（写失败/崩溃后重启前调用）。
 
@@ -666,6 +850,12 @@ class JarBridge:
                 pass  # Windows 上已退出的进程 kill 会抛 Errno 22
             except Exception:
                 pass
+            for pipe in (getattr(proc, 'stdout', None), getattr(proc, 'stderr', None)):
+                try:
+                    if pipe:
+                        pipe.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------ 生命周期
 
@@ -696,6 +886,14 @@ class JarBridge:
                     proc.kill()
                 except Exception:
                     pass
+            finally:
+                for pipe in (getattr(proc, 'stdin', None), getattr(proc, 'stdout', None),
+                             getattr(proc, 'stderr', None)):
+                    try:
+                        if pipe:
+                            pipe.close()
+                    except Exception:
+                        pass
 
 
 # ------------------------------------------------------------ 文件工具
