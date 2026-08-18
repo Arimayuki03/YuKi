@@ -1,0 +1,6 @@
+{
+  "urls": [
+    {"name": "gone-a", "url": "./depot_gone_a.json"},
+    {"name": "gone-b", "url": "./depot_gone_b.json"}
+  ]
+}

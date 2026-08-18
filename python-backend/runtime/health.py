@@ -5,21 +5,20 @@ import os
 import time
 from typing import Iterable
 
+from .android_policy import android_worker_available
 from .errors import RuntimeError, error_from_exception
 
 
 def android_worker_enabled() -> bool:
-    """Return true only after an Android Worker has reported readiness.
+    """Return true only when policy and both readiness inputs permit it.
 
-    G0 does not start an Android Worker.  The old implementation treated a
-    user-set ``VPC_ANDROID_WORKER_ENABLED`` flag as proof that one existed,
-    which could let an Android/Dex JAR enter the ordinary JVM path and become
-    healthy.  A future Worker must set both flags during its health handshake;
-    merely opting in is never sufficient.
+    A4.1 ended in No-Go, so the current product policy keeps this false even if
+    both environment variables are set.  This prevents environment flags from
+    silently widening the formal C1 support ceiling.
     """
     enabled = str(os.environ.get('VPC_ANDROID_WORKER_ENABLED', '')).lower() in ('1', 'true', 'yes')
     ready = str(os.environ.get('VPC_ANDROID_WORKER_READY', '')).lower() in ('1', 'true', 'yes')
-    return enabled and ready
+    return android_worker_available(enabled=enabled, ready=ready)
 
 
 @dataclass
@@ -39,6 +38,9 @@ class SiteHealth:
     circuit_open_until: float = 0
     failure_stage: str = ''
     half_open: bool = False
+    # C2.4：能力路由结论（RouteDecision）。诊断页要能回答「为什么判成这个运行时」，
+    # 而不是只看到一个 runtime 字符串。
+    route: object = None
 
     def __post_init__(self):
         self.capabilities = sorted(set(str(v) for v in self.capabilities if v))
@@ -166,31 +168,32 @@ class SiteHealth:
             'circuitOpenUntil': int(self.circuit_open_until * 1000) if self.circuit_open_until else 0,
             'failureStage': self.failure_stage,
             'halfOpen': bool(self.half_open),
+            'route': self.route.to_dict() if self.route is not None else None,
         }
 
 
 def infer_site_health(item: dict, capabilities: Iterable[str] | None = None) -> SiteHealth:
-    """只按配置字段推断候选运行时；JAR Android 信号由下载后的扫描覆盖。"""
+    """只按配置字段推断候选运行时；JAR Android 信号由下载后的扫描覆盖。
+
+    判定本身委托给 C2.4 的 :func:`capability_router.route_site`——此前这里有一份
+    独立的 if/elif 链，与 `config.py::_build_site` 的分支规则不完全一致（例如 drpy
+    在这里是 C1、在装配路径上却直接跳过），诊断页与实际装配结果因此会互相矛盾。
+    现在两边共用同一个纯函数，`route` 字段同时带上判定依据。
+
+    延迟导入：`capability_router` 在模块层从本模块取 `android_worker_enabled`，
+    顶层互相导入会形成环。
+    """
+    from .capability_router import capabilities_for, route_site
+    from .config_snapshot import site_flag
+
     key = str((item or {}).get('key') or '?')
-    api = str((item or {}).get('api') or '')
-    try:
-        stype = int((item or {}).get('type', 0))
-    except (TypeError, ValueError):
-        stype = -1
-    lower = api.lower()
-    if stype in (0, 1):
-        runtime, compatibility = 'cms', 'C1'
-    elif 'drpy' in lower:
-        runtime, compatibility = 'drpy', 'C1'
-    elif stype == 4 or lower.endswith('.js'):
-        runtime, compatibility = 'js', 'C1'
-    elif stype == 3 and (api.startswith('csp_') or lower.split('?')[0].endswith('.jar')):
-        runtime, compatibility = 'jar', 'C1'
-    elif stype == 3:
-        runtime, compatibility = 'python', 'C1'
+    decision = route_site(item, site_key=key)
+    if capabilities is None:
+        caps = capabilities_for(item, decision)
     else:
-        runtime, compatibility = 'unsupported', 'C0'
-    caps = list(capabilities or ('home', 'search', 'detail', 'player', 'proxy'))
-    if not bool((item or {}).get('searchable', 1)) and 'search' in caps:
-        caps.remove('search')
-    return SiteHealth(key, runtime=runtime, compatibility=compatibility, capabilities=caps)
+        caps = list(capabilities)
+        # 与字段矩阵共用同一份开关语义（`searchable=2` 在 FongMi 里不可搜）。
+        if not site_flag((item or {}).get('searchable'), 1) and 'search' in caps:
+            caps.remove('search')
+    return SiteHealth(key, runtime=decision.runtime, compatibility=decision.compatibility,
+                      capabilities=caps, route=decision)

@@ -11,8 +11,14 @@ quickjs-ng 不支持跨模块 import，因此把入口模块及其依赖树抓�
 - import './side.js'                   副作用导入
 动态 import() 与 http(s) 绝对依赖同样支持；循环依赖按先到者截断。
 """
+import os
+import hashlib
+import time
+import logging
 import re
 from urllib.parse import urljoin
+
+logger = logging.getLogger('vpc.jsengine.resolver')
 
 # 顶层 import 语句（整行，含多行命名列表不常见，按单行处理）
 _RE_IMPORT_FROM = re.compile(r'^\s*import\s+(.+?)\s+from\s+[\'"]([^\'"]+)[\'"]\s*;?', re.M)
@@ -20,6 +26,23 @@ _RE_IMPORT_SIDE = re.compile(r'^\s*import\s+[\'"]([^\'"]+)[\'"]\s*;?', re.M)
 _RE_NAMESPACE = re.compile(r'^\*\s*as\s+([\w$]+)$')
 
 MAX_MODULES = 40  # 单 spider 依赖模块数上限，防异常依赖树
+MODULE_CACHE_TTL = 3600  # 模块二级缓存 TTL (1小时)
+
+# 内存二级持久缓存：url -> (src, timestamp)
+_GLOBAL_MODULE_CACHE = {}
+
+
+def fetch_module_cached(url, fetch_text, ttl=MODULE_CACHE_TTL):
+    """带 TTL 的全局模块网络拉取与二级缓存，避免重复解析与跨站点拉取开销。"""
+    now = time.time()
+    cached = _GLOBAL_MODULE_CACHE.get(url)
+    if cached and (now - cached[1]) < ttl:
+        return cached[0]
+    
+    src = fetch_text(url)
+    if src:
+        _GLOBAL_MODULE_CACHE[url] = (src, now)
+    return src
 
 
 def parse_imports(src):
@@ -83,7 +106,7 @@ class ModuleBundle:
             raise ValueError(f'module count exceeds limit {limit}')
         self._visiting.add(url)
         try:
-            src = fetch_text(url)
+            src = fetch_module_cached(url, fetch_text)
         finally:
             self._visiting.discard(url)
         deps = []

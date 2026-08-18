@@ -72,7 +72,11 @@ class JsSpider(Spider):
         return self._json(self._call('action', action), {})
 
     def destroy(self):
-        self._call('destroy')
+        if self.engine is not None:
+            try:
+                self.engine.destroy()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------ 工具
 

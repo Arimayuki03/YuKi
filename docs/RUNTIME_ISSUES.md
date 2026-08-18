@@ -17,6 +17,9 @@
 | R8 | `ended` 事件附带会话号并按会话匹配「看完」判定 | ✅ 已验证：旧会话延迟 ended 不误判新会话，新会话自身 ended 判看完 |
 | R9 | G0 运行时契约、站点健康和兼容夹具退出边界 | ✅ 已验证：离线 4 夹具、Python 全量、Node 222/222、JS 语法 40/40 |
 | R11 | S1 不可信运行时隔离、硬超时、聚合取消和熔断恢复 | ✅ 已验证：Python 24 阶段、Node 225/225、JS 语法 40/40、Ruff/ESLint 0 error |
+| R12 | C2 配置三层分离、prepare→validate→atomic swap、`ext` 语义、能力路由与配置安全边界 | ✅ 已验证：`run_all.py` 28 阶段全通过、编译 79 文件 0 error；四个新阶段共 157 条全部走 loopback 夹具不出网 |
+| R13 | `guard_url` 把 Windows 盘符当协议，`D:/tv.json` 报错原因与真实问题不符 | ✅ 已修复并验证：`test_config_security.py::test_blocked_local_disk_paths` |
+| R14 | `detect_text` 只剥一层 BOM，双 BOM 配置被 `json.loads` 报成第 1 列语法错误 | ✅ 已修复并验证：`test_ext_semantics.py::test_bom_and_declared_and_fallback` |
 
 ---
 
@@ -74,6 +77,42 @@ JAR 控制调用均进入可终止进程；绝对 deadline 覆盖排队、Worker
 225/225，JavaScript 语法 40/40，ESLint 0 error（64 条既有 warning），Ruff 通过。诊断夹具
 访问 `example.com` 时得到预期 404/502，这属于外部响应/故障分类覆盖，不是代码回归失败。
 本轮未进入 C2；Android/Dex/native JAR 和真实公共仓可用性仍按后续阶段及外部环境单独验收。
+
+---
+
+## 2026-08-18 C2 配置加载与安全边界验证
+
+本轮完成 C2.1–C2.5。配置分为下载 / 解析 / 运行三层，更新按 prepare → validate →
+atomic swap；新配置装配不出任何站点时旧快照连站点一起保留，本次已起的 Worker 全部释放。
+同内容哈希重复加载只累加 `reuseCount`，不重启 Worker；多仓复用判据是「清单哈希 | 选中
+子仓 URL | 子仓正文哈希」三者合成，只看清单会在子仓内容变化时错误复用。`ext` 按 FongMi
+`SiteApi` 的分歧处理：type=4/JS 在 `homeContent` 前展开一次，type=3 拿原始字符串；空响应
+保留原 URL；展开失败只写进该站点的 `error`，取消则上抛为整次加载结束。
+
+确定性离线验收全部走 `tests/offline_config_server.py` 的 loopback 夹具，不出网：
+`test_config_snapshot.py` 53、`test_ext_semantics.py` 39、`test_capability_router.py` 29、
+`test_config_security.py` 36。配置形态覆盖单仓 JSON、多仓 depot（含嵌套/全坏/私网子仓/
+条目截断）、带注释 JSON、gzip 直链（正文即 gzip）、传输层 gzip（`Content-Encoding`）、
+JPEG/PNG 伪装、相对路径仓、未知 `type`、内联 JSON 与本地文件。四种载体解出同一个内容
+哈希，任何解码错误表现为哈希不等而不是夹具写错。超时/取消覆盖预算耗尽报 L1、取消前零
+请求、装配中取消释放全部 Worker、多仓回退中取消停止扫描。
+
+`run_all.py` 28 阶段全部通过，编译 79 个 Python 文件 0 error。
+
+本轮由测试暴露并修掉的两个真实缺陷（均属产品缺陷，不是测试写错）：
+
+| 编号 | 现象 | 根因与修复 |
+|---|---|---|
+| R13 | 配置填 `D:/tv.json` 时，诊断页报“不支持的协议 d://”，与真实原因（引用了本地磁盘路径）不符 | `urlsplit('C:\\x\\tv.json')` 把盘符当成 scheme，而 `guard_url` 先按 scheme 分派。已把磁盘路径判定移到 scheme 解析之前（`runtime/config_security.py`）。`file://` 等伪协议形状不同，仍落 `scheme_blocked` |
+| R14 | 合法配置报 `Expecting value: line 1 column 1`，看上去像用户把 JSON 写坏了 | 已带 BOM 的文件又被按 `utf-8-sig` 编码一次会有两层 BOM，`detect_text` 只剥一层字节 BOM，解码后文本仍以 U+FEFF 开头。已在所有解码分支去掉残留 BOM 字符（`runtime/ext_resolver.py`），用例加强为同时覆盖单 BOM 与双 BOM |
+
+环境侧两条与代码无关的干扰，单独记录以免误判为回归：裸 `python` 缺 `lxml`，导入
+`config` 即 `ModuleNotFoundError`，必须用 `python-backend/.venv/Scripts/python.exe`；
+夹具进入时若不隔离宿主代理（环境变量 + Windows 系统代理），指向 `*.invalid` 的用例会打到
+公司代理并可能拿到 200 错误页，装配结果随宿主环境变化。
+
+本轮未进入 N3：drpy 只做独立归类（C0、`worker` 为空），真正的 drpy 运行时和 type `15/16`
+仍缺上游契约与真实配置，没有实现也没有假装实现。
 
 ---
 

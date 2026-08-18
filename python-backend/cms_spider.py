@@ -101,14 +101,20 @@ class CmsSpider:
         return {'list': [self._vod_short(v) for v in (data.get('list') or [])]}
 
     def playerContent(self, flag, id, vipFlags):
-        # id 即播放地址（CMS 直链）；非媒体后缀交解析器兜底
-        url = str(id)
-        if url.lower().split('?')[0].endswith(PLAYABLE):
+        # id 即播放地址（CMS 直链）；非媒体后缀或网页 URL 须交解析器兜底
+        url = str(id).strip()
+        path = url.lower().split('?')[0]
+        # HTML 页面绝不能误标为直链 (parse=0)
+        is_html_fake_direct = path.endswith(('.html', '.htm', '.shtml', '.php', '.jsp', '.asp', '.aspx'))
+        if not is_html_fake_direct and path.endswith(PLAYABLE):
             return {'parse': 0, 'playUrl': '', 'url': url, 'header': json.dumps(UA)}
         return {'parse': 1, 'playUrl': '', 'url': url, 'header': json.dumps(UA)}
 
     def isVideoFormat(self, url):
-        return str(url).lower().split('?')[0].endswith(PLAYABLE)
+        u = str(url).strip().lower().split('?')[0]
+        if u.endswith(('.html', '.htm', '.shtml', '.php', '.jsp', '.asp', '.aspx')):
+            return False
+        return u.endswith(PLAYABLE)
 
     def manualVideoCheck(self):
         return False
@@ -125,14 +131,25 @@ class CmsSpider:
     # ------------------------------------------------------------ 工具
 
     def _fetch(self, params):
-        rsp = http_client.get(self.api, params=params, headers=UA, timeout=15, verify=True)
-        rsp.encoding = rsp.apparent_encoding or 'utf-8'
-        text = rsp.text.strip()
+        try:
+            rsp = http_client.fetch_follow_redirects(self.api, params=params, headers=UA, timeout=15)
+            # 自动探测并支持 GBK / GB2312 / UTF-8 等常见编码
+            rsp.encoding = rsp.apparent_encoding or 'utf-8'
+            text = rsp.text.strip()
+        except Exception as e:
+            raise ValueError(f'[L3:cms] cms fetch failed: {e}') from e
+
         if text.startswith('{') or text.startswith('['):
-            return json.loads(text)
+            try:
+                return json.loads(text)
+            except Exception as e:
+                raise ValueError(f'[L3:cms] cms json decode error: {e}') from e
         if text.startswith('<'):
-            return self._parse_xml(text)
-        raise ValueError('cms: unexpected response (%s...)' % text[:30])
+            try:
+                return self._parse_xml(text)
+            except Exception as e:
+                raise ValueError(f'[L3:cms] cms xml parse error: {e}') from e
+        raise ValueError('[L3:cms] unexpected response: (%s...)' % text[:30])
 
     def _parse_xml(self, text):
         """type=0 苹果 CMS XML → 与 JSON 接口同构的 dict。"""

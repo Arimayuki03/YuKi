@@ -61,16 +61,15 @@ def _local_kv_save(data):
         logger.warning('local kv save failed: %s', e)
 
 
-# ---- C2/M-24：JS local KV 按站点隔离 + 配额 ----
-# 存储键 = "<site_key>\u0002<原key>"；读取时 scoped 未命中回退裸 key（迁移前
-# 旧数据兼容），写入时顺带清理同名裸键。全站点共享一个 JSON 文件，但互不可见。
+# ---- C2/M-24/N3.2：JS local KV 按站点隔离 + 单站点配额 ----
 KV_SCOPE_SEP = '\u0002'
-KV_MAX_VALUE_BYTES = 64 * 1024         # 单值上限
-KV_MAX_TOTAL_BYTES = 2 * 1024 * 1024   # 全文件上限（超限拒写并告警）
+KV_MAX_VALUE_BYTES = 64 * 1024         # 单值上限 (64KB)
+KV_MAX_SITE_BYTES = 256 * 1024         # 单站点上限 (256KB)
+KV_MAX_TOTAL_BYTES = 2 * 1024 * 1024   # 全文件上限 (2MB)
 
 
 def _kv_scoped(site_key, key):
-    return site_key + KV_SCOPE_SEP + key if site_key else key
+    return (site_key + KV_SCOPE_SEP + key) if site_key else key
 
 
 def _native_local_get(site_key=''):
@@ -79,7 +78,7 @@ def _native_local_get(site_key=''):
             data = _local_kv_load()
             v = data.get(_kv_scoped(site_key, key))
             if v is None and site_key:
-                v = data.get(key)   # 迁移前旧数据兜底
+                v = data.get(key)   # 迁移前旧数据兼容兜底
             return v if isinstance(v, str) else ''
     return fn
 
@@ -87,13 +86,28 @@ def _native_local_get(site_key=''):
 def _native_local_set(site_key=''):
     def fn(key, value):
         value = str(value)
-        if len(value.encode('utf-8')) > KV_MAX_VALUE_BYTES:
+        val_bytes = len(value.encode('utf-8'))
+        if val_bytes > KV_MAX_VALUE_BYTES:
             logger.warning('[js] local.set skipped: value %dKB > %dKB (site=%s key=%.60s)',
-                           len(value) // 1024, KV_MAX_VALUE_BYTES // 1024, site_key, key)
+                           val_bytes // 1024, KV_MAX_VALUE_BYTES // 1024, site_key, key)
             return None
         with _local_kv_lock:
             data = _local_kv_load()
             sk = _kv_scoped(site_key, key)
+
+            # 计算该 site_key 当前占用的总字节数
+            site_prefix = site_key + KV_SCOPE_SEP if site_key else ''
+            current_site_bytes = sum(
+                len(k.encode('utf-8')) + len(str(v).encode('utf-8'))
+                for k, v in data.items()
+                if site_prefix and k.startswith(site_prefix) and k != sk
+            ) + len(sk.encode('utf-8')) + val_bytes
+
+            if site_key and current_site_bytes > KV_MAX_SITE_BYTES:
+                logger.warning('[js] local.set skipped: site %s total %dKB > %dKB',
+                               site_key, current_site_bytes // 1024, KV_MAX_SITE_BYTES // 1024)
+                return None
+
             data[sk] = value
             if site_key and key in data:
                 del data[key]   # 迁移走同名裸键，避免兜底读到旧值
@@ -151,6 +165,21 @@ CAT_ALIASES = {
 }
 
 
+GLOBAL_SUGGESTIONS = {
+    'rule': '此 JS 依赖 drpy 规则解析器 (rule)，需使用 drpy 引擎 (type=3) 或补充 drpy 运行环境',
+    'pdfh': '此 JS 依赖 drpy HTML 解析辅助函数 (pdfh)，需使用 drpy 引擎或补充 drpy 运行环境',
+    'pd': '此 JS 依赖 drpy HTML 属性/节点提取函数 (pd)，需使用 drpy 引擎或补充 drpy 运行环境',
+    'pdfa': '此 JS 依赖 drpy 节点列表解析函数 (pdfa)，需使用 drpy 引擎或补充 drpy 运行环境',
+    'mobaRule': '此 JS 依赖 mobaRule 模板规则，请使用 drpy 引擎',
+    'fetch': '当前 QuickJS 环境提供的是 TVBox 标准 http/req 接口，请使用 http/req 代替 fetch',
+    'axios': '当前 QuickJS 环境提供的是 TVBox 标准 http/req 接口，请使用 http/req 代替 axios',
+    'document': '当前宿主为非浏览器 QuickJS 环境，请使用 cheerio 进行 DOM/HTML 解析',
+    'window': '当前宿主为非浏览器 QuickJS 环境',
+    'navigator': '当前宿主为非浏览器 QuickJS 环境',
+    'process': '当前宿主为纯 JS 沙箱环境，禁止访问 Node 进程对象',
+}
+
+
 def _native_http(url, options_json):
     """同步 HTTP，返回 JSON 串：{ok, status, code, content, headers}。"""
     try:
@@ -161,9 +190,20 @@ def _native_http(url, options_json):
     headers = opt.get('headers') or {}
     timeout = opt.get('timeout') or 10
     allow_redirects = opt.get('redirect', True)
+
+    # N3.2 / S1.1: 继承宿主安全策略（SSRF 守卫与私网防护）
+    try:
+        from runtime.config_security import guard_url, ConfigSecurityPolicy, SourceTrust
+        guard_url(url, policy=ConfigSecurityPolicy.from_env(), trust=SourceTrust())
+    except Exception as e:
+        logger.warning('js req blocked by security policy: %s (%s)', url, e)
+        return json.dumps({'ok': False, 'status': 403, 'code': 403,
+                           'content': f'blocked by host security policy: {e}',
+                           'headers': {}, 'url': url})
+
     try:
         kwargs = dict(headers=headers, timeout=timeout,
-                      allow_redirects=bool(allow_redirects), verify=False)
+                      allow_redirects=bool(allow_redirects), verify=True)
         if method == 'POST':
             kwargs['data'] = opt.get('body') or opt.get('data')
             rsp = http_client.post(url, **kwargs)
@@ -218,14 +258,18 @@ class JsEngine:
 
     @staticmethod
     def _warn_missing_global(error, source=''):
-        """把 QuickJS 深埋的 ReferenceError 转成可检索的宿主诊断。"""
+        """把 QuickJS 深埋的 ReferenceError 转成可检索的宿主诊断与操作建议。"""
         text = str(error or '')
         match = re.search(r"(?:ReferenceError:\s*)?([A-Za-z_$][\w$]*) is not defined", text)
         if not match:
             return
         name = match.group(1)
         suffix = f' ({source})' if source else ''
-        logger.warning('该 JS 源需要宿主未提供的全局 <%s>%s', name, suffix)
+        suggestion = GLOBAL_SUGGESTIONS.get(name, '')
+        if suggestion:
+            logger.warning('该 JS 源需要宿主未提供的全局 <%s>%s。建议：%s', name, suffix, suggestion)
+        else:
+            logger.warning('该 JS 源需要宿主未提供的全局 <%s>%s', name, suffix)
 
     def _js2proxy(self, site_key, flag):
         """TVBox js2Proxy 桥：生成后端 /proxy 媒体代理 URL（query 透传给 localProxy）。"""
@@ -287,7 +331,7 @@ class JsEngine:
                         continue
                     preamble.extend(binding_statements(clause, f'__MOD{dep_idx}__'))
                 body = esm_to_script(src, ns=ns)
-                script = '(function(){\n' + '\n'.join(preamble) + '\n' + body + '\n})();'
+                script = f'(function(){{\n' + '\n'.join(preamble) + '\n' + body + f'\n}})();\n//# sourceURL={url}'
                 try:
                     self.ctx.eval(script)
                 except Exception as e:
@@ -301,8 +345,19 @@ class JsEngine:
 
     # ------------------------------------------------------------ 调用
 
+    def destroy(self):
+        """显式释放上下文与资源。"""
+        with self.lock:
+            try:
+                self.call('destroy')
+            except Exception:
+                pass
+            self.ctx = None
+
     def call(self, method, *args):
         """调用 spider 方法；返回原始字符串结果（通常 JSON 串），失败返回 None。"""
+        if self.ctx is None:
+            return None
         if not self.lock.acquire(blocking=True, timeout=35):
             logger.warning('js call %s timeout waiting for lock', method)
             return None

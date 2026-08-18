@@ -1,0 +1,7 @@
+{
+  "lives": [{"name": "depot-good-live", "type": 0, "url": "https://fixture.invalid/good.txt"}],
+  "sites": [
+    {"key": "depot_good_cms", "name": "Depot Good CMS", "type": 1,
+     "api": "https://fixture.invalid/good/provide/vod/"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "_note": "子仓声明了站点，但没有一个能装配（未知 type=99）。多仓必须继续回退到下一条，而不是把这条当成选中结果。",
+  "lives": [{"name": "depot-empty-live", "type": 0, "url": "https://fixture.invalid/empty.txt"}],
+  "sites": [
+    {"key": "depot_empty_future", "name": "Depot Empty Future", "type": 99,
+     "api": "https://fixture.invalid/empty/future/"}
+  ]
+}

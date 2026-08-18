@@ -1,0 +1,6 @@
+{
+  "urls": [
+    {"name": "empty-first", "url": "./depot_empty.json"},
+    {"name": "good-second", "url": "./depot_good.json"}
+  ]
+}

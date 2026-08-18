@@ -286,30 +286,63 @@ def _empty_config_summary(parse_errors=0):
             'py_failed': 0,
             'other': 0,
         },
+        # 与 ConfigManager._prepare 的 summary 形状保持一致（C2.1/C2.3/C2.4）：
+        # 失败摘要缺键会让前端在「加载失败」和「字段为 0」之间读出 undefined。
+        'runtimes': {},
+        'unknownTypes': [],
+        'unknownFields': [],
+        'blocked': 0,
+        'requiresAndroid': 0,
+        'extExpanded': 0,
+        'extFailed': 0,
+        'hidden': 0,
+        'reused': False,
+        'snapshotId': '',
     }
 
 
-def _config_load_worker(text):
+def _form_flag(form, name):
+    """表单开关：只有显式的真值才算开。
+
+    本地文件读取和强制重建这两个开关必须由宿主 UI 显式带上；`form` 里缺键、空串
+    或 `"0"/"false"` 都视为关，避免把「参数没传」读成「用户同意」。
+    """
+    return str((form or {}).get(name, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _config_load_worker(text, *, allow_local_file=False, force=False):
     try:
-        summary = config_mgr.load(text)
+        summary = config_mgr.load(text, allow_local_file=allow_local_file, force=force)
         _config_task.update({'status': 'done', 'summary': summary, 'msg': ''})
         logger.info('config load done: %s sites', summary.get('sites'))
     except Exception as e:
         logger.exception('config load failed')
         message = str(e)
-        _config_task.update({
+        # 新配置失败时旧健康配置仍在服务（C2.1）：把它写进任务结果，否则前端只看到
+        # 一条错误，无法区分「现在没得用」和「还在用上一份」。
+        retained = getattr(config_mgr, 'last_healthy_snapshot', None)
+        payload = {
             'status': 'error',
             'summary': _empty_config_summary(1 if '[L1:parse]' in message else 0),
             'msg': message,
-        })
+        }
+        if retained is not None and retained is getattr(config_mgr, 'snapshot', None):
+            payload['retained'] = {
+                'snapshotId': retained.snapshot_id,
+                'healthy': retained.healthy_count,
+                'sites': len(retained.sites),
+            }
+        _config_task.update(payload)
 
 
-def _config_load_async(text):
+def _config_load_async(text, *, allow_local_file=False, force=False):
     """启动后台加载；已在加载中返回 None。"""
     if _config_task['status'] == 'loading':
         return None
     _config_task.update({'status': 'loading', 'summary': None, 'msg': ''})
-    threading.Thread(target=_config_load_worker, args=(text,), daemon=True).start()
+    threading.Thread(target=_config_load_worker, args=(text,),
+                     kwargs={'allow_local_file': allow_local_file, 'force': force},
+                     daemon=True).start()
     return True
 
 
@@ -591,13 +624,19 @@ def _dispatch_action_inner(form):
             name = form.get('name', '')
             text = form.get('text', '')
             if name in ('config', '配置') and text:
-                if _config_load_async(text) is None:
+                if _config_load_async(text, allow_local_file=_form_flag(form, 'localFile'),
+                                      force=_form_flag(form, 'force')) is None:
                     raise RuntimeContractError('L1_CONFIG_BUSY')
                 return 200, '{"code":202,"msg":"config loading"}'
             logger.info('setting: %s=%s', name, text)
             return 200, '{"code":200,"msg":"setting received"}'
         if do == 'loadConfig':
-            if _config_load_async(form.get('url', '')) is None:
+            # `localFile`：地址来自宿主的文件选择对话框——用户亲手选的本地路径可读。
+            # `force`：跳过「同内容复用」与「全部装配失败则保留旧配置」，用于用户
+            # 明确要求重建的场景。两者都默认关闭，远端配置无法自己打开。
+            if _config_load_async(form.get('url', ''),
+                                  allow_local_file=_form_flag(form, 'localFile'),
+                                  force=_form_flag(form, 'force')) is None:
                 raise RuntimeContractError('L1_CONFIG_BUSY')
             return 200, '{"code":202,"msg":"config loading"}'
         if do == 'configTask':

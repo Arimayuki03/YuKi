@@ -28,10 +28,11 @@ DuoDuo/
 VOX/
 TV/
 TVBox/
-# 本地工具/编排器配置
+# 本地工具/编排器配置与运行日志
 .omo/
 .zcode/
 ha-orchestrator.config*.json
+dsh-ha-orchestrator.*
 analysis-tmp/
 # jar-runner 构建产物（源码与 stubs 入库，二进制由 build.py 生成）
 python-backend/jar-runner/runner.jar
@@ -47,3 +48,9 @@ python-backend/jar-runner/test-proxy.jar
 python-backend/tests/compat_progress.jsonl
 python-backend/tests/compat_report.txt
 python-backend/tests/compat_report.json
+
+# C2 离线配置夹具的派生载体（由 single.json 确定性生成，见
+# python-backend/tests/offline_config_server.ensure_binary_fixtures）
+python-backend/tests/fixtures/config/single.json.gz
+python-backend/tests/fixtures/config/disguise.jpg
+python-backend/tests/fixtures/config/disguise.png

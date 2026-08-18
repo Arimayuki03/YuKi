@@ -35,6 +35,20 @@ class Site:
         self.searchable = True      # config 的 searchable 标志
         self.quick_search = True    # quickSearch
         self.filterable = True      # filterable
+        # C2.3 字段矩阵的其余项（此前只读了 searchable/quickSearch/filterable，
+        # 其他字段解析后被丢弃，站点级超时和 hide/indexs 因此完全失效）。
+        # 语义取 FongMi `Site.java` 的 getter：见 runtime/config_snapshot.py。
+        self.changeable = True      # 允许换源
+        self.danmaku = True         # 允许弹幕
+        self.hide = False           # 首页/搜索隐藏（仍可按 key 直达）
+        self.index = False          # indexs：详情页优先展示分类索引
+        self.timeout_ms = 15000     # 站点级请求超时（FongMi TIMEOUT_PLAY 默认 15s）
+        self.categories = []        # 分类白名单（空 = 不过滤）
+        self.play_url = ''          # 播放地址前缀/嗅探规则
+        self.click = ''             # 点击脚本（TVBox 扩展）
+        self.style = None           # {type, ratio}；None = 运行时回退 rect
+        self.entry = None           # SiteEntry：完整矩阵 + 原始条目 + 未知字段
+        self.ext_detail = None      # ResolvedExt：ext 归一/展开的过程与结论
         self.health = SiteHealth(key)
 
     @property

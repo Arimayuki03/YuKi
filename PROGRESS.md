@@ -16,7 +16,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.video-pc/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3 已验收；S1 与真实公共仓/发布环境验收仍未开始 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -78,6 +78,22 @@
   Android Worker 未完成 enabled+ready 握手时保持 `L2_SITE_REQUIRES_ANDROID`，不计 healthy。
 - 生产 Worker Supervisor、进程隔离硬杀、重启和熔断属于 S1，本轮未实现。
 
+### TVBox / FongMi C2 配置标准化与能力路由（2026-08-18）
+
+- 配置分下载（`ConfigFetchResult`）/ 解析（`ParsedConfig`）/ 运行（`ConfigSnapshot`）三层，
+  更新按 prepare → validate → atomic swap；新配置一个站点都装配不出来时旧快照连站点一起
+  保留，本次已起的 Worker 全部释放。同内容哈希重复加载只累加 `reuseCount`，不重启 Worker。
+- 多仓 `urls` 由 `RepoTrail` 记录清单、截断数、尝试顺序、选中条目和逐条失败原因；嵌套多仓
+  在深度 1 拒绝，子仓指向私网被守卫拦下，合并只增不删。
+- `ext` 按 FongMi `ExtAdapter`/`fetchExt` 对齐：任意 JSON 值归一为字符串，只有 type=4/JS 在
+  `homeContent` 前展开一次，type=3 拿原始字符串；空响应保留原 URL；失败只影响该站点。
+- 能力路由集中在 `runtime/capability_router.py`，装配与诊断页共用同一结论；R4→R5 在字节级
+  JAR 分级后收敛，与 JAR 加载器使用同一组 Android 信号，Android-only JAR 不再回退普通 JVM。
+- 配置安全边界：仅 `http`/`https`，磁盘路径在 scheme 分派前判掉；响应/解压/`ext` 体积、跳转
+  次数、多仓与 `ext` 递归深度均设限；私网信任按同源（scheme+host+port）继承，逐跳重新守卫。
+- drpy 只做独立归类（C0、`worker` 为空），真正的 drpy 运行时和 type `15/16` 属于 N3，本轮
+  未实现也未假装实现。
+
 ### 2026-08-09 2A 改动记录
 
 - `src/renderer/index.html`：删除左侧独立“关于”入口和独立视图，将关于卡片迁入“设置 → 关于”；版本号仅保留在关于分类；系统页删除画中画控件和系统页版本号；设置保持在左侧功能项末尾，收缩按钮位于其下方。
@@ -97,7 +113,11 @@
 - [x] Kazumi/UI 后续：规则页布局优化（T55）、首页推荐功能（T62）均已完成。
 - [x] 时间表后续：完整对齐 Kazumi 时间表——完整季节索引（近 20 年）、封面排名角标、排序/收藏过滤、点击进入二级详情页（T57/T58）。
 - [x] TVBox/FongMi G0.1-G0.3：兼容基线、统一运行时错误契约、站点能力模型和确定性离线验收。
-- [ ] TVBox 兼容性 S1 及真实公共仓/发布环境验收：按 [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 与
+- [x] TVBox/FongMi S1.1-S1.4：可终止 Worker 进程隔离、绝对 deadline、聚合取消和熔断恢复。
+- [x] TVBox/FongMi C2.1-C2.5：ConfigSnapshot 三层与原子换入、`ext` 完整语义、站点字段矩阵、
+  Capability Router、配置安全边界（`run_all.py` 28 阶段全通过）。
+- [ ] TVBox 兼容性 N3（drpy / PC 原生运行时）及真实公共仓/发布环境验收：按
+  [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 与
   [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
@@ -149,6 +169,15 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-08-18 C2.1-C2.5 验收：`python-backend/tests/run_all.py` 28 阶段全通过、编译 79 个 Python
+文件 0 error。四个新阶段共 157 条（config-snapshot 53、ext-semantics 39、capability-router 29、
+config-security 36）全部走 `tests/offline_config_server.py` 的 loopback 夹具，不出网；配置形态
+覆盖单仓 JSON、多仓 depot（嵌套/全坏/私网子仓/条目截断）、带注释 JSON、gzip 直链、传输层
+gzip、JPEG/PNG 伪装、相对路径仓、未知 `type`、内联 JSON 与本地文件，四种载体解出同一个
+内容哈希。本轮由测试暴露并修掉两个真实缺陷：`guard_url` 把 Windows 盘符当协议（诊断原因
+与真实问题不符）、`detect_text` 只剥一层 BOM（双 BOM 配置被报成第 1 列 JSON 语法错误），
+详见 [运行时问题](docs/RUNTIME_ISSUES.md) R13/R14。本轮按任务书停止，未进入 N3。
 
 2026-08-18 S1.1-S1.4 验收：新增 spawn-only `RuntimeSupervisor`；Worker 在不可信加载前等待
 Windows Job 绑定，deadline 覆盖排队、启动和收尾，超时/取消以进程树实际退出为证据。

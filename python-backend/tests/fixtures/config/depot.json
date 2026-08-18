@@ -1,0 +1,7 @@
+{
+  "urls": [
+    {"name": "broken-first", "url": "./depot_missing.json"},
+    {"name": "good-second", "url": "./depot_good.json"},
+    {"name": "extra-third", "url": "./depot_extra.json"}
+  ]
+}

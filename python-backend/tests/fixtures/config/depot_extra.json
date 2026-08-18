@@ -1,0 +1,7 @@
+{
+  "lives": [{"name": "depot-extra-live", "type": 0, "url": "https://fixture.invalid/extra.txt"}],
+  "sites": [
+    {"key": "depot_extra_cms", "name": "Depot Extra CMS", "type": 1,
+     "api": "https://fixture.invalid/extra/provide/vod/"}
+  ]
+}

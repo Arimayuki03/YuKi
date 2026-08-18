@@ -1,0 +1,19 @@
+{
+  "_note": "条目数超过 MAX_MULTI_REPO_ENTRIES(12)：前 11 条不存在（404），第 12 条可用，末两条必须连合并阶段都不被抓取。",
+  "urls": [
+    {"name": "missing-00", "url": "./trunc_missing_00.json"},
+    {"name": "missing-01", "url": "./trunc_missing_01.json"},
+    {"name": "missing-02", "url": "./trunc_missing_02.json"},
+    {"name": "missing-03", "url": "./trunc_missing_03.json"},
+    {"name": "missing-04", "url": "./trunc_missing_04.json"},
+    {"name": "missing-05", "url": "./trunc_missing_05.json"},
+    {"name": "missing-06", "url": "./trunc_missing_06.json"},
+    {"name": "missing-07", "url": "./trunc_missing_07.json"},
+    {"name": "missing-08", "url": "./trunc_missing_08.json"},
+    {"name": "missing-09", "url": "./trunc_missing_09.json"},
+    {"name": "missing-10", "url": "./trunc_missing_10.json"},
+    {"name": "good", "url": "./depot_good.json"},
+    {"name": "tail-a", "url": "./trunc_tail_a.json"},
+    {"name": "tail-b", "url": "./trunc_tail_b.json"}
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "purpose": "A4.1 Android Worker feasibility spike; artifacts are downloaded only for a user-run probe and are not redistributed",
+  "samples": [
+    {
+      "id": "fxz250711-context",
+      "kind": "android_context",
+      "file": "fxz250711.jar",
+      "url": "https://raw.githubusercontent.com/maoystv/6/refs/heads/main/jar/fxz250711.jar",
+      "sha256": "4c8375db7eaf455db762a4e6420a142d30a04c33ede65810f3d9d5c94b7553f1",
+      "sizeBytes": 377682,
+      "evidence": [
+        "classes.dex",
+        "com.github.catvod.spider.Init.init(android.content.Context)",
+        "android.app.Application and android.os.Handler references"
+      ],
+      "jvmProbe": {
+        "file": "fxz-jvm.jar",
+        "className": "com.github.catvod.spider.NanGua",
+        "ext": "7lj763gg0939795i017ii486k512jkihhilg9g0h96j865740113"
+      }
+    },
+    {
+      "id": "app-secondary-dex",
+      "kind": "secondary_dex",
+      "file": "app.jar",
+      "url": "https://raw.githubusercontent.com/maoystv/6/main/jar/app.jar",
+      "sha256": "e39125ea77db1e0805abffa08bc1f40af37a74e940dfa8e6ede209e832021ca7",
+      "sizeBytes": 310161,
+      "evidence": [
+        "classes.dex",
+        "dalvik.system.DexFile.loadDex",
+        "classes2.dex and secondary-dexes extraction path"
+      ],
+      "jvmProbe": {
+        "file": "app-jvm.jar",
+        "className": "com.github.catvod.spider.AppYsV2",
+        "ext": ""
+      }
+    },
+    {
+      "id": "share-yd-arm-proxy",
+      "kind": "arm_native_proxy",
+      "file": "share-yd.jar",
+      "url": "https://raw.githubusercontent.com/maoystv/TV/refs/heads/master/jar/%E5%88%86%E4%BA%AB%E8%80%85YD.jar",
+      "sha256": "914e2a8edf2e38e5f51b8ec075d934576ec16da4a66756b58f23ad8c4eafc924",
+      "sizeBytes": 33181,
+      "evidence": [
+        "classes.dex",
+        "remote mediaProxy-v7a and mediaProxy-v8a payload references",
+        "local proxy endpoint http://127.0.0.1:8944/?url="
+      ],
+      "nativePayloadAccess": "upstream returned HTTP 403 during the 2026-08-19 probe; ARM ELF and runtime execution therefore remain unverified",
+      "jvmProbe": {
+        "file": "share-yd-jvm.jar",
+        "className": "com.github.catvod.spider.YDjisu",
+        "ext": ""
+      }
+    }
+  ]
+}

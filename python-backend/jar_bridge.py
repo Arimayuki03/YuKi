@@ -24,6 +24,7 @@ import logging
 
 import hoststate
 from runtime.errors import RuntimeError as RuntimeContractError
+from runtime.android_policy import android_only_details
 from runtime.contracts import current_runtime_request
 from runtime.health import android_worker_enabled
 import http_client
@@ -412,7 +413,7 @@ class JarBridge:
                 'L2_SITE_REQUIRES_ANDROID',
                 site_key=site_key,
                 runtime='android',
-                details={
+                details={**android_only_details(),
                     'compatibility': 'C2',
                     'jarLevel': report.get('level'),
                     'signals': sorted(signals),
@@ -532,6 +533,7 @@ class JarBridge:
         # 需要转换：jvm 缓存路径 = 原路径去掉 .jar 加 -jvm.jar
         base = jar_path.rsplit('.', 1)[0]
         jvm_path = base + '-jvm.jar'
+        tmp_jvm_path = base + '-jvm.jar.tmp'
         # M-14：源 jar 更新（md5 变化重新下载）后，旧转换产物必须失效——
         # 否则永远加载旧版类，表现为"更新配置不生效"
         if os.path.isfile(jvm_path) and os.path.getmtime(jvm_path) >= os.path.getmtime(jar_path):
@@ -546,8 +548,12 @@ class JarBridge:
                 cp = [os.path.join(lib_dir, f) for f in os.listdir(lib_dir) if f.endswith('.jar')]
                 main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
             else:
-                logger.warning('dex2jar not found at %s, skipping DEX conversion', d2j_jar)
-                return JarBridge.apply_jar_patches(jar_path)
+                logger.error('dex2jar not found at %s, cannot convert DEX jar %s', d2j_jar, jar_path)
+                raise RuntimeContractError(
+                    'L3_RUNTIME_INIT_FAILED',
+                    runtime='jar',
+                    raw_error=f'dex2jar tools not found for converting DEX jar: {os.path.basename(jar_path)}',
+                )
         else:
             cp = [d2j_jar]
             # 加上 lib 下其他 jar（依赖）
@@ -560,21 +566,61 @@ class JarBridge:
             main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
         java_bin = java_probe.find_java()
         if not java_bin:
-            logger.warning('no java runtime for dex2jar, skipping DEX conversion')
-            return JarBridge.apply_jar_patches(jar_path)
+            logger.error('no java runtime for dex2jar, cannot convert DEX jar %s', jar_path)
+            raise RuntimeContractError(
+                'L3_RUNTIME_INIT_FAILED',
+                runtime='jar',
+                raw_error=f'Java runtime not found for dex2jar conversion: {os.path.basename(jar_path)}',
+            )
         classpath = os.pathsep.join(cp)
-        cmd = [java_bin, '-cp', classpath, main_class, '-o', jvm_path, jar_path]
+        # 先输出到临时文件，完成后原子重命名；若失败或异常立即清理临时文件
+        if os.path.isfile(tmp_jvm_path):
+            try:
+                os.remove(tmp_jvm_path)
+            except OSError:
+                pass
+        cmd = [java_bin, '-cp', classpath, main_class, '-o', tmp_jvm_path, jar_path]
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=120)
             if r.returncode != 0:
-                logger.warning('dex2jar failed: %s', r.stderr.decode('utf-8', 'replace')[:200])
-                return JarBridge.apply_jar_patches(jar_path)
-            if os.path.isfile(jvm_path):
+                err_msg = r.stderr.decode('utf-8', 'replace')[:300]
+                logger.error('dex2jar failed for %s (exit code %d): %s', jar_path, r.returncode, err_msg)
+                raise RuntimeContractError(
+                    'L3_RUNTIME_INIT_FAILED',
+                    runtime='jar',
+                    raw_error=f'dex2jar conversion failed (code {r.returncode}): {err_msg}',
+                )
+            if os.path.isfile(tmp_jvm_path):
+                os.replace(tmp_jvm_path, jvm_path)
                 logger.info('dex2jar ok: %s -> %s', os.path.basename(jar_path), os.path.basename(jvm_path))
                 return JarBridge.apply_jar_patches(jvm_path)
+            raise RuntimeContractError(
+                'L3_RUNTIME_INIT_FAILED',
+                runtime='jar',
+                raw_error=f'dex2jar output missing: {os.path.basename(jvm_path)}',
+            )
+        except subprocess.TimeoutExpired as te:
+            logger.error('dex2jar timed out for %s after 120s', jar_path)
+            raise RuntimeContractError(
+                'L3_RUNTIME_TIMEOUT',
+                runtime='jar',
+                raw_error=f'dex2jar conversion timed out after 120s: {os.path.basename(jar_path)}',
+            ) from te
+        except RuntimeContractError:
+            raise
         except Exception as e:
-            logger.warning('dex2jar exception: %s', e)
-        return JarBridge.apply_jar_patches(jar_path)
+            logger.error('dex2jar exception for %s: %s', jar_path, e)
+            raise RuntimeContractError(
+                'L3_RUNTIME_INIT_FAILED',
+                runtime='jar',
+                raw_error=f'dex2jar conversion error: {e}',
+            ) from e
+        finally:
+            if os.path.isfile(tmp_jvm_path):
+                try:
+                    os.remove(tmp_jvm_path)
+                except OSError:
+                    pass
 
     @staticmethod
     def map_class_name(jar_path, api_class_name):

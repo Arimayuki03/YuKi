@@ -1,6 +1,6 @@
 # 影视 PC 系统架构
 
-> 更新时间：2026-08-18
+> 更新时间：2026-08-19
 >
 > 本文描述当前有效架构。历史方案、详细批次和踩坑记录见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
@@ -129,16 +129,83 @@ FastAPI Python 后端
 
 ## 10. 运行时控制面与站点健康
 
+### 10.1 配置快照与加载事务
+
+配置分三层，职责不重叠（`python-backend/runtime/config_snapshot.py`）：
+
+| 层 | 类型 | 内容 | 生命周期 |
+|---|---|---|---|
+| 下载 | `ConfigFetchResult` | 源 URL、最终 URL、transport（`http`/`file`/`inline`/`depot`）、HTTP 状态、ETag、Last-Modified、内容哈希、体积、跳转链、伪装形态（`gzip`/`image`）、编码、耗时 | 每次取回一份 |
+| 解析 | `ParsedConfig` | `entries`（`SiteEntry` 字段矩阵）、`spider`、`parses`、`flags`、`lives`、`wallpaper`、`header`、未知字段名单、原始顶层 JSON | 纯数据，可随时丢弃 |
+| 运行 | `ConfigSnapshot` | 上两层 + 已装配 `sites`、`diagnostics`、`routes`、`summary`、`security`、`artifacts`、`state`（`prepared`/`running`/`rejected`/`retired`）、`snapshot_id`、`source_hash`、`swap_seq` | 原子替换的单位 |
+
+- 加载事务是 prepare → validate → atomic swap。`_prepare` 把新站点装配进一份**新**列表，
+  期间不碰正在运行的 `sites.sites`；`_validate` 拒绝重复 `key`，也拒绝“新配置全部装配
+  失败但仍持有可用旧快照”；`_apply` 才整体替换清单与诊断，把上一份快照标记
+  `retired`，随后销毁旧 Runner 与不再被引用的 JAR 桥。
+- 因此新配置失败时旧配置继续可用：站点不会被先清空，`lastHealthySnapshot` 保留最近
+  一次 healthy 数 > 0 的快照标识。取消与超时走同一条丢弃路径，已起的 Worker 全部回收。
+- `source_hash` 是复用判据。同内容重复加载只增加 `reuseCount`，不重启任何 Worker；多仓
+  的判据是「清单哈希 | 选中子仓 URL | 子仓正文哈希」三者合成，只看清单会在子仓内容变化
+  时错误复用。
+- 多仓（顶层 `urls`）由 `RepoTrail` 记录 `declared`、`truncated`、实际尝试顺序、上次成功的
+  偏好条目、`selected`、每条失败原因和参与合并的子仓。第一个**装配出站点**的条目胜出，
+  条目表上限 12 条，嵌套多仓在深度 1 处拒绝。合并只增不删：主条目出影片源，其余条目补
+  `lives`/`sites`。
+- 相对 `api`/`jar`/`ext`/`playUrl` 一律按 `fetch.base_url`（即跳转后的**最终** URL）解析。
+
+安全边界（`python-backend/runtime/config_security.py`）：仅 `http`/`https`；本地文件需用户
+显式选择；响应 8 MiB、解压后 32 MiB、`ext` 2 MiB、跳转 5 次、多仓深度 1、`ext` 展开深度 2
+（均可用 `VPC_CONFIG_MAX_*` 覆盖）；声明的 `Content-Length` 在读正文前就判上限，流式读取与
+增量解压各自设限，避免“小包大解压”。此外磁盘路径在解析 scheme **之前**判掉——`urlsplit`
+会把 `C:\...` 的盘符当成 scheme，若先按 scheme 分派，`D:/tv.json` 会被报成“不支持的协议
+d://”，诊断页给出的原因和真实问题（引用了本地磁盘路径）就不一致。
+信任继承是同源（scheme + host + port）而不是“同一台机器”，每一跳跳转都重新过守卫，
+用户亲手输入的根地址才是信任根，内联 JSON 没有可继承的源。下载的 JAR/JS/Python 按 URL 与
+sha256 登记，内容变化即重新评估能力与权限。
+
+### 10.2 站点字段矩阵与能力路由
+
+- `SiteEntry` 覆盖 `type/api/jar/ext/key/name`、`searchable/quickSearch/filterable/changeable/indexs/hide`、
+  `header/playUrl/click/categories/style/timeout`，顶层 `spider/parses/flags/lives/wallpaper`；
+  站点级 `jar` 优先于顶层共享 `spider`。整数语义对齐 FongMi：`searchable` 只有 1 为真，
+  缺省 `type` 等于 0。
+- 未知字段整条保留在 `raw` 并登记到 `unknown_fields`；未知 `type` 不折叠成 0、不猜成 CMS，
+  条目本身仍然有效，只是带结构化 unsupported 原因。非法条目标记而不丢弃。
+- `ext` 在矩阵层保持原始 JSON 值（字符串/对象/数组）。归一化成字符串、以及 HTTP `ext` 的
+  展开都属于运行时契约：按 FongMi `SiteApi` 的分歧，只有 type=4/JS 在 `homeContent` 前
+  `fetchExt()`，type=3 的 spider 拿到的是原始字符串，自己决定要不要去取。空响应保留原
+  URL，展开失败只影响该站点。
+- 运行时判定由 Capability Router 一处产出（`runtime/capability_router.py`），装配路径与诊断页
+  共用同一结论：R1 CMS HTTP → R2 `.py` → R3 `.js`/type=4（并把 drpy 单独分类）→ R4
+  portable JVM JAR → R5 Android/Dex/native JAR → R6 unsupported。判定是纯函数，不随调用
+  顺序或并发变化，也不发起任何网络请求。
+
+### 10.3 运行时控制面
+
 - `/action` 为每个请求建立 `RuntimeRequest`，包含 requestId、playSessionId、siteKey、
   method、deadlineMs 和 args；Runner 与 JAR RPC 复用同一上下文。
 - 错误按 L1 配置、L2 站点、L3 运行时、L4 解析、L5 媒体、L6 播放器分层；运行时错误
   返回非 2xx HTTP 和结构化 `RuntimeResponse`，UI 文本与日志均脱敏限长。
 - 客户端断连、deadline 和主动取消通过 `/runtime/cancel` 传播到 Supervisor；非协作式
   Python/QuickJS/JAR 调用会终止实际 Worker 进程树。解析超时仍会销毁隐藏窗口并释放槽位。
-- `SiteHealth` 分别记录 configured、built、initialized、healthy。`/sites.sites` 是内容页
-  可用清单，`/sites.diagnostics` 保存包括不兼容站点在内的完整诊断。
-- 普通 JVM 仅接收 portable JAR；Dex、Android API、native 与 DRM 信号在 Android Worker
-  未启用时标记 C2 / `requires_android`，不得计入 healthy。
+
+### 10.4 站点健康
+
+- `SiteHealth` 分别记录 configured、built、initialized、healthy 四个阶段，并带上路由结论
+  （runtime、worker、命中的规则、兼容级别 C0/C1/C2、JAR 分级与信号、稳定错误码）。
+  `/sites.sites` 是内容页可用清单，`/sites.diagnostics` 保存包括不兼容站点在内的完整诊断。
+- 普通 JVM 仅接收 portable JAR。A4.1 在 2026-08-19 得出 No-Go，当前产品支持上限固定为
+  C1；Dex、Android API、native 与 DRM 信号标记 C2 / `requires_android`，不得计入 healthy。
+  路由与加载器使用同一份信号集合，
+  已知 Android-only 的 JAR 不会回退到普通 JVM 路径；分级读不出来时如实记为 `L?` +
+  `classify-failed`，不洗成干净的 L0。
+- `runtime/android_policy.py` 是产品政策闸门：`ANDROID_WORKER_SHIPPED=false` 时，即使环境同时
+  声明 enabled/ready 也不能扩大支持范围。错误 `L2_SITE_REQUIRES_ANDROID` 必须告诉用户
+  “仅支持 Android、当前上限 C1、不回退 dex2jar/JVM、改用可移植源”。A4.1 的三个真实样例、
+  JVM 实测和四方案比较见 [ANDROID_WORKER_SPIKE_REPORT.md](ANDROID_WORKER_SPIKE_REPORT.md)。
+- drpy 规则由受 Supervisor 管理的独立 Node Worker 进程承载（`drpy-engine/`），
+  能力路由判定为 C1 / `worker='drpy'`，实现零增量体积复用 Electron Node 运行时。
 - 远程 Python、QuickJS、CMS 和 portable JAR 控制调用按站点进入 spawn Worker。Windows
   使用 kill-on-close Job Object 管理 Worker 与 Java/Node/Python 后代，并施加运行时内存上限。
 - Worker 控制面使用本地 pipe 的有大小上限 JSON 帧；spawn 子进程先发送可信 `booted` 并
@@ -162,3 +229,20 @@ npm run build:win
 ```
 
 `test:all` 依次执行 Python 测试、Node 单元测试和 JavaScript 语法检查。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。
+
+Python 侧的入口是 `python-backend/tests/run_all.py`（按阶段串行，任一阶段失败即停）。
+配置与路由相关的四个阶段是 `config-snapshot`、`ext-semantics`、`capability-router`、
+`config-security`，全部通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的
+loopback 夹具跑，不出网也不依赖公共仓库；夹具进入时会隔离宿主的代理环境变量与 Windows
+系统代理，否则开发机上的代理会把请求吞掉，装配结果随宿主环境变化。gzip、JPEG/PNG 伪装
+三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，gzip 固定 `mtime=0`），
+所以四种载体解出来的内容哈希必须相等，任何解码错误表现为哈希不等而不是夹具写错。
+
+跑单个阶段要用项目虚拟环境的解释器，裸 `python` 缺 `lxml` 会在导入 `config` 时报
+`ModuleNotFoundError`（属于环境问题，不是被测代码的缺陷）：
+
+```powershell
+cd python-backend
+.\.venv\Scripts\python.exe tests\run_all.py
+.\.venv\Scripts\python.exe tests\test_config_snapshot.py
+```

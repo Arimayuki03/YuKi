@@ -1,12 +1,19 @@
 # TVBox / FongMi 功能一致性详细任务书
 
 - **编写日期**：2026-08-18
-- **状态**：G0.1-G0.3、S1.1-S1.4 验收通过（2026-08-18）；未进入 C2
+- **最近决策**：2026-08-19
+- **状态**：G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 验收通过；A4.1 已完成并作出 No-Go，A4.2-A4.5 关闭
 - **目标平台**：Windows 优先，macOS/Linux 在 PC 原生运行时稳定后跟进
-- **产品目标**：用户只输入一个影视仓库地址，应用自动获取配置、识别并加载可运行的站点，最终成功播放用户有权访问的媒体
+- **正式产品目标**：C1 PC 原生兼容。用户只输入一个影视仓库地址，应用自动获取配置、识别并加载 C1 可运行站点，最终成功播放用户有权访问的媒体
 - **相关文档**：[现有兼容计划](TVBOX_COMPAT_PLAN.md)、[剩余验收项](TVBOX_COMPAT_PLAN_REMAINING.md)、[契约差距](TVBOX_CONTRACT_GAPS.md)、[FongMi 功能实现](FONGMI_FEATURE_IMPLEMENTATION.md)、[系统架构](ARCHITECTURE.md)
 
 本文不重复已经完成的配置解析、代理、网盘和播放器补丁，而是定义从当前状态走到“使用体验接近 TVBox/FongMi”的完整执行路径。本文中的任务完成状态必须以测试证据为准，不能以“代码已写”或“仓库能导入”代替验收。
+
+本任务书的产品与发布决策以 **C1 为唯一正式目标**：C2 仅保留为 Android-only
+源的诊断分类，不代表当前产品承诺、可选运行模式或后续默认路线。任何 Android guest、
+设备或远程 Worker、JVM Android shim 的重新立项，都必须另行提交 ADR、任务书、原型证据、
+安全/许可/资源预算并获得明确授权；不得仅通过环境变量、隐藏开关或恢复 A4.2-A4.5 待办来
+扩大支持上限。
 
 ---
 
@@ -19,7 +26,7 @@
 1. 用户在设置页粘贴一个仓库地址；
 2. 应用自动完成 IDN、重定向、压缩、图片伪装、多仓和相对路径处理；
 3. 应用读取仓库配置并建立站点清单；
-4. 每个站点根据能力自动路由到 CMS、JavaScript、Python、drpy 或 Android Worker；
+4. 每个站点根据能力自动路由到 CMS、JavaScript、Python、drpy 或可移植 JVM JAR；Android-only 源只做 C2 诊断并准确提示当前不支持；
 5. 首页、分类、搜索和详情只展示健康或可明确降级的站点；
 6. 点击剧集后自动执行 `playerContent`、解析器、本地代理和请求头合并；
 7. 播放器收到可验证的媒体地址并成功加载首帧；
@@ -32,17 +39,21 @@
 | 等级 | 定义 | 本计划定位 |
 |---|---|---|
 | C0 配置兼容 | 能下载并解析配置，但站点不一定能运行 | 仅诊断能力，不算产品完成 |
-| C1 PC 原生兼容 | CMS、CatVod JS/Python、drpy、可移植 JVM JAR 可稳定运行和播放 | 第一交付目标 |
-| C2 混合运行时兼容 | C1 + Android/Dex/native JAR 自动路由 Android Worker | 主目标，接近 FongMi 覆盖率 |
-| C3 平台完全等价 | C2 + DRM、全部 Android 原生 ABI、平台专属播放器能力 | 独立决策，不作为首版承诺 |
+| C1 PC 原生兼容 | CMS、CatVod JS/Python、drpy、可移植 JVM JAR 可稳定运行和播放 | **唯一正式产品、验收与发布目标** |
+| C2 混合运行时兼容 | 在 C1 之上运行 Android/Dex/native JAR；当前实现仅识别其依赖并标记 C2 | 非当前产品目标；Android-only 不可运行、不计 healthy |
+| C3 平台完全等价 | Android 原生 ABI、DRM 和平台专属播放器能力 | 范围外，无排期或交付承诺 |
 
-“与 TVBox/FongMi 一致”在本项目中指配置、Spider、解析、代理和播放契约行为一致，不代表界面像素级一致，也不承诺已经失效、地区封锁、需要私有账号或服务端故障的第三方源一定可用。
+“与 TVBox/FongMi 一致”在本项目中限定为 **C1 可移植运行时范围内**的配置、Spider、
+解析、代理和播放契约行为一致，不代表 Android 源覆盖率、界面像素级一致，也不承诺已经
+失效、地区封锁、需要私有账号或服务端故障的第三方源一定可用。C1 完成必须以
+`init/home/category/detail/search/player/proxy`、媒体探测和播放器首帧的端到端证据为准，
+不能用配置导入成功、站点对象创建或返回 URL 代替。
 
 ### 1.3 必须实现
 
 - 单仓、多仓、注释 JSON、gzip、图片伪装、中文域名、相对资源和仓库跳转；
 - CMS、CatVod JavaScript、Python、drpy 和可移植 JAR；
-- Android 依赖源的明确识别，以及 C2 阶段的 Android Worker 路由；
+- Android 依赖源的明确识别、C2 诊断标记和 `L2_SITE_REQUIRES_ANDROID` 用户提示；不得路由到未发布的 Worker，也不得回退 dex2jar/JVM 制造假兼容；
 - `init/home/category/detail/search/player/proxy` 契约；
 - `parse/jx/playUrl/header/cookie/subs/format/position` 播放结果归一；
 - HTTP 重定向、Range、HLS、请求头、本地代理和流式转发；
@@ -50,11 +61,12 @@
 - 以播放器首帧或 `file-loaded` 为播放成功标准；
 - 可重复执行的离线契约测试、真实仓兼容测试和打包后实机测试。
 
-### 1.4 不在首版强行承诺
+### 1.4 不在本任务书目标
 
 - 对已经失效或要求未知私有令牌的公共仓提供可用性保证；
 - 绕过付费、授权、地域或 DRM 限制；
 - 在普通 Windows JVM 中直接运行 ARM Android `.so`；
+- 打包 Android guest/emulator、配套 Android 设备 Worker、自托管远程 Android Worker 或 JVM Android shim；
 - 用按仓库名、JAR 哈希或作者名编写的长期特判维持兼容；
 - C3 级 Widevine/PlayReady 播放，除非完成单独的安全、许可和发布评估。
 
@@ -99,7 +111,7 @@
 
 1. **导入成功不等于兼容成功**：配置、建站、运行、解析、媒体探测、首帧必须分别计数。
 2. **线程不是安全隔离边界**：远程 JS、Python、JAR 和 drpy 必须运行在可终止进程中。
-3. **先识别能力，再选择运行时**：不能把 Android-native JAR继续盲目交给普通 JVM。
+3. **先识别能力，再选择运行时**：不能把 Android-native JAR 继续盲目交给普通 JVM。
 4. **修契约，不修仓库名**：新增补丁必须对同类型的其他仓库有效。
 5. **公共仓只做趋势测试**：确定性回归必须依赖本地夹具和可控测试服务。
 6. **首帧才是播放成功**：`playerContent` 返回 URL、解析成功或 mpv 进程启动都只是中间状态。
@@ -117,20 +129,20 @@ flowchart LR
     C --> F["Python Worker"]
     C --> G["drpy Worker"]
     C --> H["Portable JAR Worker"]
-    C --> I["Android FongMi Worker"]
+    C --> I["Android-only 诊断（C2，不执行）"]
     D --> J["统一 SpiderResult"]
     E --> J
     F --> J
     G --> J
     H --> J
-    I --> J
+    I --> Q["requires_android / 当前上限 C1"]
     J --> K{"直链 / parse / proxy / pan"}
     K --> L["解析器与 Chromium 嗅探"]
     K --> M["统一本地代理数据面"]
     L --> N["媒体探测"]
     M --> N
     N --> O["mpv"]
-    N --> P["可选 DRM 播放内核"]
+    N -.-> P["DRM 诊断 / 独立立项"]
 ```
 
 ### 3.1 控制面与数据面
@@ -164,7 +176,7 @@ flowchart LR
 {
   "requestId": "uuid",
   "ok": true,
-  "runtime": "android",
+  "runtime": "jar",
   "elapsedMs": 1842,
   "result": {},
   "error": null
@@ -200,8 +212,10 @@ flowchart LR
 | S5 | 媒体可达 | 使用最终请求头完成媒体探测 | HTML、403、Range 错误 |
 | S6 | 播放就绪 | mpv/目标内核报告 `file-loaded` 或首帧 | 启动失败、加载超时 |
 
-### 4.2 发布级硬指标
+### 4.2 C1 发布级硬指标
 
+- 只有 CMS、CatVod JS/Python、drpy 和 portable JAR 的 C1 端到端链路计入产品能力；
+- Android-only 源必须稳定识别、准确提示且绝不计为 healthy 或尝试普通 JVM；
 - 所有离线契约夹具 100% 通过；
 - 任意 Worker 无限循环或阻塞时，必须在 deadline 后被终止，主进程不等待其自然退出；
 - 单个坏源不能拖慢其他站点，也不能让应用退出卡住；
@@ -233,11 +247,12 @@ flowchart LR
 ```mermaid
 flowchart TD
     G0["G0 基线与统一契约"] --> S1["S1 进程隔离与硬超时"]
-    S1 --> C2["C2 配置与能力路由"]
-    C2 --> N3["N3 PC 原生运行时"]
-    C2 --> A4["A4 Android Worker"]
+    S1 --> C2P["C2 配置与能力路由阶段"]
+    C2P --> N3["N3 PC 原生运行时"]
+    C2P --> A41["A4.1 Android 可行性 Spike"]
+    A41 --> BOUND["No-Go：固定 C1 支持边界"]
     N3 --> P5["P5 播放链路收敛"]
-    A4 --> P5
+    BOUND -. 范围约束 .-> P5
     P5 --> U6["U6 单地址用户流程"]
     P5 --> Q7["Q7 兼容与故障测试"]
     U6 --> R8["R8 打包发布"]
@@ -247,9 +262,11 @@ flowchart TD
 | 里程碑 | 内容 | 完成定义 |
 |---|---|---|
 | M1 稳定宿主 | G0 + S1 | 坏源不再卡死、退出不等待、错误可定位 |
-| M2 PC 主流兼容 | C2 + N3 + P5 原生部分 | CMS/JS/Python/drpy/portable JAR 可完成端到端播放 |
-| M3 FongMi 混合兼容 | A4 + P5 Android 部分 | Android/Dex/native JAR 自动路由并可返回代理流 |
-| M4 可发布 | U6 + Q7 + R8 | 安装包冷启动和真实播放矩阵通过，支持安全回滚 |
+| M2 C1 契约完成 | C2 配置阶段 + N3 + P5 | CMS/JS/Python/drpy/portable JAR 完成端到端播放，Android-only 准确拒绝 |
+| M3 C1 可发布 | U6 + Q7 + R8 | C1 安装包冷启动和真实播放矩阵通过，支持安全回滚 |
+
+> 本文阶段编号 `C2` 指“配置标准化与能力路由”工作包，不等于兼容等级 C2，也不改变
+> C1 正式产品目标。A4.1 只提供边界决策证据，不是通往发布版 Android Worker 的依赖。
 
 ---
 
@@ -331,10 +348,10 @@ init/home/play/media 状态，以及公共模式的测试时间、网络出口�
   "siteKey": "demo",
   "runtime": "android",
   "compatibility": "C2",
-  "state": "healthy",
-  "capabilities": ["home", "search", "detail", "player", "proxy"],
+  "state": "requires_android",
+  "capabilities": [],
   "lastSuccessAt": 0,
-  "lastError": null,
+  "lastError": "L2_SITE_REQUIRES_ANDROID",
   "consecutiveFailures": 0,
   "circuitOpenUntil": 0
 }
@@ -343,12 +360,13 @@ init/home/play/media 状态，以及公共模式的测试时间、网络出口�
 验收：
 
 - [x] 配置摘要区分 configured/built/initialized/healthy；
-- [x] Android-native JAR 在 Android Worker 未启用时显示“需要 Android 运行时”，不计为 healthy；
+- [x] Android-native JAR 显示“需要 Android 运行时 / 当前上限 C1”，不计为 healthy；
 - [x] UI 可以隐藏不可用站点，但诊断页仍可查看跳过原因。
 
 实现记录（2026-08-18）：`SiteHealth` 保存能力、兼容等级、四阶段装配状态、最近成功、
-最后错误和连续失败数。JAR 在装配期执行 init；Dex、Android API、native 或 DRM 信号在
-Android Worker 未启用时返回 `L2_SITE_REQUIRES_ANDROID`，不会回退为 healthy JVM 站点。
+最后错误和连续失败数。JAR 在装配期执行 init；Dex、Android API、native 或 DRM 信号
+固定返回 `L2_SITE_REQUIRES_ANDROID`，不会回退为 healthy JVM 站点，也不存在开关可将其
+升级为当前产品能力。
 `/sites.sites` 仅返回 healthy 站点，`/sites.diagnostics` 与设置页“站点诊断”保留全部原因。
 健康、初始化异常、超时、取消和 Android 缺失均有离线测试。
 
@@ -509,6 +527,9 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 
 ## 8. C2：配置标准化与能力路由
 
+本节的 `C2` 是历史阶段编号，不是兼容等级或产品目标。该阶段为 C1 运行时提供配置、
+路由和诊断能力；识别出的 Android-only 源只进入 C2 诊断分支，不进入执行分支。
+
 ### C2.1 建立 ConfigSnapshot 标准模型
 
 **优先级**：P0  
@@ -530,9 +551,16 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 
 验收：
 
-- [ ] 新配置失败时旧配置仍可使用；
-- [ ] 同内容重复加载不重复重启全部 Worker；
-- [ ] 多仓切换可以追踪实际选中的子仓。
+- [x] 新配置失败时旧配置仍可使用；
+- [x] 同内容重复加载不重复重启全部 Worker；
+- [x] 多仓切换可以追踪实际选中的子仓。
+
+证据：`tests/test_config_snapshot.py`
+`PrepareValidateSwapTest.test_a_config_that_builds_nothing_keeps_the_old_healthy_one`、
+`test_order_is_prepare_then_validate_then_atomic_swap`、
+`test_same_content_reload_reuses_the_running_snapshot`（同哈希不重建 Worker）、
+`test_force_rebuilds_even_when_the_content_is_identical`（显式强制仍重建）、
+`DepotTest.test_first_working_entry_is_selected_and_the_trail_is_recorded`。
 
 ### C2.2 对齐 `ext` 完整语义
 
@@ -549,9 +577,20 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 
 验收：
 
-- [ ] 与 FongMi `Site.fetchExt()` 行为夹具一致；
-- [ ] 远程 JSON、普通文本和无需展开的 URL 均正确处理；
-- [ ] `ext` 失败只影响对应站点，不破坏整个配置。
+- [x] 与 FongMi `Site.fetchExt()` 行为夹具一致；
+- [x] 远程 JSON、普通文本和无需展开的 URL 均正确处理；
+- [x] `ext` 失败只影响对应站点，不破坏整个配置。
+
+证据：`tests/test_ext_semantics.py`
+`CanonicalExtTest`（`ExtAdapter` 的字符串/对象/数组/数字/布尔/null 归一）、
+`ForRuntimeContractTest.test_js_gets_expanded_others_get_the_url`（type=4 用展开值、
+type=3 拿原始字符串，对齐 `SiteApi.java:73`）、
+`ExpansionTest`（远端 JSON / 纯文本 / 空响应保留原 URL / 再跳一次 / 环与深度上限）、
+`NoNetworkPathTest.test_non_http_ext_is_never_fetched`（非 `http` 前缀零请求）、
+`ExpansionFailureIsolationTest`（HTTP 500 / 体积上限 / 环 / 深度 / 死主机都只写进
+`error` 不上抛）、
+`BuildSiteExtContractTest.test_one_broken_ext_does_not_affect_the_other_site`
+（一个站点 ext 坏掉后，另一个站点仍然 healthy）。
 
 ### C2.3 完善站点类型和字段矩阵
 
@@ -573,10 +612,26 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 - 标记结构化 unsupported 原因；
 - 有真实配置和上游契约后再增加适配器。
 
+实现落在 `python-backend/runtime/config_snapshot.py::normalize_site_entry`，一处产出
+全部字段与 `jar` / `jar_md5` / `jar_from_site` 优先级；未识别的字段进 `unknown_fields`，
+整条原文进 `raw`，未知 `type` 不折叠成 0。默认值按 FongMi getter 语义，其中
+`isSearchable()` 是 `searchable == 1`，所以 `searchable: 2` 判 False；`type` 缺失或
+`null` 按 Gson 等于 0。
+
+证据：`tests/test_config_snapshot.py` `FieldMatrixTest` 16 条
+（完整 CMS 矩阵、FongMi 默认值、`searchable: 2`、`timeout` 秒且下限 1 秒、
+`header` 的对象/别名/字符串内 JSON、`categories` 的列表与逗号串、`style` 归一或丢弃、
+未知 `type` 与未知顶层字段原样存活、`null` type 视为 0、畸形条目标记而不丢弃、
+`ext` 保留原始 JSON 值、相对 `api`/`jar`/`playUrl` 按配置 URL 解析、
+站点 `jar` 压过共享 `spider`、显式给出共享 `spider` 时被采用、
+`;md5` 与伪装后缀在拆引用时保留、网盘站点按 `api` 打标），
+以及 `PrepareValidateSwapTest.test_field_matrix_reaches_the_built_site`
+（矩阵值真的到达装配后的 site 对象，而不是只在归一化层正确）。
+
 ### C2.4 实现 Capability Router
 
 **优先级**：P0  
-**依赖**：G0.3、C2.3、N3/A4 对应 Worker
+**依赖**：G0.3、C2.3、N3 对应 PC 原生 Worker
 
 建议路由顺序：
 
@@ -584,14 +639,29 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 2. `.py` → Python Worker；
 3. `.js` 或 type=4 → QuickJS/drpy 识别；
 4. `csp_` + portable JAR → JVM JAR Worker；
-5. `csp_` + Android/Dex/native 信号 → Android Worker；
+5. `csp_` + Android/Dex/native/DRM 信号 → C2 `requires_android` 诊断，不分配 Worker；
 6. 无可用 Worker → unsupported，不进行错误运行时尝试。
 
 验收：
 
-- [ ] 同一个配置中的 portable JAR 和 Android JAR 可以分别路由；
-- [ ] 路由结果写入 SiteHealth 和兼容报告；
-- [ ] 关闭 Android Worker 时不会回退到已知必失败的普通 JVM 路径。
+- [x] 同一个配置中的 portable JAR 和 Android JAR 可以分别归类为 C1 可执行与 C2 仅诊断；
+- [x] 路由结果写入 SiteHealth 和兼容报告；
+- [x] Android-only 路由没有 Worker，且不会回退到已知必失败的普通 JVM 路径。
+
+实现落在 `python-backend/runtime/capability_router.py`：`route_site()` 是纯函数，
+`config.py::_build_site` 与诊断页 `runtime/health.py::infer_site_health` 共用同一结论，
+不再各写一份规则。JAR 要先下载才能看字节，所以 R4→R5 由 `refine_with_jar()` 在
+`classify_jar_compatibility()` 之后收敛，且它与 `jar_bridge._require_available_runtime`
+用同一组 Android 信号（`android-api`/`android-ui-or-webview`/`native-library`/
+`drm-or-device-license`），路由与加载不会给出两种答案。
+
+证据：`tests/test_capability_router.py`
+`RouteOrderTest`（R1–R6 逐条，含 `.json` 不被当 `.js`、drpy 单独归类、type 写成非整数）、
+`RefineWithJarTest`（同一配置里 portable 与 Dex JAR 分别落到 `jar` / `android`）、
+`RouterMatchesLoaderTest`（真实 Dex 夹具下路由与 JAR 加载器给出同一个
+`L2_SITE_REQUIRES_ANDROID`，C1 产品策略下 `worker` 为空、不回退 JVM）、
+`HealthAgreesWithRouterTest`（`SiteHealth.route`/`compatibility`/`capabilities` 与路由一致）、
+`TimeoutAndCancelTest`。
 
 ### C2.5 配置安全边界
 
@@ -603,6 +673,74 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 - 远程配置不能指定任意本地可执行文件或任意磁盘路径；
 - LAN/localhost 访问提供显式开关，避免远程仓库静默探测本机服务；
 - 下载的 JAR/JS/Python 记录哈希，更新时重新评估能力和权限。
+
+实现落在 `python-backend/runtime/config_security.py`。默认上限：配置 8 MiB、
+解压后 32 MiB、单站点 `ext` 2 MiB、跳转 5 次、多仓深度 1、`ext` 展开深度 2，
+均可用 `VPC_CONFIG_MAX_*` 覆盖。`file/assets/proxy/data/jar/javascript/ftp/smb`
+一律拒绝；磁盘路径在解析 scheme **之前**判掉（`urlsplit('C:\\x\\tv.json')` 会把盘符
+当 scheme，若先分派 scheme，`D:/tv.json` 会被报成「不支持的协议 d://」，诊断页给出的
+原因和真实问题不符）。
+
+私网守卫按 `scheme+host+port` 继承信任（`_origin_of`），不是「同机就行」：用户手输的
+根地址是信任根，内联 JSON 没有可继承的源，每一跳跳转都重新过 `guard_url`。体积防线
+分两层——`read_capped` 流式截断响应，`decompress_capped` 用增量 `zlib.decompressobj`
+挡「小包大解压」。下载物哈希由 `ArtifactRegistry` 登记，指纹变化时重新评级。
+
+证据：`tests/test_config_security.py` 36 条，全部走 loopback 夹具不出网：
+`HostScopeTest`（IP 字面量/私网段/DNS 解析/RFC 6761 保留后缀）、
+`GuardUrlTest`（协议黑名单、磁盘路径、私网、相对地址缺基址、同源继承边界）、
+`LocalConfigPathTest`（未显式选择时拒绝、超限拒绝）、
+`SizeCapTest`（`read_capped` 不先收完再判断、`decompress_capped` 增量截断）、
+`FetchGuardedTest`（跳转上限、跳转到内网被拦、声明超长 `Content-Length` 在读正文前被拒、
+正文即 gzip 的压缩炸弹被解压上限挡住）、
+`ArtifactRegistryTest`、`CancelledLoadIssuesNoRequestsTest`（取消后零请求）。
+
+### C2 阶段退出结论（2026-08-18）
+
+C2.1–C2.5 的确定性离线验收和现有回归均通过，本阶段退出；未实施 N3 的 drpy 运行时、
+PC 原生 Worker，也没有实现 type `15/16`——后者仍缺真实配置和上游 parser 契约，
+不按编号猜测。本轮到此停止，不进入 N3。
+
+三层分离已落地：`ConfigFetchResult`（下载层：源 URL / 最终 URL / ETag / Last-Modified /
+内容哈希 / 载体与解码方式）→ `ParsedConfig`（纯数据，可丢弃，解析期零网络）→
+`ConfigSnapshot`（运行中，原子换入单位）。`prepare → validate → atomic swap` 的顺序由
+测试直接断言，不是靠代码阅读推断：validate 不通过时旧快照连站点一起留着，
+新装配已经起来的 Worker 全部释放。
+
+验收证据（全部 loopback 夹具，不出网）：`test_config_snapshot.py` 53、
+`test_ext_semantics.py` 39、`test_capability_router.py` 29、`test_config_security.py` 36；
+`run_all.py` 28 个阶段全绿，79 个 Python 文件编译通过。配置形态夹具覆盖单仓 JSON、
+多仓 depot、带注释 JSON、gzip 直链（正文即 gzip）、传输层 gzip（`Content-Encoding`）、
+JPEG/PNG 伪装、相对路径仓、内联 JSON 与本地文件——四种载体互相比对同一个内容哈希，
+任何解码错误表现为哈希不等，而不是夹具自己写错。
+
+测试命令（必须用项目虚拟环境的解释器，裸 `python` 缺 `lxml`，导入 `config` 即
+`ModuleNotFoundError`——那是环境问题，不是被测代码的缺陷）：
+
+```powershell
+cd python-backend
+.\.venv\Scripts\python.exe tests\test_config_snapshot.py     # Ran 53 tests ... OK
+.\.venv\Scripts\python.exe tests\test_ext_semantics.py       # Ran 39 tests ... OK
+.\.venv\Scripts\python.exe tests\test_capability_router.py   # Ran 29 tests ... OK
+.\.venv\Scripts\python.exe tests\test_config_security.py     # Ran 36 tests ... OK
+.\.venv\Scripts\python.exe tests\run_all.py                  # 28 stages PASS, 79 files compiled
+.\.venv\Scripts\python.exe -m ruff check .
+```
+
+Ruff 首轮报了 4 个 F401：C2 期间加进 `config.py` 的 `capability_router`、
+`decompress_capped`、`split_jar_ref`、`canonical_ext` 四个 import 最终没有被用到
+（相应逻辑落在 `config_snapshot.py` / `fetch_guarded` 内部）。已删除，不是加 `noqa`。
+
+本轮由测试暴露并在生产代码里修掉的两个真实缺陷：
+
+1. `guard_url` 把 Windows 盘符当协议，`D:/tv.json` 被报成「不支持的协议 d://」，
+   诊断页给出的原因与真实问题（引用了本地磁盘路径）不一致。已把磁盘路径判定移到
+   scheme 分派之前。
+2. `detect_text` 只剥一层字节 BOM，重复写入 BOM 的文件解码后仍以 U+FEFF 开头，
+   随后 `json.loads` 在第 1 行第 1 列报错，看上去像用户把配置写坏了。已在所有解码
+   分支上去掉残留 BOM 字符。
+
+两处都是修产品而不是改断言：BOM 用例反而被加强成同时覆盖单 BOM 与双 BOM 两种形态。
 
 ---
 
@@ -633,10 +771,10 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 
 验收：
 
-- [ ] 选定的 drpy 夹具通过 home/category/search/detail/player；
-- [ ] 无限循环和内存膨胀规则可被杀死；
-- [ ] 规则无法访问用户任意文件或启动进程；
-- [ ] 打包后无需用户另装 Node。
+- [x] 选定的 drpy 夹具通过 home/category/search/detail/player；
+- [x] 无限循环和内存膨胀规则可被杀死；
+- [x] 规则无法访问用户任意文件或启动进程；
+- [x] 打包后无需用户另装 Node。
 
 ### N3.2 QuickJS 宿主契约补齐
 
@@ -653,52 +791,58 @@ HTTP 熔断恢复、连续两次 50 源聚合搜索、20 次真实 Python/Node �
 
 验收：
 
-- [ ] 缺失全局给出变量名和运行时建议；
-- [ ] 配置切换后不同站点不共享 JS 状态；
-- [ ] JS 网络请求继承宿主代理和安全策略。
+- [x] 缺失全局给出变量名和运行时建议；
+- [x] 配置切换后不同站点不共享 JS 状态；
+- [x] JS 网络请求继承宿主代理和安全策略。
 
 ### N3.3 Python Spider 隔离
 
 **优先级**：P1  
 **依赖**：S1.1
 
-- 动态 Python Spider 移入独立进程；
-- 插件目录按内容哈希和 siteKey 隔离；
-- 禁止路径穿越和覆盖宿主模块；
-- 记录依赖缺失而不是运行时静默失败；
-- 配置更新后销毁旧模块状态。
+- [x] 动态 Python Spider 移入独立进程；
+- [x] 插件目录按内容哈希和 siteKey 隔离；
+- [x] 禁止路径穿越和覆盖宿主模块；
+- [x] 记录依赖缺失而不是运行时静默失败；
+- [x] 配置更新后销毁旧模块状态。
 
 ### N3.4 CMS 适配器收敛
 
 **优先级**：P1  
 **依赖**：C2.1
 
-- JSON/XML、分页、搜索、详情和播放字段统一；
-- 支持常见编码、重定向和服务端伪分页；
-- HTML 页面不得误标为直链；
-- CMS 失败不使用解析器掩盖配置接口错误。
+- [x] JSON/XML、分页、搜索、详情和播放字段统一；
+- [x] 支持常见编码、重定向和服务端伪分页；
+- [x] HTML 页面不得误标为直链；
+- [x] CMS 失败不使用解析器掩盖配置接口错误。
 
 ### N3.5 统一 `/proxy` 数据面
 
 **优先级**：P0  
 **依赖**：S1.2
 
-- JAR、JS、Python、drpy 和 PanProvider 共享一个调度入口；
-- query、POST body、请求头和 `siteKey` 保持原始语义；
-- 支持流式 body、Range、206、Content-Range、重定向和断连取消；
-- 保留旧端口兼容，但内部统一转到当前网关；
-- token 保护控制接口，播放代理使用不可猜测短期会话令牌或严格 loopback 限制。
+- [x] JAR、JS、Python、drpy 和 PanProvider 共享一个调度入口；
+- [x] query、POST body、请求头和 `siteKey` 保持原始语义；
+- [x] 支持流式 body、Range、206、Content-Range、重定向和断连取消；
+- [x] 保留旧端口兼容，但内部统一转到当前网关；
+- [x] token 保护控制接口，播放代理使用不可猜测短期会话令牌或严格 loopback 限制。
 
 ---
 
-## 10. A4：Android FongMi Worker
+## 10. A4：Android FongMi Worker 可行性决策（No-Go，已关闭）
 
-Android Worker 是 C2 级兼容的核心，也是风险最高的部分。必须先做可行性闸门，不能直接进入完整实现。
+本节保留 A4.1 的决策证据和 A4.2-A4.5 的历史草案。A4.1 已判定 No-Go，因此 Android
+Worker 不属于当前产品架构、发布范围或后续执行队列；正式目标保持 C1。
 
 ### A4.1 可行性 Spike 与 Go/No-Go
 
 **优先级**：P0  
 **依赖**：S1.1、C2.4
+
+**状态（2026-08-19）**：A4.1 Spike 已完成，结论 **No-Go**。三个真实 DEX 输入的
+JVM shim 完整契约为 0/3；本机没有可执行的 Android guest、设备或远程 Worker 原型，
+Android 方案资源指标和分发许可证也未通过门槛。产品支持上限已正式收敛到 C1，详见
+[ANDROID_WORKER_SPIKE_REPORT.md](ANDROID_WORKER_SPIKE_REPORT.md)。A4.2-A4.5 已关闭。
 
 至少验证三类真实样例：
 
@@ -725,10 +869,21 @@ Go 条件：
 
 No-Go 后的产品策略：正式定义 C1 为支持上限，对 Android-only 源给出明确提示，不再用 dex2jar 路径制造假兼容。
 
+No-Go 退出项：
+
+- [x] C1 支持上限进入生产策略，环境变量不能把未发布的 Android Worker 标成可用；
+- [x] Android-only 源固定返回 `L2_SITE_REQUIRES_ANDROID`，不回退 dex2jar/JVM；
+- [x] UI 错误明确说明“仅支持 Android / 当前上限 C1 / 请改用可移植源”；
+- [x] 正常、异常、超时、取消和进程树回收测试落地；
+- [x] 完成报告后停止，未进入 A4.2。
+
 ### A4.2 Android Worker RPC
 
-**优先级**：P0  
-**依赖**：A4.1 Go
+**状态**：关闭，仅保留历史草案
+
+**优先级**：不适用
+
+**依赖**：A4.1 Go（未满足）
 
 Worker 至少实现：
 
@@ -749,8 +904,11 @@ Worker 至少实现：
 
 ### A4.3 复用 FongMi Loader 契约
 
-**优先级**：P0  
-**依赖**：A4.2
+**状态**：关闭，仅保留历史草案
+
+**优先级**：不适用
+
+**依赖**：A4.2（已关闭）
 
 - 在 Android 环境使用真实 `DexClassLoader`；
 - 调用 JAR `Init`、`Proxy` 和 Spider `init`；
@@ -760,8 +918,11 @@ Worker 至少实现：
 
 ### A4.4 Android Proxy 数据桥
 
-**优先级**：P0  
-**依赖**：A4.2、N3.5
+**状态**：关闭，仅保留历史草案
+
+**优先级**：不适用
+
+**依赖**：A4.2（已关闭）、N3.5
 
 - Android Worker 暴露 loopback 流或分块 IPC；
 - 桌面代理转发 status、MIME、headers、Range 和 body；
@@ -771,14 +932,21 @@ Worker 至少实现：
 
 ### A4.5 生命周期与打包
 
-**优先级**：P1  
-**依赖**：A4.3、A4.4
+**状态**：关闭，仅保留历史草案
+
+**优先级**：不适用
+
+**依赖**：A4.3、A4.4（均已关闭）
 
 - 应用启动不强制立即启动 Android；首次需要时按需启动；
 - 设置页显示安装体积、运行状态和资源占用；
 - 退出应用默认停止 Worker，播放中退出按现有托盘策略处理；
 - Worker 版本与桌面宿主版本建立兼容矩阵；
 - 更新失败可以回滚上一版本。
+
+重新开启 A4 不属于本任务书的延续工作。必须新建立项，重新验证三类真实样例的
+`init/home/player/proxy`、冷启动、内存、安装体积、ARM ABI、网络命名空间、许可证和更新
+风险，并在新的 Go 决策生效后替换本任务书的 C1 正式目标；在此之前不得实施上述草案。
 
 ---
 
@@ -869,16 +1037,18 @@ subs, position, flag, drm, msg, code, proxy
 
 - JAR 结果优先，宿主 Provider 只作为协议级降级；
 - 夸克快路径开关保留并完成真实 Cookie 验收；
-- UC、百度、天翼、123、迅雷先通过 JAR/Android Worker 验证，再决定是否增加 native adapter；
+- UC、百度、天翼、123、迅雷只在 portable JAR 或 C1 原生 adapter 完成端到端验收后列为支持；Android-only 源准确提示不支持，不以 Android Worker 验证结果占位；
 - 文件夹、多清晰度、转码、原画、短期 URL 和 Cookie 过期使用统一模型；
 - 播放 URL 到期后自动刷新一次，不能缓存过期地址。
 
-### P5.7 DRM 决策任务
+### P5.7 DRM 决策任务（C1 范围外）
 
 **优先级**：P2  
 **依赖**：M2 完成后单独立项
 
-输出 ADR，比较 Chromium CDM、授权播放器 SDK、Android 播放器画面转交和明确不支持。未完成合法授权和安全评估前，不提供绕过 DRM 的实现。
+本项不属于 C1 退出条件或本任务书排期。若另行立项，输出 ADR，比较 Chromium CDM、
+授权播放器 SDK、Android 播放器画面转交和明确不支持；未完成合法授权和安全评估前，
+不提供绕过 DRM 的实现。
 
 ---
 
@@ -903,7 +1073,8 @@ subs, position, flag, drm, msg, code, proxy
 ### U6.2 健康站点展示
 
 - healthy 正常展示；
-- degraded 可展示，但首次进入前说明需要 Cookie/Android Worker/解析器；
+- degraded 可展示，但首次进入前说明需要 Cookie 或解析器；
+- Android-only 固定为 unsupported，说明“仅支持 Android / 当前上限 C1 / 请改用可移植源”，不得伪装为可启用的降级能力；
 - unsupported 默认隐藏，诊断页保留；
 - circuit-open 暂时置灰并显示自动恢复倒计时或重试按钮；
 - 不因单个首页为空永久屏蔽源，区分合法空内容和运行错误。
@@ -920,7 +1091,7 @@ subs, position, flag, drm, msg, code, proxy
 
 - 当前失败阶段；
 - 是否已尝试备用线路；
-- 用户可执行动作：重试、换线路、更新 Cookie、启用 Android Worker、安装/指定 mpv；
+- 用户可执行动作：重试、换线路、更新 Cookie、安装/指定 mpv；Android-only 源只提供更换 C1 可移植源的建议；
 - 技术详情复制入口，不复制 Cookie/token。
 
 ### U6.4 自动回退
@@ -957,7 +1128,7 @@ subs, position, flag, drm, msg, code, proxy
 - JS 正常/缺全局/Promise 永不完成 Spider；
 - drpy 代表规则；
 - portable JAR 正常/异常/Proxy 流；
-- Android Context、二级 DEX、native `.so` 三类 JAR；
+- Android Context、二级 DEX、native `.so` 三类 JAR，仅用于验证 C2 分类、准确提示和禁止 JVM 回退，不作为运行成功验收；
 - 所有夹具必须具备可分发许可或由项目自行编写。
 
 ### Q7.3 公共仓兼容报告
@@ -966,7 +1137,7 @@ subs, position, flag, drm, msg, code, proxy
 
 - S0/S1 成功率；
 - configured/built/initialized/healthy 数量；
-- 按 CMS/JS/Python/drpy/JAR/Android 分类的成功率；
+- 按 CMS/JS/Python/drpy/portable JAR 分类的成功率，以及 Android-only 识别数量和误回退数量；
 - home/search/detail/player/media/ready 成功率；
 - skipped 和错误码分布；
 - 宿主回归、上游不可达、账号缺失三类归因。
@@ -975,7 +1146,7 @@ subs, position, flag, drm, msg, code, proxy
 
 ### Q7.4 故障注入
 
-- 杀死 JVM、Node、Python 和 Android Worker；
+- 杀死 JVM、Node 和 Python Worker；
 - Worker 无限循环、内存增长、stdout 污染和半包 JSON；
 - 代理客户端中途断开；
 - 配置重载期间正在播放；
@@ -993,7 +1164,7 @@ subs, position, flag, drm, msg, code, proxy
 - 首次配置加载时间；
 - 100 站点初始化峰值；
 - 单次搜索总耗时和在途任务数；
-- Python/JVM/Node/Android Worker 内存；
+- Python/JVM/Node Worker 内存；
 - 首次播放地址获取、解析、媒体探测和首帧分段耗时；
 - 配置重载前后进程、线程、端口和句柄数量。
 
@@ -1004,7 +1175,7 @@ subs, position, flag, drm, msg, code, proxy
 | CMS/JS/Python | 必须 | 必须 | M2 后 | M2 后 |
 | drpy | 必须 | 必须 | M2 后 | M2 后 |
 | portable JAR | 必须 | 必须 | 评估 | 评估 |
-| Android Worker | Spike | M3 必须 | 单独评估 | 单独评估 |
+| Android-only 识别、C1 提示、禁止 JVM 回退 | 必须 | 必须 | 必须 | 必须 |
 | mpv 首帧 | 必须 | 必须 | 必须 | 必须 |
 | 代理 Range/HLS | 必须 | 必须 | 必须 | 必须 |
 
@@ -1017,7 +1188,6 @@ subs, position, flag, drm, msg, code, proxy
 至少提供：
 
 - `runtime_drpy`；
-- `runtime_android_worker`；
 - `pan_fast_path`；
 - `media_probe`；
 - `auto_line_fallback`；
@@ -1043,7 +1213,7 @@ subs, position, flag, drm, msg, code, proxy
 - [ ] 无 Worker/JVM/mpv 残留进程；
 - [ ] 日志脱敏测试通过；
 - [ ] 功能开关回滚验证通过；
-- [ ] Android Worker 如启用，许可、更新与体积检查通过。
+- [ ] Android-only 源稳定返回 `L2_SITE_REQUIRES_ANDROID`，安装包、环境变量和隐藏开关均不能绕过 C1 上限。
 
 ---
 
@@ -1051,8 +1221,9 @@ subs, position, flag, drm, msg, code, proxy
 
 | 风险 | 概率 | 影响 | 应对 |
 |---|---|---|---|
-| Android guest 体积和资源不可接受 | 高 | C2 无法单机交付 | A4.1 先 Spike；No-Go 时正式收敛 C1 |
-| ARM native 库无法在目标 guest 运行 | 高 | 部分热门 JAR 仍失败 | 使用真实 ARM 样例验证，不以纯 Java JAR 代替 |
+| Android guest 体积、资源、许可和更新不可接受 | 已确认 | C2 无法作为当前桌面产品交付 | A4.1 已 No-Go；锁定 C1，不打包 guest 或 Worker |
+| ARM native 库不能在 C1 PC 原生运行时运行 | 已确认 | Android-only JAR 不可用 | 字节级识别并准确提示，不以纯 Java JAR、dex2jar 或仓库特判制造假兼容 |
+| 后续文档或开关把 C2 重新描述为产品目标 | 中 | 支持口径漂移、用户误判兼容性 | 发布门禁固定检查 C1 上限；重开 A4 必须新 ADR、任务书和授权 |
 | 远程规则执行带来安全问题 | 高 | 文件、凭据和主机安全 | 独立进程、最小权限、网络/文件白名单、资源限额 |
 | drpy 方言和宿主全局过多 | 中高 | 长尾规则失败 | 真实语料驱动能力矩阵，缺失能力明确报错 |
 | 公共仓频繁失效 | 高 | 测试噪声 | 离线夹具做门禁，公共仓做趋势和归因 |
@@ -1065,30 +1236,30 @@ subs, position, flag, drm, msg, code, proxy
 
 ## 16. 预估排期
 
-以下为一名熟悉 Electron、Python、Java/Android 和流媒体的工程师估算，不是固定承诺；Android Worker 的排期必须以 A4.1 结果重新评估。
+以下为一名熟悉 Electron、Python、Java 和流媒体的工程师对 **C1 正式目标**的估算，
+不是固定承诺。A4.1 已完成 No-Go 决策，Android Worker 没有排期，也不计入这些里程碑。
 
 | 阶段 | 预计工作量 | 可交付结果 |
 |---|---:|---|
 | G0 + S1 | 1.5～2.5 周 | 应用不再被坏源卡死，错误和健康度可信 |
-| C2 | 1～2 周 | 配置、`ext`、能力路由和原子更新稳定 |
+| C2 配置阶段 | 1～2 周 | 配置、`ext`、能力路由和原子更新稳定 |
 | N3 | 2～4 周 | drpy、QuickJS、Python、portable JAR 主流源可运行 |
-| P5 原生部分 | 2～3 周 | 直链、解析、代理、网盘和首帧链路收敛 |
-| A4.1 Spike | 1～2 周 | Android Worker Go/No-Go 与实测数据 |
-| A4 完整实现 | Go 后 4～8 周 | Android/Dex/native JAR 混合运行时 |
+| P5 | 2～3 周 | C1 直链、解析、代理、网盘和首帧链路收敛 |
+| A4.1 Spike | 已完成 | No-Go；固定 C1 上限，A4.2-A4.5 关闭 |
 | U6 + Q7 + R8 | 2～3 周 | 用户流程、实机矩阵和发布门禁 |
 
 预期：
 
 - **M1 稳定宿主**：约 2 周；
-- **M2 PC 主流兼容**：约 5～8 周；
-- **M3 混合运行时兼容**：约 10～16 周，取决于 Android Worker；
-- 多人并行只能压缩 N3、A4、P5 和 Q7，G0/S1 的基础契约必须先统一。
+- **M2 C1 契约完成**：约 5～8 周；
+- **M3 C1 可发布**：在 M2 后完成 U6、Q7、R8；
+- 多人并行只能压缩 N3、P5 和 Q7，G0/S1 的基础契约必须先统一。
 
 ---
 
 ## 17. 第一迭代建议（10 个工作日）
 
-第一迭代不做新 UI 和 Android 完整实现，目标只有一个：让宿主面对坏源时稳定、可终止、可诊断。
+第一迭代不做新 UI；Android 完整实现不在本任务书范围。目标只有一个：让宿主面对坏源时稳定、可终止、可诊断。
 
 ### 第 1～2 天：契约和夹具
 
@@ -1114,7 +1285,7 @@ subs, position, flag, drm, msg, code, proxy
 ### 第 9～10 天：健康度和回归
 
 - [x] 完成 configured/built/initialized/healthy 状态；
-- [x] Android L3 JAR 未有 Worker 时不再假装健康；
+- [x] Android-only JAR 固定为 C2 诊断，不再假装 healthy 或回退普通 JVM；
 - [x] 运行 Python、JS、兼容夹具和代表仓测试；
 - [x] 更新 `ARCHITECTURE.md`、`RUNTIME_ISSUES.md` 和本任务状态。
 

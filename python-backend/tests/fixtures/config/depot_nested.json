@@ -1,0 +1,5 @@
+{
+  "urls": [
+    {"name": "nested-depot", "url": "./depot.json"}
+  ]
+}

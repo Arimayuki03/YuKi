@@ -10,6 +10,8 @@ import concurrent.futures
 import re
 from typing import Any, Mapping
 
+from .android_policy import ANDROID_ONLY_MESSAGE
+
 try:
     # ``requests`` is an optional transport dependency for the runtime
     # contract.  Importing it here lets its Timeout subclass retain the same
@@ -27,12 +29,15 @@ ERROR_SPECS = {
     'L1_CONFIG_TIMEOUT': ('config', True, 504, '配置加载超时'),
     'L1_CONFIG_CANCELLED': ('config', True, 499, '配置加载已取消'),
     'L1_CONFIG_BUSY': ('config', True, 409, '配置加载正在进行，请稍后重试'),
+    'L1_CONFIG_BLOCKED': ('config', False, 403, '配置来源被安全边界拒绝'),
+    'L1_CONFIG_TOO_LARGE': ('config', False, 413, '配置内容超出允许体积'),
     # L2 site assembly/capability
     'L2_SITE_INVALID': ('site', False, 422, '站点配置无效'),
+    'L2_SITE_BLOCKED': ('site', False, 403, '站点资源地址被安全边界拒绝'),
     'L2_SITE_NOT_FOUND': ('site', False, 404, '站点不存在或尚未加载'),
     'L2_SITE_UNSUPPORTED': ('site', False, 422, '当前版本不支持该站点类型'),
     'L2_SITE_BUILD_FAILED': ('site', False, 422, '站点装配失败'),
-    'L2_SITE_REQUIRES_ANDROID': ('site', False, 424, '该站点需要 Android 运行时'),
+    'L2_SITE_REQUIRES_ANDROID': ('site', False, 424, ANDROID_ONLY_MESSAGE),
     'L2_SITE_TIMEOUT': ('site', True, 504, '站点装配超时'),
     'L2_SITE_CANCELLED': ('site', True, 499, '站点装配已取消'),
     # L3 runtime/worker

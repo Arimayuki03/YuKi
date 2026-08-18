@@ -1,0 +1,7 @@
+{
+  "_note": "子仓地址指向内网。清单本身是从 loopback 取回的，但同源信任是 scheme+host+port，不是「只要是本机就行」——这一条必须被拒。",
+  "urls": [
+    {"name": "ssrf-private", "url": "http://10.0.0.1/secret.json"},
+    {"name": "ssrf-link-local", "url": "http://169.254.169.254/latest/meta-data/"}
+  ]
+}

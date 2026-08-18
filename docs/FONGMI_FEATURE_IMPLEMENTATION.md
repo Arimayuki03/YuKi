@@ -1,6 +1,6 @@
 # FongMi 功能实现实施文档
 
-更新时间：2026-08-18
+更新时间：2026-08-19
 
 本文是把当前 Electron + Python + JVM 项目逐步收敛到 FongMi/TVBox 运行时能力的实施方案。重点是：
 
@@ -86,8 +86,27 @@ RPC 和重启；超时/取消会结束实际进程树。JAR Proxy 视频主体�
 不同恢复策略，配置/Cookie/主动重试恢复均走 HTTP 集成测试。20 次热重载和应用退出验证
 无 Python/Java/Node 后代或监听端口残留。
 
-本轮到 S1 为止，未进入 C2；Android Worker、drpy/Node Worker 和后续配置能力路由仍按任务书
-后续阶段执行。
+C2（2026-08-18）已完成配置标准化与能力路由：配置分下载/解析/运行三层并按
+prepare → validate → atomic swap 换入，新配置装配失败时旧健康配置继续可用；`ext` 按
+`ExtAdapter`/`fetchExt` 对齐（只有 type=4/JS 在 `homeContent` 前展开一次）；站点字段矩阵、
+未知 `type` 保留和配置安全边界（体积/跳转/解压/递归/私网）落地；运行时判定集中到
+`runtime/capability_router.py`，装配路径与诊断页共用同一结论。Android Worker 的 A4.1
+可行性 Spike 已在 2026-08-19 得出 No-Go，产品支持上限正式为 C1，A4.2 未启动；drpy/Node Worker 已正式实现（N3.1 基于 Supervisor 管理的独立 Node Worker，
+通过完整五方法、安全沙箱、死循环超时强杀及自愈测试，支持零增量体积复用 Electron Node 运行时，
+能力路由判定升级为 C1）。
+
+### 1.5 A4.1 Android Worker No-Go（2026-08-19）
+
+三类真实 DEX 输入（Context、二级 DEX、ARM native 下载 + 本地 Proxy）已固定哈希并进入
+可复跑探针。现有 JVM shim 只有部分 `init` 能返回，最终 `init/home/player/proxy` 完整通过
+0/3；真实 player 必须经 home/category/detail 取 episode、读媒体字节并由 mpv 出首帧，
+所以没有把站点对象、分类对象或 URL 当作完成。ARM payload 当前由上游返回 403，动态 ELF
+执行没有伪报成功。
+
+四方案对比和资源/ABI/网络命名空间/许可证/更新风险见
+[ANDROID_WORKER_SPIKE_REPORT.md](ANDROID_WORKER_SPIKE_REPORT.md)。结论是 No-Go：Android-only
+源保持 C2 诊断，但当前桌面产品只支持 C1；错误提示会说明仅支持 Android、不会回退
+dex2jar/JVM，并建议改用可移植 CMS/Python/JS/drpy/JVM 源。A4.2–A4.5 没有实施。
 
 ## 2. 目标架构
 
@@ -164,6 +183,12 @@ destroy()
 | 4 | HTTP URL | JSON + Base64 ext |
 
 `type=15/16`、drpy、HikerWeb、Android 原生引擎不能凭编号猜测实现。必须先取得真实配置和对应 FongMi 源码，再单独建立契约。
+
+上表是第一阶段的支持范围记录。C2 之后运行时判定的**唯一**依据是
+`python-backend/runtime/capability_router.py::route_site`（规则 R1–R6，含 drpy 独立归类和
+portable/Android JAR 的字节级分流），完整矩阵见
+[ARCHITECTURE.md §10.2](ARCHITECTURE.md) 与
+[TVBOX_CONTRACT_GAPS.md §1](TVBOX_CONTRACT_GAPS.md)；本表不再单独维护。
 
 ## 4. 当前关键差距
 

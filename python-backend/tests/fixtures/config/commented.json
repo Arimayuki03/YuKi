@@ -1,0 +1,11 @@
+// 老刘备/小盒子等仓库的常见写法：整行注释 + 行内注释 + BOM 前缀空白。
+// 严格 JSON 解析会失败，剥注释后才可解析；URL 里的 `//` 不能被误剥。
+{
+  # 苹果CMS 的 parses 区常用 # 注释
+  "sites": [
+    {//数据接口
+      "key": "commented_cms", "name": "Commented CMS", "type": 1,
+      "api": "https://fixture.invalid/commented/provide/vod/"
+    }
+  ]
+}

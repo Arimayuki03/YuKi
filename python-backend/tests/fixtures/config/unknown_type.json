@@ -1,0 +1,12 @@
+{
+  "brandNewTopField": {"kept": true},
+  "sites": [
+    {"key": "future_type", "name": "Future Type", "type": 99,
+     "api": "https://fixture.invalid/future/", "brandNewSiteField": [1, 2, 3]},
+    {"key": "drpy_site", "name": "drpy Rule", "type": 4,
+     "api": "https://fixture.invalid/drpy/drpy2.min.js",
+     "ext": "https://fixture.invalid/drpy/rule.js"},
+    {"key": "cms_relay", "name": "CMS Relay", "type": 1,
+     "api": "https://fixture.invalid/relay/provide/vod/"}
+  ]
+}

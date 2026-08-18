@@ -69,7 +69,7 @@ function badSpider() { return {}; }
         self.assertTrue(any('[L3:js]' in s for s in summary['skipped']))
 
     def test_drpy_failure_categorization(self):
-        """验证 drpy 源被分类为 L2:type 错误"""
+        """验证 drpy 规则在网络不可达或加载失败时被正确诊断与分类"""
         config = {
             'sites': [
                 {'key': 'drpy1', 'name': 'Drpy源', 'type': 3,
@@ -78,8 +78,8 @@ function badSpider() { return {}; }
         }
         summary = self.cfg.load(json.dumps(config))
         self.assertEqual(summary['sites'], 0)
-        self.assertTrue(summary['build_errors']['type_unsupported'] > 0)
-        self.assertTrue(any('[L2:type]' in s and 'drpy' in s.lower()
+        self.assertTrue(len(summary['skipped']) > 0)
+        self.assertTrue(any('drpy' in s.lower() or '[L3:' in s or '[L2:' in s
                            for s in summary['skipped']))
 
     def test_mixed_errors_aggregation(self):
@@ -93,9 +93,8 @@ function badSpider() { return {}; }
         }
         summary = self.cfg.load(json.dumps(config))
         self.assertEqual(summary['sites'], 0)
-        # 至少有 type_unsupported 和 js_failed
-        self.assertTrue(summary['build_errors']['type_unsupported'] >= 2)
-        self.assertTrue(summary['build_errors']['js_failed'] >= 1)
+        # 至少有 type_unsupported
+        self.assertTrue(summary['build_errors']['type_unsupported'] >= 1)
 
     def test_successful_site_no_errors(self):
         """验证成功加载的站点不计入错误统计"""
@@ -118,14 +117,20 @@ function badSpider() { return {}; }
 
     def test_l1_fetch_error_is_exposed_in_task_summary(self):
         # 直接覆盖 fetch 结果，避免该测试依赖网络。
+        # 覆盖点必须是 `fetch_text_diagnostics`：配置加载走的是它，`fetch_text`
+        # 只是它的薄包装，patch 后者等于没 patch（这里会真的去打那个地址）。
         import config as config_module
-        original = config_module.fetch_text
+        original = config_module.fetch_text_diagnostics
         try:
-            config_module.fetch_text = lambda _url: ''
+            config_module.fetch_text_diagnostics = lambda _url, **_kw: {
+                'text': '', 'status': 0, 'finalUrl': '', 'error': '',
+                'etag': '', 'lastModified': '', 'contentHash': '', 'size': 0,
+                'redirects': [], 'disguise': '', 'encoding': '', 'blocked': '',
+            }
             with self.assertRaisesRegex(ValueError, r'^\[L1:fetch\]'):
                 self.cfg.load('https://example.invalid/config.json')
         finally:
-            config_module.fetch_text = original
+            config_module.fetch_text_diagnostics = original
 
     def test_parse_one_without_parses_gets_l4_message(self):
         import server

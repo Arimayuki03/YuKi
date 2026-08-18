@@ -2097,6 +2097,9 @@ app.whenReady().then(() => {
     if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
     bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
     bridge.extraEnv.VPC_PAN_FAST_PATH = settings.get('panFastPath') === false ? '0' : '1';
+    // 注入 Node/Electron 运行时路径，使 python-backend 可复用 Electron 内置 Node（ELECTRON_RUN_AS_NODE）
+    bridge.extraEnv.VPC_NODE_BIN = process.execPath;
+    bridge.extraEnv.VPC_ELECTRON_MODE = '1';
     // 日志级别 + 定时清空日志：启动时按持久化设置生效（可在设置页调整）
     setLogLevel(settings.get('logLevel'));
     (function applyScheduledLogCleanup() {

@@ -43,6 +43,13 @@ STAGES = [
     ('pan-cache', [PY, os.path.join(HERE, 'test_pan_cache.py')]),
     ('pan-cookies', [PY, os.path.join(HERE, 'test_pan_cookies.py')]),
     ('jar-compatibility', [PY, os.path.join(HERE, 'test_jar_compatibility.py')]),
+    # C2.1~C2.5：配置快照 / ext 语义 / 站点字段矩阵 / 能力路由 / 配置安全边界。
+    # 全部走 tests/offline_config_server.py 的 loopback 夹具，不出网。
+    ('config-snapshot', [PY, os.path.join(HERE, 'test_config_snapshot.py')]),
+    ('ext-semantics', [PY, os.path.join(HERE, 'test_ext_semantics.py')]),
+    ('capability-router', [PY, os.path.join(HERE, 'test_capability_router.py')]),
+    ('config-security', [PY, os.path.join(HERE, 'test_config_security.py')]),
+    ('android-worker-spike', [PY, os.path.join(HERE, 'test_android_worker_spike.py')]),
 ]
 
 SKIP_DIRS = {'.venv', '__pycache__', 'tests'}

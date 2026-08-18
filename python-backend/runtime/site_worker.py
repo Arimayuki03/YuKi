@@ -13,7 +13,8 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_DIR = os.path.join(BASE_DIR, 'js-engine')
-for path in (BASE_DIR, JS_DIR):
+DRPY_DIR = os.path.join(BASE_DIR, 'drpy-engine')
+for path in (BASE_DIR, JS_DIR, DRPY_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -171,7 +172,16 @@ class SiteRuntimeWorker:
             if module_spec is None or module_spec.loader is None:
                 raise ValueError('python spider module cannot be loaded')
             module = importlib.util.module_from_spec(module_spec)
-            module_spec.loader.exec_module(module)
+            try:
+                module_spec.loader.exec_module(module)
+            except ModuleNotFoundError as e:
+                missing_pkg = getattr(e, 'name', '') or str(e)
+                raise ValueError(f'[L3:py] Python Spider 缺失依赖包: {missing_pkg}') from e
+            except Exception as e:
+                raise ValueError(f'[L3:py] Python Spider 执行失败: {e}') from e
+
+            if not hasattr(module, 'Spider'):
+                raise ValueError('[L3:py] Python Spider 缺少 Spider 类导出')
             spider = module.Spider()
         elif self.kind == 'js':
             from config import fetch_text
@@ -184,6 +194,12 @@ class SiteRuntimeWorker:
             if not ok:
                 raise ValueError('JS spider produced no export')
             spider = make_js_spider_class(self.site_key, engine, self.name)
+        elif self.kind == 'drpy':
+            from config import fetch_text
+            from drpy_spider import make_drpy_spider_class
+            api = str(self.spec.get('api') or '')
+            rule_source = fetch_text(api) if api.startswith('http') else api
+            spider = make_drpy_spider_class(self.site_key, rule_source, self.name)
         elif self.kind == 'jar':
             os.environ['VPC_WORKER_CONTROL_ONLY'] = '1'
             from jar_bridge import JarBridge

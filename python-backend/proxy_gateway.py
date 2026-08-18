@@ -14,18 +14,18 @@ from urllib.parse import urlencode
 
 
 def _site_key(params: dict[str, Any], sites: Any, do: str) -> tuple[str | None, bool]:
-    """返回 ``(site_key, explicit)``，兼容 siteKey/site 两种命名。"""
+    """返回 ``(site_key, explicit)``，兼容 siteKey/site 两种命名，不破坏 params 原始语义。"""
     if do == 'pan':
         # do=pan 的 site/siteKey 属于 Provider/旧 URL 上下文，不应把网盘
         # 请求误当成 SiteManager 站点代理。
         return None, False
-    raw = params.pop('siteKey', None)
+    raw = params.get('siteKey')
     if raw in (None, ''):
         legacy = params.get('site')
         # do=pan 的 site 是 Provider 名称，不是 SiteManager key。
         if do == 'pan' and sites.get(legacy) is None:
             return None, False
-        raw = params.pop('site', None)
+        raw = legacy
     if raw in (None, ''):
         return None, False
     return str(raw), True
@@ -71,9 +71,20 @@ def dispatch(params: Mapping[str, Any] | None, sites: Any) -> Any:
         kind = do if do in ('js', 'py', 'jar', 'cms') else None
         site = sites.recent(kind)
 
-    # Host-native Provider 目前由 go_proxy 提供，静态 JAR/JS/Python 的
-    # siteKey 仍在上面的分支优先处理。
-    if site is None and do == 'pan':
+    # 优先在进程内直接解析网盘 Provider (PanProvider)，实现统一调度
+    if do == 'pan':
+        site_name = str(param.get('site') or '')
+        try:
+            from pan.registry import registry
+            provider = registry.get(site_name)
+            if provider is not None:
+                share_url = str(param.get('share_url') or param.get('url') or '')
+                file_id = str(param.get('file_id') or '')
+                res = provider.resolve(share_url, file_id=file_id)
+                if isinstance(res, dict) and res.get('url'):
+                    return res['url']
+        except Exception:
+            pass
         return _pan_fallback_url(param)
     if site is None or getattr(site, 'runner', None) is None:
         return None
