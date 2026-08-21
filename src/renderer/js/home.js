@@ -103,8 +103,11 @@ const Home = {
     _probeBar: null,    // T81：首页探测进度条 { total, done, active, shown, showTimer, doneTimer }
     _autoProbeEnabled: true, // 源自动检测开关；兼容旧配置默认开启
     _probeRetryDelayMs: PROBE_RETRY_DELAY, // 轮内二次确认间隔（测试可注入 0）
+    _probeRound2DelayMs: PROBE_ROUND2_DELAY, // 同会话补探第二轮间隔（测试可注入 0）
     _probeStartDelayMs: PROBE_START_DELAY, // 配置就绪后探测轮的延迟启动（测试可注入 0）
     _probeStartTimer: null, // 延迟探测定时器（新一轮 loadSites 重排）
+    _probeRound2Timer: null, // 证据不足源补测定时器（PROBE_ROUND2_DELAY 后自终止一轮）
+    _probeRound2Keys: [],   // 待补测源 key（调度时合并去重，触发时取走清空）
     _configPending: false,  // 配置恢复/导入进行中（后端还没有站点）：刷新/搜索/分类请求必然落空
     _userRefresh: false,    // 本次 loadHome 由刷新按钮触发（失败保留内容时给用户反馈）
 
@@ -216,6 +219,40 @@ const Home = {
         const settings = await this._getSourceSettings();
         if (!isCurrentSitesLoad()) return;
         this.setAutoProbeEnabled(settings.sourceAutoDetect !== false);
+        // 换仓（配置源 URL 变化）→ 重置探测/屏蔽状态。探测/屏蔽/空分类记录全部按源
+        // key 复用，而不同仓常存在同名 key——旧仓的结论会张冠李戴地套在新仓同名源上
+        // （已屏蔽的误隐藏、已「探过」的漏探），表现为换仓后无法屏蔽无影视的源。以
+        // lastConfigUrl 为仓标识持久化 probeSourceUrl：不一致即清空按 key 的持久化
+        // 记录与内存镜像（含 localStorage 空分类缓存），新仓所有源从零全量探测；
+        // 同仓重启则原样保留（多仓漂移仍由下方 key 集签名处理）。边界：粘贴 JSON
+        // 配置不更新 lastConfigUrl，此场景不做重置（仅识别 URL 换仓）。
+        const cfgUrl = typeof settings.lastConfigUrl === 'string' ? settings.lastConfigUrl : '';
+        const probedUrl = typeof settings.probeSourceUrl === 'string' ? settings.probeSourceUrl : '';
+        if (probedUrl !== cfgUrl) {
+            this._probeToken++; // 在途旧探测写入前校验世代，结果丢弃
+            clearTimeout(this._probeStartTimer);
+            this._probeStartTimer = null;
+            this._cancelProbeRound2(); // 补测轮随换仓作废
+            this._probing = false;     // 释放锁，允许对新仓重新发起探测
+            this._probingAll = false;
+            this._clsProbed = {};
+            this._clsBusy = {};
+            try {
+                await window.vpc.settingsSet('probeSourceUrl', cfgUrl);
+                await window.vpc.settingsSet('blockedSites', []);
+                await window.vpc.settingsSet('blockedReason', {});
+                await window.vpc.settingsSet('probedSites', []);
+                await window.vpc.settingsSet('probedAt', {});
+                await window.vpc.settingsSet('probeFailStreak', {});
+            } catch (e) { /* 持久化失败不影响本次展示过滤 */ }
+            // 空分类结果同样按 site key 复用：清内存镜像 + localStorage，新仓重新探测分类
+            this._emptyCls = {};
+            this._okCls = {};
+            this._clsTs = {};
+            this._clsStarted = {};
+            this._clearPersistedEmptyClasses();
+            settings.blockedSites = []; // 本次 loadSites 后续的屏蔽过滤直接用清空后的列表
+        }
         // T77：配置/源集合变更 → 作废分类内容缓存（页缓存 + 合并窗口），回到页面立即生效
         this.invalidatePageCaches();
         let all = [];
@@ -272,6 +309,7 @@ const Home = {
             this._probing = false; // 释放锁，允许对新集合重新发起探测
             this._clsProbed = {};
             this._clsBusy = {};
+            this._cancelProbeRound2(); // 补测轮随源集合变更作废（token 校验兜底）
             this._probingAll = false; // 全源探测在途锁随源集合变更释放
         }
         if (!isCurrentSitesLoad()) return;
@@ -458,10 +496,14 @@ const Home = {
      * 失败不误杀、死源不漏杀：
      * - 失败包络/超时 = 证据不足，轮内隔 PROBE_RETRY_DELAY 二次确认一次；
      * - 连续 PROBE_FAIL_LIMIT 轮都无响应 → 按死源屏蔽（探测失败连败计数持久化）；
+     * - 全量轮结束时仍有未达阈值的证据不足源 → 隔 PROBE_ROUND2_DELAY 同会话自动补探
+     *   第二轮（只探这批源，自终止），连败达标即在本次会话内按死源屏蔽；
      * - 已结论源按 PROBE_RECHECK_TTL 复查：内容失效补屏蔽，屏蔽源恢复内容自动解除；
      * - 分类出错本轮不下结论，留待下次重试。并发 4，结果持久化（可在源配置里恢复）。
+     *
+     * onlySite：'' = 全量轮；单个 key = 单源探测；key 数组 = 补测轮（opts.round2 标记）。
      */
-    async _probeSites(onlySite = '') {
+    async _probeSites(onlySite = '', opts = {}) {
         if (!this._autoProbeEnabled || this._probing || !this._allSites.length) return;
         this._probing = true;
         const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
@@ -484,8 +526,10 @@ const Home = {
             });
             const isStale = (k) => !probedAt[k] || (Date.now() - probedAt[k]) > PROBE_RECHECK_TTL;
             // 待探测 = 从未探过，或结论已过期（含被屏蔽源：复查到内容即自动解除）
+            const wanted = (k) => !onlySite ||
+                (Array.isArray(onlySite) ? onlySite.indexOf(k) >= 0 : k === onlySite);
             const pending = this._allSites.filter((x) =>
-                ((!probed[x.key] || isStale(x.key)) && (!onlySite || x.key === onlySite)));
+                ((!probed[x.key] || isStale(x.key)) && wanted(x.key)));
             if (!pending.length) {
                 if (dirty) await window.vpc.settingsSet('probedAt', probedAt);
                 return;
@@ -498,6 +542,7 @@ const Home = {
             started = this._startProbe(pending.length);
             let idx = 0, changed = false, newBlocked = 0, blockedDead = 0, revived = 0;
             const unknowns = []; // 本轮证据不足：轮末二次确认
+            const round2Candidates = []; // 二次确认仍失败且未达屏蔽阈值：30s 后同会话补探第二轮
             const conclude = (site, ok) => {
                 probed[site.key] = 1;
                 probedAt[site.key] = Date.now();
@@ -523,6 +568,10 @@ const Home = {
                     if (!blocked.has(site.key)) { blocked.add(site.key); newBlocked++; changed = true; }
                     reason[site.key] = 'dead';
                     blockedDead++;
+                } else {
+                    // 未达阈值：本轮不下结论。同会话稍后自动补探第二轮（_scheduleProbeRound2），
+                    // 不必等下次启动的整轮扫描就能收敛到「连续无响应 → 死源屏蔽」。
+                    round2Candidates.push(site);
                 }
                 dirty = true;
             };
@@ -613,10 +662,48 @@ const Home = {
                 parts.push('可在源配置里恢复');
                 warnToast(parts.join('，'));
             }
+            // 同会话补探第二轮：全量轮结束时仍有「证据不足且未达屏蔽阈值」的源 → 隔
+            // PROBE_ROUND2_DELAY 只补测这批源；补测轮内连败达到阈值即本次会话内按死源
+            // 屏蔽（不必等下次启动）。补测轮自身不再续期（自终止），换仓/关开关作废。
+            if (!opts.round2 && !onlySite && round2Candidates.length &&
+                token === this._probeToken && this._autoProbeEnabled) {
+                this._scheduleProbeRound2(round2Candidates);
+            }
         } catch (e) { /* 探测异常不影响主流程 */ } finally {
             this._probing = false;
             if (started) this._endProbe(); // T81：一段探测完成
         }
+    },
+
+    /** 证据不足源的同会话补测调度：合并待测 key（去重、裁剪到当前源集合），隔
+     *  _probeRound2DelayMs 只补测这批源；到点校验探测世代与开关后取走目标一次性执行
+     *  （不滚动续期 → 自终止）。换仓/关开关会主动取消定时器或使其到点即弃。 */
+    _scheduleProbeRound2(sites) {
+        const live = new Set(this._allSites.map((x) => x.key));
+        sites.forEach((s) => {
+            if (live.has(s.key) && this._probeRound2Keys.indexOf(s.key) < 0) {
+                this._probeRound2Keys.push(s.key);
+            }
+        });
+        if (!this._probeRound2Keys.length) return;
+        clearTimeout(this._probeRound2Timer);
+        const token = this._probeToken;
+        this._probeRound2Timer = setTimeout(() => {
+            this._probeRound2Timer = null;
+            const keys = this._probeRound2Keys.splice(0); // 取走即清空：补测轮不续期
+            if (!keys.length || token !== this._probeToken || !this._autoProbeEnabled) return;
+            this._probeSites(keys, { round2: true });
+        }, this._probeRound2DelayMs);
+        if (this._probeRound2Timer && typeof this._probeRound2Timer.unref === 'function') {
+            this._probeRound2Timer.unref(); // Node 测试环境：不阻止进程退出
+        }
+    },
+
+    /** 取消在途的证据不足源补测定时器并清空待测目标。 */
+    _cancelProbeRound2() {
+        clearTimeout(this._probeRound2Timer);
+        this._probeRound2Timer = null;
+        this._probeRound2Keys = [];
     },
 
     /**

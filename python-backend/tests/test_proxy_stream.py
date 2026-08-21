@@ -98,10 +98,43 @@ class TestProxyStream(unittest.TestCase):
                 ('application/json', 'application/json'),
         ):
             handler = self._handler()
-            with patch.object(go_proxy, '_fetch', return_value=_Response(
-                    200, {'Content-Type': upstream})):
+            resp = _Response(200, {'Content-Type': upstream})
+            if upstream == 'application/vnd.apple.mpegurl':
+                # m3u8 现在走「整体取回 + 分片重写」路径，需要响应体
+                resp.content = b'#EXTM3U\n#EXTINF:2.0,\nseg0.ts?auth=k\n'
+            with patch.object(go_proxy, '_fetch', return_value=resp):
                 handler._stream_forward('https://cdn.test/pan', {}, True)
             self.assertIn(('header', 'Content-Type', expected), handler.events, upstream)
+
+    def test_hls_playlist_segments_are_wrapped_through_proxy(self):
+        """夸克 v2/play 返回的 m3u8：分片必须包回代理转发。
+
+        相对分片按 127.0.0.1 代理基址解析会 404；绝对分片直连 CDN 缺
+        Cookie/Referer 被拒。两种都必须包成 ？url= 转发。
+        """
+        handler = self._handler()
+        handler.wfile = io.BytesIO()
+        resp = _Response(200, {'Content-Type': 'application/vnd.apple.mpegurl'})
+        resp.content = (b'#EXTM3U\n'
+                        b'#EXT-X-VERSION:3\n'
+                        b'#EXTINF:2.0,\n'
+                        b'seg0.ts?auth=k\n'
+                        b'#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x1\n')
+        with patch.object(go_proxy, '_fetch', return_value=resp):
+            handler._stream_forward('https://cdn.quark.test/live/hls.m3u8',
+                                    {}, False)
+        written = handler.wfile.getvalue().decode('utf-8')
+        self.assertIn(
+            'http://127.0.0.1:9978/proxy?url='
+            'https%3A%2F%2Fcdn.quark.test%2Flive%2Fseg0.ts%3Fauth%3Dk',
+            written)
+        # AES KEY 的 URI 属性同样被包装
+        self.assertIn('URI="http://127.0.0.1:9978/proxy?url=', written)
+        self.assertIn('key.bin', written)
+        # 标签行保留、Content-Type 明确为 m3u8
+        self.assertIn('#EXT-X-VERSION:3', written)
+        self.assertIn(('header', 'Content-Type', 'application/vnd.apple.mpegurl'),
+                      handler.events)
 
     def test_legacy_url_probe_does_not_wrap_412_as_200(self):
         handler = object.__new__(go_proxy._Handler)

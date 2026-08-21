@@ -321,6 +321,127 @@ test('死源连败计数：连续 2 轮完全无响应 → 按死源屏蔽（rea
     assert.ok(!ctx.__store.probeFailStreak.s, '屏蔽后连败计数清除');
 });
 
+// ---------------------------------------------------------------- 同会话补探第二轮 + 换仓重置
+
+test('同会话补探第二轮：首轮证据不足隔 PROBE_ROUND2_DELAY 补测，连败达标即本次会话内按死源屏蔽', async () => {
+    const ctx = statefulEnv(async () => ({ ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } }));
+    const H = ctx.__Home;
+    H._probeRound2DelayMs = 5; // 不真等 30s
+    await H._probeSites(); // 第 1 轮（含轮内二次确认）：证据不足，未达阈值
+    assert.equal(ctx.__store.probeFailStreak.s, 1, '连败计数 +1');
+    assert.ok(!ctx.__store.blockedSites, '单轮失败不得屏蔽');
+    assert.ok(H._probeRound2Timer, '已调度同会话补探');
+    assert.deepEqual([...H._probeRound2Keys], ['s'], '补测目标为证据不足源（VM realm 数组展开后比较）');
+    for (let i = 0; i < 200 && !ctx.__store.blockedSites; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '补测轮连败达标 → 本次会话内即按死源屏蔽');
+    assert.equal(ctx.__store.blockedReason.s, 'dead', '屏蔽原因标注为连续无响应');
+    assert.equal(H._probeRound2Timer, null, '补测轮自终止：不再续期');
+});
+
+test('同会话补探第二轮：补测时源恢复响应 → 正常出结论，不再调度', async () => {
+    let calls = 0;
+    const ctx = statefulEnv(async () => {
+        calls++;
+        return calls <= 2
+            ? { ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } }
+            : { list: [{ vod_id: '1', vod_name: 'x' }] };
+    });
+    const H = ctx.__Home;
+    H._probeRound2DelayMs = 5;
+    await H._probeSites(); // 第 1 轮：首次+二次确认均失败 → 证据不足
+    assert.ok(H._probeRound2Timer, '已调度补探');
+    for (let i = 0; i < 200 && !((ctx.__store.probedSites || []).includes('s')); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.ok((ctx.__store.probedSites || []).includes('s'), '补测轮拿到内容 → 记结论');
+    assert.ok(!ctx.__store.blockedSites, '有内容不屏蔽');
+    assert.ok(!ctx.__store.probeFailStreak.s, '成功清除连败计数');
+    assert.equal(H._probeRound2Timer, null, '有结论后不再调度');
+});
+
+/** 换仓重置测试环境：settings 走共享 store（可预置旧仓状态），getJson 可注入站点列表。 */
+function repoEnv(getJsonImpl, initialStore) {
+    const ctx = loadHome();
+    const H = home(ctx);
+    const store = Object.assign({}, initialStore || {});
+    ctx.window.vpc.settingsGet = async () => ({ ...store });
+    ctx.window.vpc.settingsSet = async (k, v) => { store[k] = v; };
+    H._getSourceSettings = async () => ({ ...(await ctx.window.vpc.settingsGet()) });
+    H.setAutoProbeEnabled = () => {}; // 保持默认开启
+    H.invalidatePageCaches = () => {};
+    H._renderSiteSelect = () => {};
+    H.loadHome = async () => {};
+    H._probeSites = () => {};     // 探测延迟启动的入口桩掉
+    H._probeAllClasses = () => {};
+    ctx.getJson = getJsonImpl;
+    ctx.__store = store;
+    return ctx;
+}
+
+test('换仓重置：配置 URL 变化时清空探测/屏蔽记录，旧仓屏蔽的同名 key 不再误隐藏', async () => {
+    // 同名 key 张冠李戴场景：旧仓把 zy_1 屏蔽/标已探过，换到新仓后同名 zy_1 是不同源，
+    // 若沿用旧记录会「误隐藏 + 漏探测」，表现为换仓后无法屏蔽无影视的源。
+    const ctx = repoEnv(
+        async () => ({ sites: [REAL_SITE] }),
+        {
+            lastConfigUrl: 'http://new/repo.json',
+            probeSourceUrl: 'http://old/repo.json',
+            blockedSites: ['zy_1'],
+            blockedReason: { zy_1: 'empty' },
+            probedSites: ['zy_1'],
+            probedAt: { zy_1: Date.now() },
+        },
+    );
+    const H = ctx.__Home;
+    await H.loadSites();
+    // 重置块写入的空数组/对象是 VM realm 字面量：先展开成宿主 realm 再断言
+    assert.deepEqual([...(ctx.__store.blockedSites || [])], [], '旧仓屏蔽记录清空');
+    assert.deepEqual([...(ctx.__store.probedSites || [])], [], '旧仓已探记录清空（新仓从零全量探测）');
+    assert.deepEqual({ ...(ctx.__store.blockedReason || {}) }, {});
+    assert.deepEqual({ ...(ctx.__store.probedAt || {}) }, {});
+    assert.deepEqual({ ...(ctx.__store.probeFailStreak || {}) }, {});
+    assert.equal(ctx.__store.probeSourceUrl, 'http://new/repo.json', '仓标识更新为新 URL');
+    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1'], '同名 key 不再被旧仓屏蔽记录误隐藏');
+});
+
+test('换仓重置：localStorage 空分类缓存一并作废（按 site key 复用的结论同样张冠李戴）', async () => {
+    const ctx = repoEnv(
+        async () => ({ sites: [REAL_SITE] }),
+        {
+            lastConfigUrl: 'http://new/repo.json',
+            probeSourceUrl: 'http://old/repo.json',
+        },
+    );
+    const H = ctx.__Home;
+    ctx.__ls.setItem('vpc_home_empty_classes', JSON.stringify({ zy_1: { ts: Date.now(), empty: ['a'], ok: [] } }));
+    H._loadPersistedEmptyClasses(); // 模拟启动载入旧仓分类结论
+    await H.loadSites();
+    assert.deepEqual(H._emptyCls.zy_1, undefined, '内存镜像清空');
+    assert.equal(ctx.__ls.getItem('vpc_home_empty_classes'), null, '持久化空分类缓存清除');
+    assert.ok(!H._clsStarted.zy_1 && !H._clsTs.zy_1, '新仓该源重新全量探测分类');
+});
+
+test('同仓重启：配置 URL 未变化时保留探测/屏蔽记录（多仓漂移仍按 key 集签名处理）', async () => {
+    const ctx = repoEnv(
+        async () => ({ sites: [REAL_SITE] }),
+        {
+            lastConfigUrl: 'http://same/repo.json',
+            probeSourceUrl: 'http://same/repo.json',
+            blockedSites: ['other'],
+            blockedReason: { other: 'dead' },
+            probedSites: ['other'],
+            probedAt: { other: Date.now() },
+        },
+    );
+    const H = ctx.__Home;
+    await H.loadSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['other'], '同仓不重置屏蔽记录');
+    assert.deepEqual(ctx.__store.probedSites, ['other']);
+    assert.equal(ctx.__store.probeSourceUrl, 'http://same/repo.json', '仓标识保持不变');
+});
+
 test('内嵌 error 但返回影片 → 内容优先于错误，判可用不屏蔽', async () => {
     const ctx = statefulEnv(async (action) => (action === 'homeContent'
         ? { list: [{ vod_id: '1' }], error: { code: 'L3_RUNTIME_CALL_FAILED', message: '部分线路失败' } }

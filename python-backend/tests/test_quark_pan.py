@@ -365,5 +365,119 @@ class TestQuarkShareFilePlay(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestQuarkShareStaleMetadataRefresh(unittest.TestCase):
+    """聚合站页面缓存的 fid/share_fid_token 过期后的自愈行为。
+
+    真实案例（夸克盘社）：vodId 里的 fileId/fileToken 是分享发布时的快照，
+    分享者更新文件后夸克轮换令牌——转存报 41020「转存文件token校验异常」，
+    v2/play 21001、file/download 14001。修复：转存失败后实时拉取分享目录树，
+    用当前条目重定位（fileId 优先、shareId 参数次之）再转存一次。
+    """
+
+    def setUp(self):
+        go_proxy._SAVE_CACHE.pop('pwd-2:fid-ep7', None)
+        go_proxy._SAVE_CACHE.pop('pwd-2:share-1', None)
+        go_proxy._SHARE_CACHE.pop('pwd-2', None)
+
+    def tearDown(self):
+        go_proxy._SAVE_CACHE.pop('pwd-2:fid-ep7', None)
+        go_proxy._SAVE_CACHE.pop('pwd-2:share-1', None)
+        go_proxy._SHARE_CACHE.pop('pwd-2', None)
+
+    @staticmethod
+    def _fake_qget(entries_by_pdir):
+        """按请求里的 pdir_fid 返回预置列表，未命中返回空列表。"""
+
+        def fake_qget(url, **kwargs):
+            pdir = ''
+            for seg in str(url).split('&'):
+                if seg.startswith('pdir_fid='):
+                    pdir = seg.split('=', 1)[1]
+            return _FakeResponse({'data': {'list': entries_by_pdir.get(pdir, [])}})
+        return fake_qget
+
+    def test_save_retried_with_fresh_token_from_share_tree(self):
+        saved = []
+
+        def fake_save(pwd_id, stoken, fid, fid_token, headers):
+            saved.append((fid, fid_token))
+            if fid_token == 'token-stale':
+                raise ValueError('save task id empty')
+            return 'personal-fid'
+
+        tree = {'0': [{'fid': 'dir-1', 'dir': True},
+                      {'fid': 'fid-other', 'share_fid_token': 't-x', 'file': True}],
+                'dir-1': [{'fid': 'share-1', 'share_fid_token': 'token-live',
+                           'file': True}]}
+
+        with patch.object(go_proxy, '_qpost',
+                          lambda url, **kwargs:
+                          _FakeResponse({'data': {'stoken': 'stoken-9'}}) if
+                          'sharepage/token' in str(url) else None), \
+                patch.object(go_proxy, '_qget', self._fake_qget(tree)), \
+                patch.object(go_proxy, '_quark_v2play', lambda *a, **k: None), \
+                patch.object(go_proxy, '_quark_download_url',
+                             lambda *a, **k: (_ for _ in ()).throw(
+                                 ValueError('download URL unavailable'))), \
+                patch.object(go_proxy, '_quark_save_share', fake_save), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='':
+                             'https://cdn.test/%s.mp4' % fid):
+            url = go_proxy._quark_share_file_play_url(
+                'pwd-2', 'fid-ep7', 'token-stale', {}, share_id='share-1')
+        self.assertEqual(url, 'https://cdn.test/personal-fid.mp4')
+        # 第一次用原值失败；自愈后用目录树里的新鲜条目（shareId 位的活 fid）
+        self.assertEqual(saved, [('fid-ep7', 'token-stale'),
+                                 ('share-1', 'token-live')])
+
+    def test_refresh_miss_keeps_original_failure(self):
+        def fake_save(pwd_id, stoken, fid, fid_token, headers):
+            raise ValueError('save task id empty')
+
+        with patch.object(go_proxy, '_qpost',
+                          lambda url, **kwargs:
+                          _FakeResponse({'data': {'stoken': 'stoken-9'}}) if
+                          'sharepage/token' in str(url) else None), \
+                patch.object(go_proxy, '_qget', self._fake_qget({})), \
+                patch.object(go_proxy, '_quark_v2play', lambda *a, **k: None), \
+                patch.object(go_proxy, '_quark_download_url',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_save_share', fake_save), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='': ''):
+            with self.assertRaises(ValueError):
+                go_proxy._quark_share_file_play_url(
+                    'pwd-2', 'fid-ep7', 'token-stale', {}, share_id='share-1')
+
+    def test_valid_tokens_skip_tree_lookup(self):
+        """令牌有效时转存一把过：除既有文件夹兜底外，无额外目录树遍历。"""
+        qget_calls = []
+        fake_qget = self._fake_qget({})
+
+        def counting_qget(url, **kwargs):
+            qget_calls.append(str(url))
+            return fake_qget(url, **kwargs)
+
+        with patch.object(go_proxy, '_qpost',
+                          lambda url, **kwargs:
+                          _FakeResponse({'data': {'stoken': 'stoken-9'}}) if
+                          'sharepage/token' in str(url) else None), \
+                patch.object(go_proxy, '_qget', counting_qget), \
+                patch.object(go_proxy, '_quark_v2play', lambda *a, **k: None), \
+                patch.object(go_proxy, '_quark_download_url',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_save_share',
+                             lambda *a, **k: 'personal-fid'), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='':
+                             'https://cdn.test/x.mp4'):
+            url = go_proxy._quark_share_file_play_url(
+                'pwd-2', 'fid-ok', 'token-ok', {})
+        self.assertEqual(url, 'https://cdn.test/x.mp4')
+        # 只允许既有文件夹兜底的这一次 detail（对原 fid），不得触发树遍历
+        self.assertEqual(len(qget_calls), 1)
+        self.assertIn('pdir_fid=fid-ok', qget_calls[0])
+
+
 if __name__ == '__main__':
     unittest.main()

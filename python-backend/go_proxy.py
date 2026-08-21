@@ -237,6 +237,93 @@ def _forward_content_type(upstream, default='video/mp4'):
     return default
 
 
+def _is_hls_ctype(ctype):
+    """上游 Content-Type 是否为 HLS 播放列表。"""
+    return 'mpegurl' in str(ctype or '').lower()
+
+
+_HLS_URI_ATTR_RE = re.compile(r'(URI=")([^"]*)(")')
+
+
+def _hls_proxy_wrap(abs_url):
+    """分片/子列表/KEY 统一包回本代理 ？url= 转发。
+
+    凭据由该分支按夸克/UC 域名白名单注入；嵌套的变体播放列表经同一分支
+    会再次被识别为 m3u8 并重写，任意深度都能走通。
+    """
+    return 'http://127.0.0.1:%d/proxy?url=%s' % (
+        PORT, urllib.parse.quote(abs_url, safe=''))
+
+
+def _rewrite_hls_line(line, base_url):
+    """重写单行：非标签行=分片/子列表 URI；标签行只改写 URI="..." 属性。
+
+    返回 None 表示空行（丢弃）；无法解析为 http(s) 的行原样保留。
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith('#'):
+        if 'URI="' not in stripped:
+            return line
+
+        def _sub(m):
+            uri = m.group(2)
+            if not uri:
+                return m.group(0)
+            if not uri.lower().startswith(('http://', 'https://')):
+                uri = urllib.parse.urljoin(base_url, uri)
+            if not uri.lower().startswith(('http://', 'https://')):
+                return m.group(0)  # data: 等非 http URI 不包装
+            return m.group(1) + _hls_proxy_wrap(uri) + m.group(3)
+
+        return _HLS_URI_ATTR_RE.sub(_sub, line)
+    if not stripped.lower().startswith(('http://', 'https://')):
+        stripped = urllib.parse.urljoin(base_url, stripped)
+    if not stripped.lower().startswith(('http://', 'https://')):
+        return line
+    return _hls_proxy_wrap(stripped)
+
+
+def _rewrite_hls_playlist(base_url, text):
+    """重写 HLS 播放列表：所有分片/子列表/AES KEY 地址改为经本代理转发。
+
+    背景：do=pan 把夸克 v2/play 返回的 m3u8 原文透传给 mpv 时，相对分片
+    （media-xxx.ts?auth_key=...）会被按 127.0.0.1 代理基址解析 → 404；
+    绝对分片则绕过代理直连 CDN——缺 Cookie/Referer 时被拒。两种都必须包
+    成 ?url= 转发才能播放。
+    """
+    out = []
+    for line in text.splitlines():
+        rewritten = _rewrite_hls_line(line, base_url)
+        if rewritten is not None:
+            out.append(rewritten)
+    return '\n'.join(out) + '\n'
+
+
+def _send_hls_playlist(self, url, headers, head_only):
+    """整体取回上游 m3u8、重写后回给客户端。返回是否成功。"""
+    resp = _fetch(url, headers, 0, None, timeout=30)
+    try:
+        status = int(resp.status_code or 502)
+        if status not in (200, 206):
+            self.send_response(status if 400 <= status <= 599 else 502)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return True  # 已应答（错误状态），调用方无需再处理
+        text = resp.content.decode('utf-8', 'replace')
+    finally:
+        resp.close()
+    body = _rewrite_hls_playlist(url, text).encode('utf-8')
+    self.send_response(200)
+    self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
+    self.send_header('Content-Length', str(len(body)))
+    self.end_headers()
+    if not head_only:
+        self.wfile.write(body)
+    return True
+
+
 def _quark_detail_url(pwd_id, stoken, pdir_fid=''):
     """拼夸克分享 detail URL（stoken 必须 URL 编码）。
 
@@ -316,6 +403,43 @@ def _quark_response_meta(response):
     shape = type(data).__name__
     return 'status=%s code=%s message=%s data=%s' % (
         status, code if code is not None else '-', has_message, shape)
+
+
+def _quark_share_tree_lookup(pwd_id, stoken, headers, max_items=512, max_depth=3):
+    """遍历分享目录树（BFS），返回 {fid: 当前条目} 映射。
+
+    背景：聚合站页面常缓存分享发布时的旧 fid/share_fid_token；分享者更新
+    文件后夸克会轮换令牌，拿旧 token 去转存必报 41020「转存文件token校验
+    异常」。sharepage/detail 实时返回的列表携带当前有效的 share_fid_token，
+    用它按 fid 重新定位目标文件即可自愈。
+
+    条目结构（data.list）：dir=true 为文件夹；file_fid_token 字段名是
+    share_fid_token。BFS 限深限量，防止超大分享拖死取流。
+    """
+    found = {}
+    queue = [('0', 0)]
+    seen = set()
+    while queue and len(found) < max_items:
+        pdir, depth = queue.pop(0)
+        if pdir in seen or depth > max_depth:
+            continue
+        seen.add(pdir)
+        try:
+            r = _qget(_quark_detail_url(pwd_id, stoken, pdir),
+                      headers=headers, timeout=20, verify=True)
+            items = ((r.json() or {}).get('data') or {}).get('list') or []
+        except Exception:
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            fid = str(it.get('fid') or '')
+            if not fid:
+                continue
+            found[fid] = it
+            if it.get('dir') and depth < max_depth:
+                queue.append((fid, depth + 1))
+    return found
 
 
 def _quark_v2play(fid, headers, quality=''):
@@ -608,6 +732,8 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
         raise ValueError('missing pwd/file id')
     import time as _time
     last_err = None
+    # 元数据刷新只做一轮：目录树内容不会在 0.8s 重试间隔内变化
+    refreshed = False
 
     def _resolve_folder_fid(target_fid, stoken_value):
         """若 fid 是文件夹则进目录找首个视频，返回 (fid, token) 或原值。"""
@@ -652,7 +778,37 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
                             return url
             if url:
                 return url
-            new_fid = _quark_save_share(pwd_id, stoken, eff_fid, eff_token, headers)
+            try:
+                new_fid = _quark_save_share(pwd_id, stoken, eff_fid, eff_token,
+                                            headers)
+            except Exception:
+                # 元数据过期自愈：JAR/聚合站 vodId 携带的 fid/share_fid_token 是
+                # 页面缓存的快照，分享者更新文件后夸克轮换令牌——直接转存会报
+                # 41020「转存文件token校验异常」。实时拉取分享目录树，用当前
+                # 条目（fid + 有效 token）重定位后再转存一次。匹配顺序：
+                # fileId → shareId 参数（部分 JAR 格式两段语义错位，真实文件
+                # fid 反而落在 shareId 位）。找不到候选则维持原错误上抛。
+                if refreshed:
+                    raise
+                refreshed = True
+                try:
+                    tree = _quark_share_tree_lookup(pwd_id, stoken, headers)
+                except Exception:
+                    tree = {}
+                picked = False
+                for cand in (str(eff_fid or ''), str(share_id or '')):
+                    ent = tree.get(cand) if cand else None
+                    if isinstance(ent, dict) and not ent.get('dir'):
+                        tok = str(ent.get('share_fid_token') or '')
+                        cur_fid = str(ent.get('fid') or cand)
+                        if tok:
+                            eff_fid, eff_token = cur_fid, tok
+                            picked = True
+                            break
+                if not picked:
+                    raise
+                new_fid = _quark_save_share(pwd_id, stoken, eff_fid, eff_token,
+                                            headers)
             playable = _quark_personal_play_url(new_fid, headers, retries=4,
                                                 quality=quality)
             if playable:
@@ -972,6 +1128,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             finally:
                 probe.close()
             if total is None or total <= 0:
+                # 无长度信息（HLS 等）。m3u8 同样整体取回并重写分片地址——
+                # do=pan 重写过的嵌套变体列表会经 ?url= 回到此处，二次重写
+                # 保证任意深度嵌套的分片都落在代理内。
+                if _is_hls_ctype(ctype):
+                    _send_hls_playlist(self, url, headers, head_only)
+                    return
                 # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
                 # 不发 Content-Length，按开放区间（不带 Range）直接透传
                 self.send_response(200)
@@ -1298,7 +1460,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         finally:
             probe.close()
         if total is None or total <= 0:
-            # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
+            # 无长度信息（HLS 等）。m3u8 播放列表必须整体取回并重写分片地址：
+            # 相对分片按代理基址解析必 404，绝对分片直连 CDN 缺凭据被拒。
+            if _is_hls_ctype(ctype):
+                if _send_hls_playlist(self, url, headers, head_only):
+                    return
+            # 其余未知长度流：先发 200 + 探测到的 Content-Type，
             # 不发 Content-Length，按开放区间（不带 Range）直接透传
             self.send_response(200)
             self.send_header('Content-Type', ctype)
