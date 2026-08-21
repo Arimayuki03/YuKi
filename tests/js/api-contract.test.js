@@ -150,12 +150,15 @@ test('watchStats 初始结构', () => {
 
 test('settings-reset 保留键列表', () => {
     const keepKeys = ['favorites', 'history', 'dlDir', 'cacheDir',
-        'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches',
+        'watchStats', 'recentWatches',
         'bangumiToken', 'dandanAppId', 'dandanAppSecret'];
     assert.ok(keepKeys.includes('favorites'), '收藏应保留');
     assert.ok(keepKeys.includes('history'), '历史应保留');
     assert.ok(keepKeys.includes('watchStats'), '统计应保留');
     assert.ok(!keepKeys.includes('themeColor'), '主题色应清除');
+    // 硬盘缓存已移除：两个历史键由启动迁移删除，不再进保留清单
+    assert.ok(!keepKeys.includes('playerCacheMode'));
+    assert.ok(!keepKeys.includes('playerCacheDir'));
 });
 
 // ============================================================

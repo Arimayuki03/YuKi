@@ -27,6 +27,7 @@ function loadPlayer(settings, extras = {}) {
         parseFloat,
         setTimeout,
         clearTimeout,
+        warnToast() {},
         $: jqueryStub,
         window: {
             vpc: {
@@ -221,7 +222,7 @@ test('用户主动关闭播放器（quit）终止连播链，不自动播下一�
     assert.equal(player._seq, null); // quit → 终止连播链，不推进下一集
 });
 
-test('断流退出（未看完、非 quit、媒体直链）保留连播链等待主进程重连', async () => {
+test('断流退出重新调用原始 playerContent 链且最多一次，不复用旧 CDN URL', async () => {
     const settings = {};
     const player = loadPlayer(settings);
     player._curMeta = { title: '影片 C' };
@@ -230,8 +231,31 @@ test('断流退出（未看完、非 quit、媒体直链）保留连播链等待
     player._playToken = 6;
     player._lastUrl = 'https://x.example.com/ep1.mp4';
     player._seq = { site: 's', flag: 'f', title: '影片 C', episodes: [{ name: '第1集', url: 'u1' }, { name: '第2集', url: 'u2' }], index: 0 };
+    player._currentPlayback = { site: 's', flag: 'f', id: 'episode-id', title: '影片 C',
+        subtitle: '第1集', episodes: player._seq.episodes, epIndex: 0, kazumiSrc: '' };
+    const calls = [];
+    player.play = async (...args) => { calls.push(args); return { ok: true }; };
     await player._onExit({ sessionId: 902, pos: 30, duration: 120, quit: false });
-    assert.ok(player._seq); // 断流等待主进程重连，链保留
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][2], 'episode-id', '必须重用 episode id 重新走 playerContent');
+    assert.equal(calls[0][8].reconnectAttempt, 1);
+    assert.equal(player._reconnectAttempts, 1);
+    await player._onExit({ sessionId: 902, pos: 60, duration: 120, quit: false });
+    assert.equal(calls.length, 1, '同一播放链不能无限重连');
+});
+
+test('断流等待期间用户发起新操作会取消重连', async () => {
+    const player = loadPlayer({});
+    player._session = 903;
+    player._playToken = 10;
+    player._currentPlayback = { site: 's', flag: 'f', id: 'episode-id', title: '影片',
+        subtitle: '第1集', episodes: [], epIndex: 0, kazumiSrc: '' };
+    let calls = 0;
+    player.play = async () => { calls += 1; return { ok: true }; };
+    const pending = player._onExit({ sessionId: 903, pos: 30, duration: 120, quit: false });
+    setTimeout(() => { player._playToken += 1; player._currentPlayback = null; }, 20);
+    await pending;
+    assert.equal(calls, 0);
 });
 
 test('_awaitTimeout：解析 IPC 挂起时超时返回 null（loading 不会卡死）', async () => {

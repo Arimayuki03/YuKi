@@ -10,7 +10,8 @@ test('2A: about is a settings category and legacy UI is removed', () => {
     const html = read('src/renderer/index.html');
 
     assert.match(html, /data-cat="about"/);
-    assert.equal((html.match(/data-setcat="about"/g) || []).length, 4);
+    // 技术栈卡片已移除（WIP 清理），about 分类剩：版本信息、致谢等 3 处
+    assert.equal((html.match(/data-setcat="about"/g) || []).length, 3);
     assert.doesNotMatch(html, /data-view="about"|id="view-about"/);
     // 2.11：外观卡已新增「MiSans 界面字体」开关，故不再断言无 MiSans 文案
     assert.doesNotMatch(html, /set_pip_|id="app_version"|画中画/);

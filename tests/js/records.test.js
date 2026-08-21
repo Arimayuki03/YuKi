@@ -138,6 +138,23 @@ test('recCard：Bangumi 条目带来源徽标/状态标签，可勾选批量标�
     assert.doesNotMatch(html, /rec-edit/);
 });
 
+test('recCard：本地与下载文件卡片带 data-local-path 供抓帧渲染', () => {
+    const ctx = loadRecords({});
+    const localHtml = ctx.__recCard({ site: 'local', vodId: 'sub/video.mp4', name: '本地视频' }, true, false);
+    assert.match(localHtml, /data-local-path="sub\/video\.mp4"/);
+    const dlHtml = ctx.__recCard({ site: 'download', vodId: 'C:\\Downloads\\video.mp4', name: '下载视频' }, true, false);
+    assert.match(dlHtml, /data-local-path="C:\\Downloads\\video\.mp4"/);
+});
+
+test('recCard：下载文件即使已有旧封面也仍走视频帧封面', () => {
+    const ctx = loadRecords({});
+    const html = ctx.__recCard({
+        site: 'download', vodId: 'C:\\Downloads\\video.mp4', name: '下载视频', pic: 'https://example.com/old.jpg',
+    }, true, false);
+    assert.match(html, /data-local-path="C:\\Downloads\\video\.mp4"/);
+    assert.doesNotMatch(html, /old\.jpg/);
+});
+
 test('recCard：本地条目保留删除/编辑/勾选按钮与状态标签', () => {
     const ctx = loadRecords({});
     const html = ctx.__recCard(

@@ -700,3 +700,32 @@ test('searchCurrent：换词/重搜重置已见记录与残留页码', async () 
     assert.equal(H._searchSeen.key, 's|另一部', '换词按 site|word 隔离已见记录');
     assert.equal(H._searchSeen.ids.size, 20);
 });
+
+test('loadSites：后发配置完成后，旧的站点响应不得覆盖新配置', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H._getSourceSettings = async () => ({});
+    H.setAutoProbeEnabled = (enabled) => { H._autoProbeEnabled = false; };
+    H.invalidatePageCaches = () => {};
+    H._getBlocked = async () => [];
+    H._renderSiteSelect = () => {};
+    H.loadHome = async () => {};
+    H._probeSites = () => {};
+
+    const pending = [];
+    ctx.getJson = async () => new Promise((resolve) => pending.push(resolve));
+    const first = H.loadSites();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pending.length, 1, '第一次刷新应先发起站点列表请求');
+    const second = H.loadSites();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pending.length, 2, '第二次刷新也应发起站点列表请求');
+
+    pending[1]({ sites: [{ key: 'new', name: '新配置', state: 'healthy', runtime: 'python' }] });
+    await second;
+    pending[0]({ sites: [{ key: 'old', name: '旧配置', state: 'healthy', runtime: 'python' }] });
+    await first;
+
+    assert.deepEqual(H._allSites.map((site) => site.key), ['new']);
+    assert.deepEqual(H.sites.map((site) => site.key), ['new']);
+});

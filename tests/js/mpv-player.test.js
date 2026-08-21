@@ -219,3 +219,107 @@ test('setCustomPath(): 不存在的路径返回 false，不改变现有 binary',
     assert.equal(ok, false);
     assert.equal(p.binary, null);
 });
+
+// ---------------------------------------------------------------- 视频缓冲缓存（只走内存）
+
+test('_cacheArgs(): 在线播放缓存只进内存，不落磁盘', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    const a = p._cacheArgs(true);
+    assert.ok(a.includes('--cache=yes'));
+    assert.ok(a.includes('--demuxer-max-bytes=512MiB'));      // 内存缓冲上限
+    assert.ok(a.includes('--demuxer-max-back-bytes=128MiB')); // 回退缓冲（同为内存）
+    assert.ok(a.includes('--demuxer-readahead-secs=60'));
+    assert.ok(a.includes('--cache-on-disk=no'));              // 显式关闭，压过用户 mpv.conf
+    assert.ok(!a.some((x) => x.startsWith('--demuxer-cache-dir=')));
+    assert.ok(!a.includes('--cache-on-disk=yes'));
+});
+
+test('_cacheArgs(): 本地文件同样显式关闭落盘（不加预缓冲）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    assert.deepEqual(p._cacheArgs(false), ['--cache-on-disk=no']);
+});
+
+test('_cacheArgs(): 残留的旧 disk 字段也不得让缓存落盘（防回归）', () => {
+    // 硬盘缓存能力已移除；旧版本的 cacheMode/cacheDir 字段或历史设置键都不应再有任何效力
+    const p = Object.create(MpvPlayer.prototype);
+    p.cacheMode = 'disk';
+    p.cacheDir = require('path').join(require('os').tmpdir(), 'vpc-legacy-mpv-cache');
+    for (const isNet of [true, false]) {
+        const a = p._cacheArgs(isNet);
+        assert.ok(a.includes('--cache-on-disk=no'));
+        assert.ok(!a.includes('--cache-on-disk=yes'));
+        assert.ok(!a.some((x) => x.startsWith('--demuxer-cache-dir=')));
+    }
+    // 目录也不该被顺手创建
+    assert.equal(require('fs').existsSync(p.cacheDir), false);
+});
+
+// ---------------------------------------------------------------- 截图（s 键落盘）
+
+/**
+ * 校验 mpv 截图文件名模板的转义合法性（对齐 mpv create_fname 的可接受集合）。
+ * mpv 遇到未知转义会判整个模板非法并**放弃截图**，故此处逐个转义白名单校验。
+ */
+function shotTemplateBad(tpl) {
+    for (let i = 0; i < tpl.length; i++) {
+        if (tpl[i] !== '%') continue;
+        let c = tpl[++i];
+        if (c === undefined) return '模板以 % 结尾';
+        if (c === '#') c = tpl[++i];                      // %#n：每个文件重置序号
+        while (c >= '0' && c <= '9') c = tpl[++i];         // %0Xn：序号补零位数
+        if (c === undefined) return '序号转义缺 n';
+        if ('nfFxpP%'.includes(c)) continue;               // 序号/文件名/路径/播放时间/字面 %
+        if (c === '{') {                                   // %{property}
+            const end = tpl.indexOf('}', i);
+            if (end < 0) return '%{…} 未闭合';
+            i = end;
+            continue;
+        }
+        if (c === 't') {                                   // %tX：strftime 字段，必须带子格式字符
+            if (tpl[++i] === undefined) return '%t 缺子格式字符';
+            continue;
+        }
+        if (c === 'w') {                                   // %wX：播放时间，子格式限定集合
+            const sub = tpl[++i];
+            if (!'HhMmSsfT'.includes(String(sub))) return `%w 子格式非法：%w${sub}`;
+            continue;
+        }
+        if (c === 'X') {                                   // %X{fallback}
+            if (tpl[++i] !== '{') return '%X 缺 {fallback}';
+            const end = tpl.indexOf('}', i);
+            if (end < 0) return '%X{…} 未闭合';
+            i = end;
+            continue;
+        }
+        return `未知转义：%${c}`;
+    }
+    return '';
+}
+
+test('shotTemplateBad(): 能识别出旧模板 video-pc-%w-%03n 非法（本次 bug 的根因）', () => {
+    assert.equal(shotTemplateBad('video-pc-%w-%03n'), '%w 子格式非法：%w-');
+    assert.equal(shotTemplateBad('mpv-shot%n'), '');
+    assert.equal(shotTemplateBad('%wH.%wM.%wS-%03n'), '');
+});
+
+test('_screenshotArgs(): 目录/png/合法模板三件套', () => {
+    const dir = require('path').join(require('os').tmpdir(), 'vpc-shot-args-test');
+    const p = Object.create(MpvPlayer.prototype);
+    p.screenshotDir = dir;
+    const a = p._screenshotArgs();
+    assert.ok(a.includes(`--screenshot-directory=${dir}`));
+    assert.ok(a.includes('--screenshot-format=png')); // 与 IPC 通道 screenshot-to-file 的 .png 一致
+    const tpl = a.find((x) => x.startsWith('--screenshot-template='));
+    assert.ok(tpl, '缺 --screenshot-template');
+    const value = tpl.slice('--screenshot-template='.length);
+    assert.equal(shotTemplateBad(value), ''); // 非法模板会让 mpv 放弃截图（s 键只弹 OSD 不落盘）
+    assert.ok(/%0?\d*n/.test(value), '模板需含序号 %n，重名时自增避让而非报错');
+    assert.ok(require('fs').existsSync(dir), '目录应被兜底创建');
+    try { require('fs').rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+});
+
+test('_screenshotArgs(): 未设目录时不注入任何截图参数', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.screenshotDir = '';
+    assert.deepEqual(p._screenshotArgs(), []);
+});
