@@ -57,7 +57,7 @@ ERROR_SPECS = {
     'L4_PARSE_FAILED': ('parse', True, 502, '播放地址解析失败'),
     'L4_PARSE_TIMEOUT': ('parse', True, 504, '播放地址解析超时'),
     'L4_PARSE_CANCELLED': ('parse', True, 499, '播放地址解析已取消'),
-    'L4_PARSE_UNAVAILABLE': ('parse', False, 424, '当前配置未含匹配该线路的解析接口（parse=1）'),
+    'L4_PARSE_UNAVAILABLE': ('parse', False, 424, '当前配置未含可用的解析接口（parse=1）'),
     # L5 media reachability
     'L5_MEDIA_UNREACHABLE': ('media', True, 502, '媒体地址不可达'),
     'L5_MEDIA_HTTP_ERROR': ('media', True, 502, '媒体服务器拒绝访问'),

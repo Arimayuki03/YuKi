@@ -57,6 +57,9 @@ class Runner:
     def playerContent(self, flag, id, vipFlags):
         return self._invoke('playerContent', flag, id, vipFlags)
 
+    def jsonExt(self, key, jxs, url):
+        return self._invoke('jsonExt', key, jxs, url)
+
     def liveContent(self, url):
         return self._invoke('liveContent', url)
 

@@ -11,8 +11,6 @@ quickjs-ng 不支持跨模块 import，因此把入口模块及其依赖树抓�
 - import './side.js'                   副作用导入
 动态 import() 与 http(s) 绝对依赖同样支持；循环依赖按先到者截断。
 """
-import os
-import hashlib
 import time
 import logging
 import re

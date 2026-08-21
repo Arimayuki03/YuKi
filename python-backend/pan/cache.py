@@ -85,6 +85,8 @@ def make_cache_key(
         'shareId': p.get('shareId') or p.get('share_id') or '',
         'fileId': p.get('fileId') or p.get('file_id') or p.get('fid') or '',
         'fileToken': p.get('fileToken') or p.get('file_token') or '',
+        'pwdId': p.get('pwdId') or p.get('pwd_id') or '',
+        'shareUrl': p.get('shareUrl') or p.get('share_url') or '',
         'url': p.get('url') or '',
         'quality': p.get('quality') or p.get('resolution') or '',
     }

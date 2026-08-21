@@ -19,6 +19,7 @@ DEFAULT_FIELDS = {
     'jx': 0,
     'playUrl': '',
     'header': {},
+    'headers': {},
     'flag': '',
     'jxFrom': '',
     'click': '',
@@ -26,6 +27,9 @@ DEFAULT_FIELDS = {
     'subs': [],
     'drm': None,
     'position': 0,
+    'msg': '',
+    'code': 0,
+    'proxy': None,
     'error': '',
 }
 
@@ -100,6 +104,7 @@ def normalize_play_result(
     raw: Any,
     *,
     site_headers: Any = None,
+    site_play_url: str = '',
     flag: str = '',
     original_id: str = '',
 ) -> dict[str, Any]:
@@ -142,21 +147,32 @@ def normalize_play_result(
     jx = result.get('jx')
     jx_enabled = jx is True or str(jx).lower() in ('1', 'true', 'yes')
     result['jx'] = 1 if jx_enabled else _number(jx, 0)
-    parse = _number(result.get('parse'), 0)
-    result['parse'] = 1 if jx_enabled or parse == 1 else 0
+    # ``jx=1`` is FongMi's compatibility spelling for "needs parsing".  Keep
+    # the independent jx field, promote a false/absent parse to 1, and retain
+    # any explicit non-zero numeric parse extension supplied by the Spider.
+    parsed_mode = _number(result.get('parse'), 0)
+    result['parse'] = 1 if jx_enabled and not parsed_mode else parsed_mode
 
-    result['header'] = merge_headers(site_headers, result.get('header'), result.get('headers'))
+    spider_header = result.get('header')
+    spider_headers = result.get('headers')
+    result['headers'] = _header_map(spider_headers)
+    result['header'] = merge_headers(site_headers, spider_header, spider_headers)
     result['flag'] = _string(result.get('flag')) or _string(flag)
-    for key in ('playUrl', 'jxFrom', 'click', 'format'):
+    for key in ('playUrl', 'jxFrom', 'click', 'format', 'msg'):
         result[key] = _string(result.get(key))
+    if not result['playUrl']:
+        result['playUrl'] = _string(site_play_url).strip()
 
     result['subs'] = _json_value(result.get('subs'))
     if result['subs'] in (None, ''):
         result['subs'] = []
     result['drm'] = _json_value(result.get('drm'))
     result['position'] = _number(result.get('position'), 0)
+    result['code'] = _number(result.get('code'), 0)
+    result['proxy'] = _json_value(result.get('proxy'))
+    if 'skipProbe' in result:
+        result['skipProbe'] = result['skipProbe'] is True or str(result['skipProbe']).lower() in ('1', 'true', 'yes')
 
     if not result['url'] and not result.get('error'):
         result['error'] = 'playerContent returned an empty url'
     return result
-

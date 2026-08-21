@@ -20,13 +20,40 @@ _state = {
     'cache_dir': _CACHE_DIR,
     'plugins_dir': os.path.join(_CACHE_DIR, 'py'),  # 对应原 Android cacheDir/py
     'log_dir': os.path.join(_DATA_DIR, 'logs'),
-    'pan_fast_path': True,  # 任务三：网盘快路径开关（默认开：夸克文件前置短路；
-                            # 关：全走 jar，兜底才用 go-proxy）
+    # R8.1 功能开关标准体系
+    'runtime_android_worker': False,# Android Worker（受 A4.1 No-Go 政策硬锁定）
+    'pan_fast_path': True,          # 网盘快路径（夸克等前置短路，关后全走 jar 兜底）
+    'media_probe': True,            # 起播前媒体探测
+    'auto_line_fallback': True,     # 播放失败多线路自动回退
+    'legacy_parser': True,          # 简易解析器与 iframe 跟随
 }
 
 
 def configure(**kwargs):
     _state.update(kwargs)
+
+
+def get_feature_flags():
+    """获取所有功能开关当前状态字典。"""
+    return {
+        'runtime_android_worker': bool(_state.get('runtime_android_worker', False)),
+        'pan_fast_path': bool(_state.get('pan_fast_path', True)),
+        'media_probe': bool(_state.get('media_probe', True)),
+        'auto_line_fallback': bool(_state.get('auto_line_fallback', True)),
+        'legacy_parser': bool(_state.get('legacy_parser', True)),
+    }
+
+
+def get_media_probe():
+    return bool(_state.get('media_probe', True))
+
+
+def get_auto_line_fallback():
+    return bool(_state.get('auto_line_fallback', True))
+
+
+def get_legacy_parser():
+    return bool(_state.get('legacy_parser', True))
 
 
 def get_port():

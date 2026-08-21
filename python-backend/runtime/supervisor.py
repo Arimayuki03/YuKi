@@ -2,6 +2,7 @@
 """进程隔离、绝对 deadline、强制终止、重启与熔断。"""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 import atexit
 import logging
@@ -42,6 +43,122 @@ RUNTIME_POLICIES = {
 
 _registry_lock = threading.RLock()
 _registry = weakref.WeakSet()
+
+# 全局 Worker 进程数限制：配置多仓/多站点并发构建时无上限会同时拉起数十个
+# Python 子进程（每个站点一个 Supervisor）+ 若为 jar 则再派生 JVM，内存暴涨。
+# 默认总 Worker 8、其中 jar 最多 3，可用环境变量覆盖。
+_GLOBAL_LRU: OrderedDict[int, object] = OrderedDict()
+_MAX_WORKERS_DEFAULT = 8
+_MAX_JAR_WORKERS_DEFAULT = 3
+
+
+def _max_workers() -> int:
+    raw = os.environ.get('VPC_MAX_WORKERS') or os.environ.get('VPC_MAX_PYTHON_WORKERS')
+    if raw:
+        try:
+            v = int(str(raw).strip())
+            return max(1, min(16, v))
+        except (TypeError, ValueError):
+            pass
+    return _MAX_WORKERS_DEFAULT
+
+
+def _max_jar_workers() -> int:
+    raw = os.environ.get('VPC_MAX_JAR_WORKERS') or os.environ.get('VPC_MAX_JVM')
+    if raw:
+        try:
+            v = int(str(raw).strip())
+            return max(1, min(8, v))
+        except (TypeError, ValueError):
+            pass
+    return _MAX_JAR_WORKERS_DEFAULT
+
+
+def _global_alive_count(runtime: str | None = None) -> int:
+    with _registry_lock:
+        if runtime is None:
+            return sum(1 for s in list(_registry) if s.pid is not None)
+        return sum(1 for s in list(_registry) if getattr(s, 'runtime', None) == runtime and s.pid is not None)
+
+
+def _touch_global(sup) -> None:
+    with _registry_lock:
+        k = id(sup)
+        if k in _GLOBAL_LRU:
+            _GLOBAL_LRU.move_to_end(k)
+        else:
+            _GLOBAL_LRU[k] = sup
+
+
+def _remove_global(sup) -> None:
+    with _registry_lock:
+        _GLOBAL_LRU.pop(id(sup), None)
+
+
+def _ensure_global_slot_locked(caller) -> object | None:
+    """在全局上限内为 caller 预留进程槽；需淘汰时返回 victim（调用方在锁外销毁）。
+
+    须在 caller._lifecycle_lock 已持有且未持有 _registry_lock 时调用；内部会短暂
+    持有 _registry_lock 判断并挑选 victim，但不直接销毁（避免在 _registry_lock 内
+    重入 victim._lifecycle_lock 造成死锁或 ~1s 阻塞）。
+    """
+    limit_total = _max_workers()
+    limit_jar = _max_jar_workers()
+    with _registry_lock:
+        # 刷新 caller 在 LRU 中的位置（即使尚未有 pid，也占位以保证公平）
+        k = id(caller)
+        if k in _GLOBAL_LRU:
+            _GLOBAL_LRU.move_to_end(k)
+        else:
+            _GLOBAL_LRU[k] = caller
+        # caller 已有存活进程则无需预留
+        if caller.pid is not None:
+            return None
+        total = sum(1 for s in list(_registry) if s.pid is not None)
+        jar_total = sum(1 for s in list(_registry) if getattr(s, 'runtime', None) == 'jar' and s.pid is not None)
+        need_total = total >= limit_total
+        need_jar = caller.runtime == 'jar' and jar_total >= limit_jar
+        if not (need_total or need_jar):
+            return None
+        reason = 'total %d/%d' % (total, limit_total) if need_total else 'jar %d/%d' % (jar_total, limit_jar)
+        logger.warning('global worker limit reached (%s), evicting LRU idle worker caller=%s',
+                       reason, caller.site_key)
+        # 从最久未用方向遍历，挑一个空闲（无 active_request 且 _call_lock 可非阻塞获取）的
+        # jar 上限触达时必须淘汰同为 jar 的空闲 Worker，淘汰 python 不能释放 jar 配额
+        required_runtime = 'jar' if need_jar else None
+        for vk, sup in list(_GLOBAL_LRU.items()):
+            if sup is caller:
+                continue
+            if sup.pid is None:
+                continue
+            if required_runtime is not None and getattr(sup, 'runtime', None) != required_runtime:
+                continue
+            # 跳过正忙的
+            try:
+                if getattr(sup, '_active_request', None) is not None:
+                    continue
+            except Exception:
+                continue
+            lock = getattr(sup, '_call_lock', None)
+            if lock is not None and not lock.acquire(blocking=False):
+                continue
+            try:
+                # 找到可淘汰的空闲 victim，从 LRU 摘除并返回（调用方负责真正 _dispose）
+                _GLOBAL_LRU.pop(vk, None)
+                return sup
+            finally:
+                if lock is not None:
+                    try:
+                        lock.release()
+                    except Exception:
+                        pass
+        # 无一可淘汰——池已耗尽且全忙，拒绝而非无限排队
+        raise RuntimeError(
+            'L3_RUNTIME_BUSY',
+            site_key=getattr(caller, 'site_key', ''),
+            runtime=getattr(caller, 'runtime', ''),
+            raw_error='global worker pool exhausted (all workers busy)',
+        )
 
 
 def active_supervisors():
@@ -130,7 +247,24 @@ class RuntimeSupervisor:
             raise RuntimeError('L3_RUNTIME_RESTARTED', site_key=self.site_key,
                                runtime=self.runtime, raw_error='supervisor destroyed')
         if self._process is not None and self._process.is_alive() and self._connection is not None:
+            _touch_global(self)
             return
+        # 全局进程数限流：超限时先淘汰最久未用的空闲 Worker（LRU）
+        victim = None
+        try:
+            victim = _ensure_global_slot_locked(self)
+        except RuntimeError:
+            raise
+        if victim is not None:
+            logger.info('evicting idle worker %s (%s) pid=%s to free global slot for %s',
+                        victim.site_key, victim.runtime, victim.pid, self.site_key)
+            try:
+                with victim._lifecycle_lock:
+                    victim._dispose_locked(kill=True)
+            except Exception:
+                pass
+            with _registry_lock:
+                _GLOBAL_LRU.pop(id(victim), None)
         self._dispose_locked(kill=True)
         parent, child = self._ctx.Pipe(duplex=True)
         process = self._ctx.Process(
@@ -280,31 +414,40 @@ class RuntimeSupervisor:
                 raise error
             request.raise_if_cancelled()
             self._circuit.before_call()
-            with self._lifecycle_lock:
-                self._start_locked(deadline)
-                connection = self._connection
-                process = self._process
-                generation = self._generation
-                try:
-                    send_json(connection, {
-                        'op': 'call',
-                        'id': request.request_id,
-                        'method': method,
-                        'args': list(args or []),
-                        'request': {
-                            **request.to_dict(),
+            try:
+                with self._lifecycle_lock:
+                    self._start_locked(deadline)
+                    connection = self._connection
+                    process = self._process
+                    generation = self._generation
+                    try:
+                        send_json(connection, {
+                            'op': 'call',
+                            'id': request.request_id,
                             'method': method,
-                            'remainingMs': max(1, int(self._remaining(deadline) * 1000)),
-                        },
-                    })
-                except Exception as exc:
-                    self._dispose_locked(kill=True)
-                    error = RuntimeError(
-                        'L3_RUNTIME_RESTARTED', site_key=self.site_key,
-                        runtime=self.runtime, request_id=request.request_id,
-                        raw_error=str(exc))
-                    self._circuit.record_failure(error)
-                    raise error from exc
+                            'args': list(args or []),
+                            'request': {
+                                **request.to_dict(),
+                                'method': method,
+                                'remainingMs': max(1, int(self._remaining(deadline) * 1000)),
+                            },
+                        })
+                    except Exception as exc:
+                        self._dispose_locked(kill=True)
+                        error = RuntimeError(
+                            'L3_RUNTIME_RESTARTED', site_key=self.site_key,
+                            runtime=self.runtime, request_id=request.request_id,
+                            raw_error=str(exc))
+                        self._circuit.record_failure(error)
+                        raise error from exc
+            except RuntimeError as exc:
+                # 全局池耗尽（L3_RUNTIME_BUSY）需计入熔断，避免无限重试
+                if getattr(exc, 'code', None) == 'L3_RUNTIME_BUSY':
+                    try:
+                        self._circuit.record_failure(exc)
+                    except Exception:
+                        pass
+                raise
             with self._active_lock:
                 self._active_request = request
                 self._active_done.clear()
@@ -364,9 +507,12 @@ class RuntimeSupervisor:
                         error.with_request(request)
                         error.site_key = error.site_key or self.site_key
                         error.runtime = error.runtime or self.runtime
+                        if error.code in ('L3_RUNTIME_TIMEOUT', 'L2_SITE_TIMEOUT'):
+                            self._hard_stop()
                         self._circuit.record_failure(error)
                         raise error
                     self._circuit.record_success()
+                    _touch_global(self)
                     return message.get('result'), str(message.get('lastError') or '')
             self._hard_stop()
             error = self._timeout_error(request)
@@ -443,6 +589,7 @@ class RuntimeSupervisor:
             self._dispose_locked(kill=True)
         with _registry_lock:
             _registry.discard(self)
+        _remove_global(self)
 
 
 atexit.register(destroy_all_supervisors)

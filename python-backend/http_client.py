@@ -20,7 +20,7 @@ jar_bridge.py 重复实现三份且语义有微妙差异。
 """
 import threading
 from http.cookiejar import DefaultCookiePolicy
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlencode
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -196,7 +196,7 @@ def post(url, *, timeout=TIMEOUT_NORMAL, proxy=True, **kw):
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
-def fetch_follow_redirects(url, timeout=TIMEOUT_NORMAL, max_redirects=5, headers=None):
+def fetch_follow_redirects(url, params=None, timeout=TIMEOUT_NORMAL, max_redirects=5, headers=None):
     """手动跟随重定向取最终响应（app.redirect 的收编版）。
 
     修复原实现两个问题：无深度上限（循环重定向 → RecursionError）、
@@ -204,7 +204,12 @@ def fetch_follow_redirects(url, timeout=TIMEOUT_NORMAL, max_redirects=5, headers
     """
     hdr = dict(headers or {})
     hdr.setdefault('User-Agent', DEFAULT_UA)
-    current = url
+    if params:
+        query_str = urlencode(params)
+        sep = '&' if '?' in url else '?'
+        current = f"{url}{sep}{query_str}"
+    else:
+        current = url
     for _ in range(max_redirects + 1):
         rsp = _send('GET', current, timeout=timeout, allow_redirects=False, headers=hdr)
         if rsp is None or rsp.status_code not in _REDIRECT_STATUSES or 'Location' not in rsp.headers:

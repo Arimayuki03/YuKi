@@ -1,6 +1,4 @@
 import sys
-import json
-import traceback
 
 print(f"Python: {sys.version}")
 try:

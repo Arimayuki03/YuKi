@@ -23,6 +23,7 @@ logger = logging.getLogger('vpc.sites')
 class Site:
     def __init__(self, key, api, ext=''):
         self.key = key
+        self.display_name = key
         self.api = api
         self.ext = ext
         self.runner = None
@@ -53,12 +54,7 @@ class Site:
 
     @property
     def name(self):
-        if self.runner is None:
-            return self.key
-        try:
-            return self.runner.getName() or self.key
-        except Exception:
-            return self.key
+        return self.display_name or self.key
 
 
 class SiteManager:

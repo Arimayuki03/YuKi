@@ -120,10 +120,12 @@ class SiteHealth:
             self.runtime = 'android'
             self.compatibility = 'C2'
             self.state = 'requires_android'
+        elif self.runtime == 'unsupported' or err.code == 'L2_SITE_UNSUPPORTED':
+            self.state = 'unsupported'
         elif err.code.endswith('_CANCELLED'):
             self.state = 'cancelled'
         elif err.code == 'L3_RUNTIME_CREDENTIALS_REQUIRED':
-            self.state = 'credentials_required'
+            self.state = 'degraded'
         elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN' or self.circuit_open_until > time.time():
             self.state = 'circuit-open'
         elif err.code.endswith('_TIMEOUT'):
@@ -147,7 +149,7 @@ class SiteHealth:
     def force_half_open(self):
         self.circuit_open_until = 0
         self.half_open = True
-        if self.state in ('circuit-open', 'credentials_required'):
+        if self.state in ('circuit-open', 'degraded', 'credentials_required'):
             self.state = 'half-open'
         return self
 
@@ -195,5 +197,6 @@ def infer_site_health(item: dict, capabilities: Iterable[str] | None = None) -> 
         # 与字段矩阵共用同一份开关语义（`searchable=2` 在 FongMi 里不可搜）。
         if not site_flag((item or {}).get('searchable'), 1) and 'search' in caps:
             caps.remove('search')
+    initial_state = 'unsupported' if decision.runtime in ('android', 'unsupported') else 'configured'
     return SiteHealth(key, runtime=decision.runtime, compatibility=decision.compatibility,
-                      capabilities=caps, route=decision)
+                      capabilities=caps, state=initial_state, route=decision)

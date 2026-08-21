@@ -30,6 +30,17 @@ class ShareInfo:
 
 
 @dataclass
+class PlayVariant:
+    url: str
+    quality: str = ''
+    headers: dict[str, str] = field(default_factory=dict)
+    original: bool = False
+    transcoded: bool = False
+    expire_at: float = 0.0
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class PlayUrl:
     url: str
     headers: dict[str, str] = field(default_factory=dict)
@@ -37,3 +48,8 @@ class PlayUrl:
     file_id: str = ''
     provider: str = ''
     request: dict[str, Any] = field(default_factory=dict)
+    quality: str = ''
+    variants: list[PlayVariant] = field(default_factory=list)
+    original: bool = False
+    transcoded: bool = False
+    one_time: bool = True

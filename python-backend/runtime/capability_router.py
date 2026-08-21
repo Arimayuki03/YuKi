@@ -7,25 +7,22 @@
 本模块把判定收成两步纯函数：
 
 * :func:`route_site` —— 只看配置字段，给出下载前的路由结论；
-* :func:`refine_with_jar` —— 拿到 JAR 字节分级报告后细化到 JVM / Android。
+* :func:`refine_with_jar` —— 拿到 JAR 字节分级报告后细化到 JVM / dex2jar 回退。
 
 路由顺序（任务书 C2.4）：
 
 1. CMS HTTP 接口（type 0/1）        → CMS Worker
 2. api 指向 ``.py``                 → Python Worker
-3. api 指向 ``.js`` 或 type=4       → QuickJS Worker；命中 drpy 标记则单列 drpy
+3. api 指向 ``.js`` 或 type=4       → QuickJS Worker；命中 drpy 标记则标记 unsupported
 4. ``csp_`` / ``.jar`` + portable   → JVM JAR Worker
-5. ``csp_`` / ``.jar`` + Dex/native → Android Worker（缺失则 L2_SITE_REQUIRES_ANDROID）
+5. ``csp_`` / ``.jar`` + Dex/native → dex2jar/JVM 回退
 6. 其余                             → unsupported，且**不尝试任何运行时**
 
-第 6 条是关键：不猜 CMS、不降级到 JS、不「先试试 JVM」。已知 Android-only 的 JAR
-在 Android Worker 未就绪时固定停在第 5 条，绝不回落第 4 条。
+Android-only 的 JAR 仍会先做字节分级，但桌面端统一允许进入 dex2jar/JVM；缺少
+Android 能力时由实际 Worker 返回可诊断的运行时错误。
 """
 from dataclasses import dataclass, field
 
-from .android_policy import (
-    ANDROID_WORKER_DECISION, ANDROID_WORKER_SHIPPED, SUPPORT_CEILING,
-    android_only_details)
 from .health import android_worker_enabled
 
 # 运行时 → Worker 种类。'' 表示当前宿主没有可用 Worker。
@@ -35,21 +32,19 @@ WORKERS = {
     'js': 'quickjs',
     'jar': 'jvm-jar',
     'android': 'android',
-    'drpy': 'drpy',
     'unsupported': '',
 }
 
 # 分级：C0 无法运行 / C1 桌面可运行 / C2 需要 Android 运行时。
 COMPATIBILITY = {
     'cms': 'C1', 'python': 'C1', 'js': 'C1', 'jar': 'C1',
-    'android': 'C2', 'drpy': 'C1', 'unsupported': 'C0',
+    'android': 'C2', 'unsupported': 'C0',
 }
 
 DRPY_MARKERS = ('drpy', 'dr_py', 'drpys')
 
-# 只要出现这些字节信号，普通 JVM 上必然缺类/缺库（android.* 存根、.so、DRM 组件），
-# 因此固定判为需要 Android 运行时。与 `jar_bridge._require_available_runtime` 用的是
-# 同一集合——两边不一致会让路由说「可跑」而加载器说「需要 Android」。
+# 这些字节信号表示普通 JVM 可能缺类/缺库（android.* 存根、.so、DRM 组件），
+# 但桌面端仍允许进入 dex2jar/JVM 回退，由实际调用结果决定是否可用。
 ANDROID_ONLY_SIGNALS = frozenset({
     'android-api', 'android-ui-or-webview', 'native-library', 'drm-or-device-license',
 })
@@ -136,7 +131,8 @@ def is_drpy(api, ext=''):
 
     drpy 是独立的规则运行时（依赖 ``pdfa``/``pdfh``/``pdft`` 等宿主全局），不是
     CatVod JS 契约的子集。必须单独分类：混进 QuickJS 会在调用期报
-    ``ReferenceError`` 并被误判为「JS 源写错了」。
+    ``ReferenceError`` 并被误判为「JS 源写错了」。drpy 引擎（Node Worker）已
+    移除，命中标记的站点固定路由到 unsupported，由诊断页给出准确原因。
     """
     blob = ('%s %s' % (api or '', ext if isinstance(ext, str) else '')).lower()
     return any(marker in blob for marker in DRPY_MARKERS)
@@ -182,12 +178,15 @@ def route_site(item, *, api=None, ext='', site_key='', android_enabled=None):
     if kind == 'py':
         return _decide(key, site_type, 'python', 'R2-python', 'api 指向 .py → Python Worker')
 
-    # R3 JS / type=4：先区分 drpy，再进 QuickJS。
+    # R3 JS / type=4：先识别 drpy（固定不支持），再进 QuickJS。
     if kind == 'js' or site_type == 4:
         if is_drpy(resolved_api, ext):
+            # drpy 引擎已移除：识别后固定标记为不支持，避免混进 QuickJS
+            # 报 ReferenceError 被误判为「JS 源写错了」。
             return _decide(
-                key, site_type, 'drpy', 'R3-drpy',
-                'drpy 规则源 → 独立 Node Worker 运行时')
+                key, site_type, 'unsupported', 'R6-unsupported',
+                'drpy 规则源需要独立的 drpy 运行时，当前版本未支持',
+                error_code='L2_SITE_UNSUPPORTED')
         return _decide(key, site_type, 'js', 'R3-quickjs',
                        'type=4 或 api 指向 .js → QuickJS Worker')
 
@@ -210,12 +209,7 @@ def route_site(item, *, api=None, ext='', site_key='', android_enabled=None):
 
 
 def refine_with_jar(decision, report, *, android_enabled=None):
-    """拿到 JAR 字节分级后细化 R4/R5。
-
-    `report` 即 `jar_bridge.classify_jar_compatibility` 的返回值。
-    L0/L1（纯 JVM 可运行）留在 R4；L2 及以上、或带 Dex/native 信号的固定进 R5，
-    Android Worker 未就绪时给 `L2_SITE_REQUIRES_ANDROID`——**不回落 R4**。
-    """
+    """拿到 JAR 字节分级后细化 R4/R5，并允许 Android/Dex/native 源回退 JVM。"""
     if decision is None or not decision.needs_jar:
         return decision
     data = dict(report or {})
@@ -224,27 +218,21 @@ def refine_with_jar(decision, report, *, android_enabled=None):
     has_dex = bool(data.get('hasDex'))
     has_native = bool(data.get('hasNative'))
     handshake_enabled = android_worker_enabled() if android_enabled is None else bool(android_enabled)
-    # A test seam or environment flag is not product policy.  After the A4.1
-    # No-Go decision, Android routing stays disabled until a later task changes
-    # the explicit shipped policy and supplies a real Worker.
-    enabled = bool(ANDROID_WORKER_SHIPPED and handshake_enabled)
     android_only = (has_dex or has_native or level in ('L2', 'L3', 'L4')
                     or bool(ANDROID_ONLY_SIGNALS.intersection(signals)))
     if android_only:
-        refined = _decide(
-            decision.site_key, decision.site_type, 'android', 'R5-android',
-            'JAR 分级 %s（%s）仅支持 Android' % (level or 'L?', ','.join(signals) or 'dex/native'),
+        return _decide(
+            decision.site_key, decision.site_type, 'jar', 'R5-jvm-fallback',
+            'JAR 分级 %s（%s）检测到 Android/Dex/native 特征，允许 dex2jar/JVM 回退；'
+            '若运行时缺少 Android 能力，将返回实际运行时错误' %
+            (level or 'L?', ','.join(signals) or 'dex/native'),
             needs_jar=True, jar_level=level, jar_signals=signals,
             has_dex=has_dex, has_native=has_native,
-            details={**android_only_details(),
-                     'androidWorkerEnabled': enabled,
-                     'androidWorkerHandshake': handshake_enabled})
-        if not enabled:
-            refined.error_code = 'L2_SITE_REQUIRES_ANDROID'
-            refined.reason += ('；A4.1 %s，当前支持上限 %s，'
-                               '不回退普通 JVM 路径' %
-                               (ANDROID_WORKER_DECISION, SUPPORT_CEILING))
-        return refined
+            details={
+                'fallback': 'dex2jar/JVM',
+                'androidOnly': True,
+                'androidWorkerHandshake': handshake_enabled,
+            })
     return _decide(
         decision.site_key, decision.site_type, 'jar', 'R4-jvm-jar',
         'JAR 分级 %s：无 Dex/native/Android 信号 → portable JVM Worker' % (level or 'L0'),
@@ -272,6 +260,6 @@ def capabilities_for(item, decision):
         caps.append('filter')
     if site_flag(data.get('changeable'), 1):
         caps.append('changeable')
-    if decision is not None and decision.runtime in ('drpy', 'unsupported'):
+    if decision is not None and decision.runtime == 'unsupported':
         return []
     return sorted(set(caps))

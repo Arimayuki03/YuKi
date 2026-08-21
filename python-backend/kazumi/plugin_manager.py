@@ -1022,23 +1022,47 @@ class PluginManager:
     BANGUMI_COLLECTION_TYPES = {1: '想看', 2: '看过', 3: '在看', 4: '搁置', 5: '抛弃'}
 
     @staticmethod
+    def _normalize_bangumi_token(token):
+        """规范化 Token：去空白、兼容用户粘贴的 `Bearer xxx` 全头。"""
+        if not token:
+            return ''
+        t = str(token).strip()
+        if t.lower().startswith('bearer '):
+            t = t[7:].strip()
+        return t
+
+    @staticmethod
     def _bangumi_auth_headers(token):
         """带 token 的鉴权头（Bangumi API 要求 User-Agent + Bearer）。"""
+        norm = PluginManager._normalize_bangumi_token(token)
         return {
-            'Authorization': f'Bearer {token}',
+            'Authorization': f'Bearer {norm}',
             'User-Agent': BANGUMI_UA,
         }
 
     def bangumi_me(self, token):
         """当前用户信息（需 token；返回 None 表示 token 无效或网络失败）。"""
+        token = self._normalize_bangumi_token(token)
         if not token:
             return None
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/me',
                                headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=True)
+            if getattr(rsp, 'status_code', None) in (401, 403):
+                logger.warning('[kazumi] bangumi me 401/403: Token 无效或已过期，请在 https://bgm.tv/settings/token 重新获取')
+                return None
             rsp.raise_for_status()
             return rsp.json()
         except Exception as e:
+            # requests HTTPError 携带 response，显式识别 401/403
+            try:
+                resp = getattr(e, 'response', None)
+                code = getattr(resp, 'status_code', None)
+                if code in (401, 403):
+                    logger.warning('[kazumi] bangumi me 401/403: Token 无效或已过期，请在 https://bgm.tv/settings/token 重新获取')
+                    return None
+            except Exception:
+                pass
             logger.warning('[kazumi] bangumi me failed: %s', e)
             return None
 
@@ -1063,6 +1087,7 @@ class PluginManager:
         """当前用户收藏列表（subject_type=2 动画），条目含 subject_id/type/name。
         R1：改用真实用户名（_bangumi_username），不再用 `/v0/users/-/collections`。
         注意：Bangumi API 该端点 limit 上限为 100，超出返回 400，此处统一钳制。"""
+        token = self._normalize_bangumi_token(token)
         if not token:
             return []
         limit = max(1, min(int(limit or 100), 100))
@@ -1074,15 +1099,27 @@ class PluginManager:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections',
                                params={'subject_type': subject_type, 'limit': limit, 'offset': offset},
                                headers=self._bangumi_auth_headers(token), timeout=(5, 10), verify=True)
+            if getattr(rsp, 'status_code', None) in (401, 403):
+                logger.warning('[kazumi] bangumi collections 401/403: Token 无效或已过期')
+                return []
             rsp.raise_for_status()
             data = rsp.json()
             return data.get('data', []) or []
         except Exception as e:
+            try:
+                resp = getattr(e, 'response', None)
+                code = getattr(resp, 'status_code', None)
+                if code in (401, 403):
+                    logger.warning('[kazumi] bangumi collections 401/403: Token 无效或已过期')
+                    return []
+            except Exception:
+                pass
             logger.warning('[kazumi] bangumi collections failed: %s', e)
             return []
 
     def bangumi_collection(self, token, subject_id):
         """单个 subject 的收藏状态；未收藏返回 None。"""
+        token = self._normalize_bangumi_token(token)
         if not token:
             return None
         username = self._bangumi_username(token)
@@ -1092,11 +1129,22 @@ class PluginManager:
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections/{subject_id}',
                                headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=True)
-            if rsp.status_code == 404:
+            if getattr(rsp, 'status_code', None) == 404:
+                return None
+            if getattr(rsp, 'status_code', None) in (401, 403):
+                logger.warning('[kazumi] bangumi collection get 401/403: Token 无效或已过期')
                 return None
             rsp.raise_for_status()
             return rsp.json()
         except Exception as e:
+            try:
+                resp = getattr(e, 'response', None)
+                code = getattr(resp, 'status_code', None)
+                if code in (401, 403):
+                    logger.warning('[kazumi] bangumi collection get 401/403: Token 无效或已过期')
+                    return None
+            except Exception:
+                pass
             logger.warning('[kazumi] bangumi collection get failed: %s', e)
             return None
 
@@ -1108,6 +1156,7 @@ class PluginManager:
         写法（PUT 等价）；真实用户名 GET 收藏正常，但写接口在个别镜像/网络下返回 404，故都覆盖。
         type: 0想看 1看过 2在看 3搁置 4抛弃（Bangumi 收藏类型）。返回 (ok, msg)。"""
         import requests
+        token = self._normalize_bangumi_token(token)
         if not token:
             return False, '缺少 Bangumi token'
         # 先验证 token 有效性，刷新 username 缓存
@@ -1115,7 +1164,7 @@ class PluginManager:
         self._username_ts = 0
         username = self._bangumi_username(token)
         if not username:
-            return False, 'Bangumi token 无效或网络不可达，请检查设置中的 Token'
+            return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
         body = {'type': int(collection_type)}
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
@@ -1143,13 +1192,18 @@ class PluginManager:
                     except Exception as e:
                         msg = f'{method} {base}/v0/users/{uname}/collections/{subject_id} ERR {str(e)[:80]}'
                         other_err = msg
-        last = auth_err or other_err or '未知错误'
+        # 401 鉴权失败给出可操作提示，其余保持原始诊断
+        if auth_err:
+            last = 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
+        else:
+            last = other_err or '未知错误'
         logger.warning('[kazumi] bangumi collection update failed: %s', last)
         return False, last
 
     def bangumi_delete_collection(self, token, subject_id):
         """删除收藏（对齐 Kazumi deleteBangumiById：DELETE /v0/users/-/collections/{id}）。返回 (ok, msg)。"""
         import requests
+        token = self._normalize_bangumi_token(token)
         if not token:
             return False, '缺少 Bangumi token'
         # subject_id 必须是有效整数，否则 Bangumi API 返回 404
@@ -1161,7 +1215,7 @@ class PluginManager:
         self._username_ts = 0
         username = self._bangumi_username(token)
         if not username:
-            return False, 'Bangumi token 无效或网络不可达'
+            return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
@@ -1188,7 +1242,10 @@ class PluginManager:
                         other_err = msg
                 except Exception as e:
                     other_err = f'DELETE {base}/v0/users/{uname}/collections/{subject_id} ERR {str(e)[:80]}'
-        last = auth_err or other_err or '未知错误'
+        if auth_err:
+            last = 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
+        else:
+            last = other_err or '未知错误'
         logger.warning('[kazumi] bangumi collection delete failed: %s', last)
         return False, last
 
@@ -1204,6 +1261,7 @@ class PluginManager:
           - 返回按 subject_id 去重的合并列表（每项保留原始 subject/subject_id，并回填 type）。
 
         与 bangumi_user_collections（单页、上限 100）区别：本方法拉全量供同步用，不截断。"""
+        token = self._normalize_bangumi_token(token)
         if not token:
             return []
         username = self._bangumi_username(token)
@@ -1225,13 +1283,25 @@ class PluginManager:
                         rsp = http_client.get(url, params={'subject_type': subject_type, 'type': ctype,
                                                          'limit': per_page, 'offset': offset},
                                            headers=headers, timeout=(5, 10), verify=True)
-                        if rsp.status_code == 429 or 500 <= rsp.status_code < 600:
+                        code = getattr(rsp, 'status_code', None)
+                        if code in (401, 403):
+                            logger.warning('[kazumi] bangumi collections page 401/403: Token 无效或已过期')
+                            return []  # 鉴权失败直接终止，避免后续无效请求
+                        if code == 429 or (isinstance(code, int) and 500 <= code < 600):
                             time.sleep(0.5)
                             continue  # 退避后重试本页
                         rsp.raise_for_status()
                         data = rsp.json() or {}
                         break
                     except Exception as e:
+                        try:
+                            resp = getattr(e, 'response', None)
+                            code = getattr(resp, 'status_code', None)
+                            if code in (401, 403):
+                                logger.warning('[kazumi] bangumi collections page 401/403: Token 无效或已过期')
+                                return []
+                        except Exception:
+                            pass
                         logger.warning('[kazumi] bangumi collections page failed type=%s offset=%s: %s',
                                        ctype, offset, e)
                         data = None
@@ -1270,7 +1340,20 @@ class PluginManager:
           pull     远端独有（渲染端合并进网格用的原始远端条目）
           conflict 双方都有但 type 不同的明细（含 resolved: local/remote）
           skipped  已同步一致 + 冲突且远端胜 的计数（去重/增量的核心）"""
+        token = self._normalize_bangumi_token(token)
+        if not token:
+            return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
+                    'remoteTotal': 0, 'localTotal': len(local_favorites or []),
+                    'error': '缺少 Bangumi token'}
         remote_list = self._bangumi_all_collections(token)
+        # 若远端拉取因 401 返回空且 token 经校验无效，补 error 提示（_bangumi_all_collections 已在 401 时直接返回 []）
+        # 为保证测试中 mock _bangumi_all_collections 时不误判，仅当 remote 为空且用户名确实获取失败时附加错误
+        if not remote_list:
+            # 轻量校验：尝试获取用户名，失败则视为 token 无效（避免把“空收藏”误判为鉴权失败，需同时满足本地有数据）
+            if local_favorites and not self._bangumi_username(token):
+                return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
+                        'remoteTotal': 0, 'localTotal': len(local_favorites or []),
+                        'error': 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'}
         remote = {}
         for it in remote_list:
             sid = it.get('subject_id')
@@ -1347,7 +1430,9 @@ class PluginManager:
                             other_err = msg
                     except Exception as e:
                         other_err = f'{method} {base}/v0/users/{uname}/collections/{subject_id} ERR {str(e)[:80]}'
-        return False, (auth_err or other_err or '未知错误')
+        if auth_err:
+            return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
+        return False, (other_err or '未知错误')
 
     def bangumi_apply_sync_plan(self, token, uploads, max_workers=3, op_delay=0.25):
         """并发执行同步计划的上传部分（ThreadPoolExecutor，max_workers≤3，每请求前 250ms 限速）。
@@ -1355,6 +1440,7 @@ class PluginManager:
         对齐 Kazumi async_serial_queue 的限速上传，但用有界并发提速。username 只解析一次并复用
         （不像 bangumi_update_collection 每条重置缓存），避免每条上传都打一次 /v0/me。
         uploads: list[{subjectId, type}]。返回 {uploaded, failed, results:[{subjectId,ok,msg}]}。"""
+        token = self._normalize_bangumi_token(token)
         if not token:
             return {'uploaded': 0, 'failed': 0, 'results': [], 'error': '缺少 Bangumi token'}
         uploads = list(uploads or [])
@@ -1362,7 +1448,7 @@ class PluginManager:
             return {'uploaded': 0, 'failed': 0, 'results': []}
         username = self._bangumi_username(token)
         if not username:
-            return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': 'Bangumi token 无效或网络不可达'}
+            return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'}
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API

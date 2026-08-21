@@ -5,16 +5,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import logging
 import os
 import socket
 import subprocess
 import sys
 import time
 
+logger = logging.getLogger('vpc.site_worker')
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_DIR = os.path.join(BASE_DIR, 'js-engine')
-DRPY_DIR = os.path.join(BASE_DIR, 'drpy-engine')
-for path in (BASE_DIR, JS_DIR, DRPY_DIR):
+for path in (BASE_DIR, JS_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -194,12 +196,6 @@ class SiteRuntimeWorker:
             if not ok:
                 raise ValueError('JS spider produced no export')
             spider = make_js_spider_class(self.site_key, engine, self.name)
-        elif self.kind == 'drpy':
-            from config import fetch_text
-            from drpy_spider import make_drpy_spider_class
-            api = str(self.spec.get('api') or '')
-            rule_source = fetch_text(api) if api.startswith('http') else api
-            spider = make_drpy_spider_class(self.site_key, rule_source, self.name)
         elif self.kind == 'jar':
             os.environ['VPC_WORKER_CONTROL_ONLY'] = '1'
             from jar_bridge import JarBridge
@@ -225,6 +221,13 @@ class SiteRuntimeWorker:
         except Exception:
             pass
         self.runner = Runner(spider)
+        # 惰性启动/崩溃重启自举初始化：在握手前完成 spider.init(ext)
+        ext = self.spec.get('ext') or ''
+        if ext:
+            try:
+                self.runner.init(ext)
+            except Exception as e:
+                logger.warning('site worker %s auto-init failed: %s', self.site_key, e)
 
     @property
     def last_error(self):
