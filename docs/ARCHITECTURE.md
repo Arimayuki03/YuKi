@@ -54,14 +54,17 @@ FastAPI Python 后端
 ```text
 搜索或详情
   → CatVod playerContent / Kazumi chapterResult
-  → 获得媒体直链或播放页面
-  → 直链：直接交给 mpv
+  → 统一 PlayResult（保留未知字段和 drm）
+  → json: / parse:<name> / type 0、1、2、4 / flags 路由
+  → 直链：进入媒体探测
   → 页面：隐藏 BrowserWindow 提取真实流
        1. webRequest 拦截媒体请求
        2. 注入脚本轮询 video/audio currentSrc
        3. legacy 模式监听并跟随 iframe src
-  → 合并 Referer/User-Agent
-  → mpv 单集播放
+  → 按站点、Spider、解析器、窗口会话顺序合并请求头
+  → HEAD；不确定时 GET Range bytes=0-1
+  → 拒绝 HTML/JSON/登录页/401/403/伪媒体
+  → mpv 单集播放，等待 file-loaded/ready
   → 渲染层依据播放会话推进连播
 ```
 
@@ -69,11 +72,19 @@ FastAPI Python 后端
 
 - mpv 每次只播放一集，不使用播放列表承担业务连播。
 - 每次播放分配会话号，旧会话退出不能影响当前会话。
-- 断流自动重连只允许每个会话尝试一次。
+- `vpc:play` 只有在 mpv 报告 `file-loaded`/ready 后才返回 `ok=true`；首帧超时会停止对应进程。
+- 断流自动重连只允许每条观看链尝试一次，并重新调用原始 `playerContent`，不复用旧 CDN URL。
 - `ended` 事件携带会话号，渲染层「看完」兜底判定按会话匹配，避免旧集 ended 误判新集。
 - 观看统计按「观看链」累计：断流重连经 `player-session` 复用旧链元信息，重连退出只补增量、不重复计次数/部数。
-- 同地址解析使用 single-flight 去重；解析窗口使用独立 partition 槽位。
-- HTML 页面不能直接交给 mpv。
+- 同地址解析使用 single-flight 去重；解析窗口和 partition 由 playSessionId/requestId 隔离，
+  完成、失败、超时和取消都会清理 hook、窗口与 partition。
+- `User-Agent/Referer/Origin/Cookie/Authorization` 大小写无关地合并，优先级从低到高为：
+  站点 header → Spider `header` → Spider `headers` → 解析器配置 → 解析结果 → BrowserWindow
+  最终媒体域 Cookie/重定向 Cookie。
+- HTML、JSON、登录页、401/403 和已过期签名地址不能直接交给 mpv；Spider 可用
+  `skipProbe` 标记真正一次性、探测即消耗的 URL。
+- JAR 网盘 Provider 是首选实现；native Quark Provider 只在显式快路径开启且 JAR 降级时接管。
+- DRM 策略见 [ADR-0002-drm-playback.md](ADR-0002-drm-playback.md)：当前明确不支持，不实现绕过。
 
 ## 5. 下载数据流
 

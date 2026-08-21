@@ -247,18 +247,23 @@ socket 流。FongMi 需要的是：
 - 透传 Range、Content-Length、Content-Range、Accept-Ranges；
 - 客户端断开后取消上游请求。
 
-### 4.4 `playerContent` 已统一主要字段，桌面能力仍有边界
+### 4.4 `playerContent`、解析、媒体探测和首帧已形成闭环
 
 当前后端和渲染层已归一化并消费：
 
-- `jx=1` 与 `parse=1` 等价；
+- `url/parse/jx/playUrl/header/headers/format/subs/position/flag/drm/msg/code/proxy` 和未知字段；
+- `jx=1`、`parse=1` 和配置 flags 的解析选择；
 - `playUrl` 的 `json:`、`parse:` 精确解析器选择和普通前缀；
-- `flag`、`jxFrom`、`click`；
+- type 0 WebView、type 1 JSON、type 2 portable JAR、type 4 并发优先级；
+- JSON 嵌套字段、重定向、legacy iframe 和 BrowserWindow 会话 Cookie；
+- 五类敏感 header 的大小写无关合并；
 - `format`、`subs`、`position`；
 - `drm` 保留并在 mpv 播放前给出明确“不支持”错误；
 - 配置 flags 继续作为真实 `vipFlags` 传入 Spider。
 
-仍需通过更多真实源验证 parser 的 type 2/3/4 行为和 click 脚本语义。
+最终 URL 在进入播放器前执行 HEAD/Range 探测，拒绝 HTML、JSON、登录页和 403；mpv
+只有 `file-loaded`/ready 后才报告成功。断流重新调用原始 `playerContent`，一次性 URL 不
+长缓存且最多重连一次。type 3/click 不在本轮 P5 范围，真实站点/真实 CDN 仍需独立验收。
 
 ### 4.5 Cookie 字段不等于 Provider 能力
 
@@ -903,10 +908,13 @@ Python localProxy(params) -> 同等结构
 
 - [x] 抽取 `PanProvider`；
 - [x] 抽取 Quark（复用现有 API 实现并接入注册表）；
+- [x] JAR Provider 优先；native Quark 仅在显式快路径开启且 JAR 降级时作为协议级回退；
 - [ ] 接入 UC；
 - [ ] 验证百度、天翼、123、迅雷的 JAR Proxy；
 - [x] 增加签名 URL 缓存和 single-flight 刷新；
 - [x] 加密 Cookie。
+- [ ] 使用已授权的真实夸克 Cookie + 指定测试文件完成 URL、Range 和 mpv 首帧验收；当前
+  离线契约已通过，但安全策略未授权把本机凭据发送到外部 API。
 
 ### Phase 5：远程网盘浏览
 
@@ -933,6 +941,9 @@ Python localProxy(params) -> 同等结构
 - [ ] 夸克分享和个人文件可以真实播放；
 - [x] Cookie 失效时的本地错误、一次刷新、密文存储和日志脱敏契约通过；真实账号仍需验收；
 - [x] 显式站点并发时不会串 Cookie、串 JAR 或串错误；无上下文的旧 recent URL 仍只作兼容路径。
+
+P5 的离线逐项证据见 [P5_PLAYBACK_MATRIX.md](P5_PLAYBACK_MATRIX.md)；DRM 决策见
+[ADR-0002-drm-playback.md](ADR-0002-drm-playback.md)。两者都不扩大真实网盘或 DRM 支持声明。
 
 ### 远程网盘浏览完成
 

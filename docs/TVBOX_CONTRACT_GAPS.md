@@ -70,20 +70,34 @@ type=3 的 spider 拿到原始字符串自己决定要不要取。空响应保�
 
 当前已覆盖：
 
-- `playerContent` 返回 `parse=1` 时，渲染层通过 `resolveParse` 取配置 `parses`；
-- 解析窗口支持 HTTP 解析接口、重定向、媒体请求嗅探和 legacy iframe 跟随；
-- 没有解析器或没有匹配线路时，后端响应增加 `当前配置未含匹配该线路的解析接口（parse=1）`，前端保留原有友好提示；
-- `url`、`header`、`playUrl` 的解析结果向播放器传递时仍需按更多真实配置复测。
+- `parse=1`、`jx=1`、`json:`、`parse:<name>`、普通 `playUrl` 前缀和配置 `flags`；
+- type 0 BrowserWindow、type 1 JSON、type 2 portable JAR `Json<name>.parse`、type 4 并发；
+- type 4 等待候选完成后按配置 priority/order 选取，低优先级先返回不能抢占；
+- JSON 嵌套 URL/header、重定向、媒体请求嗅探和 legacy iframe 跟随；
+- 窗口、webRequest hook 和 partition 按 playSessionId/requestId 隔离并在失败/超时/取消后清理；
+- 解析器的 `ext.flag` 与上游一致只作**偏好**（`VodConfig.getParses(type, flag)` 的
+  `filter.isEmpty() ? items : filter`）：没有解析器点名当前线路时仍按配置顺序试全部解析器；
+  配置完全没有可执行解析器时，后端只附带非致命 `warning`（`当前配置未含可用的解析接口（parse=1）`）
+  并保留 `url/parse/header`，渲染层照上游 `ParseJob` 的 type 0 回退继续隐藏窗口嗅探，
+  只有播放地址为空才提升为 424；
+- 每个候选在交给播放器前执行媒体探测，HTML、JSON、登录页和 403 不进入 mpv。
 
-未完成：FongMi type 1 扩展解析、`jx` 选择策略、混合解析器的优先级，以及需要登录态的 webview 解析页面。它们应进入行为样例，不应凭字段名直接宣称兼容。
+边界：type 3/click 脚本不在 P5 指定范围；需要人工验证码的页面仍需用户完成验证，宿主只
+保证同一窗口会话 Cookie 合并和资源清理。离线行为证据见
+[P5_PLAYBACK_MATRIX.md](P5_PLAYBACK_MATRIX.md)，不能替代更多真实站点验收。
 
 ## 5. `playerContent` 语义与 header
 
 对照点：`TV-fongmi/catvod/src/main/java/com/github/catvod/crawler/Spider.java` 的六方法契约，以及 `TV-fongmi/app/src/main/java/com/fongmi/android/tv/bean/Result.java` 的 `playUrl` 字段。
 
-Python `Runner` 保持六方法入口；JAR、JS、Python、CMS 均归一为 `url/parse/header` 结果。内置 mpv 支持 `Referer`、`User-Agent` 等请求头；外部播放器只在播放器类型支持时透传，并在不支持时返回 `headerDropped`。
+Python `Runner` 保持六方法入口；JAR、JS、Python、CMS 统一保留
+`url/parse/jx/playUrl/header/headers/format/subs/position/flag/drm/msg/code/proxy` 和未知扩展字段。
+五类敏感 header 大小写无关地按站点、Spider、解析器和窗口会话的明确顺序合并。内置 mpv
+透传最终 header；外部播放器不能透传时返回 `headerDropped`，且只报告 launched，不伪造首帧成功。
 
-待补：`playUrl` 的站点级前缀/模板语义、`vipFlags` 影响解析线路的完整矩阵，以及多 header 形式（字符串、对象、大小写变体）的实测。当前不要把“有字段”当成“全语义兼容”。
+播放前先 HEAD，结果不确定时 GET `Range: bytes=0-1`；只有 mpv `file-loaded`/ready 后
+`vpc:play` 才返回 `ok=true`。一次性/签名 URL 不长缓存，断流时重新执行原始
+`playerContent`，最多一次。真实夸克 Cookie 和真实 CDN 首帧仍是外部验收项，不以夹具冒充。
 
 ## 6. lives / liveContent
 
@@ -123,7 +137,7 @@ SupervisedRunner 与健康诊断体系。
 ## 具体后续任务
 
 1. 在兼容语料中加入：站点级 JAR 覆盖、`parse=1` 无解析器、`parse=1` 多 flag、HTTP `.js`、伪装 JAR URL 五类最小配置。
-2. 为 `parse-window.js` 增加 type 0/type 1/`jx`/legacy iframe 的离线响应夹具。
+2. 保持 type 0/1/2/4、`jx`、legacy iframe、媒体探测和首帧离线矩阵为发布回归门禁。
 3. 取得真实 type 15/16 配置和 FongMi 对应 parser 后，再实现 L2 契约，不按编号猜测。
 4. 兼容套件报告继续按 `[L1:*]`、`[L2:*]`、`[L3:*]` 聚合 skipped 原因。
 

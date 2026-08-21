@@ -972,6 +972,9 @@ subs, position, flag, drm, msg, code, proxy
 - 一次性 CDN URL 不进入长缓存；
 - 原始站点 header、Spider header、解析器 header 按明确顺序合并。
 
+**2026-08-19 实现证据**：`play_contract.py` 保留上述字段和未知扩展；header 顺序、空 URL、
+畸形输入和一次性 URL 缓存规则由 `test_play_contract.py` 覆盖。
+
 ### P5.2 对齐解析器语义
 
 **优先级**：P0  
@@ -987,10 +990,13 @@ subs, position, flag, drm, msg, code, proxy
 
 验收：
 
-- [ ] 离线解析夹具覆盖每种类型和优先级；
-- [ ] 低优先级解析器先返回时不能抢占高优先级成功结果；
-- [ ] 换集或取消后旧解析窗口不能触发新会话播放；
-- [ ] 解析失败不残留 loading 和隐藏窗口。
+- [x] 离线解析夹具覆盖每种类型和优先级；
+- [x] 低优先级解析器先返回时不能抢占高优先级成功结果；
+- [x] 换集或取消后旧解析窗口不能触发新会话播放；
+- [x] 解析失败不残留 loading 和隐藏窗口。
+
+**2026-08-19 实现证据**：`parse-window-contract.test.js` 覆盖 type 0/1/2/4、优先级、
+异常、超时/取消和清理；`player-contract.test.js` 覆盖 `json:/parse:/playUrl/jx/flags`。
 
 ### P5.3 请求头、Cookie 与会话
 
@@ -1002,6 +1008,9 @@ subs, position, flag, drm, msg, code, proxy
 - Cookie 不写日志、不写前端 localStorage；
 - 外部播放器不支持 header 时明确提示降级；
 - 同一播放链的重定向、HLS master、variant 和 segment 使用一致会话。
+
+**2026-08-19 实现证据**：五类 header 使用大小写无关合并；解析窗口按最终媒体域合并
+session/redirect Cookie，外部播放器无法透传时显式降级。离线证据见 P5 播放矩阵。
 
 ### P5.4 媒体探测
 
@@ -1018,6 +1027,9 @@ subs, position, flag, drm, msg, code, proxy
 
 探测失败进入下一解析线路或重新调用 `playerContent`，不能直接拉起 mpv 显示黑屏。
 
+**2026-08-19 实现证据**：`media-probe.js` 实现 HEAD→Range、重定向/Cookie、HLS/魔数和
+伪媒体拒绝；正常、异常、超时、取消和 skipProbe 由 loopback 夹具覆盖。
+
 ### P5.5 播放就绪与失败恢复
 
 **优先级**：P0  
@@ -1030,6 +1042,9 @@ subs, position, flag, drm, msg, code, proxy
 - 用户关闭播放器立即终止重连和连播；
 - 播放错误保留最终 URL、来源和错误层级供诊断，但 UI 不展示敏感 header。
 
+**2026-08-19 实现证据**：mpv `file-loaded`/ready 是 `ok=true` 的唯一内置播放器门槛；
+超时主动 stop。渲染层重连重新提交原始站点/flag/id，最多一次，用户关闭会取消。
+
 ### P5.6 网盘 Provider
 
 **优先级**：P1  
@@ -1041,6 +1056,10 @@ subs, position, flag, drm, msg, code, proxy
 - 文件夹、多清晰度、转码、原画、短期 URL 和 Cookie 过期使用统一模型；
 - 播放 URL 到期后自动刷新一次，不能缓存过期地址。
 
+**2026-08-19 实现状态**：JAR 优先、native Quark 显式降级、统一多清晰度模型、短期 URL
+缓存和一次刷新均有离线证据。真实夸克 Cookie 已在本机加密存储中检测到，但只读外部验收
+因网络沙箱/敏感凭据授权策略未执行，故“真实 Cookie + 真实文件首帧”仍未完成，不计完成。
+
 ### P5.7 DRM 决策任务（C1 范围外）
 
 **优先级**：P2  
@@ -1049,6 +1068,9 @@ subs, position, flag, drm, msg, code, proxy
 本项不属于 C1 退出条件或本任务书排期。若另行立项，输出 ADR，比较 Chromium CDM、
 授权播放器 SDK、Android 播放器画面转交和明确不支持；未完成合法授权和安全评估前，
 不提供绕过 DRM 的实现。
+
+**2026-08-19 决策输出**：[ADR-0002-drm-playback.md](ADR-0002-drm-playback.md) 比较四种
+方案并选择当前明确不支持；没有实现任何 DRM 绕过或未授权播放。
 
 ---
 
@@ -1070,6 +1092,12 @@ subs, position, flag, drm, msg, code, proxy
 - 摘要可展开查看按运行时和错误层级分组的原因；
 - 默认文案面向普通用户，技术详情放二级诊断。
 
+验收：
+
+- [x] 进度文案展示 5 阶段流（获取仓库 → 解析配置 → 检测站点 → 初始化运行时 → 可用/降级/不支持数量）；
+- [x] 支持带 requestId 的中途取消，取消后保留原健康配置与状态；
+- [x] 加载与诊断面板提供运行时与错误码聚合展开视图。
+
 ### U6.2 健康站点展示
 
 - healthy 正常展示；
@@ -1078,6 +1106,12 @@ subs, position, flag, drm, msg, code, proxy
 - unsupported 默认隐藏，诊断页保留；
 - circuit-open 暂时置灰并显示自动恢复倒计时或重试按钮；
 - 不因单个首页为空永久屏蔽源，区分合法空内容和运行错误。
+
+验收：
+
+- [x] Android-only 站点在选择列表固定隐藏，诊断页保留清晰 C1 上限提示；
+- [x] degraded 站点带 `[降级·需Cookie/解析]` 标示；
+- [x] circuit-open 站点带倒计时 `[熔断保护 Ns]` 提示。
 
 ### U6.3 播放状态机
 
@@ -1094,6 +1128,12 @@ subs, position, flag, drm, msg, code, proxy
 - 用户可执行动作：重试、换线路、更新 Cookie、安装/指定 mpv；Android-only 源只提供更换 C1 可移植源的建议；
 - 技术详情复制入口，不复制 Cookie/token。
 
+验收：
+
+- [x] 播放进度 Toast 统一贯穿 5 步状态流；
+- [x] 错误弹窗提供脱敏技术详情复制、线路重试、网盘 Cookie 与 mpv 设置直达动作；
+- [x] 严格按 playSessionId/requestId 隔离 UI 状态。
+
 ### U6.4 自动回退
 
 - 当前线路 `playerContent` 失败时，可按用户设置尝试同影片其他线路；
@@ -1101,6 +1141,12 @@ subs, position, flag, drm, msg, code, proxy
 - 不跨影片标题盲目匹配；
 - 回退成功后记录健康度，但不永久修改仓库配置；
 - 用户主动选择线路时优先尊重用户选择。
+
+验收：
+
+- [x] 单线路取地址/解析/媒体验证失败时同影片自动尝试备用线路（上限 2 次）；
+- [x] 仅在同影片 Detail.sources 范围内切换同集下标，不跨影片盲目匹配；
+- [x] 用户手动选线拥有最高优先级。
 
 ---
 
