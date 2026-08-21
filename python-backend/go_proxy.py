@@ -21,6 +21,7 @@ import logging
 import os
 import json
 import queue
+import re
 import threading
 import time
 import urllib.parse
@@ -211,6 +212,31 @@ def _fetch(url, headers, start, end=None, timeout=60):
                         proxies=_system_proxies() or None)
 
 
+# 明确的媒体 Content-Type：原样透传。
+_MEDIA_CONTENT_TYPE = re.compile(
+    r'^(?:video/|audio/'
+    r'|application/(?:vnd\.apple\.mpegurl|x-mpegurl|dash\+xml|mp4|ogg))', re.I)
+# 明确的文本/接口 Content-Type：也原样透传。这类响应意味着上游给的是错误页
+# 或接口 JSON（HTTP 200 的软失败），标成视频只会让 mpv 报「无法识别的格式」，
+# 掩盖真正原因。
+_TEXTUAL_CONTENT_TYPE = re.compile(
+    r'^(?:text/|application/(?:[^;]*\+)?(?:json|xml)|application/xhtml)', re.I)
+
+
+def _forward_content_type(upstream, default='video/mp4'):
+    """归一化回给播放器的 Content-Type。
+
+    夸克 file/download 直链回的是 application/octet-stream（也见过
+    application/force-download 一类）。按 Content-Type 猜容器的一方（mpv 的
+    格式探测、宿主播放前的媒体探测）会把这些泛型二进制判成「非媒体」而拒播，
+    所以统一归到默认视频类型；明确的媒体类型与明确的文本/接口类型都原样透传。
+    """
+    value = str(upstream or '').strip()
+    if _MEDIA_CONTENT_TYPE.match(value) or _TEXTUAL_CONTENT_TYPE.match(value):
+        return value
+    return default
+
+
 def _quark_detail_url(pwd_id, stoken, pdir_fid=''):
     """拼夸克分享 detail URL（stoken 必须 URL 编码）。
 
@@ -259,8 +285,41 @@ def _quark_resolve_share(pwd_id, headers):
     raise last_err or ValueError('share resolve failed')
 
 
-def _quark_v2play(fid, headers):
-    """v2/play 取播放直链；分享文件未转存（file not found）返回 None。"""
+def _quark_quality_key(value):
+    """归一 Quark/FongMi 线路名，允许线路带 ``#0101`` 后缀。"""
+    text = str(value or '').strip().lower()
+    text = text.split('#', 1)[0].strip()
+    aliases = {
+        'quark普画': 'normal', '普画': 'normal', '普清': 'normal',
+        'normal': 'normal', 'low': 'low', '标清': 'low',
+        'high': 'high', '高清': 'high', 'super': 'super',
+        '至臻': 'original', '原画': 'original', 'origin': 'original',
+        'original': 'original', 'quark原画': 'original', '夸克原画': 'original',
+        'quark原画11': 'original',
+        '2k': '2k', '4k': '4k',
+    }
+    return aliases.get(text, text)
+
+
+def _quark_response_meta(response):
+    """返回不含凭据/正文的 Quark 响应诊断元数据。"""
+    status = getattr(response, 'status_code', 0)
+    try:
+        payload = response.json() or {}
+    except Exception:
+        return 'status=%s json=invalid' % status
+    if not isinstance(payload, dict):
+        return 'status=%s json=%s' % (status, type(payload).__name__)
+    code = payload.get('code')
+    has_message = bool(payload.get('message') or payload.get('msg'))
+    data = payload.get('data')
+    shape = type(data).__name__
+    return 'status=%s code=%s message=%s data=%s' % (
+        status, code if code is not None else '-', has_message, shape)
+
+
+def _quark_v2play(fid, headers, quality=''):
+    """v2/play 取播放直链，并按请求线路从 play_info 候选中选择。"""
     import json as _json
     r = _qpost(
         'https://drive-pc.quark.cn/1/clouddrive/file/v2/play?pr=ucpro&fr=pc&uc_param_str=',
@@ -271,30 +330,42 @@ def _quark_v2play(fid, headers):
     try:
         j = r.json()
     except Exception:
+        logger.warning('quark upstream stage=v2play %s', _quark_response_meta(r))
         return None
-    if 'file not found' in (j.get('message') or ''):
+    if getattr(r, 'status_code', 200) >= 400:
+        logger.warning('quark upstream stage=v2play %s', _quark_response_meta(r))
+    if 'file not found' in str(j.get('message') or '').lower():
+        logger.warning('quark upstream stage=v2play unavailable %s', _quark_response_meta(r))
         return None
-    # 递归找第一个 http(s) 直链（play_info.urls 结构随接口版本变化）
-    found = [None]
+    wanted = _quark_quality_key(quality)
+    candidates = []
 
-    def walk(node):
-        if found[0]:
-            return
+    def walk(node, inherited=''):
         if isinstance(node, dict):
-            if 'url' in node and isinstance(node.get('url'), str) and node['url'].startswith('http'):
-                found[0] = node['url']
-                return
-            for v in node.values():
-                walk(v)
-                if found[0]:
-                    return
+            label = (node.get('resolution') or node.get('quality') or node.get('name')
+                     or node.get('format') or inherited)
+            url = node.get('url')
+            if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                candidates.append((str(label or ''), url))
+            for key, value in node.items():
+                if key not in ('url',):
+                    walk(value, str(label or key or inherited))
         elif isinstance(node, list):
-            for v in node:
-                walk(v)
-                if found[0]:
-                    return
+            for value in node:
+                walk(value, inherited)
     walk(j)
-    return found[0]
+    if not candidates:
+        return None
+    if wanted:
+        for label, url in candidates:
+            if _quark_quality_key(label) == wanted:
+                return url
+        # Some API responses put the resolution in a sibling key/name.  A
+        # substring match is safe after normalization and preserves fallback.
+        for label, url in candidates:
+            if wanted in _quark_quality_key(label) or _quark_quality_key(label) in wanted:
+                return url
+    return candidates[0][1]
 
 
 def _quark_personal_download_url(fid, headers):
@@ -333,13 +404,19 @@ def _quark_personal_download_url(fid, headers):
     return None
 
 
-def _quark_personal_play_url(fid, headers, retries=1):
+def _quark_personal_play_url(fid, headers, retries=1, quality=''):
     """解析个人 fid 的可播放 URL，兼容转存任务刚完成的短暂延迟。"""
     import time as _time
     attempts = max(1, int(retries) + 1)
     for attempt in range(attempts):
         try:
-            url = _quark_v2play(str(fid), headers)
+            url = _quark_v2play(str(fid), headers, quality)
+        except TypeError:
+            # 兼容旧的二参数桥接函数。
+            try:
+                url = _quark_v2play(str(fid), headers)
+            except Exception:
+                url = None
         except Exception:
             url = None
         if url:
@@ -395,7 +472,7 @@ def _quark_pick_video(lst):
     return None
 
 
-def _quark_share_play_url(pwd_id, headers):
+def _quark_share_play_url(pwd_id, headers, quality=''):
     """夸克分享完整播放链路：token → detail →（进目录找视频）→ v2/play 直链。
 
     分享文件原始 fid 的 v2/play 直接可出直链（实测 3s 内），**不需要转存**。
@@ -414,7 +491,8 @@ def _quark_share_play_url(pwd_id, headers):
             # fid 会一直留在缓存中，导致每次播放都拿到坏地址。
             cached_fid = str(_SAVE_CACHE.get(pwd_id) or '')
             if cached_fid:
-                cached_url = _quark_personal_play_url(cached_fid, headers, retries=1)
+                cached_url = _quark_personal_play_url(cached_fid, headers, retries=1,
+                                                       quality=quality)
                 if cached_url:
                     return cached_url
                 _SAVE_CACHE.pop(pwd_id, None)
@@ -460,7 +538,7 @@ def _quark_share_play_url(pwd_id, headers):
                 _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
                                         'fid': fid, 'fid_token': fid_token}
             # 优先分享文件原始 fid 直链（快、不失效）
-            url = _quark_v2play(fid, headers)
+            url = _quark_v2play(fid, headers, quality)
             if url:
                 _SAVE_CACHE.pop(pwd_id, None)
                 return url
@@ -469,7 +547,8 @@ def _quark_share_play_url(pwd_id, headers):
             if new_fid:
                 _SAVE_CACHE[pwd_id] = new_fid
                 _persist_save_cache()
-            playable = _quark_personal_play_url(new_fid, headers, retries=4)
+            playable = _quark_personal_play_url(new_fid, headers, retries=4,
+                                                  quality=quality)
             if playable:
                 return playable
             raise ValueError('saved file has no playable URL')
@@ -480,11 +559,141 @@ def _quark_share_play_url(pwd_id, headers):
     raise last_err or ValueError('share play failed')
 
 
-def _quark_download_url(share_id, file_id, file_token, headers):
-    """夸克分享文件取流：POST file/download（新版接口）→ 302 Location 真实直链。
+def _quark_share_stoken(pwd_id, headers):
+    """申请（并缓存）公开分享的会话 token（stoken）。
 
-    返回直链 URL；无 Location 抛异常。
+    分享文件的 share_fid_token 只在 stoken 建立的分享会话里有效：没有会话时
+    ``file/download?scene=share`` 回 400 code=14001「非法token」、``v2/play``
+    回 404 code=21001。与 _quark_share_play_url 共用 _SHARE_CACHE（5 分钟
+    TTL），同一分享的多集播放不会反复申请。
     """
+    import json as _json
+    import time as _time
+    now = _time.time()
+    cached = _SHARE_CACHE.get(pwd_id) or {}
+    if cached.get('stoken') and (now - cached.get('ts', 0)) < _SHARE_CACHE_TTL:
+        return str(cached['stoken'])
+    _SHARE_CACHE.pop(pwd_id, None)
+    r = _qpost(
+        'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+        headers={**headers, 'Content-Type': 'application/json'},
+        data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
+        timeout=20, verify=True)
+    stoken = ((r.json() or {}).get('data') or {}).get('stoken', '')
+    if not stoken:
+        logger.warning('quark upstream stage=share-token %s', _quark_response_meta(r))
+        raise ValueError('share token empty')
+    if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
+        _SHARE_CACHE.clear()
+    _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': str(stoken),
+                            'fid': str(cached.get('fid') or ''),
+                            'fid_token': str(cached.get('fid_token') or '')}
+    return str(stoken)
+
+
+def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
+                               share_id=''):
+    """公开分享里**指定**文件的取流：建立分享会话 → 该 fid 出直链 → 转存兜底。
+
+    与 _quark_share_play_url 的区别是不重新挑文件：后者只取分享里的第一个视频，
+    用在多集分享上必然串集。这里用调用方（JAR vodId）给的 fid /
+    share_fid_token，先 sharepage/token 建立会话，再按原始分享 fid 取直链；夸克
+    拒掉分享 fid 时才转存一次，用新的个人 fid 播放。
+    已转存到个人网盘的资源：分享 fid 的 v2/play 可能因 21001/14001 失败，
+    但同一 fid 在个人空间的 v2/play + file/download 仍可出直链，放在最后兜底。
+    部分资源 fileId 实际是文件夹 fid（file_type==0）：此时按 pdir_fid 进目录
+    找首个视频再取流/转存，避免“已转存但不能播”。
+    """
+    if not pwd_id or not file_id:
+        raise ValueError('missing pwd/file id')
+    import time as _time
+    last_err = None
+
+    def _resolve_folder_fid(target_fid, stoken_value):
+        """若 fid 是文件夹则进目录找首个视频，返回 (fid, token) 或原值。"""
+        try:
+            detail_url = _quark_detail_url(pwd_id, stoken_value, str(target_fid))
+            r_detail = _qget(detail_url, headers=headers, timeout=20, verify=True)
+            lst = ((r_detail.json() or {}).get('data') or {}).get('list') or []
+            picked = _quark_pick_video(lst)
+            if picked is not None:
+                return str(picked.get('fid') or target_fid), str(picked.get('share_fid_token') or file_token)
+        except Exception:
+            pass
+        return target_fid, file_token
+
+    for attempt in range(2):
+        try:
+            stoken = _quark_share_stoken(pwd_id, headers)
+            # 文件夹 fid 兜底：先尝试一次目录解析，避免后续 save 存错对象
+            eff_fid, eff_token = file_id, file_token
+            url = _quark_v2play(eff_fid, headers, quality)
+            if not url and share_id:
+                try:
+                    url = _quark_download_url(share_id, eff_fid, eff_token, headers)
+                except Exception:
+                    url = ''
+                if url:
+                    return url
+            if not url:
+                # 可能是文件夹 fid：进目录找首个视频后再试一次
+                alt_fid, alt_token = _resolve_folder_fid(eff_fid, stoken)
+                if alt_fid != eff_fid:
+                    eff_fid, eff_token = alt_fid, alt_token
+                    url = _quark_v2play(eff_fid, headers, quality)
+                    if url:
+                        return url
+                    if share_id:
+                        try:
+                            url = _quark_download_url(share_id, eff_fid, eff_token, headers)
+                        except Exception:
+                            url = ''
+                        if url:
+                            return url
+            if url:
+                return url
+            new_fid = _quark_save_share(pwd_id, stoken, eff_fid, eff_token, headers)
+            playable = _quark_personal_play_url(new_fid, headers, retries=4,
+                                                quality=quality)
+            if playable:
+                # per-file 转存缓存：同一 pwd 下多集不互相覆盖。
+                # 不再覆盖单 pwd 键：多集分享下它会被最后一集的 fid 覆盖，
+                # 导致后续对同分享的首集 fallback 取到错集（串集）。
+                try:
+                    key = '%s:%s' % (pwd_id, file_id)
+                    _SAVE_CACHE[key] = new_fid
+                    # 若目标是文件夹 fid 转换后的视频，也缓存转换后 fid 映射
+                    if eff_fid != file_id:
+                        _SAVE_CACHE['%s:%s' % (pwd_id, eff_fid)] = new_fid
+                    _persist_save_cache()
+                except Exception:
+                    pass
+                return playable
+            raise ValueError('saved share file has no playable URL')
+        except Exception as e:
+            last_err = e
+            # stoken 可能已失效（分享被重开/会话过期）：清缓存后重申请一次。
+            _SHARE_CACHE.pop(pwd_id, None)
+            if attempt == 0:
+                _time.sleep(0.8)
+    # 已转存但分享链路失败的最后一档：直接用个人空间 fid 试 v2/play/download
+    try:
+        # 先查 per-file 转存缓存
+        cached = _SAVE_CACHE.get('%s:%s' % (pwd_id, file_id))
+        if cached:
+            url = _quark_personal_play_url(cached, headers, retries=1, quality=quality)
+            if url:
+                return url
+        url = _quark_personal_play_url(file_id, headers, retries=1, quality=quality)
+        if url:
+            return url
+    except Exception:
+        pass
+    raise last_err or ValueError('share file play failed')
+
+
+def _quark_download_url(share_id, file_id, file_token, headers):
+    """夸克分享文件取流：file/download 返回重定向或 JSON 直链。"""
     if not share_id or not file_id:
         raise ValueError('missing share/file id')
     import json as _json
@@ -494,10 +703,26 @@ def _quark_download_url(share_id, file_id, file_token, headers):
         data=_json.dumps({'fid': file_id, 'uid': 0, 'scene': 'share',
                           'shareId': share_id, 'token': file_token}),
         timeout=25, verify=True, allow_redirects=False)
-    loc = r.headers.get('Location', '')
-    if not loc:
-        raise ValueError('download no location (status %s)' % r.status_code)
-    return loc
+    location = r.headers.get('Location', '') if getattr(r, 'headers', None) else ''
+    if isinstance(location, str) and location.startswith(('http://', 'https://')):
+        return location
+    try:
+        payload = r.json() or {}
+    except Exception:
+        logger.warning('quark upstream stage=download %s', _quark_response_meta(r))
+        payload = {}
+    data = payload.get('data') if isinstance(payload, dict) else None
+    entries = data if isinstance(data, list) else [data]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get('download_url') or entry.get('url') or entry.get('downloadUrl') or ''
+        if isinstance(url, str) and url.startswith(('http://', 'https://')):
+            return url
+    status = getattr(r, 'status_code', 0)
+    logger.warning('quark upstream stage=download URL unavailable %s',
+                   _quark_response_meta(r))
+    raise ValueError('download URL unavailable (status %s)' % status)
 
 
 class _SegStream:
@@ -741,7 +966,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 cr = probe.headers.get('Content-Range', '')
                 if '/' in cr:
                     total = int(cr.rsplit('/', 1)[1])
-                ctype = probe.headers.get('Content-Type') or ctype
+                ctype = _forward_content_type(probe.headers.get('Content-Type'), ctype)
             except (TypeError, ValueError):
                 total = None
             finally:
@@ -868,9 +1093,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         这里自行解析分享（token → detail → 首个文件）再取流。
         """
         site = q.get('site', [''])[0]
-        share_id = urllib.parse.unquote_plus(q.get('shareId', [''])[0])
-        file_id = urllib.parse.unquote_plus(q.get('fileId', [''])[0])
-        file_token = urllib.parse.unquote_plus(q.get('fileToken', [''])[0])
+        # parse_qs already performs the single percent-decoding pass.  A
+        # second unquote_plus would turn literal '+' characters in Quark
+        # base64 tokens into spaces and invalidate the share request.
+        share_id = q.get('shareId', q.get('share_id', ['']))[0]
+        file_id = q.get('fileId', q.get('file_id', ['']))[0]
+        file_token = q.get('fileToken', q.get('file_token', ['']))[0]
+        pwd_id = q.get('pwdId', q.get('pwd_id', ['']))[0]
+        share_url = q.get('shareUrl', q.get('share_url', ['']))[0]
+        quality = q.get('quality', q.get('resolution', ['']))[0]
         cookie = self.headers.get('Cookie', '')
         if not cookie:
             # pan 链路目标均为 drive.quark.cn / drive-pc.quark.cn 等固定夸克
@@ -887,6 +1118,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(400)
             self.end_headers()
             return
+        if not cookie.strip():
+            # 无 Cookie 时整条 Provider 链路必然失败：匿名 sharepage/token 能
+            # 建会话，但 v2/play 必回 401 code=31001、file/download 回 400
+            # code=14001，随后还会白跑转存+个人盘重试（约 11 次上游请求、4 秒）。
+            # 这里快速失败：单条日志 + 立即 502，渲染层据 do=pan 地址给出
+            # 「配置网盘 Cookie」引导。
+            logger.warning('quark pan request rejected: 本机未存储夸克 Cookie，'
+                           '请在设置中扫码登录（share=%s pwd=%s）',
+                           bool(share_id), bool(pwd_id or share_url))
+            body = b'quark login required: no pan cookie'
+            self.send_response(502)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+            return
         try:
             # Provider registry 是新的抽象入口；下面保留旧分支作为兼容
             # fallback，便于第三方站点/老测试在迁移期间继续工作。
@@ -897,10 +1145,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     'shareId': share_id,
                     'fileId': file_id,
                     'fileToken': file_token,
+                    'pwdId': pwd_id,
+                    'shareUrl': share_url,
+                    'quality': quality,
                 }, headers=headers)
                 if play is None or not play.url:
-                    logger.warning('quark play URL unavailable: share=%s file=%s',
-                                   bool(share_id), file_id[:80])
+                    # pwd 标记区分两类失败：有分享会话参数却解析失败（凭据/
+                    # 分享本身的问题）vs 压根没带 pwd_id/分享链接（vodId 只有
+                    # shareId+fid，PC 侧建不起分享会话，应交回 JAR 解析）。
+                    logger.warning(
+                        'quark play URL unavailable: share=%s pwd=%s file=%s',
+                        bool(share_id), bool(pwd_id or share_url), file_id[:80])
                     body = b'quark play URL unavailable'
                     self.send_response(502)
                     self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -914,6 +1169,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         'shareId': share_id,
                         'fileId': file_id,
                         'fileToken': file_token,
+                        'pwdId': pwd_id,
+                        'shareUrl': share_url,
+                        'quality': quality,
                     }, headers=headers, refresh=True)
                     if fresh is None or not fresh.url:
                         return None
@@ -958,6 +1216,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     url = None
                 if not url:
                     url = _quark_v2play(file_id, headers)
+                # 已转存但分享链路失败：回退个人网盘 fid 直链
+                if not url:
+                    url = _quark_personal_play_url(file_id, headers, retries=1) or None
             if not url:
                 self.send_response(502)
                 self.end_headers()
@@ -984,13 +1245,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         """
         # 签名 URL 过期时，先用 Provider single-flight 刷新一次；不要在
         # 后续 Range 分段里无限重试，避免把 401/403 变成隐形死循环。
+        # 部分夸克直链在签名失效或风控时回 200 + JSON/HTML（软失败），
+        # 按文本 Content-Type 同样视为可刷新错误，避免把错误页当视频推给 mpv。
+        def _is_soft_error(resp):
+            try:
+                ct = str(resp.headers.get('Content-Type') or '').strip()
+                if _TEXTUAL_CONTENT_TYPE.match(ct):
+                    return True
+            except Exception:
+                pass
+            return False
+
         probe = None
         for attempt in range(2):
             probe = _fetch(url, headers, 0, 0, timeout=30)
-            # CDN 签名过期通常是 401/403/412；夸克转存文件刚切换完成或旧
-            # fid 被回收时也可能返回 404/410，此时同样刷新一次播放地址。
-            if (probe.status_code not in _REFRESHABLE_UPSTREAM_STATUSES
-                    or not callable(refresh) or attempt):
+            soft = _is_soft_error(probe)
+            need_refresh = (probe.status_code in _REFRESHABLE_UPSTREAM_STATUSES or soft)
+            if (not need_refresh or not callable(refresh) or attempt):
+                # 软失败但无刷新回调时，同样视为失败而非直接透传错误页
+                if soft and not callable(refresh):
+                    # 尝试一次 Provider 刷新已在上层处理过，这里直接按 502 结束
+                    pass
                 break
             try:
                 replacement = refresh()
@@ -1017,7 +1292,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             cr = probe.headers.get('Content-Range', '')
             if '/' in cr:
                 total = int(cr.rsplit('/', 1)[1])
-            ctype = probe.headers.get('Content-Type') or ctype
+            ctype = _forward_content_type(probe.headers.get('Content-Type'), ctype)
         except (TypeError, ValueError):
             total = None
         finally:

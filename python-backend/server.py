@@ -100,8 +100,16 @@ _danmaku_lock = threading.Lock()
 # 弹幕队列上限：超出丢最旧，防内存无限增长
 _DANMAKU_QUEUE_MAX = 5000
 
-# 配置加载异步任务（多仓扫描可达分钟级，不能阻塞 /action 请求）
-_config_task = {'status': 'idle', 'summary': None, 'msg': ''}
+_config_task = {
+    'status': 'idle',
+    'summary': None,
+    'msg': '',
+    'stage': 'idle',
+    'requestId': '',
+    'progress': {'stage': 'idle', 'configured': 0, 'current': 0, 'total': 0, 'healthy': 0, 'degraded': 0, 'unsupported': 0}
+}
+_config_cancel_event = None
+_config_lock = threading.Lock()
 
 # playerContent 稳定结果缓存（key=site|flag|id → {result, ts}，60s 有效期）。
 # 带签名的 CDN/旧 go-proxy 地址不缓存，避免换集后继续拿到 412。
@@ -192,6 +200,12 @@ def _is_ephemeral_play_result(result):
         url = str((data or {}).get('url') or '') if isinstance(data, dict) else ''
         if not url:
             return False
+        if any(data.get(key) is True for key in ('oneTime', 'ephemeral', 'skipCache')):
+            return True
+        if str(data.get('cache') or '').lower() in ('0', 'false', 'no', 'off'):
+            return True
+        if data.get('expireAt') or data.get('expiresAt'):
+            return True
         parts = urllib.parse.urlsplit(url)
         host = (parts.hostname or '').lower()
         query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
@@ -201,8 +215,12 @@ def _is_ephemeral_play_result(result):
             return False
         if host.endswith('.quark.cn') or host.endswith('.myquark.cn'):
             return True
-        volatile = {'auth_key', 'token', 'sign', 'signature', 'expires',
-                    'expire', 'expire_at', 'expires_at', 'deadline'}
+        volatile = {
+            'auth_key', 'token', 'sign', 'signature', 'expires', 'expire',
+            'expire_at', 'expires_at', 'deadline', 'policy', 'credential',
+            'x-expires', 'x-oss-expires', 'x-amz-expires',
+            'x-amz-signature', 'x-amz-credential', 'wssecret', 'wstime',
+        }
         return any(str(key).lower() in volatile for key in query)
     except (TypeError, ValueError, AttributeError):
         return False
@@ -238,7 +256,8 @@ def _setup_logging():
     formatter = _RedactingFormatter('%(asctime)s %(name)s %(levelname)s %(message)s')
     root = logging.getLogger()
     root.handlers.clear()
-    root.setLevel(logging.INFO)
+    # 级别由 Electron 主进程经 VPC_LOG_LEVEL 注入（设置页“日志级别”），缺省 INFO
+    root.setLevel(getattr(logging, os.environ.get('VPC_LOG_LEVEL', 'INFO').upper(), logging.INFO))
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     root.addHandler(console)
@@ -310,21 +329,53 @@ def _form_flag(form, name):
     return str((form or {}).get(name, '')).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _config_load_worker(text, *, allow_local_file=False, force=False):
+def cancel_config_task(reason='cancelled'):
+    global _config_cancel_event
+    with _config_lock:
+        if _config_cancel_event is not None:
+            _config_cancel_event.set()
+        if _config_task['status'] == 'loading':
+            retained = getattr(config_mgr, 'last_healthy_snapshot', None)
+            payload = {
+                'status': 'error',
+                'msg': reason,
+                'stage': 'cancelled',
+                'summary': _empty_config_summary(0),
+            }
+            if retained is not None and retained is getattr(config_mgr, 'snapshot', None):
+                payload['retained'] = {
+                    'snapshotId': retained.snapshot_id,
+                    'healthy': retained.healthy_count,
+                    'sites': len(retained.sites),
+                }
+            _config_task.update(payload)
+            return True
+    return False
+
+
+def _config_load_worker(text, *, allow_local_file=False, force=False, cancel_event=None, request_id=''):
     try:
-        summary = config_mgr.load(text, allow_local_file=allow_local_file, force=force)
-        _config_task.update({'status': 'done', 'summary': summary, 'msg': ''})
+        summary = config_mgr.load(text, allow_local_file=allow_local_file, force=force,
+                                  cancel_event=cancel_event)
+        with _config_lock:
+            _config_task.update({
+                'status': 'done',
+                'summary': summary,
+                'msg': '',
+                'stage': 'done',
+                'requestId': request_id,
+            })
         logger.info('config load done: %s sites', summary.get('sites'))
     except Exception as e:
         logger.exception('config load failed')
         message = str(e)
-        # 新配置失败时旧健康配置仍在服务（C2.1）：把它写进任务结果，否则前端只看到
-        # 一条错误，无法区分「现在没得用」和「还在用上一份」。
         retained = getattr(config_mgr, 'last_healthy_snapshot', None)
         payload = {
             'status': 'error',
             'summary': _empty_config_summary(1 if '[L1:parse]' in message else 0),
             'msg': message,
+            'stage': 'error',
+            'requestId': request_id,
         }
         if retained is not None and retained is getattr(config_mgr, 'snapshot', None):
             payload['retained'] = {
@@ -332,16 +383,29 @@ def _config_load_worker(text, *, allow_local_file=False, force=False):
                 'healthy': retained.healthy_count,
                 'sites': len(retained.sites),
             }
-        _config_task.update(payload)
+        with _config_lock:
+            _config_task.update(payload)
 
 
-def _config_load_async(text, *, allow_local_file=False, force=False):
+def _config_load_async(text, *, allow_local_file=False, force=False, request_id=''):
     """启动后台加载；已在加载中返回 None。"""
-    if _config_task['status'] == 'loading':
-        return None
-    _config_task.update({'status': 'loading', 'summary': None, 'msg': ''})
+    global _config_cancel_event
+    with _config_lock:
+        if _config_task['status'] == 'loading':
+            return None
+        _config_cancel_event = threading.Event()
+        _config_task.update({
+            'status': 'loading',
+            'summary': None,
+            'msg': '',
+            'stage': 'fetching',
+            'requestId': str(request_id or ''),
+            'progress': {'stage': 'fetching', 'configured': 0, 'current': 0, 'total': 0, 'healthy': 0, 'degraded': 0, 'unsupported': 0}
+        })
+        cancel_evt = _config_cancel_event
     threading.Thread(target=_config_load_worker, args=(text,),
-                     kwargs={'allow_local_file': allow_local_file, 'force': force},
+                     kwargs={'allow_local_file': allow_local_file, 'force': force,
+                             'cancel_event': cancel_evt, 'request_id': request_id},
                      daemon=True).start()
     return True
 
@@ -507,26 +571,35 @@ def _friendly_jar_error(err):
     return e[:120]
 
 
-def _parse_matches_flag(flag):
-    """判断 config parses 是否至少有一个可能处理当前线路的解析器。"""
-    parses = getattr(config_mgr, 'parses', None) or []
-    if not parses:
-        return False
-    if not flag:
-        return True
-    for item in parses:
+def _usable_parsers():
+    """配置里真正能执行的解析器：有 ``url``，或 type=4（聚合，遍历其他解析器）。"""
+    usable = []
+    for item in getattr(config_mgr, 'parses', None) or []:
         if not isinstance(item, dict):
-            return True
-        values = []
-        for key in ('flag', 'flags', 'name', 'id'):
-            value = item.get(key)
-            if isinstance(value, (list, tuple)):
-                values.extend(str(v) for v in value)
-            elif value is not None:
-                values.append(str(value))
-        if not values or str(flag) in values:
-            return True
-    return False
+            continue
+        try:
+            type_value = int(item.get('type') or 0)
+        except (TypeError, ValueError):
+            type_value = 0
+        if str(item.get('url') or '').strip() or type_value == 4:
+            usable.append(item)
+    return usable
+
+
+def _has_usable_parser():
+    """配置里是否有任何可用解析器（不按线路筛）。
+
+    对齐上游 ``VodConfig.getParses(type, flag)`` 的
+    ``filter.isEmpty() ? items : filter``——解析器的 ``ext.flag`` 只是**偏好**，
+    没有解析器声明这条线路时回退到全部解析器，绝不因为「没有解析器点名这条线路」
+    就拒绝解析。旧实现 ``_parse_matches_flag`` 把 ``name``/``id`` 当作 flag 逐项
+    比较（真实 TVBox 配置的线路白名单在 ``ext.flag``，``name`` 一般是「解析1」这类
+    标签），于是任何正常配置都会被误判成「无匹配解析接口」，把本可解析的线路判死。
+
+    线路级筛选交给主进程 `src/main/parse-window.js` 的 ``matchesFlag``——那一侧
+    真正执行解析、也需要按 flag 排候选顺序；后端只回答「配置里到底有没有解析器」。
+    """
+    return bool(_usable_parsers())
 
 
 def _attach_jar_error(ru, body, ensure_list=False, flag=''):
@@ -541,8 +614,9 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
     err = getattr(sp, 'last_error', '') if sp is not None else ''
     fallback = (err and _friendly_jar_error(err)) or '站点接口异常或风控，暂时无法获取内容'
 
-    def _error_payload(code, raw=''):
-        error = RuntimeContractError(code, runtime='jar', raw_error=raw)
+    def _error_payload(code, raw='', details=None):
+        error = RuntimeContractError(code, runtime='jar', raw_error=raw,
+                                     details=details or {})
         return error.to_dict()
 
     try:
@@ -551,11 +625,22 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
             if err:
                 code = 'L3_RUNTIME_TIMEOUT' if 'timeout' in str(err).lower() else 'L3_RUNTIME_CALL_FAILED'
                 data['error'] = _error_payload(code, err)
-            elif data.get('parse') in (1, '1', True) and not _parse_matches_flag(flag):
-                # L4：让配置缺少 parses（或没有匹配当前 flag）变成可诊断响应，
-                # 而不是让渲染层只能看到一个泛化的播放失败。
-                data['error'] = _error_payload(
-                    'L4_PARSE_UNAVAILABLE', 'parse=1 without matching parser')
+            elif data.get('parse') in (1, '1', True) and not _has_usable_parser():
+                # L4：配置没有可执行解析器时**不**判定为线路失败。上游
+                # ``ParseJob.setParse`` 在没有解析器时回退到 type 0 网页嗅探
+                # （桌面端对应 `captureDirect` 隐藏窗口），渲染层也已实现该兜底。
+                # 若在这里写 ``error``，`_decorate_action_body` 会把 200 提升成 424
+                # 并丢掉 url/parse/header，渲染层只能整条线路判死并自动跳下一条
+                # ——而下一条线路同样没有解析器，用户看到的就是无意义的线路轮换。
+                # 因此有播放地址时只挂非致命 ``warning``（渲染层照常尝试嗅探，
+                # 失败时才用它解释原因）；地址为空才是真的无从播放。
+                payload = _error_payload(
+                    'L4_PARSE_UNAVAILABLE', 'parse=1 without configured parser',
+                    details={'flag': str(flag)} if flag else None)
+                if str(data.get('url') or '').strip():
+                    data['warning'] = payload
+                else:
+                    data['error'] = payload
             if ensure_list:
                 data.setdefault('list', [])
             return json.dumps(data, ensure_ascii=False)
@@ -574,7 +659,9 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
 def _normalize_play_result(body, flag='', site=None, original_id=''):
     """归一化 FongMi ``playerContent``，未知扩展字段全部保留。"""
     site_headers = getattr(site, 'headers', {}) if site is not None else {}
+    site_play_url = getattr(site, 'play_url', '') if site is not None else ''
     data = normalize_play_result(body, site_headers=site_headers,
+                                 site_play_url=site_play_url,
                                  flag=flag, original_id=original_id)
     return json.dumps(data, ensure_ascii=False)
 
@@ -623,58 +710,150 @@ def _dispatch_action_inner(form):
         if do == 'setting':
             name = form.get('name', '')
             text = form.get('text', '')
+            req_id = str(form.get('requestId') or '')
             if name in ('config', '配置') and text:
                 if _config_load_async(text, allow_local_file=_form_flag(form, 'localFile'),
-                                      force=_form_flag(form, 'force')) is None:
+                                      force=_form_flag(form, 'force'), request_id=req_id) is None:
                     raise RuntimeContractError('L1_CONFIG_BUSY')
                 return 200, '{"code":202,"msg":"config loading"}'
             logger.info('setting: %s=%s', name, text)
             return 200, '{"code":200,"msg":"setting received"}'
         if do == 'loadConfig':
-            # `localFile`：地址来自宿主的文件选择对话框——用户亲手选的本地路径可读。
-            # `force`：跳过「同内容复用」与「全部装配失败则保留旧配置」，用于用户
-            # 明确要求重建的场景。两者都默认关闭，远端配置无法自己打开。
+            req_id = str(form.get('requestId') or '')
             if _config_load_async(form.get('url', ''),
                                   allow_local_file=_form_flag(form, 'localFile'),
-                                  force=_form_flag(form, 'force')) is None:
-                raise RuntimeContractError('L1_CONFIG_BUSY')
+                                  force=_form_flag(form, 'force'), request_id=req_id) is None:
+                    raise RuntimeContractError('L1_CONFIG_BUSY')
             return 200, '{"code":202,"msg":"config loading"}'
+        if do == 'cancelConfig':
+            cancelled = cancel_config_task(form.get('reason', 'user cancelled'))
+            return 200, json.dumps({'code': 200, 'cancelled': cancelled}, ensure_ascii=False)
         if do == 'configTask':
+            # 配置加载是独立后台任务；轮询端点必须保留旧版的顶层
+            # ``status/msg`` 契约，否则前端只能显示「未知错误」。同时附带
+            # 脱敏后的结构化错误，供诊断页使用，不把它当成 Spider 请求失败。
             if _config_task.get('status') == 'error':
                 msg = str(_config_task.get('msg') or 'config task failed')
                 code = 'L1_CONFIG_TIMEOUT' if _is_timeout_text(msg) else 'L1_CONFIG_PARSE_FAILED'
-                raise RuntimeContractError(code, raw_error=msg)
+                error = RuntimeContractError(code, raw_error=msg)
+                payload = {'code': 200, **_config_task,
+                           'msg': error.raw_error or error.message,
+                           'error': error.to_dict()}
+                return 200, json.dumps(payload, ensure_ascii=False, default=str)
             return 200, json.dumps({'code': 200, **_config_task},
                                    ensure_ascii=False, default=str)
         if do == 'cacheSize':
+            # 缓存占用统计（供面板清理前展示）：总字节/文件数 + TTL 过期条目 + 分项明细
             total, items = _cache_size()
-            # TTL 感知：附带 KV 缓存里已过期待清理的条目数（供面板展示）
             expired = 0
+            kv_bytes = 0
             try:
-                _, _, expired = cache_store.stats()
+                kv_bytes, _, expired = cache_store.stats()
             except Exception:
-                expired = 0
-            return 200, json.dumps({'code': 200, 'bytes': total, 'items': items, 'expired': expired})
+                kv_bytes, expired = 0, 0
+            js_local, dl_cache = _cache_paths()
+            js_bytes = 0
+            if os.path.isfile(js_local):
+                try:
+                    js_bytes = os.path.getsize(js_local)
+                except OSError:
+                    js_bytes = 0
+            dl_bytes = 0
+            if os.path.isdir(dl_cache):
+                dl_bytes, _ = _dir_size(dl_cache)
+            player_items = 0
+            try:
+                with _player_cache_lock:
+                    player_items = len(_player_content_cache)
+            except Exception:
+                player_items = 0
+            repo_bytes = 0
+            try:
+                repo_path = getattr(config_mgr._repository_cache(), 'path', '')
+                if repo_path and os.path.isfile(repo_path):
+                    repo_bytes = os.path.getsize(repo_path)
+            except Exception:
+                repo_bytes = 0
+            return 200, json.dumps({
+                'code': 200,
+                'bytes': total,
+                'items': items,
+                'expired': expired,
+                'breakdown': {
+                    'kv': kv_bytes,
+                    'jsLocal': js_bytes,
+                    'dlCache': dl_bytes,
+                    'playerCache': player_items,
+                    'repoCache': repo_bytes,
+                },
+            }, ensure_ascii=False)
+        if do == 'clearConfigCache':
+            config_mgr._repository_cache().clear()
+            config_mgr.cache_restored = False
+            config_mgr.cache_age = 0
+            return 200, '{"code":200,"msg":"config cache cleared"}'
         if do == 'clearCache':
-            # 缓存清理：spider KV 缓存 + JS 本地存储 + 下载缓存目录（返回释放字节数）
+            # 缓存清理：spider KV 缓存 + JS 本地存储 + 下载缓存目录
+            # + 播放内容内存缓存 + 网盘签名 URL 缓存 + KV 配额状态（返回结构化明细）
             import shutil
             freed, _ = _cache_size()
             removed = cache_store.clear()
             extra = 0
             js_local, dl_cache = _cache_paths()
+            js_removed = 0
             if os.path.exists(js_local):
                 try:
                     os.remove(js_local)
                     extra += 1
+                    js_removed = 1
                 except OSError:
                     pass
+            dl_removed = 0
             if os.path.isdir(dl_cache):
                 shutil.rmtree(dl_cache, ignore_errors=True)
                 extra += 1
-            logger.info('cache cleared: %s kv + %s extra (%s bytes)', removed, extra, freed)
-            return 200, json.dumps({'code': 200, 'bytes': freed,
-                                    'msg': '已删除 %d 项缓存' % (removed + extra)},
-                                   ensure_ascii=False)
+                dl_removed = 1
+            # 播放内容内存缓存
+            player_removed = 0
+            try:
+                with _player_cache_lock:
+                    player_removed = len(_player_content_cache)
+                    _player_content_cache.clear()
+            except Exception:
+                player_removed = 0
+            # 网盘签名 URL 缓存（pan 模块可能未安装）
+            signed_cleared = False
+            try:
+                from pan.cache import clear_signed_url_cache
+                clear_signed_url_cache()
+                signed_cleared = True
+            except Exception:
+                signed_cleared = False
+            # 重置 KV 配额状态（下次访问强制重新核算）
+            try:
+                with _kv_quota_lock:
+                    _kv_quota_state['checked'] = 0.0
+                    _kv_quota_state['exceeded'] = False
+            except Exception:
+                pass
+            detail = {
+                'kv': removed,
+                'jsLocal': js_removed,
+                'dlCache': dl_removed,
+                'playerCache': player_removed,
+                'signedUrlCache': signed_cleared,
+            }
+            logger.info(
+                'cache cleared: kv=%s jsLocal=%s dlCache=%s player=%s signedUrl=%s (%s bytes freed)',
+                removed, js_removed, dl_removed, player_removed, signed_cleared, freed)
+            return 200, json.dumps({
+                'code': 200,
+                'bytes': freed,
+                'removed': removed,
+                'extra': extra,
+                'detail': detail,
+                'msg': '已删除 %d 项缓存' % (removed + extra + player_removed),
+            }, ensure_ascii=False)
         if do == 'fetchText':
             # 直播源等外部文本拉取（渲染层直接 fetch 会被 CORS 拦截）
             from config import fetch_text_diagnostics
@@ -765,6 +944,26 @@ def _dispatch_action_inner(form):
         sites.set_recent(site.key)
         ru = site.runner
 
+        if do == 'parseExt':
+            # FongMi parse type=2 lives in the most recently applicable
+            # portable Spider JAR (Json<key>.parse), not in BrowserWindow.
+            jar_site = site if sites._kind(site) == 'jar' else sites.recent('jar')
+            if jar_site is None or not callable(getattr(jar_site.runner, 'jsonExt', None)):
+                raise RuntimeContractError(
+                    'L2_SITE_UNSUPPORTED', raw_error='parse type=2 requires a portable parser JAR')
+            try:
+                jxs = json.loads(form.get('jxs', '{}') or '{}')
+            except (TypeError, ValueError):
+                jxs = {}
+            if not isinstance(jxs, dict):
+                jxs = {}
+            raw = _runtime_site_call(
+                jar_site, 'parse', lambda: jar_site.runner.jsonExt(
+                    form.get('key', ''), jxs, form.get('url', '')))
+            if isinstance(raw, str):
+                return 200, raw
+            return 200, json.dumps(raw, ensure_ascii=False)
+
         # ---- Spider 内容 API（契约见 PHASE0_依赖矩阵.md 第 3 节）----
         if do == 'homeContent':
             return 200, _attach_jar_error(ru, _runtime_site_call(
@@ -794,7 +993,12 @@ def _dispatch_action_inner(form):
             except (TypeError, ValueError):
                 vip_key = str(vip_raw)
             cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}|{vip_key}"
+            refresh = _form_flag(form, 'refresh')
             cached = _player_content_cache.get(cache_key)
+            if refresh and cached:
+                with _player_cache_lock:
+                    _player_content_cache.pop(cache_key, None)
+                cached = None
             if (cached and not _is_ephemeral_play_result(cached.get('result'))
                     and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL):
                 return 200, cached['result']
@@ -1088,7 +1292,7 @@ def _decorate_action_body(status, body, request):
     site = sites.get(request.site_key) if request.site_key else None
     runtime_methods = {
         'homeContent', 'homeVideoContent', 'categoryContent', 'searchContent',
-        'detailContent', 'playerContent', 'liveContent', 'action',
+        'detailContent', 'playerContent', 'parseExt', 'liveContent', 'action',
     }
     if status < 400 and request.method in runtime_methods and payload.get('error'):
         raw = payload.get('error')
@@ -1989,11 +2193,24 @@ def main():
     port = int(os.environ.get('VPC_PORT') or pick_free_port())
     token = os.environ.get('VPC_TOKEN') or secrets.token_hex(16)
     pan_fast_path = os.environ.get('VPC_PAN_FAST_PATH')
+    runtime_android_worker = os.environ.get('VPC_ANDROID_WORKER_ENABLED')
+    media_probe = os.environ.get('VPC_MEDIA_PROBE')
+    auto_line_fallback = os.environ.get('VPC_AUTO_LINE_FALLBACK')
+    legacy_parser = os.environ.get('VPC_LEGACY_PARSER')
+
+    def _env_bool(val, default=True):
+        if val is None:
+            return default
+        return str(val).strip().lower() not in ('0', 'false', 'no', 'off')
+
     hoststate.configure(
         port=port,
         token=token,
-        **({'pan_fast_path': str(pan_fast_path).strip().lower() not in ('0', 'false', 'no', 'off')}
-           if pan_fast_path is not None else {}),
+        pan_fast_path=_env_bool(pan_fast_path, True),
+        runtime_android_worker=False,  # A4.1 No-Go 政策硬锁定
+        media_probe=_env_bool(media_probe, True),
+        auto_line_fallback=_env_bool(auto_line_fallback, True),
+        legacy_parser=_env_bool(legacy_parser, True),
     )
     # 自定义缓存目录（主进程设置页指定，经 VPC_CACHE_DIR 传入）；py 插件目录跟随
     cache_dir = os.environ.get('VPC_CACHE_DIR')
@@ -2001,8 +2218,20 @@ def main():
         hoststate.configure(cache_dir=cache_dir,
                             plugins_dir=os.path.join(cache_dir, 'py'))
     hoststate.ensure_dirs()
+    config_mgr.configure_repository_cache()
     _setup_logging()
-    load_default_sites()
+    last_cached_url = os.environ.get('VPC_LAST_CONFIG_URL', '')
+    restored = None
+    if last_cached_url:
+        try:
+            restored = config_mgr.restore_cached(last_cached_url)
+            if restored:
+                logger.info('config restored from disk cache: %s sites',
+                            restored.get('healthy', restored.get('sites', 0)))
+        except Exception:
+            logger.warning('config disk cache restore failed', exc_info=True)
+    if not restored:
+        load_default_sites()
     fastapi_app = create_app()
     print(f'VPC_BACKEND_READY port={port} token={token}', flush=True)
     import uvicorn

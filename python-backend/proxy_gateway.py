@@ -32,11 +32,24 @@ def _site_key(params: dict[str, Any], sites: Any, do: str) -> tuple[str | None, 
 
 
 def _pan_fallback_url(params: Mapping[str, Any]) -> str | None:
-    """返回旧 go-proxy 兼容 URL；不在模块导入时启动监听器。"""
+    """返回旧 go-proxy 兼容 URL；不在模块导入时启动监听器。
+
+    ``params`` 在统一入口中还包含 HTTP 请求头（例如 ``cookie``、
+    ``authorization``）。这些值不能拼进 URL：除了泄露凭据，也会让
+    重定向后的旧数据面错误地把请求头当成业务参数。旧 ``_handle_pan``
+    会从客户端请求头或本地加密 Cookie 存储中获取夸克 Cookie。
+    """
     try:
         import go_proxy
 
-        query = urlencode({str(k): v for k, v in params.items() if v is not None}, doseq=True)
+        blocked = {
+            'cookie', 'authorization', 'proxy-authorization', 'set-cookie',
+            'user-agent', 'referer', 'range', 'content-length', 'content-type',
+            '_body',
+        }
+        query = urlencode({str(k): v for k, v in params.items()
+                           if v is not None and str(k).lower() not in blocked},
+                          doseq=True)
         return f"http://127.0.0.1:{int(go_proxy.PORT)}/proxy" + (f"?{query}" if query else '')
     except Exception:
         return None
@@ -71,20 +84,18 @@ def dispatch(params: Mapping[str, Any] | None, sites: Any) -> Any:
         kind = do if do in ('js', 'py', 'jar', 'cms') else None
         site = sites.recent(kind)
 
-    # 优先在进程内直接解析网盘 Provider (PanProvider)，实现统一调度
     if do == 'pan':
-        site_name = str(param.get('site') or '')
-        try:
-            from pan.registry import registry
-            provider = registry.get(site_name)
-            if provider is not None:
-                share_url = str(param.get('share_url') or param.get('url') or '')
-                file_id = str(param.get('file_id') or '')
-                res = provider.resolve(share_url, file_id=file_id)
-                if isinstance(res, dict) and res.get('url'):
-                    return res['url']
-        except Exception:
-            pass
+        # 网盘请求必须走旧 go-proxy 数据面，而不是在这里把 Provider 的
+        # signed URL 变成 302。旧数据面负责：
+        #
+        # * 从请求头或 pan_cookies.py 加载夸克 Cookie；
+        # * 保留 PlayUrl.headers，并将 Range/Referer/UA 传给 CDN；
+        # * 处理探测、206、seek、过期刷新和上游失败；
+        # * 对分享直链失败执行 v2/play/转存回退。
+        #
+        # 统一入口之前直接返回 play.url，会丢失这些请求头；而且 FastAPI
+        # 的重定向不会可靠地携带 mpv 的 Cookie。因此恢复 8 月 17 日已验证
+        # 的协议层路径：只生成本地 do=pan URL，由 9978 Handler 取流。
         return _pan_fallback_url(param)
     if site is None or getattr(site, 'runner', None) is None:
         return None
