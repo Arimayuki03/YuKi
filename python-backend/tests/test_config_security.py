@@ -160,37 +160,55 @@ class GuardUrlTest(unittest.TestCase):
 
     # -------------------------------------------- 私网同源继承（PNA 模型）
 
-    def test_public_config_cannot_reach_loopback_or_private(self):
+    def test_default_policy_allows_loopback_and_private(self):
+        """桌面端默认放开：TVBox 生态大量仓指向本机服务与局域网 NAS，
+        跨源引用不再触发 private_network_blocked。"""
         for url in ('http://127.0.0.1:9978/api', 'http://localhost:8080/x',
                     'http://10.1.2.3/x', 'http://192.168.0.9/x'):
-            exc = self._blocked(url, kind='api', site_key='s')
+            got = guard_url(url, policy=self.policy, trust=self.trust,
+                            kind='api', site_key='s')
+            self.assertEqual(got, url)
+
+    def test_strict_mode_blocks_cross_origin_loopback_and_private(self):
+        """严格 SSRF 防护（对应 VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）：
+        公网信任根引用回环/内网仍要被拒——开关是给需要它的部署留的。"""
+        policy = _policy(allow_private_network=False)
+        trust = SourceTrust.for_source('https://cdn.fixture.invalid/tv.json',
+                                       policy=policy)
+        for url in ('http://127.0.0.1:9978/api', 'http://localhost:8080/x',
+                    'http://10.1.2.3/x', 'http://192.168.0.9/x'):
+            with self.assertRaises(ConfigSecurityError, msg=url) as caught:
+                guard_url(url, policy=policy, trust=trust, kind='api',
+                          site_key='s')
+            exc = caught.exception
             self.assertEqual(exc.reason, 'private_network_blocked', url)
             self.assertIn(exc.scope, ('loopback', 'private'), url)
 
     def test_user_entered_loopback_root_is_a_trust_root(self):
-        """用户亲手输入 http://127.0.0.1:8000/tv.json 属于显式选择，同源子资源继承信任。"""
-        trust = SourceTrust.for_source('http://127.0.0.1:8000/tv.json', policy=self.policy)
+        """用户亲手输入 http://127.0.0.1:8000/tv.json 属于显式选择，同源子资源继承信任。
+
+        用严格策略验证：即使恢复 SSRF 防护，同源继承依然成立。"""
+        policy = _policy(allow_private_network=False)
+        trust = SourceTrust.for_source('http://127.0.0.1:8000/tv.json', policy=policy)
         self.assertEqual(trust.scope, 'loopback')
-        got = guard_url('http://127.0.0.1:8000/jar/x.jar', policy=self.policy,
+        got = guard_url('http://127.0.0.1:8000/jar/x.jar', policy=policy,
                         trust=trust, kind='jar')
         self.assertEqual(got, 'http://127.0.0.1:8000/jar/x.jar')
 
     def test_trust_inheritance_is_same_origin_not_same_machine(self):
-        """同源 = scheme+host+port 全等。换端口/换主机名/换协议都不继承。"""
-        trust = SourceTrust.for_source('http://127.0.0.1:8000/tv.json', policy=self.policy)
+        """同源 = scheme+host+port 全等。换端口/换主机名/换协议都不继承。
+
+        在严格策略下验证：默认放开后私网地址本来就放行，该断言只在
+        严格模式才有区分度。"""
+        policy = _policy(allow_private_network=False)
+        trust = SourceTrust.for_source('http://127.0.0.1:8000/tv.json', policy=policy)
         for url in ('http://127.0.0.1:9978/x',      # 换端口 → 端口扫描
                     'http://localhost:8000/x',      # 换主机名
                     'https://127.0.0.1:8000/x',     # 换协议
                     'http://10.0.0.5:8000/x'):      # 换主机
             with self.assertRaises(ConfigSecurityError, msg=url) as caught:
-                guard_url(url, policy=self.policy, trust=trust, kind='api')
+                guard_url(url, policy=policy, trust=trust, kind='api')
             self.assertEqual(caught.exception.reason, 'private_network_blocked', url)
-
-    def test_allow_private_network_is_the_only_override(self):
-        policy = _policy(allow_private_network=True)
-        got = guard_url('http://192.168.1.10/api', policy=policy, trust=self.trust,
-                        kind='api')
-        self.assertEqual(got, 'http://192.168.1.10/api')
 
     def test_inline_config_has_no_trusted_origin(self):
         trust = SourceTrust.for_source('{"sites":[]}', policy=self.policy)
@@ -294,19 +312,22 @@ class FetchGuardedTest(unittest.TestCase):
         self.assertEqual(caught.exception.reason, 'too_many_redirects')
 
     def test_every_hop_is_re_guarded_so_redirect_cannot_reach_private(self):
-        """跳转是绕过 SSRF 检查最常见的路径：公网源 302 到内网必须在跟随前被拒。"""
+        """跳转是绕过 SSRF 检查最常见的路径：严格模式下公网源 302 到内网必须在跟随前被拒。"""
+        strict = _policy(allow_private_network=False)
         public_trust = SourceTrust.for_source('https://cdn.fixture.invalid/tv.json',
-                                             policy=_policy())
+                                              policy=strict)
         with self.assertRaises(ConfigSecurityError) as caught:
-            fetch_guarded(self.fx.url('redirect-to-private'), policy=_policy(),
+            fetch_guarded(self.fx.url('redirect-to-private'), policy=strict,
                           trust=public_trust)
         # 第一跳本身就跨源（夹具在 127.0.0.1，信任根在公网）→ 先被私网守卫拦住。
         self.assertEqual(caught.exception.reason, 'private_network_blocked')
 
         # 信任根就是夹具自身时第一跳放行，第二跳（10.0.0.1）仍必须被拒。
+        fixture_trust = SourceTrust.for_source(self.fx.config('single.json'),
+                                               policy=strict)
         with self.assertRaises(ConfigSecurityError) as caught:
-            fetch_guarded(self.fx.url('redirect-to-private'), policy=_policy(),
-                          trust=self.trust)
+            fetch_guarded(self.fx.url('redirect-to-private'), policy=strict,
+                          trust=fixture_trust)
         exc = caught.exception
         self.assertEqual(exc.reason, 'private_network_blocked')
         self.assertIn('10.0.0.1', exc.url)

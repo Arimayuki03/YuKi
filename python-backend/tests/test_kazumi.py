@@ -523,8 +523,8 @@ class TestBangumiSync(unittest.TestCase):
         from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT
         self.assertIn('api.bgm.tv', BANGUMI_API)
         self.assertIn('next.bgm.tv', BANGUMI_API_NEXT)
-        self.assertNotIn('bangumi.lol', BANGUMI_API)
-        self.assertNotIn('bangumi.lol', BANGUMI_API_NEXT)
+        self.assertNotIn('bangumi.pro', BANGUMI_API)
+        self.assertNotIn('bangumi.pro', BANGUMI_API_NEXT)
 
     def test_me_with_token(self):
         from unittest import mock
@@ -850,7 +850,7 @@ class TestBangumiSync(unittest.TestCase):
         # 默认官方
         self.assertEqual(self.mgr._base_api(), BANGUMI_API)
         self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
-        # 开启 Bangumi 镜像 → 全域名反代 api.bangumi.lol / next.bangumi.lol
+        # 开启 Bangumi 镜像 → 全域名反代 api.bangumi.pro / next.bangumi.pro
         self.mgr.set_mirror(bangumi=True)
         self.assertEqual(self.mgr._base_api(), BANGUMI_MIRROR_API)
         self.assertEqual(self.mgr._base_next(), BANGUMI_MIRROR_NEXT)
@@ -860,7 +860,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
 
     def test_mirror_enabled_trends_uses_mirror(self):
-        # 镜像开启 → 推荐走 next.bangumi.lol（全域名反代），且 nameCN 归一到 name_cn
+        # 镜像开启 → 推荐走 next.bangumi.pro（全域名反代），且 nameCN 归一到 name_cn
         from kazumi.plugin_manager import BANGUMI_MIRROR_NEXT
         from unittest import mock
 
@@ -879,7 +879,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(out['total'], 1)
 
     def test_mirror_enabled_search_uses_mirror(self):
-        # 镜像开启 → 搜索走 api.bangumi.lol（免签名，全路径可用）
+        # 镜像开启 → 搜索走 api.bangumi.pro（免签名，全路径可用）
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
 
@@ -897,7 +897,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(len(out), 1)
 
     def test_mirror_enabled_season_calendar_uses_mirror(self):
-        # 镜像开启 → 季度放送检索（v0/search/subjects POST）走 api.bangumi.lol
+        # 镜像开启 → 季度放送检索（v0/search/subjects POST）走 api.bangumi.pro
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
 
@@ -931,7 +931,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertIn(BANGUMI_API_NEXT + '/p1/trending/subjects', m.call_args[0][0])
 
     def test_mirror_enabled_auth_collections_uses_mirror(self):
-        # 全域名反代也代理鉴权/收藏接口（镜像开启时走 api.bangumi.lol）
+        # 全域名反代也代理鉴权/收藏接口（镜像开启时走 api.bangumi.pro）
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
         self.mgr.enable_bangumi_proxy = True

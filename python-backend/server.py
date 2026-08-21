@@ -335,6 +335,10 @@ def cancel_config_task(reason='cancelled'):
         if _config_cancel_event is not None:
             _config_cancel_event.set()
         if _config_task['status'] == 'loading':
+            # 代际失效 + 任务序号自增：被取消的加载线程之后不得回写状态，
+            # 也不得在装配完成时把半路结果 swap 进运行中配置。
+            config_mgr.cancel_active_load()
+            _config_task['seq'] = _config_task.get('seq', 0) + 1
             retained = getattr(config_mgr, 'last_healthy_snapshot', None)
             payload = {
                 'status': 'error',
@@ -353,18 +357,49 @@ def cancel_config_task(reason='cancelled'):
     return False
 
 
-def _config_load_worker(text, *, allow_local_file=False, force=False, cancel_event=None, request_id=''):
+def _update_config_task(seq, payload):
+    """加载线程回写任务状态：序号不匹配说明已被更新的加载接管，直接丢弃。"""
+    with _config_lock:
+        if _config_task.get('seq') != seq:
+            return False
+        _config_task.update(payload)
+        return True
+
+
+def _config_progress_reporter(seq):
+    """把 ConfigManager 的加载进度写入 _config_task.progress（前端进度条）。
+
+    进度按「实际完成的站点数」上报；seq 不匹配（被更新请求接管）时丢弃，
+    防止旧线程污染新任务的进度。
+    """
+    def report(stage, current, total):
+        with _config_lock:
+            if _config_task.get('seq') != seq or _config_task.get('status') != 'loading':
+                return
+            prev = _config_task.get('progress') or {}
+            _config_task['progress'] = {
+                'stage': str(stage),
+                'configured': int(total or prev.get('configured') or 0),
+                'current': int(current), 'total': int(total),
+                'healthy': prev.get('healthy', 0),
+                'degraded': prev.get('degraded', 0),
+                'unsupported': prev.get('unsupported', 0),
+            }
+    return report
+
+
+def _config_load_worker(text, *, allow_local_file=False, force=False, cancel_event=None, request_id='', seq=0):
     try:
         summary = config_mgr.load(text, allow_local_file=allow_local_file, force=force,
-                                  cancel_event=cancel_event)
-        with _config_lock:
-            _config_task.update({
-                'status': 'done',
-                'summary': summary,
-                'msg': '',
-                'stage': 'done',
-                'requestId': request_id,
-            })
+                                  cancel_event=cancel_event,
+                                  progress_cb=_config_progress_reporter(seq))
+        _update_config_task(seq, {
+            'status': 'done',
+            'summary': summary,
+            'msg': '',
+            'stage': 'done',
+            'requestId': request_id,
+        })
         logger.info('config load done: %s sites', summary.get('sites'))
     except Exception as e:
         logger.exception('config load failed')
@@ -383,31 +418,126 @@ def _config_load_worker(text, *, allow_local_file=False, force=False, cancel_eve
                 'healthy': retained.healthy_count,
                 'sites': len(retained.sites),
             }
-        with _config_lock:
-            _config_task.update(payload)
+        _update_config_task(seq, payload)
 
 
-def _config_load_async(text, *, allow_local_file=False, force=False, request_id=''):
-    """启动后台加载；已在加载中返回 None。"""
+def _config_load_async(text, *, allow_local_file=False, force=False, request_id='', user=False):
+    """启动后台加载；无法启动（不允许接管）时返回 None。
+
+    接管规则：加载是全局单例任务，但「用户导入」必须能接管任何进行中的加载
+    （启动恢复 / 主进程自动重载 / 上一次导入）——大仓库的自动重载动辄数分钟，
+    若它一直占着 loading 态，用户每次点导入都只会收到 BUSY，表现为「所有导入
+    都报错」。反向不成立：**自动重载不得接管任何进行中的加载**——启动恢复进行
+    到一半时被自动重载取消（换慢速网络重载），用户会看到恢复永远不出结果、
+    首页一直停在示例源。自动重载遇到 loading 一律 BUSY，等下一轮时机。
+    """
     global _config_cancel_event
     with _config_lock:
+        stale_event = None
         if _config_task['status'] == 'loading':
-            return None
+            if not user:
+                return None          # 自动重载对任何进行中的加载让位（含启动恢复）
+            stale_event = _config_cancel_event  # 用户导入接管一切进行中的加载
+        if stale_event is not None:
+            # 接管：唤醒旧线程的取消检查点，代际失效其最终 swap；
+            # 旧线程稍后在检查点自行消亡，状态经 seq 不再回写。
+            stale_event.set()
+            config_mgr.cancel_active_load()
+            logger.info('config load superseded by request %s', request_id or '(auto)')
         _config_cancel_event = threading.Event()
+        _config_task['seq'] = _config_task.get('seq', 0) + 1
+        seq = _config_task['seq']
         _config_task.update({
             'status': 'loading',
             'summary': None,
             'msg': '',
             'stage': 'fetching',
             'requestId': str(request_id or ''),
+            'user': bool(user),
+            'seq': seq,
             'progress': {'stage': 'fetching', 'configured': 0, 'current': 0, 'total': 0, 'healthy': 0, 'degraded': 0, 'unsupported': 0}
         })
         cancel_evt = _config_cancel_event
     threading.Thread(target=_config_load_worker, args=(text,),
                      kwargs={'allow_local_file': allow_local_file, 'force': force,
-                             'cancel_event': cancel_evt, 'request_id': request_id},
+                             'cancel_event': cancel_evt, 'request_id': request_id,
+                             'seq': seq},
                      daemon=True).start()
     return True
+
+
+def _config_restore_worker(source_url, *, seq=0):
+    """启动期磁盘缓存恢复（后台线程）。
+
+    复用 ``_config_task`` 契约上报 loading→done/error/idle：主进程 auto-reload
+    与渲染端 configTask 轮询据此感知「恢复进行中/已完成」。恢复不可用
+    （无缓存/来源不匹配）时回到 idle，交还给常规网络重载决策。
+    """
+    try:
+        summary = config_mgr.restore_cached(source_url,
+                                            progress_cb=_config_progress_reporter(seq))
+    except Exception:
+        logger.warning('config disk cache restore failed', exc_info=True)
+        retained = getattr(config_mgr, 'last_healthy_snapshot', None)
+        payload = {
+            'status': 'error',
+            'summary': _empty_config_summary(0),
+            'msg': 'disk cache restore failed',
+            'stage': 'error',
+            'requestId': 'startup-restore',
+        }
+        if retained is not None and retained is getattr(config_mgr, 'snapshot', None):
+            payload['retained'] = {
+                'snapshotId': retained.snapshot_id,
+                'healthy': retained.healthy_count,
+                'sites': len(retained.sites),
+            }
+        _update_config_task(seq, payload)
+        return
+    if summary:
+        _update_config_task(seq, {
+            'status': 'done',
+            'summary': summary,
+            'msg': '',
+            'stage': 'done',
+            'requestId': 'startup-restore',
+        })
+    else:
+        _update_config_task(seq, {
+            'status': 'idle',
+            'summary': None,
+            'msg': '',
+            'stage': 'idle',
+            'requestId': '',
+        })
+    if summary:
+        logger.info('config restored from disk cache: %s sites',
+                    summary.get('healthy', summary.get('sites', 0)))
+    else:
+        logger.info('config disk cache restore unavailable; keeping default sites')
+
+
+def _start_config_restore_async(source_url):
+    """标记 loading 并启动恢复线程；已在加载中时跳过。"""
+    with _config_lock:
+        if _config_task['status'] == 'loading':
+            return
+        _config_task['seq'] = _config_task.get('seq', 0) + 1
+        _config_task.update({
+            'status': 'loading',
+            'summary': None,
+            'msg': '',
+            'stage': 'restoring',
+            'requestId': 'startup-restore',
+            'user': False,
+            'seq': _config_task['seq'],
+            'progress': {'stage': 'restoring', 'configured': 0, 'current': 0,
+                         'total': 0, 'healthy': 0, 'degraded': 0, 'unsupported': 0},
+        })
+        seq = _config_task['seq']
+    threading.Thread(target=_config_restore_worker, args=(source_url,),
+                     kwargs={'seq': seq},
+                     name='config-restore', daemon=True).start()
 
 
 def _danmaku_reset():
@@ -682,7 +812,11 @@ def dispatch_action(form, runtime_request=None):
             with _SPIDER_SEMAPHORE:
                 return _dispatch_action_inner(form)
         except RuntimeContractError as error:
-            logger.warning(
+            # L2_SITE_NOT_FOUND 是客户端路由未命中（渲染端预渲染的站点在磁盘缓存
+            # 恢复窗口期还没上后端），不是后端故障——每次启动都会出现，按 WARNING
+            # 记只会刷屏；响应里已带结构化错误，降为 INFO。
+            _log = (logger.info if error.code == 'L2_SITE_NOT_FOUND' else logger.warning)
+            _log(
                 'runtime request failed requestId=%s code=%s site=%s raw=%s',
                 request.request_id, error.code, request.site_key,
                 redact_sensitive(error.raw_error, 800))
@@ -712,8 +846,11 @@ def _dispatch_action_inner(form):
             text = form.get('text', '')
             req_id = str(form.get('requestId') or '')
             if name in ('config', '配置') and text:
+                # 带 requestId 的是渲染端用户导入，可接管进行中的后台加载；
+                # 不带的是主进程自动重载，不得打断用户正在等结果的导入。
                 if _config_load_async(text, allow_local_file=_form_flag(form, 'localFile'),
-                                      force=_form_flag(form, 'force'), request_id=req_id) is None:
+                                      force=_form_flag(form, 'force'), request_id=req_id,
+                                      user=bool(req_id)) is None:
                     raise RuntimeContractError('L1_CONFIG_BUSY')
                 return 200, '{"code":202,"msg":"config loading"}'
             logger.info('setting: %s=%s', name, text)
@@ -722,8 +859,9 @@ def _dispatch_action_inner(form):
             req_id = str(form.get('requestId') or '')
             if _config_load_async(form.get('url', ''),
                                   allow_local_file=_form_flag(form, 'localFile'),
-                                  force=_form_flag(form, 'force'), request_id=req_id) is None:
-                    raise RuntimeContractError('L1_CONFIG_BUSY')
+                                  force=_form_flag(form, 'force'), request_id=req_id,
+                                  user=bool(req_id)) is None:
+                raise RuntimeContractError('L1_CONFIG_BUSY')
             return 200, '{"code":202,"msg":"config loading"}'
         if do == 'cancelConfig':
             cancelled = cancel_config_task(form.get('reason', 'user cancelled'))
@@ -2221,19 +2359,16 @@ def main():
     config_mgr.configure_repository_cache()
     _setup_logging()
     last_cached_url = os.environ.get('VPC_LAST_CONFIG_URL', '')
-    restored = None
-    if last_cached_url:
-        try:
-            restored = config_mgr.restore_cached(last_cached_url)
-            if restored:
-                logger.info('config restored from disk cache: %s sites',
-                            restored.get('healthy', restored.get('sites', 0)))
-        except Exception:
-            logger.warning('config disk cache restore failed', exc_info=True)
-    if not restored:
-        load_default_sites()
     fastapi_app = create_app()
+    # READY 不再等待磁盘缓存恢复：大配置（数百站点）+ 慢镜像 jar 下载会让同步
+    # 恢复耗时数分钟，期间 VPC_BACKEND_READY 迟迟不打印，主进程拿不到端口/token、
+    # 渲染端 waitBackend 拿不到 backend info——整个窗口在事件绑定前呈「卡死」态。
+    # 先以内置示例源兜底就绪，恢复移入后台线程（经 _config_task 上报状态，
+    # 主进程 auto-reload 会等它结束再决策是否需要网络重载）。
+    load_default_sites()
     print(f'VPC_BACKEND_READY port={port} token={token}', flush=True)
+    if last_cached_url:
+        _start_config_restore_async(last_cached_url)
     import uvicorn
     uvicorn.run(fastapi_app, host='127.0.0.1', port=port, log_level='warning')
 

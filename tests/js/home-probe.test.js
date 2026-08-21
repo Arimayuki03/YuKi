@@ -5,9 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('node:vm');
 
-/** 在 VM 中加载 home.js，注入最小全局桩；localStorage 为内存 Map 桩（T60 持久化）。
+/** 在 VM 中加载 common.js + home.js，注入最小全局桩；localStorage 为内存 Map 桩（T60 持久化）。
  *  sharedStore：可传入外部 Map 以共享 localStorage（跨 vm 上下文测持久化往返）。 */
 function loadHome(sharedStore) {
+    const cacheSrc = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/cache.js'), 'utf8');
+    const commonSrc = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/common.js'), 'utf8');
     const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/home.js'), 'utf8');
     const lsStore = sharedStore || new Map();
     const ls = {
@@ -17,10 +19,10 @@ function loadHome(sharedStore) {
     };
     const context = {
         console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, parseInt, parseFloat,
-        setTimeout, clearTimeout,
+        setTimeout, clearTimeout, document: {},
         localStorage: ls,
         $: () => ({ on() { return this; }, off() { return this; }, empty() { return this; }, html() {}, val() { return ''; } }),
-        window: { vpc: { settingsGet: async () => ({}), settingsSet: async () => {} } },
+        window: { vpc: { settingsGet: async () => ({}), settingsSet: async () => {} }, localStorage: ls },
         escHtml: (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'),
         truncateTitle: (s) => String(s || '').slice(0, 60),
         vodCoverImg: (pic) => `<img src="${pic || ''}">`,
@@ -39,7 +41,17 @@ function loadHome(sharedStore) {
     };
     context.globalThis = context;
     vm.createContext(context);
-    vm.runInContext(`${source}\n;globalThis.__Home = Home;`, context, { filename: 'home.js' });
+    vm.runInContext(`${cacheSrc}\n;${commonSrc}\n;${source}`, context, { filename: 'home.js' });
+    // common.js 的真实实现会重定义这些依赖 DOM/后端的函数（showLoading 里就有 $().find），
+    // 加载后重新打桩覆盖；纯函数（errorTextOf/escHtml 等）保留真实实现供断言。
+    // cache.js 把 localCache* 挂在 window 上，桥接成 VM 全局供 home.js 裸引用。
+    vm.runInContext(`
+        ;globalThis.__Home = Home; globalThis.__errorTextOf = errorTextOf;
+        ;localCacheGet = (typeof window.localCacheGet === 'function') ? window.localCacheGet : (() => null);
+        ;localCacheSet = (typeof window.localCacheSet === 'function') ? window.localCacheSet : (() => {});
+        ;warnToast = () => {}; showLoading = () => {}; hideLoading = () => {};
+        ;fillMissingCovers = () => {}; fitVodTitles = () => {}; renderStatusBar = () => {}; renderPagerBox = () => {};
+        ;confirmDialog = async () => true; doAction = async () => ({ list: [] }); pageSizeOf = async () => 20;`, context);
     context.__ls = ls;
     context.__lsStore = lsStore;
     return context;
@@ -58,6 +70,7 @@ function home(ctx) {
     H._clsStarted = {};
     H._okCls = {};
     H._emptyCls = {};
+    H._probeStartDelayMs = 0; // 探测延迟启动不真等 8s（用例可按需覆盖）
     return H;
 }
 
@@ -237,10 +250,21 @@ function probeEnv(doActionImpl) {
     H._allSites = [{ key: 's' }];
     H._updateProbeBar = () => {};
     H._renderSiteSelect = () => {};
+    H._probeRetryDelayMs = 0; // 轮内二次确认不真等 3s
     const sets = {};
     ctx.window.vpc.settingsSet = async (k, v) => { sets[k] = v; };
     ctx.doAction = doActionImpl;
     ctx.__sets = sets;
+    return ctx;
+}
+
+/** 跨「启动轮次」的有状态探测环境：settingsSet 写入的值会在下一轮 settingsGet 读回。 */
+function statefulEnv(doActionImpl) {
+    const ctx = probeEnv(doActionImpl);
+    const store = {};
+    ctx.window.vpc.settingsGet = async () => ({ ...store });
+    ctx.window.vpc.settingsSet = async (k, v) => { store[k] = v; };
+    ctx.__store = store;
     return ctx;
 }
 
@@ -279,19 +303,180 @@ test('_probeSites：真僵尸源（推荐位与全部分类均确认为空）仍
     await H._probeSites();
     assert.deepEqual(ctx.__sets.blockedSites, ['s'], '全部分类确认无内容才屏蔽');
     assert.ok(ctx.__sets.probedSites.includes('s'));
+    assert.equal(ctx.__sets.blockedReason.s, 'empty', '屏蔽原因标注为无内容');
 });
 
-test('_probeSites：探测请求携带 deadlineMs 与渲染层超时对齐（后端不再提前掐断慢源）', async () => {
-    const seen = [];
-    const ctx = probeEnv(async (action, kv) => {
-        seen.push({ action, deadlineMs: kv.deadlineMs });
-        if (action === 'homeContent') return { list: [{ vod_id: '1' }] };
-        return { list: [] };
+// ---------------------------------------------------------------- 死源连败屏蔽 + 复查
+
+test('死源连败计数：连续 2 轮完全无响应 → 按死源屏蔽（reason=dead），单轮失败不屏蔽', async () => {
+    const ctx = statefulEnv(async () => ({ ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } }));
+    const H = ctx.__Home;
+    await H._probeSites(); // 第 1 轮（含轮内重试）：证据不足
+    assert.ok(!ctx.__store.blockedSites, '单轮失败不得屏蔽（防误杀瞬时故障）');
+    assert.equal(ctx.__store.probeFailStreak.s, 1, '连败计数 +1');
+    assert.ok(!ctx.__store.probedSites.includes('s'), '未定论不写 probedSites');
+    await H._probeSites(); // 第 2 轮：达到阈值 → 按死源屏蔽
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '连续 2 轮（各含二次确认）无响应按死源屏蔽');
+    assert.equal(ctx.__store.blockedReason.s, 'dead', '屏蔽原因标注为连续无响应');
+    assert.ok(!ctx.__store.probeFailStreak.s, '屏蔽后连败计数清除');
+});
+
+test('内嵌 error 但返回影片 → 内容优先于错误，判可用不屏蔽', async () => {
+    const ctx = statefulEnv(async (action) => (action === 'homeContent'
+        ? { list: [{ vod_id: '1' }], error: { code: 'L3_RUNTIME_CALL_FAILED', message: '部分线路失败' } }
+        : { list: [{ vod_id: '1' }], error: { code: 'L3_RUNTIME_CALL_FAILED', message: '部分线路失败' } }));
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.ok(!ctx.__store.blockedSites, '有真实影片的源不得屏蔽');
+    assert.ok(ctx.__store.probedSites.includes('s'), '内容即结论');
+    assert.ok(!ctx.__store.probeFailStreak.s, '不算连败');
+});
+
+test('分类返回内嵌 error 且有影片 → 该分类按有内容计', async () => {
+    const ctx = statefulEnv(async (action) => (action === 'homeContent'
+        ? { list: [], class: [{ type_id: 'a', type_name: 'A' }] }
+        : { list: [{ vod_id: '1' }], error: { code: 'L3_RUNTIME_CALL_FAILED', message: '附错误' } }));
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.ok(!ctx.__store.blockedSites, '分类有内容 → 源可用');
+    assert.ok(ctx.__store.probedSites.includes('s'));
+});
+
+test('renderGrid 空态提示：内嵌 error 对象显示 code+message，不再出现 [object Object]', () => {
+    const ctx = loadHome();
+    const H = ctx.__Home;
+    let captured = '';
+    ctx.$ = (sel) => ({ empty() { return this; }, html(s) { captured = s; } });
+    H.renderGrid([], { code: 'L3_RUNTIME_CALL_FAILED', message: '蜘蛛调用失败', stage: 'site' });
+    assert.match(captured, /L3_RUNTIME_CALL_FAILED 蜘蛛调用失败/, '显示 code + message');
+    assert.doesNotMatch(captured, /\[object Object\]/);
+    // 嵌套 {error:{...}} 与纯字符串同样可读
+    H.renderGrid([], { error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } });
+    assert.match(captured, /L3_RUNTIME_TIMEOUT 超时/);
+    H.renderGrid([], 'gateway timeout');
+    assert.match(captured, /gateway timeout/);
+    H.renderGrid([], null);
+    assert.doesNotMatch(captured, /（/, '无错误时不带括号');
+});
+
+test('errorTextOf：各形态错误值的文案提取', () => {
+    const f = loadHome().__errorTextOf;
+    assert.equal(f({ code: 'L1_CONFIG_TIMEOUT', message: '配置加载超时' }), 'L1_CONFIG_TIMEOUT 配置加载超时');
+    assert.equal(f({ error: { message: '嵌套' } }), '嵌套');
+    assert.equal(f(new Error('boom')), 'boom');
+    assert.equal(f('裸字符串'), '裸字符串');
+    assert.equal(f({ foo: 1 }), '{"foo":1}');
+    assert.equal(f(null), '');
+    assert.ok(f({ message: 'x'.repeat(300) }, 100).length <= 101, '超长截断');
+});
+
+test('轮内二次确认：首次失败重试成功 → 不计连败、不屏蔽', async () => {
+    let calls = 0;
+    const ctx = statefulEnv(async () => {
+        calls++;
+        return calls === 1
+            ? { ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } }
+            : { list: [{ vod_id: '1', vod_name: 'x' }] };
     });
     const H = ctx.__Home;
     await H._probeSites();
-    const home = seen.find((x) => x.action === 'homeContent');
-    assert.equal(home.deadlineMs, 60000, 'homeContent 探测 deadline 对齐 60s 渲染层超时');
+    assert.equal(calls, 2, '轮内应重试一次');
+    assert.ok(!ctx.__store.blockedSites, '重试成功不屏蔽');
+    assert.ok(ctx.__store.probedSites.includes('s'), '重试成功即有结论');
+    assert.ok(!ctx.__store.probeFailStreak.s, '成功清除连败计数');
+});
+
+test('复查：屏蔽源恢复内容 → 自动解除屏蔽并清除原因', async () => {
+    let homeResp = { list: [], class: [{ type_id: 'a', type_name: 'A' }] };
+    const ctx = statefulEnv(async (action) => (action === 'homeContent' ? homeResp : { list: [] }));
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '先按无内容屏蔽');
+    // 结论过期（超过复查周期），且源恢复了内容
+    ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 };
+    homeResp = { list: [{ vod_id: '1', vod_name: '复活' }] };
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, [], '复查发现内容 → 自动解除屏蔽');
+    assert.ok(!ctx.__store.blockedReason.s, '解除后屏蔽原因清除');
+});
+
+test('复查：屏蔽源复查仍无内容 → 保持屏蔽并刷新复查时间（新鲜期内不再重探）', async () => {
+    const resp = () => ({ list: [], class: [{ type_id: 'a', type_name: 'A' }] });
+    let calls = 0;
+    const ctx = statefulEnv(async (action) => { calls++; return action === 'homeContent' ? resp() : { list: [] }; });
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s']);
+    ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 }; // 过期复查
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '复查仍空 → 保持屏蔽');
+    assert.ok(ctx.__store.probedAt.s > Date.now() - 60 * 1000, '复查时间刷新为现在（非过期旧值）');
+    const callsAfterRecheck = calls;
+    await H._probeSites(); // 新鲜期内：不再探测
+    assert.equal(calls, callsAfterRecheck, '新鲜期内不重复探测');
+});
+
+test('复查：结论过期的可用源重新探测（内容失效后补屏蔽）', async () => {
+    let homeResp = { list: [{ vod_id: '1' }] };
+    const ctx = statefulEnv(async () => homeResp);
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.ok(ctx.__store.probedSites.includes('s'), '首次有内容');
+    assert.ok(!ctx.__store.blockedSites);
+    ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 };
+    homeResp = { list: [], class: [] }; // 内容失效
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '复查发现失效 → 补屏蔽');
+    assert.equal(ctx.__store.blockedReason.s, 'empty');
+});
+
+test('迁移：旧版 probedSites 无时间戳 → 补「现在」，不触发全量重探', async () => {
+    let calls = 0;
+    const ctx = statefulEnv(async () => { calls++; return { list: [{ vod_id: '1' }] }; });
+    ctx.__store.probedSites = ['s']; // 旧格式：只有数组没有 probedAt
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.equal(calls, 0, '迁移补时间戳后本轮不重探');
+    assert.ok(ctx.__store.probedAt && ctx.__store.probedAt.s > 0, '时间戳已补');
+});
+
+test('裁剪：离场源（多仓漂移）的探测记录不残留', async () => {
+    const ctx = statefulEnv(async () => ({ list: [{ vod_id: '1' }] }));
+    ctx.__store.probedSites = ['gone', 's'];
+    ctx.__store.probedAt = { gone: Date.now(), s: 1 }; // s 过期 → 本轮重探
+    ctx.__store.probeFailStreak = { gone: 2 };
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.probedSites, ['s'], '离场源从 probedSites 裁掉');
+    assert.deepEqual(Object.keys(ctx.__store.probedAt), ['s']);
+    assert.ok(!ctx.__store.probeFailStreak.gone, '离场源连败计数裁掉');
+});
+
+test('_probeSites：分级超时——首轮 20s 快速分类，二次确认 45s 给慢源长机会', async () => {
+    const seen = [];
+    const ctx = probeEnv(async (action, kv) => {
+        seen.push({ action, deadlineMs: kv.deadlineMs, site: kv.site });
+        if (seen.length === 1) return { ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } };
+        return { list: [{ vod_id: '1' }] };
+    });
+    const H = ctx.__Home;
+    await H._probeSites();
+    const deadlines = seen.filter((x) => x.action === 'homeContent').map((x) => x.deadlineMs);
+    assert.deepEqual(deadlines, [20000, 45000], '首轮快速分类，二次确认放长');
+});
+
+test('_probeSites：全量轮当前源置顶（首屏反馈优先，其余同轮并发补全）', async () => {
+    const order = [];
+    const ctx = probeEnv(async (action, kv) => {
+        order.push(kv.site);
+        return { list: [{ vod_id: '1' }] };
+    });
+    const H = ctx.__Home;
+    H._allSites = Array.from({ length: 10 }, (_, i) => ({ key: 's' + i }));
+    H.site = 's5'; // 当前源排在列表中间
+    await H._probeSites();
+    assert.equal(order[0], 's5', '当前源第一个被探测');
+    assert.equal(order.length, 10, '全部源同轮探测（无需手动切换触发）');
 });
 
 test('_probeClassesFor：分类失败包络不判空也不标记完成（分类不被误隐藏）', async () => {
@@ -805,4 +990,223 @@ test('loadSites：后发配置完成后，旧的站点响应不得覆盖新配�
 
     assert.deepEqual(H._allSites.map((site) => site.key), ['new']);
     assert.deepEqual(H.sites.map((site) => site.key), ['new']);
+});
+
+// ---------------------------------------------------------------- demo 兜底与站点列表缓存
+
+/** loadSites 测试环境：桩掉与 /sites 无关的旁路，getJson 可注入返回。 */
+function sitesEnv(getJsonImpl) {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H._getSourceSettings = async () => ({});
+    H.setAutoProbeEnabled = () => { H._autoProbeEnabled = false; };
+    H.invalidatePageCaches = () => {};
+    H._getBlocked = async () => [];
+    H._renderSiteSelect = () => {};
+    H.loadHome = async () => {};
+    H._probeSites = () => {};
+    ctx.getJson = getJsonImpl;
+    return ctx;
+}
+
+const REAL_SITE = { key: 'zy_1', name: '资源一号', state: 'healthy', runtime: 'python' };
+const DEMO_SITE = { key: 'demo', name: '示例源', state: 'healthy', runtime: 'python' };
+
+test('loadSites：/sites 返回 demo 兜底时不写入站点缓存（示例源不是用户内容）', async () => {
+    const ctx = sitesEnv(async () => ({ sites: [DEMO_SITE] }));
+    await ctx.__Home.loadSites();
+    assert.equal(ctx.__ls.getItem('vpc_cache::home::sites::v1'), null,
+        'demo-only 不得写入站点列表缓存');
+});
+
+test('loadSites：真实站点列表正常写缓存，重启可预渲染', async () => {
+    const ctx = sitesEnv(async () => ({ sites: [REAL_SITE, DEMO_SITE] }));
+    await ctx.__Home.loadSites();
+    assert.notEqual(ctx.__ls.getItem('vpc_cache::home::sites::v1'), null, '真实列表写缓存');
+});
+
+test('loadSites：已有真实站点展示时，demo-only /sites 不把示例源顶上屏', async () => {
+    // 先以真实列表建立展示（预渲染路径同构），再模拟恢复窗口内 /sites 返回 demo
+    const ctx = sitesEnv(async () => ({ sites: [REAL_SITE] }));
+    const H = ctx.__Home;
+    await H.loadSites();
+    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1']);
+    ctx.getJson = async () => ({ sites: [DEMO_SITE] });
+    await H.loadSites();
+    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1'],
+        '恢复未完成期间保留真实站点展示，不被内置示例源顶掉');
+    assert.deepEqual(H._allSites.map((s) => s.key), ['zy_1']);
+});
+
+test('首次运行（无配置无缓存）：demo-only 正常上屏为引导态', async () => {
+    const ctx = sitesEnv(async () => ({ sites: [DEMO_SITE] }));
+    const H = ctx.__Home;
+    await H.loadSites();
+    assert.deepEqual(H.sites.map((s) => s.key), ['demo'], '无任何配置时示例源正常展示');
+    assert.equal(H.hasSiteCache(), false, 'demo-only 不算「有站点缓存」');
+});
+
+test('恢复窗口期（demo-only 且配置任务 loading）：显示恢复提示，不播 demo、不探测', async () => {
+    const ctx = sitesEnv(async () => ({ sites: [DEMO_SITE] }));
+    const H = ctx.__Home;
+    let probeCalls = 0;
+    H._probeSites = () => { probeCalls++; };
+    H._probeAllClasses = () => {};
+    H.loadHome = async () => { throw new Error('恢复期间不得加载首页内容'); };
+    ctx.doAction = async () => ({ status: 'loading' }); // configTask → 恢复进行中
+    let gridHtml = '';
+    ctx.$ = (sel) => ({
+        empty() { return this; }, on() { return this; }, val() { return ''; },
+        html(s) { if (sel === '#home-grid') gridHtml = s; },
+    });
+    await H.loadSites();
+    assert.match(gridHtml, /正在恢复上次的配置/, '首页显示恢复提示而非示例源');
+    assert.equal(probeCalls, 0, '恢复期间不启动探测轮');
+    assert.equal(H._probeStartTimer, null);
+});
+
+test('loadSites：探测轮延迟启动（先让首屏上屏，不与内容请求抢后端）', async () => {
+    const ctx = sitesEnv(async () => ({ sites: [REAL_SITE] }));
+    const H = ctx.__Home;
+    H.setAutoProbeEnabled = () => {}; // 保持默认开启（sitesEnv 的桩会关掉）
+    H._probeStartDelayMs = 15;
+    let probeCalls = 0;
+    H._probeSites = () => { probeCalls++; };
+    H._probeAllClasses = () => {};
+    await H.loadSites();
+    assert.equal(probeCalls, 0, 'loadSites 完成时不立即探测');
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(probeCalls, 1, '延迟后后台启动探测轮');
+});
+
+test('renderRestoreProgress：loading 时显示进度条（阶段文案+计数），结束隐藏', () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    const state = { show: 0, hide: 0 };
+    const barStub = () => ({ text() { return this; }, toggleClass() { return this; }, css() { return this; } });
+    const el = {
+        length: 1,
+        children: () => ({ length: 0 }),
+        html() { return this; }, empty() { return this; },
+        find: barStub, toggleClass() { return this; },
+        show() { state.show++; return this; },
+        hide() { state.hide++; return this; },
+    };
+    ctx.$ = (sel) => (sel === '#home-restore-bar' ? el
+        : { empty() { return this; }, html() {}, show() {}, hide() {} });
+    // 恢复初期（无总数）→ 不定态进度条
+    H.renderRestoreProgress({ status: 'loading', progress: { stage: 'restoring', current: 0, total: 0 } });
+    assert.equal(state.show, 1, '恢复中显示进度条');
+    // build 阶段（有总数）→ 百分比计数
+    H.renderRestoreProgress({ status: 'loading', progress: { stage: 'build', current: 48, total: 64 } });
+    assert.equal(state.show, 2);
+    // 结束 → 隐藏
+    H.renderRestoreProgress({ status: 'done' });
+    assert.equal(state.hide, 1, '任务结束隐藏进度条');
+    H.renderRestoreProgress(null);
+    assert.equal(state.hide, 2);
+});
+
+test('_fetchHomeFeed：网络失败（失败包络）不把已上屏的缓存内容翻成「暂无内容」', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H.site = 's';
+    H._loadToken = 1;
+    // 预置持久化 feed 缓存（冷启动即时上屏源）
+    ctx.__ls.setItem('vpc_cache::home::feed::v1::s',
+        JSON.stringify({ v: { ts: Date.now(), pagecount: 1, items: makeItems('c-', 5) }, e: Date.now() + 60000, t: Date.now() }));
+    H.renderGrid = () => {}; // 不碰 DOM
+    H.renderPager = () => {};
+    // 网络全部失败（配置恢复中，当前源还不在后端）
+    ctx.doAction = async () => ({ ok: false, error: { code: 'L3_RUNTIME_CALL_FAILED', message: 'site not found' } });
+    const items = await H._fetchHomeFeed(1, 20);
+    assert.equal(items.length, 5, '保留已上屏的缓存内容');
+    assert.deepEqual(items.map((v) => v.vod_id).slice(0, 2), ['c-0', 'c-1']);
+});
+
+test('_fetchHomeFeed：刷新场景（无缓存引导、已有旧内容）网络失败同样保留旧内容', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H.site = 's';
+    H._loadToken = 1;
+    H._homeList = makeItems('old-', 4); // 刷新前已渲染的旧内容
+    H.renderGrid = () => {};
+    H.renderPager = () => {};
+    ctx.doAction = async () => ({ ok: false, error: { code: 'L2_SITE_NOT_FOUND', message: '站点不存在' } });
+    const items = await H._fetchHomeFeed(1, 20);
+    assert.equal(items.length, 4, '保留刷新前的旧内容，不显示「暂无内容」');
+    assert.equal(items[0].vod_id, 'old-0');
+});
+
+test('恢复窗口期（_configPending）：刷新/搜索/分类入口直接提示，不发必败请求', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H.site = 's';
+    H._configPending = true;
+    H._homeList = makeItems('old-', 3);
+    let calls = 0;
+    let toasts = 0;
+    ctx.doAction = async () => { calls++; return { list: [] }; };
+    ctx.warnToast = () => { toasts++; };
+    ctx.$ = (sel) => ({
+        on() { return this; }, off() { return this; }, empty() { return this; },
+        html() {}, val() { return sel === '#home-search' ? '海贼王' : ''; },
+    });
+    H.searchCurrent();
+    await H.loadCategory('1', 1);
+    assert.equal(calls, 0, '入口拦截，不发网络请求');
+    assert.equal(toasts, 2, '搜索与分类各提示一次');
+    assert.equal(H._homeList.length, 3, '已显示内容不被翻空');
+    // 真实站点就绪后（_configPending=false）恢复正常
+    H._configPending = false;
+    await H.loadCategory('1', 1);
+    assert.ok(calls >= 1, '就绪后分类请求正常发出');
+});
+
+test('searchCurrent：失败包络显示「源暂不可用」，不显示「未找到相关内容」', async () => {
+    const ctx = searchEnv(async () => ({ ok: false, error: { code: 'L2_SITE_NOT_FOUND', message: '站点不存在' } }));
+    const H = ctx.__Home;
+    let gridHtml = '';
+    ctx.$ = (sel) => ({
+        on() { return this; }, off() { return this; }, empty() { return this; },
+        html(s) { if (sel === '#home-grid') gridHtml = s; },
+        val() { return '海贼王'; }, removeClass() { return this; },
+    });
+    ctx.__setWord('海贼王');
+    H.renderPager = () => {};
+    await H.searchCurrent(1);
+    assert.match(gridHtml, /源暂不可用/, '失败包络按「暂不可用」提示');
+    assert.doesNotMatch(gridHtml, /相关的内容/, '不得显示「未找到相关内容」误导用户');
+});
+
+test('_prerenderFromCache：历史脏数据（demo-only 缓存）不预渲染', async () => {
+    const ctx = loadHome();
+    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+        JSON.stringify({ v: [DEMO_SITE], e: Date.now() + 60000, t: Date.now() }));
+    const H = home(ctx);
+    H._renderSiteSelect = () => {};
+    H._prerenderFromCache();
+    assert.equal(H._allSites.length, 0, 'demo-only 缓存不预渲染');
+    assert.equal(H.hasSiteCache(), false);
+    // 真实缓存正常预渲染
+    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+        JSON.stringify({ v: [REAL_SITE], e: Date.now() + 60000, t: Date.now() }));
+    H._prerenderFromCache();
+    assert.deepEqual(H._allSites.map((s) => s.key), ['zy_1'], '真实缓存照常预渲染');
+    assert.equal(H.hasSiteCache(), true);
+});
+
+test('_prerenderFromCache：过滤屏蔽源，不自动选中屏蔽源为当前源', () => {
+    const ctx = loadHome();
+    // 缓存列表第一个是已屏蔽源（/sites 原始顺序）——不过滤会把它选为当前源，
+    // 启动即对它发请求，恢复窗口期全是 L2_SITE_NOT_FOUND
+    const blockedSite = { key: 'blocked_1', name: '已屏蔽源', state: 'healthy', runtime: 'python' };
+    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+        JSON.stringify({ v: [blockedSite, REAL_SITE], e: Date.now() + 60000, t: Date.now() }));
+    const H = home(ctx);
+    H._renderSiteSelect = () => {};
+    H._prerenderFromCache(['blocked_1']);
+    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1'], '屏蔽源不进预渲染下拉');
+    assert.equal(H.site, 'zy_1', '当前源不落在屏蔽源上');
+    assert.deepEqual(H._allSites.map((s) => s.key), ['blocked_1', 'zy_1'], '_allSites 保留全量（探测用）');
 });

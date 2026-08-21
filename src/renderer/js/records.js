@@ -263,7 +263,7 @@ function recCard(v, editable, withTags, playCountByName) {
     if (!pic && String(v.site || '').startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
         pic = Kazumi.getCachedBangumiCover(v.name) || '';
     }
-    // T76：Bangumi 封面（官方 lain.bgm.tv）官方优先、镜像 lain.bangumi.lol 兜底；其余源普通 img
+    // T76：Bangumi 封面（官方 lain.bgm.tv）官方优先、镜像 lain.bangumi.pro 兜底；其余源普通 img
     const isBgmCover2 = pic && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic);
     const coverHtml = isBgmCover2 ? bangumiCoverImg(pic) : vodCoverImg(pic);
     // 本地文件（site='local'）与下载文件（site='download'）：vodId 存的是本地路径，异步抓帧后替换占位图

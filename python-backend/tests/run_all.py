@@ -46,6 +46,8 @@ STAGES = [
     # C2.1~C2.5：配置快照 / ext 语义 / 站点字段矩阵 / 能力路由 / 配置安全边界。
     # 全部走 tests/offline_config_server.py 的 loopback 夹具，不出网。
     ('config-snapshot', [PY, os.path.join(HERE, 'test_config_snapshot.py')]),
+    # 导入接管契约：用户导入可接管进行中的后台加载（自动重载/启动恢复）。
+    ('config-supersede', [PY, os.path.join(HERE, 'test_config_supersede.py')]),
     ('ext-semantics', [PY, os.path.join(HERE, 'test_ext_semantics.py')]),
     ('capability-router', [PY, os.path.join(HERE, 'test_capability_router.py')]),
     ('config-security', [PY, os.path.join(HERE, 'test_config_security.py')]),

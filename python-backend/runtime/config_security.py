@@ -13,10 +13,11 @@ URL 也都是不可信输入。本模块把「允许从哪里取、最多取多�
    `C:\\...`、`\\\\server\\share`、`assets://`、`proxy://` 一律拒绝。
 2. **体积与跳转上限**：响应体按流式计数截断，跳转次数、解压后体积、多仓递归深度、
    `ext` 展开深度都有硬上限，避免压缩炸弹与循环仓。
-3. **私网同源继承**（浏览器 Private Network Access 模型）：用户亲手输入的根地址
-   即使指向 `127.0.0.1`/内网也视为显式选择，**同源**子资源继承这份信任；但从公网
-   源取回的配置若引用回环/内网地址，默认拒绝——否则远端仓可以静默扫本机端口。
-   需要跨源访问内网时由 `allow_private_network` 显式打开。
+3. **私网访问开关**（浏览器 Private Network Access 模型的桌面放宽版）：桌面端
+   默认允许配置引用本机/内网地址——TVBox 生态大量仓指向局域网 NAS 与本机服务，
+   用户自己的机器上这是合理诉求。同源信任仍然成立（用户亲手输入的根地址的同源
+   子资源永远继承信任）；需要恢复严格 SSRF 防护（跨源私网引用默认拒绝）时设
+   环境变量 `VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1`。
 4. **下载物指纹**：JAR/JS/Python 落盘时登记 sha256，内容变化必须重新评估能力与
    权限，不能沿用上一次的分级结论。
 
@@ -184,7 +185,9 @@ class ConfigSecurityPolicy:
     max_ext_depth: int = MAX_EXT_DEPTH
     max_local_config_bytes: int = MAX_LOCAL_CONFIG_BYTES
     allow_local_file: bool = False
-    allow_private_network: bool = False
+    # 桌面端默认放开本机/内网引用（局域网 NAS / 本机服务是 TVBox 生态常态）；
+    # 需要严格 SSRF 防护时由 from_env 的 VPC_CONFIG_BLOCK_PRIVATE_NETWORK 关回。
+    allow_private_network: bool = True
     resolve_hostnames: bool = True
 
     @classmethod
@@ -208,7 +211,9 @@ class ConfigSecurityPolicy:
             max_depot_depth=size('VPC_CONFIG_MAX_DEPOT_DEPTH', MAX_DEPOT_DEPTH),
             max_ext_depth=size('VPC_CONFIG_MAX_EXT_DEPTH', MAX_EXT_DEPTH),
             allow_local_file=flag('VPC_CONFIG_ALLOW_LOCAL_FILE'),
-            allow_private_network=flag('VPC_CONFIG_ALLOW_PRIVATE_NETWORK'),
+            # 默认放行本机/内网地址；设 VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1 可恢复
+            # 「远端配置不能静默访问本地服务」的严格 SSRF 防护。
+            allow_private_network=not flag('VPC_CONFIG_BLOCK_PRIVATE_NETWORK'),
             resolve_hostnames=not flag('VPC_CONFIG_SKIP_DNS_SCOPE'),
         )
         return replace(base, **overrides) if overrides else base
@@ -232,7 +237,8 @@ class SourceTrust:
 
     `origin` 是根地址的 scheme://host:port；`scope` 是它的主机分级。用户输入
     `http://127.0.0.1:8000/tv.json` 时 scope='loopback'，该 origin 下的子资源继承
-    信任；而 scope='public' 的根配置引用 loopback/private 地址属于跨源提权，默认拒绝。
+    信任；scope='public' 的根配置引用 loopback/private 地址属于跨源提权，仅在严格
+    SSRF 防护模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下拒绝。
     """
 
     root: str = ''
@@ -331,8 +337,9 @@ def guard_url(url, *, policy, trust, kind='config', base_url='', site_key=''):
         if not (policy.allow_private_network or trust.trusts(raw)):
             raise ConfigSecurityError(
                 'private_network_blocked',
-                '配置引用了本机/内网地址（%s，%s）。远端配置不能静默访问本地服务；'
-                '确需访问请在设置中显式开启本地网络访问。' % (host, kind),
+                '配置引用了本机/内网地址（%s，%s）。当前为严格 SSRF 防护模式'
+                '（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1），远端配置不能静默访问本地'
+                '服务；取消该环境变量即可放开。' % (host, kind),
                 code=code, url=raw, scope=scope)
     return urlunsplit((scheme, parts.netloc, parts.path, parts.query, ''))
 

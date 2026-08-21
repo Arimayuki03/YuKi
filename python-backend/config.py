@@ -23,6 +23,7 @@ import threading
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import app as spider_app
 import hoststate
@@ -49,6 +50,10 @@ MAX_MULTI_REPO_ENTRIES = 12
 # 单次配置加载的总预算（秒）。ext 展开、子仓回退都在这个预算内，
 # 超出后按 L1_CONFIG_TIMEOUT 结束，不无限等待。
 CONFIG_LOAD_BUDGET = float(os.environ.get('VPC_CONFIG_LOAD_BUDGET') or 90)
+# 磁盘缓存恢复预算：恢复要「快」，远小于常规加载预算；预算耗尽保留已建成部分。
+RESTORE_LOAD_BUDGET = float(os.environ.get('VPC_RESTORE_LOAD_BUDGET') or 45)
+# 恢复模式的合并阶段上限：主条目建完即可用，附加仓合并（可能撞死镜像）只给零头。
+RESTORE_MERGE_BUDGET = float(os.environ.get('VPC_RESTORE_MERGE_BUDGET') or 8)
 
 # 内置 JVM runner jar（与 python-backend 同层 vendor/，开发与打包路径均兼容）
 DEFAULT_RUNNER_JAR = os.path.join(
@@ -253,7 +258,8 @@ class _LoadContext:
     """
 
     def __init__(self, source, *, policy=None, allow_local_file=False,
-                 cancel_event=None, budget=None):
+                 cancel_event=None, budget=None, generation=0,
+                 salvage_partial=False):
         self.policy = policy or ConfigSecurityPolicy.from_env(
             **({'allow_local_file': True} if allow_local_file else {}))
         # 顶层来源是用户在设置里亲手输入/选择的那一个地址，本身就构成「显式选择」：
@@ -270,6 +276,11 @@ class _LoadContext:
         self.ext = ExtResolver(policy=self.policy, trust=self.trust,
                                cancel_event=cancel_event)
         self.artifacts = []
+        # 所属加载的代际（0 = 低层测试直接构造的上下文，不参与代际守卫）
+        self.generation = int(generation)
+        # 构建期预算耗尽时保留已建成站点继续 swap（磁盘缓存恢复用）：
+        # 恢复讲究「快」，预算内没建完的站点记为跳过，而不是整体失败回退网络重载。
+        self.salvage_partial = bool(salvage_partial)
 
     def check(self):
         """取消/超时检查点。装配的每一步都要过一次，否则取消无法真正生效。"""
@@ -312,6 +323,10 @@ class ConfigManager:
         self.reuse_count = 0
         self._ctx = None
         self._ctx_lock = threading.Lock()
+        # 加载代际：新加载（或接管/取消）自增，旧加载即便跑到装配完成，
+        # 最终 swap 也会因代际不匹配被拒绝——防止被放弃的旧加载覆盖新配置。
+        self._load_generation = 0
+        self._progress_cb = None   # 本次 load 的进度回调（恢复/导入进度条）
         self.repository_cache = None
         self.cache_restored = False
         self.cache_age = 0
@@ -384,8 +399,9 @@ class ConfigManager:
     def _resolve_repo_url(self, base, sub):
         """多仓子仓地址：相对路径以多仓配置源 URL 为基址，并过 C2.5 安全边界。
 
-        子仓地址来自**远端配置内容**，不是用户输入，因此不能像根地址那样信任：
-        `guard_url` 会拒掉 `file://`、本地磁盘路径和跨源的内网/回环地址。
+        子仓地址来自**远端配置内容**：`guard_url` 会拒掉 `file://`、本地磁盘路径，
+        以及严格模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下跨源的内网/回环地址；
+        默认策略允许子仓指向局域网 NAS / 本机服务。
         """
         ctx = self._context()
         return guard_url(str(sub), policy=ctx.policy, trust=ctx.trust,
@@ -398,7 +414,8 @@ class ConfigManager:
         return self._ctx
 
     def load(self, url_or_json, _depth=0, _text=None, *, allow_local_file=False,
-             force=False, cancel_event=None, budget=None):
+             force=False, cancel_event=None, budget=None, salvage_partial=False,
+             progress_cb=None):
         """下载 → 解析 → 装配 → 校验 → 原子替换；返回加载摘要 dict。
 
         C2.1 的四条：
@@ -409,19 +426,50 @@ class ConfigManager:
         - 同内容重复加载直接复用运行中快照，不重启任何 Worker。
         """
         with self._ctx_lock:
+            self._load_generation += 1
             self._ctx = _LoadContext(url_or_json, allow_local_file=allow_local_file,
-                                     cancel_event=cancel_event, budget=budget)
+                                     cancel_event=cancel_event, budget=budget,
+                                     generation=self._load_generation,
+                                     salvage_partial=salvage_partial)
         if not getattr(self, '_restoring_cache', False):
             self.cache_restored = False
             self.cache_age = 0
         self._cache_documents = {}
         self._cache_manifest_text = ''
+        self._progress_cb = progress_cb   # 进度回调只在本次 load 生命周期内有效
         ctx = self._ctx
         try:
             return self._load_inner(url_or_json, ctx, _text=_text, force=force)
         finally:
+            self._progress_cb = None
+            # 只清理自己的上下文：加载可被新请求接管，旧线程退出时清掉的
+            # 必须不是新加载刚装上的 ctx（否则新加载的取消/预算检查失锚）。
             with self._ctx_lock:
-                self._ctx = None
+                if self._ctx is ctx:
+                    self._ctx = None
+
+    def cancel_active_load(self):
+        """使进行中的加载失效（被新导入接管 / 用户取消）。
+
+        代际自增后，旧加载在下一个检查点收到取消，即便它已经越过所有检查点
+        跑到装配完成，`_validate_and_swap` 的代际守卫也会拒绝它的 swap 并
+        释放其 Worker——被放弃的加载绝不能覆盖新配置。
+        """
+        with self._ctx_lock:
+            self._load_generation += 1
+            ctx = self._ctx
+        if ctx is not None and ctx.cancel_event is not None:
+            ctx.cancel_event.set()
+
+    def _report_progress(self, stage, current, total):
+        """向宿主上报加载进度（恢复/导入进度条）。回调异常绝不影响加载本身。"""
+        cb = getattr(self, '_progress_cb', None)
+        if cb is None:
+            return
+        try:
+            cb(str(stage), max(0, int(current)), max(0, int(total)))
+        except Exception:
+            logger.debug('progress callback failed', exc_info=True)
 
     def _load_inner(self, url_or_json, ctx, *, _text=None, force=False):
         ctx.check()
@@ -464,9 +512,9 @@ class ConfigManager:
         prepared = self._prepare(cfg, fetch.base_url or url_or_json, fetch=fetch)
         prepared['_cache_text'] = text
         prepared['snapshot'].source_hash = fetch.content_hash
-        return self._validate_and_swap(prepared, force=force)
+        return self._validate_and_swap(prepared, force=force, ctx=ctx)
 
-    def restore_cached(self, source_url=''):
+    def restore_cached(self, source_url='', progress_cb=None):
         """Restore the last validated repository without network access."""
         cached = self._repository_cache().load()
         if cached is None:
@@ -481,7 +529,13 @@ class ConfigManager:
             self._restoring_documents = dict(cached.documents or {})
             self._restoring_documents.setdefault(source, cached.text)
             self._restoring_cache = True
-            summary = self.load(source, _text=cached.text)
+            # 恢复限时 + 部分保留：恢复是「快速兜底路径」，个别站点的外链 ext/jar
+            # 不在缓存里时会走网络（死镜像单请求就能挂 30-60s），不设上限会把恢复
+            # 拖到分钟级——期间 /sites 一直是示例源，用户看到的就是「重启不加载缓存」。
+            # 预算内建成的站点立即生效，没建完的记为跳过，由后续网络重载补全。
+            summary = self.load(source, _text=cached.text,
+                                budget=RESTORE_LOAD_BUDGET, salvage_partial=True,
+                                progress_cb=progress_cb)
             if self.snapshot is not None:
                 self.snapshot.fetch.final_url = cached.final_url or self.snapshot.fetch.final_url
                 self.snapshot.fetch.etag = cached.etag
@@ -521,8 +575,9 @@ class ConfigManager:
         sub_cfgs = {}   # 成功解析的子仓配置（含主条目），供 T44 跨仓合并
         chosen = None
         manifest_base = fetch.base_url or str(url_or_json)
-        for item in entries:
+        for entry_index, item in enumerate(entries):
             ctx.check()
+            self._report_progress('fetch', entry_index + 1, len(entries))
             name = (item or {}).get('name')
             try:
                 sub = self._resolve_repo_url(manifest_base, (item or {}).get('url', ''))
@@ -592,7 +647,7 @@ class ConfigManager:
         self._dedupe_depot_sites(prepared)
         prepared['summary']['depot'] = trail.to_dict()
         prepared['summary']['snapshotId'] = prepared['snapshot'].snapshot_id
-        summary = self._validate_and_swap(prepared, force=force)
+        summary = self._validate_and_swap(prepared, force=force, ctx=ctx)
         self._save_repo_pref(item.get('name'))
         return summary
 
@@ -632,7 +687,17 @@ class ConfigManager:
                          'retainedHealthy': retained.healthy_count})
         return True
 
-    def _validate_and_swap(self, prepared, *, force=False):
+    def _validate_and_swap(self, prepared, *, force=False, ctx=None):
+        # 代际守卫：加载被新请求接管/取消后，旧线程即便跑到这里也不得 swap，
+        # 否则会用被放弃的旧配置覆盖新加载刚换上的站点。
+        ctx = ctx or self._context()
+        if ctx.generation and ctx.generation != self._load_generation:
+            self._discard(prepared, reason='superseded by a newer load')
+            raise RuntimeContractError(
+                'L1_CONFIG_CANCELLED',
+                message='[L1:cancel] 配置加载已被更新的请求接管，本次结果已丢弃',
+                raw_error='superseded by a newer load (gen %d != %d)'
+                          % (ctx.generation, self._load_generation))
         try:
             self._validate(prepared, force=force)
         except Exception:
@@ -801,90 +866,162 @@ class ConfigManager:
                 summary['hidden'] += 1
             if entry.is_pan:
                 summary['panSites'] += 1
-        # 站点构建并发化（jar 下载/子蜘蛛抓取耗时为主，串行会让导入明显卡顿）
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        # 站点构建并发化（jar 下载/子蜘蛛抓取耗时为主，串行会让导入明显卡顿）。
+        # 预算兜底：fut.result() 必须带剩余预算超时——单个站点挂死（慢镜像 jar、
+        # 失联 ext、worker 子进程卡住）曾把整次装配拖到无限期，READY 迟迟不打印，
+        # 前端整体卡死。不用 with：__exit__ 会 join 全部线程，挂死任务会卡住退出；
+        # 改为 finally 里放弃等待并取消未开跑的任务（已运行线程随进程生命周期终结）。
+        # 结果按条目顺序收集：预算在队头某站点上耗尽时，后面**已经建成**的站点
+        # 也要一并收走（保序），只有仍挂起的才跳过——否则队首一个死镜像 ext 会
+        # 把整份磁盘恢复拖垮（恢复走 salvage_partial，详见下方 ctx.check）。
+        def _record_outcome(item, site, exc):
+            """一个站点 future 的定论记账（成功 / None / 站点自身异常）。"""
+            if exc is not None:
+                err_msg = str(exc)
+                logger.error('load site %s failed: %s', item.get('key'), exc, exc_info=exc)
+                health = infer_site_health(item)
+                error = exc if isinstance(exc, RuntimeContractError) else error_from_exception(
+                    exc, stage='site', site_key=health.site_key, runtime=health.runtime)
+                if isinstance(error, RuntimeContractError) and error.runtime == 'android':
+                    health.runtime = 'android'
+                    health.compatibility = 'C2'
+                if isinstance(error, RuntimeContractError) and error.details.get('built'):
+                    health.mark_built()
+                health.record_failure(error, stage='site')
+                diagnostics.append(health)
+                summary['built'] += int(health.built)
+                summary['sites_built'] += int(health.built)
+                # 过渡期保留既有 [L2:type]/[L3:js] 细分类，后接稳定 L1-L6
+                # 错误码；原始文本先脱敏并限长，诊断页仍能解释 drpy/JS 等根因。
+                legacy = redact_sensitive(err_msg, 240)
+                runtime_tag = {
+                    'jar': '[L3:jar]', 'js': '[L3:js]',
+                    'cms': '[L3:cms]', 'python': '[L3:py]',
+                }.get(error.runtime or health.runtime, '')
+                if runtime_tag and runtime_tag not in legacy:
+                    legacy = runtime_tag + ' ' + legacy
+                summary['skipped'].append(
+                    f"{item.get('key', '?')}: {legacy} [{error.code}] {error.message}")
+                if error.code in ('L1_CONFIG_BLOCKED', 'L2_SITE_BLOCKED'):
+                    summary['blocked'] += 1
+                if error.code == 'L2_SITE_REQUIRES_ANDROID':
+                    summary['requiresAndroid'] += 1
+                # 任务五：按层级标签聚合错误计数
+                if error.code in ('L2_SITE_UNSUPPORTED', 'L2_SITE_REQUIRES_ANDROID') or '[L2:type]' in err_msg:
+                    summary['build_errors']['type_unsupported'] += 1
+                elif health.runtime == 'jar' or error.runtime == 'jar' or '[L3:jar]' in err_msg:
+                    summary['build_errors']['jar_failed'] += 1
+                elif health.runtime == 'js' or error.runtime == 'js' or '[L3:js]' in err_msg:
+                    summary['build_errors']['js_failed'] += 1
+                elif health.runtime == 'cms' or error.runtime == 'cms' or '[L3:cms]' in err_msg:
+                    summary['build_errors']['cms_failed'] += 1
+                elif health.runtime == 'python' or error.runtime == 'python' or '[L3:py]' in err_msg:
+                    summary['build_errors']['py_failed'] += 1
+                else:
+                    summary['build_errors']['other'] += 1
+                return
+            if site:
+                new_sites.append(site)
+                diagnostics.append(site.health)
+                summary['sites'] += 1
+                summary['sites_built'] += 1
+                summary['built'] += int(site.health.built)
+                summary['initialized'] += int(site.health.initialized)
+                summary['healthy'] += int(site.health.healthy)
+                resolved = getattr(site, 'ext_detail', None)
+                if resolved is not None:
+                    summary['extExpanded'] += int(bool(resolved.expanded_ok))
+                    summary['extFailed'] += int(bool(resolved.error))
+                return
+            # A configured entry that cannot produce a Site object
+            # is still a diagnostic entry.  Omitting it makes the
+            # configured count collapse to "objects built" and
+            # lets an import look healthier than it is.
+            health = infer_site_health(item)
+            error = RuntimeContractError(
+                'L2_SITE_BUILD_FAILED', site_key=health.site_key,
+                runtime=health.runtime,
+                raw_error='site entry could not be built')
+            health.record_failure(error, stage='site')
+            diagnostics.append(health)
+            summary['skipped'].append(
+                f"{item.get('key', '?')}: [L2:site] site entry could not be built "
+                f"[{error.code}] {error.message}")
+            summary['build_errors']['other'] += 1
+
+        pool = ThreadPoolExecutor(max_workers=8)
+        try:
             futures = [pool.submit(self._build_site, item, base_url, spider_jar) for item in items]
-            for item, fut in zip(items, futures):
-                try:
-                    site = fut.result()
-                    if site:
-                        new_sites.append(site)
-                        diagnostics.append(site.health)
-                        summary['sites'] += 1
-                        summary['sites_built'] += 1
-                        summary['built'] += int(site.health.built)
-                        summary['initialized'] += int(site.health.initialized)
-                        summary['healthy'] += int(site.health.healthy)
-                        resolved = getattr(site, 'ext_detail', None)
-                        if resolved is not None:
-                            summary['extExpanded'] += int(bool(resolved.expanded_ok))
-                            summary['extFailed'] += int(bool(resolved.error))
+            self._report_progress('build', 0, len(items))
+            # 进度用独立线程按完成数上报：收集中循环会被队头挂死站点阻塞，
+            # 循环内上报会让进度长时间停在原地（队头卡 30s 时进度 0/64 不动）。
+            progress_stop = threading.Event()
+
+            def _progress_ticker():
+                while not progress_stop.wait(0.5):
+                    self._report_progress(
+                        'build', sum(1 for f in futures if f.done()), len(items))
+
+            if getattr(self, '_progress_cb', None) is not None:
+                threading.Thread(target=_progress_ticker, daemon=True,
+                                 name='config-build-progress').start()
+            try:
+                outcomes = [None] * len(items)   # (site, exc) | None=未定论（跳过）
+                collected = 0
+                budget_exhausted = False
+                for i, (item, fut) in enumerate(zip(items, futures)):
+                    try:
+                        site = fut.result(timeout=ctx.remaining())
+                    except Exception as e:
+                        # 区分「站点自身抛错」与「预算等待超时」：future 未完成说明异常
+                        # 来自等待上限而非站点。停止等待，先收走其余已完成的结果。
+                        if not fut.done():
+                            budget_exhausted = True
+                            logger.warning('site build wait exceeded config load budget; stop waiting (%s)',
+                                           item.get('key'))
+                            break
+                        outcomes[i] = (None, e)
                     else:
-                        # A configured entry that cannot produce a Site object
-                        # is still a diagnostic entry.  Omitting it makes the
-                        # configured count collapse to "objects built" and
-                        # lets an import look healthier than it is.
-                        health = infer_site_health(item)
-                        error = RuntimeContractError(
-                            'L2_SITE_BUILD_FAILED', site_key=health.site_key,
-                            runtime=health.runtime,
-                            raw_error='site entry could not be built')
-                        health.record_failure(error, stage='site')
-                        diagnostics.append(health)
-                        summary['skipped'].append(
-                            f"{item.get('key', '?')}: [L2:site] site entry could not be built "
-                            f"[{error.code}] {error.message}")
-                        summary['build_errors']['other'] += 1
-                except Exception as e:
-                    err_msg = str(e)
-                    logger.exception('load site %s failed: %s', item.get('key'), e)
-                    health = infer_site_health(item)
-                    error = e if isinstance(e, RuntimeContractError) else error_from_exception(
-                        e, stage='site', site_key=health.site_key, runtime=health.runtime)
-                    if isinstance(error, RuntimeContractError) and error.runtime == 'android':
-                        health.runtime = 'android'
-                        health.compatibility = 'C2'
-                    if isinstance(error, RuntimeContractError) and error.details.get('built'):
-                        health.mark_built()
-                    health.record_failure(error, stage='site')
-                    diagnostics.append(health)
-                    summary['built'] += int(health.built)
-                    summary['sites_built'] += int(health.built)
-                    # 过渡期保留既有 [L2:type]/[L3:js] 细分类，后接稳定 L1-L6
-                    # 错误码；原始文本先脱敏并限长，诊断页仍能解释 drpy/JS 等根因。
-                    legacy = redact_sensitive(err_msg, 240)
-                    runtime_tag = {
-                        'jar': '[L3:jar]', 'js': '[L3:js]',
-                        'cms': '[L3:cms]', 'python': '[L3:py]',
-                    }.get(error.runtime or health.runtime, '')
-                    if runtime_tag and runtime_tag not in legacy:
-                        legacy = runtime_tag + ' ' + legacy
-                    summary['skipped'].append(
-                        f"{item.get('key', '?')}: {legacy} [{error.code}] {error.message}")
-                    if error.code in ('L1_CONFIG_BLOCKED', 'L2_SITE_BLOCKED'):
-                        summary['blocked'] += 1
-                    if error.code == 'L2_SITE_REQUIRES_ANDROID':
-                        summary['requiresAndroid'] += 1
-                    # 任务五：按层级标签聚合错误计数
-                    if error.code in ('L2_SITE_UNSUPPORTED', 'L2_SITE_REQUIRES_ANDROID') or '[L2:type]' in err_msg:
-                        summary['build_errors']['type_unsupported'] += 1
-                    elif health.runtime == 'jar' or error.runtime == 'jar' or '[L3:jar]' in err_msg:
-                        summary['build_errors']['jar_failed'] += 1
-                    elif health.runtime == 'js' or error.runtime == 'js' or '[L3:js]' in err_msg:
-                        summary['build_errors']['js_failed'] += 1
-                    elif health.runtime == 'cms' or error.runtime == 'cms' or '[L3:cms]' in err_msg:
-                        summary['build_errors']['cms_failed'] += 1
-                    elif health.runtime == 'python' or error.runtime == 'python' or '[L3:py]' in err_msg:
-                        summary['build_errors']['py_failed'] += 1
-                    else:
-                        summary['build_errors']['other'] += 1
+                        outcomes[i] = (site, None)
+                    collected = i + 1
+                if budget_exhausted:
+                    # 救援：把已完成却被队头挂死站点挡住的结果按序收走；仍挂起的跳过。
+                    for i, (item, fut) in enumerate(zip(items, futures)):
+                        if i < collected:
+                            continue
+                        if not fut.done():
+                            continue
+                        try:
+                            outcomes[i] = (fut.result(), None)
+                        except Exception as e:
+                            outcomes[i] = (None, e)
+                for item, outcome in zip(items, outcomes):
+                    if outcome is None:
+                        continue
+                    _record_outcome(item, outcome[0], outcome[1])
+                self._report_progress('build', len(outcomes), len(items))
+            finally:
+                progress_stop.set()
+        finally:
+            # 放弃等待而非 join：挂死的构建线程无法强杀，join 会把装配卡在退出路上。
+            pool.shutdown(wait=False, cancel_futures=True)
         # 取消/超时：构建过程中已经真的起了 Worker 子进程，直接上抛会把它们留成孤儿
         # （下一次加载看起来像「加载一次泄一批」）。先释放已建成的部分再上抛。
+        # 例外：salvage_partial（磁盘缓存恢复）在**预算耗尽**且已有建成站点时
+        # 保留部分结果继续 swap——恢复要快，被慢镜像 ext 卡住的少数站点记跳过即可，
+        # 整体失败回退网络重载反而让用户长时间停留在示例源。取消仍然立即上抛。
         try:
             ctx.check()
-        except Exception:
-            self._discard({'sites': new_sites}, reason='cancelled or timed out during build')
-            raise
+        except RuntimeContractError as error:
+            if (getattr(ctx, 'salvage_partial', False)
+                    and error.code == 'L1_CONFIG_TIMEOUT' and new_sites):
+                logger.warning(
+                    'restore budget exhausted: keep %d/%d built sites, skip the rest',
+                    len(new_sites), len(items))
+            else:
+                self._discard({'sites': new_sites},
+                              reason='cancelled or timed out during build')
+                raise
         # 装配阶段可能细化路由（R4 → R5：拿到 JAR 字节分级后才知道要不要 Android），
         # 快照必须存**最终**结论，否则诊断页显示的是下载前的乐观判断。
         refined = [getattr(h, 'route', None) for h in diagnostics]
@@ -1030,6 +1167,21 @@ class ConfigManager:
         避免单一仓命中时直播源缺失/视频源变少（仓漂移）。
         只增不删：主条目内容原样保留，合并失败静默跳过。
         """
+        # 预算已耗尽（磁盘恢复 salvage 后必然如此）：合并是增强项，逐站点检查点
+        # 会立刻全部停止，先抓附加仓正文只是白等一轮网络超时——直接跳过。
+        ctx = self._context()
+        try:
+            ctx.check()
+        except RuntimeContractError as error:
+            if error.code == 'L1_CONFIG_CANCELLED':
+                raise
+            logger.warning('multi-repo merge skipped (load budget exhausted)')
+            return
+        if getattr(ctx, 'salvage_partial', False) and ctx.deadline is not None:
+            # 磁盘恢复模式：主条目已建成即可用，合并只给零头时间——附加仓的
+            # 死镜像站点（单个 ext/jar 挂 30s+）会把恢复尾巴拖长，进度条停在
+            # 满格长时间不动（表现为「打开后检测进度直接是满的」）。
+            ctx.deadline = min(ctx.deadline, time.monotonic() + RESTORE_MERGE_BUDGET)
         primary_src = prepared['source_url']
         pending = []   # 尚未拉取过的条目 url（选中之后直接 break，未及拉取）
         for it in entries:
@@ -1101,53 +1253,99 @@ class ConfigManager:
         """跨仓合并 sites：按 key 去重（主条目优先），其余条目的站点追加构建。"""
         existing = {s.key for s in prepared['sites']}
         added = 0
-        for url, cfg in sub_cfgs.items():
-            if url == prepared['source_url']:
-                continue
+        # 合并是「只增不删」的增强：主条目已经建好，附加仓的站点要受加载预算
+        # 约束——死镜像 jar/ext 单项就要挂 60-90s，几百个附加站点串行构建曾把
+        # 整次导入拖到数分钟（任务一直 loading，期间所有新导入都被 BUSY 拒绝）。
+        # 预算耗尽时保留已合并部分并停止（不失败整个导入）；取消仍要上抛。
+        # 构建放线程池、按剩余预算收结果：串行逐个 _build_site 时，一个撞上
+        # 死镜像的站点会以自身 HTTP 超时（60s+）卡住整个合并阶段——预算检查
+        # 只在站点之间生效，进度条停在半格长时间不动。收结果带超时即可在
+        # 预算点放弃等待（挂死线程随后自行消亡，不阻塞装配）。
+        # 合并阶段按处理条数上报进度（build 满格后任务可能还要合并几十秒）。
+        ctx = self._context()
+        merge_sources = [(url, cfg) for url, cfg in sub_cfgs.items()
+                         if url != prepared['source_url']]
+        # 预先按 key 去重（主条目优先；跨附加仓先出现者优先，与串行版语义一致）
+        targets = []   # (key, item, url, sub_spider_jar)
+        for url, cfg in merge_sources:
             # 每个子仓的 csp_ 站点用该仓自己的顶层 spider jar 加载
             sub_spider_jar = self._resolve_spider_jar(cfg, url if str(url).startswith('http') else '')
             for item in cfg.get('sites') or []:
                 key = item.get('key') or ''
                 if not key or key in existing:
                     continue
+                existing.add(key)
+                targets.append((key, item, url, sub_spider_jar))
+        merge_total = len(targets)
+        merge_done = 0
+
+        def _record_merge_result(key, item, site, exc):
+            nonlocal added
+            if exc is not None:
+                if isinstance(exc, RuntimeContractError) and exc.code == 'L1_CONFIG_CANCELLED':
+                    raise exc
+                logger.warning('multi-repo merge site [%s] failed: %s', key, str(exc)[:60])
+                health = infer_site_health(item)
+                error = exc if isinstance(exc, RuntimeContractError) else error_from_exception(
+                    exc, stage='site', site_key=health.site_key, runtime=health.runtime)
+                if error.code == 'L2_SITE_REQUIRES_ANDROID':
+                    health.runtime = 'android'
+                    health.compatibility = 'C2'
+                if error.details.get('built'):
+                    health.mark_built()
+                health.record_failure(error, stage='site')
+                prepared.setdefault('diagnostics', []).append(health)
+                prepared.setdefault('summary', {}).setdefault('skipped', []).append(
+                    f"{key}: {redact_sensitive(str(exc), 240)} [{error.code}] {error.message}")
+                prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
+                    'other', 0)
+                prepared['summary']['build_errors']['other'] += 1
+                return
+            if site:
+                prepared['sites'].append(site)
+                prepared.setdefault('diagnostics', []).append(site.health)
+                added += 1
+                return
+            health = infer_site_health(item)
+            error = RuntimeContractError(
+                'L2_SITE_BUILD_FAILED', site_key=health.site_key,
+                runtime=health.runtime,
+                raw_error='site entry could not be built')
+            health.record_failure(error, stage='site')
+            prepared.setdefault('diagnostics', []).append(health)
+            prepared.setdefault('summary', {}).setdefault('skipped', []).append(
+                f"{key}: [L2:site] site entry could not be built "
+                f"[{error.code}] {error.message}")
+            prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
+                'other', 0)
+            prepared['summary']['build_errors']['other'] += 1
+
+        if not targets:
+            return
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
+            futures = [pool.submit(self._build_site, item, url, jar)
+                       for _, item, url, jar in targets]
+            for (key, item, _url, _jar), fut in zip(targets, futures):
+                remaining = ctx.remaining()
                 try:
-                    site = self._build_site(item, url, sub_spider_jar)
-                    if site:
-                        prepared['sites'].append(site)
-                        prepared.setdefault('diagnostics', []).append(site.health)
-                        existing.add(key)
-                        added += 1
-                    else:
-                        health = infer_site_health(item)
-                        error = RuntimeContractError(
-                            'L2_SITE_BUILD_FAILED', site_key=health.site_key,
-                            runtime=health.runtime,
-                            raw_error='site entry could not be built')
-                        health.record_failure(error, stage='site')
-                        prepared.setdefault('diagnostics', []).append(health)
-                        prepared.setdefault('summary', {}).setdefault('skipped', []).append(
-                            f"{key}: [L2:site] site entry could not be built "
-                            f"[{error.code}] {error.message}")
-                        prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
-                            'other', 0)
-                        prepared['summary']['build_errors']['other'] += 1
+                    if remaining is not None and remaining <= 0:
+                        raise FuturesTimeoutError()
+                    site = fut.result(timeout=remaining)
                 except Exception as e:
-                    logger.warning('multi-repo merge site [%s] failed: %s', key, str(e)[:60])
-                    health = infer_site_health(item)
-                    error = e if isinstance(e, RuntimeContractError) else error_from_exception(
-                        e, stage='site', site_key=health.site_key, runtime=health.runtime)
-                    if error.code == 'L2_SITE_REQUIRES_ANDROID':
-                        health.runtime = 'android'
-                        health.compatibility = 'C2'
-                    if error.details.get('built'):
-                        health.mark_built()
-                    health.record_failure(error, stage='site')
-                    prepared.setdefault('diagnostics', []).append(health)
-                    prepared.setdefault('summary', {}).setdefault('skipped', []).append(
-                        f"{key}: {redact_sensitive(str(e), 240)} [{error.code}] {error.message}")
-                    prepared.setdefault('summary', {}).setdefault('build_errors', {}).setdefault(
-                        'other', 0)
-                    prepared['summary']['build_errors']['other'] += 1
+                    if isinstance(e, FuturesTimeoutError) or not fut.done():
+                        logger.warning(
+                            'multi-repo merge stopped at [%s]: load budget exhausted '
+                            '(%d sites merged)', key, added)
+                        return
+                    _record_merge_result(key, item, None, e)
+                else:
+                    _record_merge_result(key, item, site, None)
+                merge_done += 1
+                self._report_progress('merge', merge_done, merge_total)
+        finally:
+            # 放弃等待而非 join：挂死的合并线程随其自身 HTTP 超时消亡。
+            pool.shutdown(wait=False, cancel_futures=True)
         if added:
             logger.info('multi-repo merge: +%d sites from other entries', added)
 

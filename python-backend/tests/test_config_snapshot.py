@@ -70,11 +70,31 @@ class _FixtureCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # 沙箱隔离：本套件的 `mgr.load(...)` 走到 _validate_and_swap 会写
+        # ConfigRepositoryCache（hoststate 缓存目录）与 last_repo.txt。hoststate
+        # 未配置时默认指向真实用户目录 ~/.video-pc——直接 `python -m unittest`
+        # 单跑本文件（不经 run_all 的 TEST_ENV）会把用户真实仓库缓存覆盖成
+        # 测试夹具（表现为应用重启后磁盘恢复失效、首页停在示例源）。
+        # run_all.py 已注入 VPC_DATA_DIR/VPC_CACHE_DIR；这里再显式钉到
+        # 测试沙箱，双保险。
+        import tempfile
+
+        import hoststate
+        sandbox_root = os.path.join(BASE, '.test-tmp')
+        os.makedirs(sandbox_root, exist_ok=True)
+        cls._sandbox = tempfile.mkdtemp(prefix='cfg-snap-', dir=sandbox_root)
+        hoststate.configure(
+            data_dir=cls._sandbox,
+            cache_dir=os.path.join(cls._sandbox, 'cache'),
+            plugins_dir=os.path.join(cls._sandbox, 'cache', 'py'),
+            log_dir=os.path.join(cls._sandbox, 'logs'))
         cls.fx = FixtureServer().__enter__()
 
     @classmethod
     def tearDownClass(cls):
         cls.fx.close()
+        import shutil
+        shutil.rmtree(cls._sandbox, ignore_errors=True)
 
     def setUp(self):
         _RecordingRunner.instances = []
@@ -811,15 +831,18 @@ class DepotTest(_FixtureCase):
         self.assertFalse(health['depot_empty_future'].built)
         self.assertTrue(health['depot_good_cms'].healthy)
 
-    def test_sub_repo_pointing_at_a_private_address_is_blocked(self):
-        """子仓地址来自远端内容，不是用户输入——不能借它探测本机/内网服务。
+    def test_sub_repo_pointing_at_a_private_address_is_blocked_in_strict_mode(self):
+        """严格 SSRF 模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）：子仓地址来自远端
+        内容，不能借它探测本机/内网服务。
 
         清单本身是从 loopback 取回的，所以这一条同时在验证「同源信任是
-        scheme+host+port，而不是只要沾上本机就全放行」。
+        scheme+host+port，而不是只要沾上本机就全放行」。桌面端默认已放开
+        （局域网 NAS / 本机服务子仓是合理场景），严格模式仅作为可选项保留。
         """
         mgr = self.manager()
-        with self.assertRaises(ValueError) as caught:
-            mgr.load(self.fx.config('depot_private.json'))
+        with mock.patch.dict(os.environ, {'VPC_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
+            with self.assertRaises(ValueError) as caught:
+                mgr.load(self.fx.config('depot_private.json'))
         self.assertRegex(str(caught.exception),
                          r'^\[L1:fetch\] all multi-repo entries failed')
         self.assertIn('private_network_blocked', str(caught.exception))
@@ -838,6 +861,95 @@ class TimeoutAndCancelTest(_FixtureCase):
         self.assertEqual(mgr.sites.sites, [], '超时不得留下半装配的配置')
         self.assertIsNone(mgr.snapshot)
         self.assertEqual(mgr.swap_count, 0)
+
+    def test_load_reports_build_progress(self):
+        """加载过程向宿主上报进度（恢复/导入进度条）：单仓报 build 阶段站点完成数，
+        多仓另报 fetch 阶段子仓序号；回调异常不影响加载。"""
+        mgr = self.manager()
+        records = []
+        summary = mgr.load(self.fx.config('single.json'),
+                           progress_cb=lambda s, c, t: records.append((s, c, t)))
+        builds = [r for r in records if r[0] == 'build']
+        self.assertTrue(builds, '单仓加载应上报 build 进度')
+        total = summary['configured']
+        self.assertEqual(builds[-1][1], total, '最终 build 进度 = 站点总数')
+        self.assertEqual(builds[-1][2], total)
+
+        mgr2 = self.manager()
+        records2 = []
+        mgr2.load(self.fx.config('depot_fallback.json'),
+                  progress_cb=lambda s, c, t: records2.append((s, c, t)))
+        self.assertTrue(any(r[0] == 'fetch' for r in records2), '多仓加载应上报 fetch 进度')
+        self.assertTrue(any(r[0] == 'build' for r in records2), '多仓加载应上报 build 进度')
+        self.assertTrue(any(r[0] == 'merge' for r in records2), '多仓合并应上报 merge 进度')
+        merges = [r for r in records2 if r[0] == 'merge']
+        self.assertEqual(merges[-1][1], merges[-1][2], '合并进度最终收满')
+
+    def test_restore_merge_phase_is_budget_capped(self):
+        """恢复模式（salvage_partial）下合并阶段只给零头时间：构建满格后附加仓
+        的死镜像站点曾把恢复尾巴拖长，进度条停在满格长时间不动。"""
+        import time as _time
+
+        from config import _LoadContext, RESTORE_MERGE_BUDGET
+
+        mgr = self.manager()
+        ctx = _LoadContext('https://x.invalid/repo.json', budget=300,
+                           salvage_partial=True)
+        with mgr._ctx_lock:
+            mgr._ctx = ctx
+        try:
+            prepared = {'sites': [], 'source_url': 'https://x.invalid/primary.json',
+                        'diagnostics': [], 'lives': [],
+                        'summary': {'skipped': [], 'build_errors': {}}}
+            mgr._merge_repo_extras(prepared, {}, [], manifest_base='')
+            self.assertLessEqual(ctx.deadline, _time.monotonic() + RESTORE_MERGE_BUDGET + 1,
+                                 '恢复模式的合并阶段截止时间被压到零头预算内')
+        finally:
+            with mgr._ctx_lock:
+                mgr._ctx = None
+        # 回调抛异常不影响加载主流程
+        mgr3 = self.manager()
+        summary3 = mgr3.load(self.fx.config('single.json'),
+                             progress_cb=lambda *a: (_ for _ in ()).throw(RuntimeError('boom')))
+        self.assertGreaterEqual(summary3['sites'], 1)
+
+    def test_restore_salvages_partial_build_on_budget_timeout(self):
+        """磁盘恢复（salvage_partial）：构建期预算耗尽时保留已建成站点继续 swap，
+        而不是整体失败——恢复被个别慢站点（死镜像 ext）拖垮时，回退网络重载会
+        让用户长时间停在示例源（「重启后不加载缓存」）。取消仍须整体失败。"""
+        import time as _time
+
+        from config import ConfigManager
+        from site_manager import SiteManager
+
+        class _SlowSecondSite(ConfigManager):
+            def _build_site(self, item, base_url='', spider_jar=''):
+                if item.get('key') == 'slow':
+                    _time.sleep(1.5)  # 超过 budget，模拟死镜像 ext 下载
+                return super()._build_site(item, base_url, spider_jar)
+
+        cfg = {'sites': [
+            {'key': 'fast', 'name': 'F', 'type': 1, 'api': 'https://fixture.invalid/a/provide/vod/'},
+            {'key': 'slow', 'name': 'S', 'type': 1, 'api': 'https://fixture.invalid/b/provide/vod/'},
+        ]}
+        mgr = _SlowSecondSite(SiteManager())
+        mgr._repo_pref_loaded = True
+        mgr.last_repo_name = ''
+        self.managers.append(mgr)
+        summary = mgr.load(json.dumps(cfg), budget=0.6, salvage_partial=True)
+        self.assertGreaterEqual(summary['sites'], 1, '预算内建成的站点保留生效')
+        self.assertIsNotNone(mgr.snapshot, '部分结果照常 swap')
+        self.assertEqual([s.key for s in mgr.sites.sites], ['fast'])
+
+        # 既有契约不变：非恢复模式的构建期超时仍整体失败
+        mgr2 = _SlowSecondSite(SiteManager())
+        mgr2._repo_pref_loaded = True
+        mgr2.last_repo_name = ''
+        self.managers.append(mgr2)
+        with self.assertRaises(RuntimeContractError) as caught:
+            mgr2.load(json.dumps(cfg), budget=0.6)
+        self.assertEqual(caught.exception.code, 'L1_CONFIG_TIMEOUT')
+        self.assertIsNone(mgr2.snapshot)
 
     def test_cancel_before_the_first_request_sends_nothing(self):
         mgr = self.manager()
@@ -917,6 +1029,84 @@ class TimeoutAndCancelTest(_FixtureCase):
         with self.assertRaises(ValueError):
             mgr.load(self.fx.config('does_not_exist.json'))
         self.assertIsNone(mgr._ctx)
+
+    def test_superseded_load_cannot_swap_its_result(self):
+        """被新请求接管（仅代际失效，无取消事件）的加载：可以跑完装配，
+        但最终 swap 必须被拒绝且释放 Worker——否则旧加载会覆盖新配置。"""
+        import time as _time
+
+        mgr = self.manager()
+        outcome = {}
+
+        def run():
+            try:
+                outcome['summary'] = mgr.load(self.fx.url('slow.json?ms=800'))
+            except Exception as exc:  # noqa: BLE001
+                outcome['error'] = exc
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        for _ in range(200):
+            with mgr._ctx_lock:
+                started = mgr._ctx is not None
+            if started:
+                break
+            _time.sleep(0.01)
+        self.assertTrue(started, '加载线程未在预期时间内创建上下文')
+        mgr.cancel_active_load()
+        worker.join(20)
+        self.assertIsInstance(outcome.get('error'), RuntimeContractError)
+        self.assertEqual(outcome['error'].code, 'L1_CONFIG_CANCELLED')
+        self.assertIsNone(mgr.snapshot, '被接管的加载不得留下运行中快照')
+        self.assertEqual(mgr.swap_count, 0)
+        # 接管后管理器仍可正常加载新配置
+        summary = mgr.load(self.fx.config('single.json'))
+        self.assertGreaterEqual(summary['sites'], 1)
+
+    def test_merge_sites_stops_when_budget_exhausted(self):
+        """附加仓合并受加载预算约束：预算耗尽时保留已合并部分并停止，
+        而不是让死镜像站点把整个导入拖到数分钟。取消则仍要上抛。"""
+        import time as _time
+
+        from config import _LoadContext
+
+        mgr = self.manager()
+        prepared = {'sites': [], 'source_url': 'https://x.invalid/primary.json',
+                    'diagnostics': [], 'lives': [],
+                    'summary': {'skipped': [], 'build_errors': {}}}
+        extra_cfg = {'sites': [
+            {'key': 'merge_slow', 'name': 'slow', 'type': 0,
+             'api': 'https://x.invalid/api.php'},
+            {'key': 'merge_slow2', 'name': 'slow2', 'type': 0,
+             'api': 'https://x.invalid/api2.php'}]}
+        sub_cfgs = {'https://x.invalid/primary.json': {'sites': []},
+                    'https://x.invalid/extra.json': extra_cfg}
+
+        ctx = _LoadContext('https://x.invalid/primary.json', budget=0.001)
+        _time.sleep(0.01)  # 让预算过期
+        with mgr._ctx_lock:
+            mgr._ctx = ctx
+        try:
+            mgr._merge_sites(prepared, sub_cfgs)
+        finally:
+            with mgr._ctx_lock:
+                mgr._ctx = None
+        self.assertEqual(prepared['sites'], [], '预算耗尽后不得再构建附加站点')
+
+        cancel = threading.Event()
+        cancel.set()
+        ctx_cancel = _LoadContext('https://x.invalid/primary.json',
+                                  cancel_event=cancel)
+        with mgr._ctx_lock:
+            mgr._ctx = ctx_cancel
+        try:
+            with self.assertRaises(RuntimeContractError) as caught:
+                mgr._merge_sites(prepared, sub_cfgs)
+        finally:
+            with mgr._ctx_lock:
+                mgr._ctx = None
+        self.assertEqual(caught.exception.code, 'L1_CONFIG_CANCELLED',
+                         '合并阶段的取消必须上抛，不能当成站点失败吞掉')
 
 
 if __name__ == '__main__':

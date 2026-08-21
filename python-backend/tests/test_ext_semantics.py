@@ -284,8 +284,12 @@ class ExpansionFailureIsolationTest(_ResolverCase):
         self.assertEqual(got.error_reason, 'recursion_limit')
 
     def test_public_config_cannot_expand_ext_into_loopback(self):
-        """远端配置的 ext 指向本机 = 端口探测，必须在取之前就被拒。"""
-        resolver = self.resolver(trust_root='https://cdn.fixture.invalid/tv.json')
+        """严格 SSRF 模式下远端配置的 ext 指向本机 = 端口探测，必须在取之前就被拒。
+
+        （默认策略已放开本机/内网引用；严格模式由
+        VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1 对应的策略位驱动。）"""
+        resolver = self.resolver(trust_root='https://cdn.fixture.invalid/tv.json',
+                                 allow_private_network=False)
         before = self.fx.hits('/ext/json')
         got = resolver.resolve(self.fx.url('ext/json'), expand=True)
         self.assertFalse(got.expanded_ok)

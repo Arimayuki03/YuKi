@@ -1693,11 +1693,12 @@ function initSettingsPanel() {
         await window.vpc.settingsSet('systemTitleBar', this.checked);
         warnToast(this.checked ? '已开启系统标题栏，重启后生效' : '已关闭系统标题栏（无边框模式），重启后生效');
     });
-    // 屏蔽源：查看列表（key 映射为可读源名，取不到时回退 key）
+    // 屏蔽源：查看列表（key 映射为可读源名，取不到时回退 key；标注屏蔽原因）
     $('#blocked_view').on('click', async () => {
         try {
             const s = (await window.vpc.settingsGet()) || {};
             const keys = Array.isArray(s.blockedSites) ? s.blockedSites : [];
+            const reason = (s.blockedReason && typeof s.blockedReason === 'object' && !Array.isArray(s.blockedReason)) ? s.blockedReason : {};
             const box = $('#blocked_list').empty();
             if (!keys.length) {
                 box.html('<div class="tip-line">暂无被屏蔽的源。</div>');
@@ -1705,18 +1706,22 @@ function initSettingsPanel() {
                 const all = (typeof Home !== 'undefined' && Home._allSites) || [];
                 keys.forEach((k) => {
                     const hit = all.find((x) => x.key === k);
-                    box.append(`<div class="history-item"><span class="history-url">${escHtml((hit && hit.name) || k)}</span></div>`);
+                    const tag = reason[k] === 'dead' ? '（连续探测无响应）' : (reason[k] === 'empty' ? '（无内容）' : '');
+                    box.append(`<div class="history-item"><span class="history-url">${escHtml((hit && hit.name) || k)}${tag}</span></div>`);
                 });
             }
             openDialog('blockedDialog');
         } catch (e) { warnToast('读取屏蔽列表失败'); }
     });
-    // 屏蔽源：恢复并重新探测
+    // 屏蔽源：恢复并重新探测（连败计数/复查时间一并清零，恢复的源从零开始重新探测）
     $('#blocked_restore').on('click', async () => {
         if (!await confirmDialog('确定恢复全部被屏蔽的源？恢复后这些源会重新加入源列表；若开启自动检测，之后会再次探测。', { okText: '恢复' })) return;
         try {
             await window.vpc.settingsSet('blockedSites', []);
+            await window.vpc.settingsSet('blockedReason', {});
             await window.vpc.settingsSet('probedSites', []);
+            await window.vpc.settingsSet('probedAt', {});
+            await window.vpc.settingsSet('probeFailStreak', {});
             const s = (await window.vpc.settingsGet()) || {};
             updateBlockedLine(s);
             if (typeof Home !== 'undefined' && Home._inited) Home.loadSites();
@@ -1998,8 +2003,8 @@ function updateBlockedLine(s) {
         return;
     }
     $('#blocked_line').text(n > 0
-        ? `已自动屏蔽 ${n} 个无内容源；恢复后会重新探测。`
-        : '自动屏蔽首页和分类均无内容的源，避免下拉里出现空源。');
+        ? `已自动屏蔽 ${n} 个无内容/失效源（连续探测无响应按死源屏蔽）；恢复后会重新探测。`
+        : '自动屏蔽首页和分类均无内容的源、连续多次探测无响应的死源；已屏蔽源会定期复查，恢复内容后自动解除。');
 }
 
 /** 资产就绪状态：查询主进程各二进制（ffmpeg/mpv/aria2/Anime4K）是否有

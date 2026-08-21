@@ -98,6 +98,7 @@
                     <button id="home-refresh" class="md-btn md-btn-tonal md-btn-icon" title="刷新"><svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4c-4.42 0-8 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg></button>
                 </div>
                 <div id="home-class" class="class-tabs"></div>
+                <div id="home-restore-bar" class="search-status" style="display:none"></div>
                 <div id="home-probe-bar" class="search-status" style="display:none"></div>
                 <div id="home-grid" class="vod-grid"></div>
                 <div id="home-pager" class="pager"></div>
@@ -956,13 +957,13 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索/时间表/榜单/详情/角色/收藏同步等）走全域名反代 api.bangumi.lol / next.bangumi.lol（对应 api.bgm.tv / next.bgm.tv，免签名）。规则仓库镜像用于规则更新拉取。</div>
+                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索/时间表/榜单/详情/角色/收藏同步等）走全域名反代 api.bangumi.pro / next.bangumi.pro（对应 api.bgm.tv / next.bgm.tv，免签名）。规则仓库镜像用于规则更新拉取。</div>
                             </div>
                         </div>
                         <div class="wall-row">
                             <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
                         </div>
-                        <label class="md-switch" title="Bangumi 接口走全域名反代 api.bangumi.lol / next.bangumi.lol"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
+                        <label class="md-switch" title="Bangumi 接口走全域名反代 api.bangumi.pro / next.bangumi.pro"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
                         <label class="md-switch" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
                         <div class="tip-line pad0">网络代理</div>
                         <div class="md-field">

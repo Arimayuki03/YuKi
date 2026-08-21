@@ -9,7 +9,7 @@
  * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf */
 
 const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
@@ -375,7 +375,7 @@ const Search = {
                 if (file) out = await Kazumi.imageSearch(file);
                 else out = await Kazumi.imageSearch(url);
                 hideLoading();
-                if (out && out.error) warnToast('以图搜番失败：' + out.error);
+                if (out && out.error) warnToast('以图搜番失败：' + errorTextOf(out.error));
                 this._renderImageResults((out && out.results) || []);
             } catch (e) {
                 hideLoading();
@@ -461,7 +461,7 @@ const Search = {
         const cards = slice.map((v) => {
             // Kazumi 结果无源封面：命中 Bangumi 封面缓存直接显示，未命中用占位图并标
             // data-cover-missing，由 fillMissingCovers 后台按片名从 Bangumi 拉取补上（T73）。
-            // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.bangumi.lol（T76）。
+            // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.bangumi.pro（T76）。
             if (String(grp.src).startsWith('kazumi:')) {
                 let cover = '';
                 if (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) cover = Kazumi.getCachedBangumiCover(v.name) || '';

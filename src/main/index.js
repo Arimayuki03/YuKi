@@ -1263,7 +1263,7 @@ app.whenReady().then(() => {
     const SETTINGS_SET_ALLOWED = new Set([
         'anime4k', 'anime4kMode', 'animEnabled', 'autoNext',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
-        'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedSites',
+        'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
         'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'enableBangumiProxy', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
@@ -1271,7 +1271,7 @@ app.whenReady().then(() => {
         // 各列表页每页条数（panels.js 动态 key 写入）
         'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
-        'probedSites', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
+        'probeFailStreak', 'probedAt', 'probedSites', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
         'useMisansFont', 'wallpaper', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
         'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
@@ -1993,7 +1993,37 @@ app.whenReady().then(() => {
                 case 'unpauseAll': {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     let gids = [];
-                    try { gids = (await dl.unpauseAll()) || []; } catch (e) { /* 无暂停任务时忽略 */ }
+                    try { gids = (await dl.unpauseAll()) || []; } catch (e) { /* 引擎异常按 0 处理，仍继续恢复持久化记录 */ }
+                    // 重启后仅存于持久化记录的进行中任务（aria2 已无此任务，列表显示为暂停卡片）：
+                    // 与单个「继续」一致地重新入队，否则全部开始会误报「没有已暂停的任务」。
+                    const liveGids = new Set([
+                        ...(await dl.listAll().catch(() => [])).map((t) => t.gid),
+                        ...hls.list().map((t) => t.gid),
+                        ...gids,
+                    ]);
+                    for (const rec of dlRecords.all()) {
+                        if (!rec || !rec.uri || liveGids.has(rec.gid)) continue;
+                        if (!['active', 'waiting', 'paused'].includes(rec.status)) continue;
+                        try {
+                            if (rec.kind === 'hls') {
+                                syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                                hls.add({
+                                    url: rec.uri, out: rec.name,
+                                    header: rec.header || undefined, // L-8:恢复原任务的 Referer/UA，避免重启后 403
+                                    adFilter: settings.get('hlsAdFilter'),
+                                    concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
+                                });
+                            } else {
+                                // 磁链不用 out 参数（会干扰多文件 BT 种子），普通 HTTP/HTTPS 带文件名恢复
+                                const isMagnet = /^magnet:/i.test(rec.uri);
+                                const opts = {};
+                                if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
+                                await dl.addUri(rec.uri, opts);
+                            }
+                            dlRecords.remove(rec.gid); // 移除旧 gid 记录，新任务由轮询重新持久化
+                            gids.push(rec.gid);
+                        } catch (e) { /* 单个恢复失败不阻塞其余任务 */ }
+                    }
                     try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
@@ -2265,7 +2295,38 @@ app.whenReady().then(() => {
         const lastUrl = settings.get('lastConfigUrl');
         if (lastUrl && /^https?:\/\//i.test(lastUrl)) {
             (async () => {
-                // 后端先尝试磁盘恢复；已有健康缓存时不再重复下载仓库。
+                // READY 行早于端口监听：先轮询 health 确认后端可达（最长 20s）。
+                for (let i = 0; i < 40; i++) {
+                    try {
+                        const h = await fetch(`${info.base}/health`, { signal: AbortSignal.timeout(2000) });
+                        if (h.ok) break;
+                    } catch (e) { /* 未就绪，重试 */ }
+                    await new Promise((r) => setTimeout(r, 500));
+                }
+                // 后端的磁盘缓存恢复已改为后台线程（READY 不再等待它）：这里先等
+                // 启动恢复结束再做决策，避免与网络重载并发重复构建全部站点。
+                // 恢复完成（loading→done 且 healthy>0）按一次成功重载收尾，渲染层
+                // 经 vpc:config-reloaded 刷新站点。t=null（端点暂不可达）时继续轮询
+                // 而非放弃——READY 刚打印时 uvicorn 可能尚未完成绑定。
+                const taskUrl = `${info.base}/action?token=${info.token}`;
+                let sawLoading = false;
+                for (let i = 0; i < 60; i++) {
+                    const t = await fetch(taskUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'do=configTask',
+                    }).then((x) => x.json()).catch(() => null);
+                    if (t && t.status !== 'loading') {
+                        if (sawLoading && t.status === 'done' && t.summary
+                            && Number(t.summary.healthy ?? t.summary.sites) > 0) {
+                            finishReload(true, Number(t.summary.healthy ?? t.summary.sites));
+                        }
+                        break;
+                    }
+                    if (t) sawLoading = true;
+                    await new Promise((r) => setTimeout(r, 2000));
+                }
+                // 启动恢复已出结果：已有健康缓存时不再重复下载仓库。
                 try {
                     const state = await fetch(`${info.base}/sites?token=${info.token}`, {
                         signal: AbortSignal.timeout(5000),
@@ -2279,14 +2340,6 @@ app.whenReady().then(() => {
                 configReload.reloading = true;
                 configReload.url = lastUrl;
                 console.log('[config] auto reload start:', lastUrl);
-                // READY 行早于端口监听：先轮询 health 确认后端可达（最长 20s）
-                for (let i = 0; i < 40; i++) {
-                    try {
-                        const h = await fetch(`${info.base}/health`, { signal: AbortSignal.timeout(2000) });
-                        if (h.ok) break;
-                    } catch (e) { /* 未就绪，重试 */ }
-                    await new Promise((r) => setTimeout(r, 500));
-                }
                 // undici 不自动编码非 ASCII 路径（如中文文件名），先 encodeURI
             return fetch(encodeURI(`${info.base}/action?token=${info.token}`), {
                 method: 'POST',

@@ -285,13 +285,13 @@ function bangumiResizeUrl(url, variant) {
     return u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`);
 }
 
-/** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.lol）；
+/** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.pro）；
  *  非官方域名原样返回（第三图床不换）。 */
 function bangumiMirrorUrl(url) {
-    return String(url || '').replace(/^https?:\/\/lain\.bgm\.tv\//i, 'https://lain.bangumi.lol/');
+    return String(url || '').replace(/^https?:\/\/lain\.bgm\.tv\//i, 'https://lain.bangumi.pro/');
 }
 
-/** 生成 Bangumi 封面 img：官方 lain.bgm.tv 优先，加载失败自动切镜像 lain.bangumi.lol，再失败落占位图。
+/** 生成 Bangumi 封面 img：官方 lain.bgm.tv 优先，加载失败自动切镜像 lain.bangumi.pro，再失败落占位图。
  *  （历史 Kazumi 源封面补拉复用 —— 官方图床被墙/慢时镜像兜底，不留空框。） */
 function bangumiCoverImg(pic, eager) {
     const first = normalizePic(bangumiResizeUrl(pic, 'card') || pic);
@@ -319,6 +319,26 @@ function bangumiCover(imagesOrUrl, size) {
         if (images[k]) return images[k];
     }
     return '';
+}
+
+/** 从后端错误值提取可读文案：RuntimeResponse 错误对象（{code,message,...}）取
+ *  "code message"，嵌套 {error:{...}} 下钻，Error 取 .message，其余 JSON 化兜底。
+ *  直接 String(obj) 会得到 "[object Object]"（空态提示/弹窗曾因此不可读）。 */
+function errorTextOf(e, maxLen = 120) {
+    let text = '';
+    if (e == null) text = '';
+    else if (typeof e === 'string') text = e;
+    else if (e instanceof Error) text = e.message || String(e);
+    else if (typeof e === 'object') {
+        const msg = e.message || e.msg || '';
+        if (msg) text = e.code ? `${e.code} ${msg}` : String(msg);
+        else if (e.error) return errorTextOf(e.error, maxLen); // 嵌套 {error:{...}}
+        else {
+            try { text = JSON.stringify(e); } catch (_) { text = String(e); }
+        }
+    } else text = String(e);
+    text = String(text || '').trim();
+    return maxLen > 0 && text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
 }
 
 /** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。 */

@@ -47,8 +47,10 @@ class TestN32QuickJSEnhancements(unittest.TestCase):
 
     def test_security_guard_applied_to_http(self):
         from quickjs_host import _native_http
-        # 私网/回环地址在无权限时不应直接暴露或造成未受控探测
-        res_json = _native_http('http://192.168.1.1/admin', '{}')
+        # 严格 SSRF 模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下私网地址仍被拒；
+        # 桌面端默认已放开本机/内网引用（局域网 NAS / 本机服务是合理场景）。
+        with patch.dict(os.environ, {'VPC_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
+            res_json = _native_http('http://192.168.1.1/admin', '{}')
         res = json.loads(res_json)
         self.assertEqual(res['status'], 403)
         self.assertIn('blocked', res['content'])

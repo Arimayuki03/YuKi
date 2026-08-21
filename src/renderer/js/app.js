@@ -10,6 +10,7 @@
 const App = {
     currentView: 'home',
     _auxInited: false,
+    _configWatch: null, // 配置任务后台守望轮询句柄（waitConfigDone 超时后启动，单例）
     // 视图导航历史栈：鼠标侧键后退弹栈、前进走重做栈（仅视图级，不含弹窗）
     _navStack: [],
     _navForward: [],
@@ -101,6 +102,7 @@ const App = {
     async waitConfigDone(opts) {
         const quiet = !!(opts && opts.quiet);
         let loaded = 0;
+        let stillBusy = false;
         for (let i = 0; i < 15; i++) {
             let busy = false;
             try {
@@ -109,17 +111,50 @@ const App = {
             } catch (e) { /* IPC 异常忽略 */ }
             let t = null;
             try { t = await doAction('configTask', {}); } catch (e) { /* 后端未就绪，以 configState 为准 */ }
+            if (typeof Home !== 'undefined' && Home.renderRestoreProgress) Home.renderRestoreProgress(t);
             if (t && t.status === 'loading') busy = true;
             if (t && t.status === 'done' && t.summary && Number(t.summary.healthy ?? t.summary.sites) > 0) {
                 loaded = Number(t.summary.healthy ?? t.summary.sites);
             }
             if (!busy) break;
+            stillBusy = true;
             if (!quiet) showLoading();
             await new Promise((r) => setTimeout(r, 1000));
         }
         if (!quiet) hideLoading();
         if (loaded > 0) warnToast(`已自动载入上次配置：${loaded} 个站点`);
+        // 15s 超时仍在加载（大配置磁盘恢复/慢网络重载）：转入后台守望——
+        // 恢复/重载完成时若错过主进程 onConfigReloaded 事件（等待窗口已过、
+        // 或自动重载因 loading 被后端拒收），这里兜底刷新首页，否则用户会
+        // 一直停在示例源，表现为「重启后不加载缓存」。
+        if (stillBusy) this.watchConfigTask();
         return loaded;
+    },
+
+    /** 后台守望配置任务：每 3s 查 configTask，离开 loading 即刷新首页/直播页。
+     *  单例（重复调用共享一个轮询），最长 5 分钟自动停止；轮询同时驱动恢复进度条。 */
+    watchConfigTask() {
+        if (this._configWatch) return;
+        let polls = 0;
+        const timer = setInterval(async () => {
+            polls += 1;
+            let t = null;
+            try { t = await doAction('configTask', {}); } catch (e) { /* 后端瞬断忽略 */ }
+            if (typeof Home !== 'undefined' && Home.renderRestoreProgress) Home.renderRestoreProgress(t);
+            const busy = !t || t.status === 'loading';
+            if (busy && polls < 100) return;
+            clearInterval(timer);
+            this._configWatch = null;
+            if (t && t.status === 'done') {
+                if (typeof Home !== 'undefined' && Home._inited && Home.loadSites) {
+                    Promise.resolve().then(() => Home.loadSites()).catch(() => {});
+                }
+                if (typeof Live !== 'undefined' && Live._inited && Live.load) {
+                    Promise.resolve().then(() => Live.load()).catch(() => {});
+                }
+            }
+        }, 3000);
+        this._configWatch = timer;
     },
 
     initNav() {
@@ -214,11 +249,10 @@ $(async function bootstrap() {
         });
     }
 
-    const ok = await waitBackend();
-    if (!ok) {
-        warnToast('后端启动失败，请检查 python-backend');
-        return;
-    }
+    // UI 骨架先行绑定：此前导航/窗口按钮在 waitBackend 成功后才绑定，后端启动慢
+    // （大配置磁盘恢复、慢镜像 jar 下载）时整个窗口没有任何事件处理器——表现为
+    // 「页面卡死无反应，不能进行交互」，只能任务管理器强杀。先绑骨架再等后端，
+    // 等待期间用户可正常切换视图/最小化/关闭窗口。
     App.initNav();
     App.initBackTop();
     // 鼠标侧键前进/后退：主进程 app-command 转发 + 渲染层 mousedown 兜底（双通道去重）
@@ -234,6 +268,14 @@ $(async function bootstrap() {
         if (window.vpc.winMaximize) $('#win-max').on('click', () => window.vpc.winMaximize());
         if (window.vpc.winClose) $('#win-close').on('click', () => window.vpc.winClose());
     })();
+
+    showLoading('正在启动后端服务…');
+    const ok = await waitBackend();
+    hideLoading();
+    if (!ok) {
+        warnToast('后端启动失败，请检查 python-backend');
+        return;
+    }
     Player.init();
     Detail.init();
     Search.init();
@@ -241,16 +283,12 @@ $(async function bootstrap() {
     Live.init();
     // Kazumi 规则引擎前端模块（kimi UI，glm5.2 后端端点）
     if (typeof Kazumi !== 'undefined' && Kazumi.init) Kazumi.init();
-    // 有上次配置时等待主进程自动重载完成后再首次渲染首页（避免显示示例源）。
-    // 但本地有站点缓存时不再阻塞：先即时上屏缓存内容（Home.init 内预渲染），
-    // 重载在后台静默进行，完成后经 onConfigReloaded → Home.loadSites 刷新站点——
-    // 否则配置重载期间（最坏 15s+）用户只能对着全局 loading 干等。
-    if (typeof Home.hasSiteCache === 'function' && Home.hasSiteCache()) {
-        App.waitConfigDone({ quiet: true }).catch(() => { /* 后台轮询失败不影响启动 */ }); // 不 await、不动遮罩
-    } else {
-        await App.waitConfigDone(); // 无缓存（首启/缓存过期）：维持原行为防示例源闪现
-    }
+    // 首页先上屏：有站点缓存则预渲染秒出真实列表；无缓存由首页显示「正在恢复
+    // 上次的配置…」提示（后端恢复最坏 ~45s，全局 loading 根本等不完）。
+    // 配置恢复/自动重载一律后台等待——此前无缓存时会用全局遮罩阻塞 15-25s，
+    // 等完照样是示例源，体验极差；完成后由 configTask 守望/重载事件自动刷新。
     await Home.init();
+    App.waitConfigDone({ quiet: true }).catch(() => { /* 后台轮询失败不影响启动 */ });
     // 辅助面板（工具面板）惰性初始化一次
     if (!App._auxInited) { initAuxPanels(); App._auxInited = true; }
     // 启动进入页面（设置里可配置默认页；校验视图存在，否则首页）。

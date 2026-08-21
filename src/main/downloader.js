@@ -315,8 +315,16 @@ class Downloader extends EventEmitter {
         const rs = await Promise.allSettled(targets.map((s) => this.pause(s.gid)));
         return rs.filter((r) => r.status === 'fulfilled').map((r) => r.value);
     }
-    /** 全部恢复（返回被恢复的 gid 数组）。 */
-    unpauseAll() { return this._rpc('unpauseAll'); }
+    /** 全部恢复（返回被恢复的 gid 数组）。aria2 原生 unpauseAll 返回的是恢复数量
+     *  （数字而非 gid 列表），调用方按数组统计会导致恒报「没有已暂停的任务」；
+     *  故与 pauseAll 对齐：waiting 快照筛出 paused 任务逐个 unpause
+     *  （tellWaiting 含排队中任务，需按 status 过滤），返回实际恢复成功的 gid。 */
+    async unpauseAll() {
+        const waiting = await this.tellWaiting();
+        const targets = (waiting || []).filter((s) => s && s.gid && s.status === 'paused');
+        const rs = await Promise.allSettled(targets.map((s) => this.unpause(s.gid)));
+        return rs.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+    }
     // remove 仅适用于 active/waiting/paused；已停止（complete/error/removed）的
     // 任务用 forceRemove，再不行则从 stopped 列表 purge（不视为失败）
     async remove(gid) {

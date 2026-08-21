@@ -29,14 +29,15 @@ logger = logging.getLogger('vpc.kazumi.manager')
 _BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 
 # Bangumi API 端点（对齐 Kazumi api_endpoints.dart：bangumiAPIDomain / bangumiAPINextDomain）
-# 2026-08-09 按用户要求从 bangumi.lol 镜像改回官方域名 api.bgm.tv / next.bgm.tv
+# 2026-08-09 按用户要求从旧镜像（bangumi.lol）改回官方域名 api.bgm.tv / next.bgm.tv；
+# 2026-08-21 按用户要求镜像域名整体切换为 bangumi.pro。
 # （api.bangumi.tv 域名已被占用/不可达，官方 API 主机实为 api.bgm.tv）。
 # api.kazumi.fyi 为 Kazumi 官方镜像，留作签名镜像兜底。
 BANGUMI_API = 'https://api.bgm.tv'
 BANGUMI_API_NEXT = 'https://next.bgm.tv'
-# 全域名反代镜像（bangumi.lol，对齐镜像站说明：api.bgm.tv → api.bangumi.lol，next.bgm.tv → next.bangumi.lol）
-BANGUMI_MIRROR_API = 'https://api.bangumi.lol'
-BANGUMI_MIRROR_NEXT = 'https://next.bangumi.lol'
+# 全域名反代镜像（bangumi.pro，对齐镜像站说明：api.bgm.tv → api.bangumi.pro，next.bgm.tv → next.bangumi.pro）
+BANGUMI_MIRROR_API = 'https://api.bangumi.pro'
+BANGUMI_MIRROR_NEXT = 'https://next.bangumi.pro'
 BANGUMI_MIRROR = 'https://api.kazumi.fyi'  # 旧 kazumi 专属镜像（仅部分路径），保留常量向后兼容
 # bangumi 官方 API 的 WAF 会拦截 python-requests 默认 UA（部分端点直接 403），必须带应用 UA
 BANGUMI_UA = 'video-pc/0.1.0 (https://github.com/); kazumi'
@@ -82,11 +83,11 @@ class PluginManager:
     # ---------------------------------------------------------------- 镜像源（4.1）
 
     def _base_api(self):
-        """api.bgm.tv 类接口基址：镜像开启时走全域名反代 api.bangumi.lol（无需签名，全路径可用）。"""
+        """api.bgm.tv 类接口基址：镜像开启时走全域名反代 api.bangumi.pro（无需签名，全路径可用）。"""
         return BANGUMI_MIRROR_API if self.enable_bangumi_proxy else BANGUMI_API
 
     def _base_next(self):
-        """next.bgm.tv 类接口基址：镜像开启时走 next.bangumi.lol。"""
+        """next.bgm.tv 类接口基址：镜像开启时走 next.bangumi.pro。"""
         return BANGUMI_MIRROR_NEXT if self.enable_bangumi_proxy else BANGUMI_API_NEXT
 
     def set_mirror(self, bangumi=None, git=None):
@@ -710,7 +711,7 @@ class PluginManager:
         POST api.bgm.tv/v0/search/subjects 按 air_date 区间过滤 type=2（动画），
         sort=rank 拉取多页后按 id 去重，复用日历归一化补 name_cn/air_date，
         再按播出星期分桶为 [{weekday:{id}, items:[...]}]（与 bangumi_calendar 同形状）。
-        镜像开启时经 _base_api() 走全域名反代 api.bangumi.lol（免签名，全路径可用）。
+        镜像开启时经 _base_api() 走全域名反代 api.bangumi.pro（免签名，全路径可用）。
         start/end 形如 YYYY-MM-DD；失败或无结果返回 []。"""
         if not start or not end:
             return []
@@ -759,9 +760,9 @@ class PluginManager:
 
     def bangumi_trends(self, limit=24, offset=0):
         """Bangumi 番剧趋势榜单（next.bgm.tv /p1/trending/subjects），返回归一化 {items,total}。
-        镜像开启时经 _base_next() 走全域名反代 next.bangumi.lol（免签名，全路径可用）。
+        镜像开启时经 _base_next() 走全域名反代 next.bangumi.pro（免签名，全路径可用）。
         注意：该端点必须传 type/limit/offset，否则返回 400。"""
-        # 官方/镜像趋势（镜像开启时 _base_next() 指向 next.bangumi.lol）
+        # 官方/镜像趋势（镜像开启时 _base_next() 指向 next.bangumi.pro）
         try:
             rsp = http_client.get(
                 f'{self._base_next()}/p1/trending/subjects',
