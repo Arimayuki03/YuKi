@@ -1812,11 +1812,13 @@ app.whenReady().then(() => {
 
     function startDlPoll() {
         if (dlTimer) return;
-        // 启动即推一次：空闲自停机制下，进入下载页仍能立刻看到历史任务列表
+        // 启动即推一次：空闲自停机制下，进入下载页仍能立刻看到历史任务列表。
+        // 引擎冷启动期间 listAll 会阻塞等待 RPC 就绪，与立即解析的空列表竞速，
+        // 先把持久化恢复记录推出去渲染；实时任务由后续 1s 轮询补上。
         (async () => {
             try {
                 let items = [];
-                try { items = await dl.listAll(); } catch (e) { /* aria2 未就绪 */ }
+                try { items = await Promise.race([dl.listAll(), Promise.resolve([])]); } catch (e) { /* aria2 未就绪 */ }
                 send('vpc:dl-list', buildDlList(items, hls.list()));
                 persistInProgress(items, hls.list());
             } catch (e) { /* ignore */ }
@@ -1858,6 +1860,9 @@ app.whenReady().then(() => {
                 case 'init': {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     const dir = settings.get('dlDir') || app.getPath('downloads');
+                    // 先拉起轮询再等引擎：持久化恢复的历史任务立即渲染，aria2 启动
+                    // 不阻塞下载页首屏（引擎就绪后再次拉起，确保空闲自停后轮询照常）
+                    startDlPoll();
                     await startDlEngine(dir);
                     syncDlDir(dl.dir);
                     // m3u8 任务队列上限与「并发任务数」保持一致（HLS 不经 aria2，需独立同步）
