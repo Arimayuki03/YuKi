@@ -16,7 +16,7 @@ from runtime.android_policy import (  # noqa: E402
     ANDROID_ONLY_MESSAGE, ANDROID_WORKER_DECISION, SUPPORT_CEILING,
     android_worker_available)
 from runtime.android_worker_spike import (  # noqa: E402
-    ContractProbe, ProbeProcessRunner, SampleResult, evaluate_go,
+    ContractProbe, ProbeProcessRunner, evaluate_go,
     inspect_android_artifact, load_manifest, validate_method_result)
 from runtime.errors import RuntimeError as ContractError  # noqa: E402
 
@@ -154,9 +154,8 @@ class AndroidWorkerSpikeTest(unittest.TestCase):
         self.assertEqual('C1', SUPPORT_CEILING)
         self.assertEqual('NO_GO', ANDROID_WORKER_DECISION)
         self.assertFalse(android_worker_available(enabled=True, ready=True))
-        self.assertIn('仅支持 Android', ANDROID_ONLY_MESSAGE)
-        self.assertIn('C1', ANDROID_ONLY_MESSAGE)
-        self.assertIn('不会回退', ANDROID_ONLY_MESSAGE)
+        self.assertIn('Android/Dex/native', ANDROID_ONLY_MESSAGE)
+        self.assertIn('dex2jar/JVM', ANDROID_ONLY_MESSAGE)
         payload = ContractError('L2_SITE_REQUIRES_ANDROID').to_dict()
         self.assertEqual(ANDROID_ONLY_MESSAGE, payload['message'])
 

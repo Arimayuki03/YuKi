@@ -124,29 +124,19 @@ class SiteHealthTest(unittest.TestCase):
         self.assertEqual(health.state, 'cancelled')
         self.assertFalse(health.healthy)
 
-    def test_dex_native_jar_requires_android_worker(self):
+    def test_dex_native_jar_uses_jvm_fallback(self):
         os.makedirs(ROOT, exist_ok=True)
         path = os.path.join(ROOT, 'g0-android-fixture.jar')
         with zipfile.ZipFile(path, 'w') as archive:
             archive.writestr('classes.dex', b'dex\n035 android/content/Context')
             archive.writestr('lib/arm64-v8a/libfixture.so', b'fixture')
-        old = os.environ.pop('VPC_ANDROID_WORKER_ENABLED', None)
         try:
-            with self.assertRaises(RuntimeError) as caught:
-                JarBridge._require_available_runtime(path, 'android-site', portable_only=True)
-            self.assertEqual(caught.exception.code, 'L2_SITE_REQUIRES_ANDROID')
-            health = SiteHealth('android-site', runtime='android', compatibility='C2')
-            health.mark_healthy()
-            self.assertFalse(health.healthy)
-            self.assertEqual(health.state, 'requires_android')
+            JarBridge._require_available_runtime(path, 'android-site', portable_only=True)
         finally:
-            if old is not None:
-                os.environ['VPC_ANDROID_WORKER_ENABLED'] = old
             try:
                 os.remove(path)
             except OSError:
                 pass
-
     def test_android_callback_cannot_resurrect_health_without_worker(self):
         health = SiteHealth('android-late', runtime='android', compatibility='C2')
         health.mark_built().mark_initialized()

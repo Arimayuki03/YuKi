@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
@@ -390,6 +391,10 @@ class RuntimeSupervisorTest(unittest.TestCase):
             }]})
             summary = manager.load(config)
             self.assertEqual(summary['healthy'], 1, summary)
+            # 惰性初始化：load() 只建站不拉起 Worker；首次调用触发 Worker 自举
+            # init，resource_tree_spider 在 init 里派生 Python/Node 后代并写状态文件。
+            reloaded = manager.sites.sites[0]
+            self.assertEqual(reloaded.runner.homeContent(False), {'list': []})
             with open(pid_file, encoding='utf-8') as stream:
                 state = json.load(stream)
             state['workerPid'] = manager.sites.sites[0].runner.supervisor.pid
@@ -481,6 +486,14 @@ class RuntimeSupervisorTest(unittest.TestCase):
             pass
 
     def test_fifty_sources_with_ten_permanent_blocks_return_healthy_results(self):
+        # 本测试验证 aggregate_search 的协调与预算回收，不是全局 Worker 上限；
+        # 放开上限（生产默认 8，见 supervisor._MAX_WORKERS_DEFAULT）以保持
+        # 「50 源并发应答」的原始覆盖前提。
+        with mock.patch('runtime.supervisor._max_workers', return_value=64), \
+                mock.patch('runtime.supervisor._max_jar_workers', return_value=16):
+            self._fifty_sources_scenario()
+
+    def _fifty_sources_scenario(self):
         runners = []
         for index in range(50):
             runner = SupervisedRunner({

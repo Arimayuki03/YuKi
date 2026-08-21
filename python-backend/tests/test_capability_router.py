@@ -24,7 +24,6 @@ from jar_bridge import JarBridge, classify_jar_compatibility  # noqa: E402
 from runtime.capability_router import (  # noqa: E402
     ANDROID_ONLY_SIGNALS, COMPATIBILITY, WORKERS, capabilities_for, is_drpy,
     looks_like_jar, refine_with_jar, route_site)
-from runtime.errors import RuntimeError as RuntimeContractError  # noqa: E402
 from runtime.health import android_worker_enabled, infer_site_health  # noqa: E402
 
 TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
@@ -85,7 +84,6 @@ class RouteOrderTest(unittest.TestCase):
         self.assertEqual(got.rule, 'R2-python')
 
     # ----------------------------------------------------- R3 QuickJS/drpy
-
     def test_r3_quickjs_by_type_and_by_suffix(self):
         for entry in (site(type=4, api='https://fixture.invalid/js/site.js'),
                       site(type=4, api='https://fixture.invalid/js/opaque'),
@@ -105,19 +103,18 @@ class RouteOrderTest(unittest.TestCase):
         disguised = route_site(site(type=3, api='https://fixture.invalid/a/site.js.txt'))
         self.assertEqual(disguised.runtime, 'js')
 
-    def test_drpy_is_its_own_class_not_broken_js(self):
-        """drpy 依赖 pdfa/pdfh/pdft 等宿主全局，由独立 Node Worker (C1) 承载。"""
+    def test_drpy_is_recognized_and_routed_unsupported(self):
+        """drpy 引擎已移除：命中标记的站点固定 unsupported，不混进 QuickJS。"""
         for entry in (site(type=4, api='https://fixture.invalid/drpy2.min.js'),
                       site(type=3, api='https://fixture.invalid/lib/dr_py/index.js'),
                       site(type=4, api='https://fixture.invalid/x.js',
                            ext='https://fixture.invalid/drpy/rule.js')):
             got = route_site(entry, ext=entry.get('ext', ''))
-            self.assertEqual(got.runtime, 'drpy', entry['api'])
-            self.assertEqual(got.rule, 'R3-drpy', entry['api'])
-            self.assertEqual(got.error_code, '', entry['api'])
-            self.assertEqual(got.worker, 'drpy', 'drpy 由独立 Node Worker 承载')
-            self.assertEqual(got.compatibility, 'C1')
-            self.assertTrue(got.supported)
+            self.assertEqual(got.runtime, 'unsupported', entry['api'])
+            self.assertEqual(got.error_code, 'L2_SITE_UNSUPPORTED', entry['api'])
+            self.assertEqual(got.worker, '', '无 drpy Worker 可用')
+            self.assertEqual(got.compatibility, 'C0')
+            self.assertFalse(got.supported)
 
     def test_drpy_detection_does_not_fire_on_unrelated_words(self):
         for api in ('https://fixture.invalid/js/predrive.js',
@@ -171,7 +168,7 @@ class RouteOrderTest(unittest.TestCase):
 
 
 class RefineWithJarTest(unittest.TestCase):
-    """R4 → R5：拿到字节分级后才知道是 portable JVM 还是 Android-only。"""
+    """R4 → R5：拿到字节分级后选择 portable JVM 或 dex2jar/JVM 回退。"""
 
     def setUp(self):
         self.base = route_site(site(key='jarred', type=3, api='csp_Fixture'))
@@ -186,7 +183,7 @@ class RefineWithJarTest(unittest.TestCase):
         self.assertTrue(got.supported)
         self.assertEqual(got.jar_level, 'L0')
 
-    def test_dex_native_and_android_signals_all_land_on_r5(self):
+    def test_dex_native_and_android_signals_all_use_jvm_fallback(self):
         cases = [
             {'level': 'L1', 'signals': ['dex'], 'hasDex': True, 'hasNative': False},
             {'level': 'L3', 'signals': ['native-library'], 'hasDex': False,
@@ -195,32 +192,28 @@ class RefineWithJarTest(unittest.TestCase):
              'hasNative': False},
             {'level': 'L4', 'signals': ['drm-or-device-license'], 'hasDex': False,
              'hasNative': False},
-            # 关键回归：只有 android-api 信号、level 仍是 L1、既无 dex 也无 native。
-            # 这类 JAR 曾被路由判为「portable」而加载器判为「需要 Android」。
             {'level': 'L1', 'signals': ['android-api'], 'hasDex': False,
              'hasNative': False},
         ]
         for report in cases:
             got = refine_with_jar(self.base, report, android_enabled=False)
-            self.assertEqual(got.runtime, 'android', report)
-            self.assertEqual(got.rule, 'R5-android', report)
-            self.assertEqual(got.compatibility, 'C2', report)
-            self.assertEqual(got.error_code, 'L2_SITE_REQUIRES_ANDROID', report)
-            self.assertNotEqual(got.rule, 'R4-jvm-jar',
-                               '已知 Android-only 的 JAR 绝不回落普通 JVM')
+            self.assertEqual(got.runtime, 'jar', report)
+            self.assertEqual(got.rule, 'R5-jvm-fallback', report)
+            self.assertEqual(got.compatibility, 'C1', report)
+            self.assertEqual(got.error_code, '', report)
+            self.assertTrue(got.supported, report)
+            self.assertEqual(got.details.get('fallback'), 'dex2jar/JVM', report)
 
-    def test_no_go_policy_overrides_a_simulated_ready_worker(self):
+    def test_android_signals_use_fallback_even_with_worker_handshake(self):
         got = refine_with_jar(self.base,
                               {'level': 'L1', 'signals': ['dex'], 'hasDex': True,
                                'hasNative': False},
                               android_enabled=True)
-        self.assertEqual((got.runtime, got.rule), ('android', 'R5-android'))
-        self.assertEqual(got.error_code, 'L2_SITE_REQUIRES_ANDROID')
-        self.assertFalse(got.supported)
-        self.assertFalse(got.details.get('androidWorkerEnabled'))
+        self.assertEqual((got.runtime, got.rule), ('jar', 'R5-jvm-fallback'))
+        self.assertEqual(got.error_code, '')
+        self.assertTrue(got.supported)
         self.assertTrue(got.details.get('androidWorkerHandshake'))
-        self.assertEqual(got.details.get('supportCeiling'), 'C1')
-        self.assertEqual(got.details.get('androidWorkerDecision'), 'NO_GO')
+        self.assertEqual(got.details.get('fallback'), 'dex2jar/JVM')
 
     def test_non_jar_decision_is_returned_untouched(self):
         cms = route_site(site(type=1, api='https://fixture.invalid/a'))
@@ -254,7 +247,7 @@ class RouterMatchesLoaderTest(unittest.TestCase):
         self.assertEqual(set(ANDROID_ONLY_SIGNALS), loader_signals,
                          '与 jar_bridge._require_available_runtime 的判据必须完全一致')
 
-    def test_real_android_jar_is_rejected_by_both_paths(self):
+    def test_real_android_jar_uses_fallback_in_both_paths(self):
         os.makedirs(TEST_ROOT, exist_ok=True)
         path = os.path.join(TEST_ROOT, 'c24-android-fixture.jar')
         with zipfile.ZipFile(path, 'w') as archive:
@@ -263,22 +256,12 @@ class RouterMatchesLoaderTest(unittest.TestCase):
         report = classify_jar_compatibility(path)
         self.assertTrue(report['hasDex'])
 
-        saved = {k: os.environ.pop(k, None)
-                 for k in ('VPC_ANDROID_WORKER_ENABLED', 'VPC_ANDROID_WORKER_READY')}
-        try:
-            self.assertFalse(android_worker_enabled())
-            decision = refine_with_jar(
-                route_site(site(key='android-site', type=3, api='csp_Android')), report)
-            self.assertEqual(decision.error_code, 'L2_SITE_REQUIRES_ANDROID')
-            with self.assertRaises(RuntimeContractError) as caught:
-                JarBridge._require_available_runtime(path, 'android-site',
-                                                     portable_only=True)
-            self.assertEqual(caught.exception.code, decision.error_code,
-                             '加载器与路由必须给出同一个错误码')
-        finally:
-            for key, value in saved.items():
-                if value is not None:
-                    os.environ[key] = value
+        decision = refine_with_jar(
+            route_site(site(key='android-site', type=3, api='csp_Android')), report)
+        self.assertEqual(decision.runtime, 'jar')
+        self.assertEqual(decision.rule, 'R5-jvm-fallback')
+        self.assertEqual(decision.error_code, '')
+        JarBridge._require_available_runtime(path, 'android-site', portable_only=True)
 
     def test_no_go_policy_cannot_be_enabled_by_handshake_flags(self):
         saved = {k: os.environ.get(k)

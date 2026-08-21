@@ -85,6 +85,25 @@ class TestProxyGateway(unittest.TestCase):
         self.assertIn('do=pan', result)
         self.assertEqual(sites.items['py-site'].runner.local_calls, [])
 
+    def test_pan_fallback_excludes_request_credentials(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        result = dispatch({
+            'do': 'pan', 'site': 'quark', 'fileId': 'fid',
+            'fileToken': 'a+b/c==', 'Cookie': 'secret-cookie',
+            'authorization': 'Bearer secret', 'user-agent': 'private-agent',
+            'referer': 'https://private.test/', 'range': 'bytes=0-1',
+            '_body': b'secret-body',
+        }, Sites())
+        query = parse_qs(urlsplit(result).query)
+        self.assertEqual(query['fileToken'], ['a+b/c=='])
+        self.assertNotIn('Cookie', query)
+        self.assertNotIn('authorization', query)
+        self.assertNotIn('user-agent', query)
+        self.assertNotIn('referer', query)
+        self.assertNotIn('range', query)
+        self.assertNotIn('_body', query)
+
     def test_health_check_does_not_require_site(self):
         self.assertEqual(dispatch({'do': 'ck'}, Sites()), 'ok')
 

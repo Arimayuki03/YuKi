@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
-"""全运行时六方法契约测试（JAR、JS、Python、drpy、CMS、Pan）
+"""全运行时六方法契约测试（JAR、JS、Python、CMS、Pan）
 涵盖：
 1. init / homeContent / categoryContent / detailContent / searchContent / playerContent (及 localProxy)
 2. 正常、异常、超时、取消测试
 3. /proxy 统一数据面真实的 HTTP 回环测试（GET/POST/Headers/Range 206/流式/断连）
 """
-import asyncio
-import io
 import json
 import os
 import sys
 import threading
-import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
@@ -26,10 +23,6 @@ if JS_ENGINE_DIR not in sys.path:
 from cms_spider import CmsSpider
 from js_spider import make_js_spider_class
 from quickjs_host import JsEngine
-from runtime.contracts import RuntimeRequest
-import proxy_gateway
-from proxy_contract import ProxyResult
-from server import build_proxy_response
 
 
 class MockStreamServer(BaseHTTPRequestHandler):

@@ -21,10 +21,8 @@ if JS_ENGINE_DIR not in sys.path:
     sys.path.insert(0, JS_ENGINE_DIR)
 
 from cms_spider import CmsSpider
-from js_spider import make_js_spider_class
-from quickjs_host import JsEngine, KV_MAX_SITE_BYTES
+from quickjs_host import JsEngine
 import proxy_gateway
-import proxy_contract
 from proxy_contract import ProxyResult
 from server import build_proxy_response
 
@@ -156,7 +154,7 @@ class TestN35ProxyGateway(unittest.TestCase):
 
 
     def test_esm_module_caching(self):
-        from module_resolver import ModuleBundle, _GLOBAL_MODULE_CACHE
+        from module_resolver import ModuleBundle
         fetch_count = 0
         def mock_fetch(url):
             nonlocal fetch_count

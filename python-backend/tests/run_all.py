@@ -27,7 +27,7 @@ STAGES = [
     ('runtime-contract', [PY, os.path.join(HERE, 'test_runtime_contract.py')]),
     ('runtime-supervisor', [PY, os.path.join(HERE, 'test_runtime_supervisor.py')]),
     ('site-health', [PY, os.path.join(HERE, 'test_site_health.py')]),
-    ('config-compat-offline', [PY, os.path.join(HERE, 'test_config_compat_offline.py')]),
+    ('config-compat', [PY, os.path.join(HERE, 'test_config_compat.py'), '--offline']),
     ('port-generalization', [PY, os.path.join(HERE, 'test_port_generalization.py')]),
     ('quark-pan', [PY, os.path.join(HERE, 'test_quark_pan.py')]),
     ('proxy-contract', [PY, os.path.join(HERE, 'test_proxy_contract.py')]),
@@ -50,6 +50,13 @@ STAGES = [
     ('capability-router', [PY, os.path.join(HERE, 'test_capability_router.py')]),
     ('config-security', [PY, os.path.join(HERE, 'test_config_security.py')]),
     ('android-worker-spike', [PY, os.path.join(HERE, 'test_android_worker_spike.py')]),
+    # Q7.1 ~ Q7.5 全套验收套件
+    ('q7-offline-fixtures', [PY, os.path.join(HERE, 'test_q7_offline_fixtures.py')]),
+    ('q7-runtime-contracts', [PY, os.path.join(HERE, 'test_q7_runtime_contracts.py')]),
+    ('q7-fault-injection', [PY, os.path.join(HERE, 'test_q7_fault_injection.py')]),
+    ('q7-perf-metrics', [PY, os.path.join(HERE, 'test_q7_perf_metrics.py')]),
+    # R8.1 ~ R8.3 功能开关、数据迁移与发布门禁
+    ('r8-release-gates', [PY, os.path.join(HERE, 'test_r8_release_gates.py')]),
 ]
 
 SKIP_DIRS = {'.venv', '__pycache__', 'tests'}

@@ -406,6 +406,37 @@ class BuildSiteExtContractTest(_ResolverCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_jar_runner_preserves_ext_for_worker_init(self):
+        """JAR Worker 必须收到和 Site 相同的 ext，否则部分源会拿到空站点地址。"""
+        import java_probe
+        import jar_bridge
+
+        ext_url = self.fx.url('ext/json')
+        shared_jar = self.fx.url('jar/shared.jar') + ';' + ('a' * 32)
+
+        def norm_jar_src(value):
+            if str(value).startswith('csp_'):
+                return '', '', ''
+            return self.fx.url('jar/shared.jar'), 'a' * 32, ''
+
+        with mock.patch.object(java_probe, 'find_java', return_value=True), \
+                mock.patch.object(jar_bridge.JarBridge, 'norm_jar_src',
+                                   side_effect=norm_jar_src), \
+                mock.patch.object(jar_bridge.JarBridge, 'download_jar',
+                                   return_value='C:/fixture/shared.jar'), \
+                mock.patch.object(jar_bridge.JarBridge, 'map_class_name',
+                                   return_value='com.github.catvod.spider.Fixture'), \
+                mock.patch.object(jar_bridge, 'classify_jar_compatibility',
+                                   return_value={'level': 'L1', 'signals': [],
+                                                 'hasDex': False, 'hasNative': False}):
+            site = self.manager._build_site({
+                'key': 'jar_ext', 'name': 'JAR', 'type': 3,
+                'api': 'csp_Fixture', 'ext': ext_url,
+            }, self.base, shared_jar)
+
+        self.assertEqual(site.health.runtime, 'jar')
+        self.assertEqual(site.ext, ext_url)
+        self.assertEqual(site.runner.spec.get('ext'), ext_url)
     def test_type4_receives_expanded_text(self):
         before = self.fx.hits('/ext/json')
         site = self.manager._build_site({
@@ -415,7 +446,10 @@ class BuildSiteExtContractTest(_ResolverCase):
         self.assertEqual(site.health.runtime, 'js')
         self.assertTrue(site.ext_detail.expanded_ok, site.ext_detail.error)
         self.assertIn('ext-json-payload', site.ext)
-        self.assertEqual(site.runner.inits, [site.ext])
+        # 惰性初始化：建站不触发 init，展开后的 ext 经 spec['ext'] 交付，
+        # Worker 子进程在首次调用前的自举阶段执行 init。
+        self.assertEqual(site.runner.inits, [])
+        self.assertEqual(site.runner.spec.get('ext'), site.ext)
         self.assertEqual(self.fx.hits('/ext/json') - before, 1,
                          'type=4 在 homeContent 前取一次 ext')
 
@@ -429,7 +463,8 @@ class BuildSiteExtContractTest(_ResolverCase):
         }, self.base, '')
         self.assertEqual(site.health.runtime, 'python')
         self.assertEqual(site.ext, ext_url, 'type=3 拿到的必须是原始字符串')
-        self.assertEqual(site.runner.inits, [ext_url])
+        # 惰性初始化：原始 URL 原样进 spec，由 spider 首次调用前自举 init。
+        self.assertEqual(site.runner.spec.get('ext'), ext_url)
         self.assertFalse(site.ext_detail.expanded_ok)
         self.assertEqual(self.fx.hits('/etag/ext.json'), before,
                          'type=3 不得触发 fetchExt')
@@ -443,7 +478,8 @@ class BuildSiteExtContractTest(_ResolverCase):
         self.assertEqual(site.health.runtime, 'cms')
         self.assertIsInstance(site.ext, str)
         self.assertEqual(site.ext, '{"cate":["电影"],"n":2}')
-        self.assertEqual(site.runner.inits, [site.ext])
+        # 惰性初始化：对象 ext 归一成 JSON 字符串后经 spec['ext'] 交付。
+        self.assertEqual(site.runner.spec.get('ext'), site.ext)
 
     def test_one_broken_ext_does_not_affect_the_other_site(self):
         good = self.manager._build_site({

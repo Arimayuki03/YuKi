@@ -12,6 +12,7 @@ if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
 from play_contract import normalize_play_result  # noqa: E402
+from server import _is_ephemeral_play_result  # noqa: E402
 from proxy_contract import decode_proxy_body, normalize_proxy_url  # noqa: E402
 
 
@@ -29,11 +30,45 @@ class TestPlayContract(unittest.TestCase):
             'custom': {'keep': True},
         }, site_headers={'User-Agent': 'site-agent'}, flag='线路A')
         self.assertEqual(result['parse'], 1)
+        self.assertEqual(result['jx'], 1)
         self.assertEqual(result['header']['Referer'], 'https://site.test/')
         self.assertEqual(result['header']['user-agent'], 'spider-agent')
         self.assertEqual(result['subs'][0]['url'], 'https://site.test/a.vtt')
         self.assertEqual(result['position'], 12000)
         self.assertEqual(result['custom'], {'keep': True})
+
+    def test_jx_does_not_overwrite_an_explicit_parse_extension(self):
+        result = normalize_play_result({
+            'url': 'https://media.test/a.m3u8', 'jx': 1, 'parse': 4,
+        })
+        self.assertEqual(result['parse'], 4)
+        self.assertEqual(result['jx'], 1)
+
+    def test_all_stable_fields_and_site_play_url_are_preserved(self):
+        result = normalize_play_result({
+            'url': 'episode-id', 'parse': 2, 'headers': {'Authorization': 'Bearer x'},
+            'format': 'video/mp4', 'subs': [], 'position': '12.5',
+            'drm': None, 'msg': 'ok', 'code': '200', 'proxy': {'do': 'jar'},
+            'futureField': 42,
+        }, site_play_url='https://parse.test/?url=', flag='vip')
+        for field in ('url', 'parse', 'jx', 'playUrl', 'header', 'headers', 'format',
+                      'subs', 'position', 'flag', 'drm', 'msg', 'code', 'proxy'):
+            self.assertIn(field, result)
+        self.assertEqual(result['parse'], 2)
+        self.assertEqual(result['playUrl'], 'https://parse.test/?url=')
+        self.assertEqual(result['futureField'], 42)
+
+    def test_header_order_is_site_then_spider_then_headers_alias_case_insensitive(self):
+        result = normalize_play_result({
+            'url': 'https://media.test/v.mp4',
+            'header': {'referer': 'https://spider.test/', 'Cookie': 'spider=1'},
+            'headers': {'Referer': 'https://alias.test/', 'cookie': 'alias=2',
+                        'Authorization': 'Bearer final'},
+        }, site_headers={'Referer': 'https://site.test/', 'User-Agent': 'site-agent'})
+        self.assertEqual(len([k for k in result['header'] if k.lower() == 'referer']), 1)
+        self.assertEqual(result['header']['Referer'], 'https://alias.test/')
+        self.assertEqual(result['header']['cookie'], 'alias=2')
+        self.assertEqual(result['header']['Authorization'], 'Bearer final')
 
     def test_empty_url_is_not_replaced_by_original_id(self):
         result = normalize_play_result({'parse': 1}, flag='f', original_id='episode-page')
@@ -44,6 +79,18 @@ class TestPlayContract(unittest.TestCase):
         result = normalize_play_result('https://media.test/v.mp4')
         self.assertEqual(result['url'], 'https://media.test/v.mp4')
         self.assertEqual(result['parse'], 0)
+
+    def test_malformed_result_is_an_explicit_error(self):
+        result = normalize_play_result('not a url')
+        self.assertEqual(result['url'], '')
+        self.assertIn('not a url', result['error'])
+
+    def test_signed_cdn_results_are_never_long_cached(self):
+        self.assertTrue(_is_ephemeral_play_result({
+            'url': 'https://cdn.test/v.mp4?X-Amz-Signature=abc&X-Amz-Expires=60'}))
+        self.assertTrue(_is_ephemeral_play_result({
+            'url': 'https://cdn.test/v.mp4', 'oneTime': True}))
+        self.assertFalse(_is_ephemeral_play_result({'url': 'https://cdn.test/static.mp4'}))
 
     def test_proxy_url_is_encoded_once_and_site_scoped(self):
         value = normalize_proxy_url(

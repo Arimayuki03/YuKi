@@ -113,6 +113,20 @@ class TestProxyContract(unittest.TestCase):
         result = normalize_proxy_result(response)
         self.assertEqual(result.body, b'content-body')
 
+    def test_response_headers_strip_credentials_and_hop_by_hop(self):
+        result = normalize_proxy_result((302, 'text/plain', b'', {
+            'Cookie': 'secret', 'Set-Cookie': 'secret',
+            'Connection': 'close', 'Transfer-Encoding': 'chunked',
+            'Location': 'http://127.0.0.1:9978/proxy?do=pan',
+            'X-Test': 'ok',
+        }))
+        self.assertNotIn('Cookie', result.headers)
+        self.assertNotIn('Set-Cookie', result.headers)
+        self.assertNotIn('Connection', result.headers)
+        self.assertNotIn('Transfer-Encoding', result.headers)
+        self.assertEqual(result.headers['Location'], 'http://127.0.0.1:9978/proxy?do=pan')
+        self.assertEqual(result.headers['X-Test'], 'ok')
+
     def test_server_builds_streaming_response(self):
         import server  # noqa: PLC0415
         from starlette.responses import StreamingResponse  # noqa: PLC0415

@@ -78,6 +78,31 @@ class TestProxyStream(unittest.TestCase):
             handler._stream_forward('https://cdn.test/bad-range', {}, True)
         self.assertIn(('status', 416), handler.events)
 
+    def test_octet_stream_is_normalized_for_the_player(self):
+        """夸克 file/download 直链回 application/octet-stream。
+
+        照原样透传，mpv 的格式探测和宿主的媒体探测都会把它判成非媒体而拒播；
+        明确的媒体类型（video/audio/HLS）必须原样保留，不能被覆盖成 mp4；
+        明确的文本/接口类型（HTTP 200 的软失败）也要原样保留，否则真正的
+        失败原因会被伪装成「视频格式不支持」。
+        """
+        for upstream, expected in (
+                ('application/octet-stream', 'video/mp4'),
+                ('binary/octet-stream', 'video/mp4'),
+                ('application/force-download', 'video/mp4'),
+                ('', 'video/mp4'),
+                ('application/vnd.apple.mpegurl', 'application/vnd.apple.mpegurl'),
+                ('video/x-matroska', 'video/x-matroska'),
+                ('audio/mpeg', 'audio/mpeg'),
+                ('text/html; charset=utf-8', 'text/html; charset=utf-8'),
+                ('application/json', 'application/json'),
+        ):
+            handler = self._handler()
+            with patch.object(go_proxy, '_fetch', return_value=_Response(
+                    200, {'Content-Type': upstream})):
+                handler._stream_forward('https://cdn.test/pan', {}, True)
+            self.assertIn(('header', 'Content-Type', expected), handler.events, upstream)
+
     def test_legacy_url_probe_does_not_wrap_412_as_200(self):
         handler = object.__new__(go_proxy._Handler)
         handler.headers = {}

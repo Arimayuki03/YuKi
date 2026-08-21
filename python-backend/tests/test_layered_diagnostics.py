@@ -53,7 +53,12 @@ class TestLayeredDiagnostics(unittest.TestCase):
                        any('[L3:jar]' in str(s) for s in summary['skipped']))
 
     def test_js_failure_categorization(self):
-        """验证 JS spider 失败被分类为 L3:js 错误"""
+        """惰性初始化后，坏 JS 不再在载入期失败（L3:js 推迟到首次调用）。
+
+        载入期为几十上百个站点各拉起 Worker 校验脚本代价过高（见
+        `ConfigManager._initialize_site`），因此坏脚本站点照常建成，
+        `[L3:js]` 只会出现在运行期诊断，不再进建站聚合。
+        """
         bad_js = '''
 // 故意缺少 __jsEvalReturn 和 default export
 function badSpider() { return {}; }
@@ -64,12 +69,13 @@ function badSpider() { return {}; }
             ]
         }
         summary = self.cfg.load(json.dumps(config))
-        self.assertEqual(summary['sites'], 0)
-        self.assertTrue(summary['build_errors']['js_failed'] > 0)
-        self.assertTrue(any('[L3:js]' in s for s in summary['skipped']))
+        self.assertEqual(summary['sites'], 1,
+                         '坏 JS 站点在惰性初始化下照常建成')
+        self.assertEqual(summary['build_errors']['js_failed'], 0)
+        self.assertEqual(len(summary['skipped']), 0)
 
     def test_drpy_failure_categorization(self):
-        """验证 drpy 规则在网络不可达或加载失败时被正确诊断与分类"""
+        """验证 drpy 源被固定标记为 unsupported 并进入分层诊断（引擎已移除）"""
         config = {
             'sites': [
                 {'key': 'drpy1', 'name': 'Drpy源', 'type': 3,
@@ -92,16 +98,23 @@ function badSpider() { return {}; }
             ]
         }
         summary = self.cfg.load(json.dumps(config))
-        self.assertEqual(summary['sites'], 0)
+        # bad_type(type99) 与 drpy 源在载入期必然跳过（R6 / drpy 固定 unsupported）；
+        # 坏 JS 站点因惰性初始化照常建成——L3:js 推迟到首次调用。
+        self.assertEqual(summary['sites'], 1)
+        self.assertEqual(len(summary['skipped']), 2)
         # 至少有 type_unsupported
         self.assertTrue(summary['build_errors']['type_unsupported'] >= 1)
 
     def test_successful_site_no_errors(self):
-        """验证成功加载的站点不计入错误统计"""
+        """验证成功加载的站点不计入错误统计
+
+        api 用公网 IP 字面量：域名（如 example.com）在本机/部分网络环境会被
+        解析到内网段，触发安全护栏的 private_network_blocked，与测试语义无关。
+        """
         config = {
             'sites': [
                 {'key': 'cms1', 'name': 'CMS源', 'type': 0,
-                 'api': 'http://example.com/api.php/provide/vod/'},
+                 'api': 'http://93.184.216.34/api.php/provide/vod/'},
             ]
         }
         summary = self.cfg.load(json.dumps(config))
@@ -133,12 +146,40 @@ function badSpider() { return {}; }
             config_module.fetch_text_diagnostics = original
 
     def test_parse_one_without_parses_gets_l4_message(self):
+        """没有解析器时 L4 只是**非致命** warning：播放地址还在，渲染层继续走
+        隐藏窗口嗅探（对齐上游 ParseJob 的 type 0 回退），不能把整条线路判死。"""
         import server
         from server import _attach_jar_error
 
         server.config_mgr.parses = []
         body = _attach_jar_error(None, json.dumps({'url': 'https://example/video', 'parse': 1}), flag='f')
-        self.assertIn('当前配置未含匹配该线路的解析接口', body)
+        data = json.loads(body)
+        self.assertIn('当前配置未含可用的解析接口', data['warning']['message'])
+        self.assertEqual(data['warning']['code'], 'L4_PARSE_UNAVAILABLE')
+        self.assertNotIn('error', data)
+        self.assertEqual(data['url'], 'https://example/video')
+        # 没有地址才是真的无从播放：保留致命 error，由 HTTP 层提升为 424。
+        body = _attach_jar_error(None, json.dumps({'url': '', 'parse': 1}), flag='f')
+        self.assertEqual(json.loads(body)['error']['code'], 'L4_PARSE_UNAVAILABLE')
+
+    def test_parse_one_with_ext_flag_parser_is_not_reported_unavailable(self):
+        """真实 TVBox 配置把线路白名单写在 ``ext.flag``，且上游只把它当偏好：
+        线路没被任何解析器点名也不能判定「无解析接口」。"""
+        import server
+        from server import _attach_jar_error
+
+        server.config_mgr.parses = [
+            {'name': '解析1', 'type': 1, 'url': 'https://jx.test/?url=',
+             'ext': {'flag': ['qiyi', 'qq']}},
+        ]
+        try:
+            for flag in ('qiyi', 'm3u8', ''):
+                data = json.loads(_attach_jar_error(
+                    None, json.dumps({'url': 'https://example/video', 'parse': 1}), flag=flag))
+                self.assertNotIn('error', data)
+                self.assertNotIn('warning', data)
+        finally:
+            server.config_mgr.parses = []
 
     def test_quickjs_missing_global_is_logged(self):
         engine = JsEngine(site_key='diagnostic-test')
