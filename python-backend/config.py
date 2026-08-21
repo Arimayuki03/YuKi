@@ -29,7 +29,7 @@ import hoststate
 from site_manager import Site
 from js_spider import make_js_spider_class
 from runtime.errors import RuntimeError as RuntimeContractError, error_from_exception, redact_sensitive
-from runtime.health import infer_site_health, android_worker_enabled
+from runtime.health import infer_site_health
 from runtime.supervised_runner import SupervisedRunner
 from runtime.capability_router import capabilities_for, refine_with_jar, route_site
 from runtime.config_security import (
@@ -39,6 +39,7 @@ from runtime.config_snapshot import (
     ConfigFetchResult, ConfigSnapshot, ParsedConfig, RepoTrail, content_hash,
     make_fetch_result, normalize_site_entry)
 from runtime.ext_resolver import ExtCancelled, ExtResolver
+from runtime.config_cache import ConfigRepositoryCache
 
 logger = logging.getLogger('vpc.config')
 
@@ -311,6 +312,22 @@ class ConfigManager:
         self.reuse_count = 0
         self._ctx = None
         self._ctx_lock = threading.Lock()
+        self.repository_cache = None
+        self.cache_restored = False
+        self.cache_age = 0
+        self._cache_documents = {}
+        self._cache_manifest_text = ''
+        self._restoring_documents = {}
+
+    def configure_repository_cache(self):
+        """Bind the repository cache after hoststate has loaded user directories."""
+        self.repository_cache = ConfigRepositoryCache(
+            os.path.join(hoststate.get_cache_dir(), 'config'))
+
+    def _repository_cache(self):
+        if self.repository_cache is None:
+            self.configure_repository_cache()
+        return self.repository_cache
 
     # ------------------------------------------------ 多仓条目偏好（T40）
 
@@ -349,7 +366,20 @@ class ConfigManager:
         except Exception:
             pass
 
-    # ------------------------------------------------------------ 入口
+    @staticmethod
+    def _normalize_repo_entry(item):
+        """兼容 TVBox/FongMi 多仓常见的 URL 条目写法。"""
+        if isinstance(item, str):
+            value = item.strip()
+            return {'name': '', 'url': value} if value else None
+        if not isinstance(item, dict):
+            return None
+        url = (item.get('url') or item.get('urlStr') or item.get('source')
+               or item.get('sourceUrl') or item.get('link') or '')
+        if isinstance(url, (dict, list)):
+            return None
+        name = item.get('name') or item.get('title') or item.get('key') or ''
+        return {'name': str(name), 'url': str(url).strip()}
 
     def _resolve_repo_url(self, base, sub):
         """多仓子仓地址：相对路径以多仓配置源 URL 为基址，并过 C2.5 安全边界。
@@ -381,6 +411,11 @@ class ConfigManager:
         with self._ctx_lock:
             self._ctx = _LoadContext(url_or_json, allow_local_file=allow_local_file,
                                      cancel_event=cancel_event, budget=budget)
+        if not getattr(self, '_restoring_cache', False):
+            self.cache_restored = False
+            self.cache_age = 0
+        self._cache_documents = {}
+        self._cache_manifest_text = ''
         ctx = self._ctx
         try:
             return self._load_inner(url_or_json, ctx, _text=_text, force=force)
@@ -392,14 +427,32 @@ class ConfigManager:
         ctx.check()
         if _text is not None:
             text = _text
-            fetch = make_fetch_result('(inline)', transport='inline',
-                                      raw=str(_text).encode('utf-8', errors='replace'),
-                                      started=ctx.started)
+            cached_restore = bool(getattr(self, '_restoring_cache', False))
+            source = (str(url_or_json) if str(url_or_json).startswith(('http://', 'https://'))
+                      else '(inline)')
+            fetch = make_fetch_result(
+                source,
+                transport='disk-cache' if cached_restore else ('inline' if source == '(inline)' else 'memory'),
+                raw=str(_text).encode('utf-8', errors='replace'),
+                final_url=str(url_or_json) if source != '(inline)' else '',
+                started=ctx.started, from_cache=cached_restore)
         else:
             text, fetch = self._fetch_config_document(url_or_json, ctx)
         cfg = parse_config_json(text)
         ctx.check()
-        if not isinstance(cfg.get('sites'), list) and isinstance(cfg.get('urls'), list) and cfg['urls']:
+        repo_urls = cfg.get('urls')
+        if isinstance(repo_urls, dict):
+            # 兼容部分影视仓把仓名直接作为对象 key 的写法。
+            repo_urls = [dict(value, name=key) if isinstance(value, dict)
+                         else {'name': key, 'url': value}
+                         for key, value in repo_urls.items()]
+            cfg = dict(cfg)
+            cfg['urls'] = repo_urls
+        if (not isinstance(cfg.get('sites'), list)
+                and isinstance(cfg.get('urls'), list) and cfg['urls']):
+            manifest_base = fetch.base_url or str(url_or_json)
+            self._cache_documents = {str(manifest_base): str(text)}
+            self._cache_manifest_text = str(text)
             return self._load_depot(url_or_json, cfg, fetch, ctx, force=force)
         if not isinstance(cfg.get('sites'), list):
             raise ValueError('[L1:parse] invalid config: missing sites')
@@ -409,19 +462,55 @@ class ConfigManager:
         if reused is not None:
             return reused
         prepared = self._prepare(cfg, fetch.base_url or url_or_json, fetch=fetch)
+        prepared['_cache_text'] = text
         prepared['snapshot'].source_hash = fetch.content_hash
         return self._validate_and_swap(prepared, force=force)
 
-    # ------------------------------------------------------- 多仓（depot）
+    def restore_cached(self, source_url=''):
+        """Restore the last validated repository without network access."""
+        cached = self._repository_cache().load()
+        if cached is None:
+            return None
+        source = str(source_url or cached.source_url or '')
+        if not source.startswith(('http://', 'https://')):
+            return None
+        if source_url and str(cached.source_url or '') != source:
+            logger.info('config cache source mismatch; ignoring cached repository')
+            return None
+        try:
+            self._restoring_documents = dict(cached.documents or {})
+            self._restoring_documents.setdefault(source, cached.text)
+            self._restoring_cache = True
+            summary = self.load(source, _text=cached.text)
+            if self.snapshot is not None:
+                self.snapshot.fetch.final_url = cached.final_url or self.snapshot.fetch.final_url
+                self.snapshot.fetch.etag = cached.etag
+                self.snapshot.fetch.last_modified = cached.last_modified
+                self.snapshot.fetch.content_hash = cached.content_hash or self.snapshot.fetch.content_hash
+            self.cache_restored = True
+            self.cache_age = max(0, int(time.time() - cached.saved_at))
+            summary['cached'] = True
+            summary['cacheAge'] = self.cache_age
+            return summary
+        except Exception:
+            logger.warning('cached config restore failed', exc_info=True)
+            return None
+        finally:
+            self._restoring_cache = False
+            self._restoring_documents = {}
+
 
     def _load_depot(self, url_or_json, cfg, fetch, ctx, *, force=False):
         """顶层 `urls` 仓库集：按序回退到第一个可用子仓，并记录完整轨迹。"""
         if str(fetch.transport) == 'depot':
             raise ValueError('[L1:parse] multi-repo nesting too deep')
-        trail = RepoTrail(is_depot=True, declared=len(cfg['urls']))
-        entries = cfg['urls'][:MAX_MULTI_REPO_ENTRIES]
-        if len(cfg['urls']) > MAX_MULTI_REPO_ENTRIES:
-            trail.truncated = len(cfg['urls']) - len(entries)
+        raw_entries = cfg.get('urls') or []
+        normalized = [self._normalize_repo_entry(item) for item in raw_entries]
+        normalized = [item for item in normalized if item is not None]
+        trail = RepoTrail(is_depot=True, declared=len(raw_entries))
+        entries = normalized[:MAX_MULTI_REPO_ENTRIES]
+        if len(raw_entries) > MAX_MULTI_REPO_ENTRIES:
+            trail.truncated = len(raw_entries) - len(entries)
             logger.info('multi-repo: only first %s of %s entries tried',
                         MAX_MULTI_REPO_ENTRIES, len(cfg['urls']))
         # T40：优先重试上次成功的条目（置顶），保持 lives 等数据稳定
@@ -431,11 +520,12 @@ class ConfigManager:
             entries = sorted(entries, key=lambda it: 0 if (it or {}).get('name') == pref else 1)
         sub_cfgs = {}   # 成功解析的子仓配置（含主条目），供 T44 跨仓合并
         chosen = None
+        manifest_base = fetch.base_url or str(url_or_json)
         for item in entries:
             ctx.check()
             name = (item or {}).get('name')
             try:
-                sub = self._resolve_repo_url(url_or_json, (item or {}).get('url', ''))
+                sub = self._resolve_repo_url(manifest_base, (item or {}).get('url', ''))
             except ConfigSecurityError as exc:
                 trail.record_failure(name, (item or {}).get('url', ''), exc.reason)
                 logger.warning('multi-repo entry blocked [%s]: %s', name, exc.reason)
@@ -447,6 +537,7 @@ class ConfigManager:
                 try:
                     logger.info('multi-repo: trying entry %s', name)
                     sub_text, sub_fetch = self._fetch_config_document(sub, ctx, depot=True)
+                    self._cache_documents[str(sub)] = str(sub_text)
                     sub_cfg = parse_config_json(sub_text)
                     if not isinstance(sub_cfg.get('sites'), list) or not sub_cfg['sites']:
                         raise ValueError('entry has no sites')
@@ -460,6 +551,7 @@ class ConfigManager:
                         return reused
                     prepared = self._prepare(sub_cfg, sub_fetch.base_url or sub,
                                              fetch=sub_fetch, depot=trail)
+                    prepared['_cache_manifest_text'] = self._cache_manifest_text
                     prepared['snapshot'].source_hash = digest
                     if prepared['summary']['sites'] > 0:
                         chosen = (item, prepared, sub)
@@ -487,7 +579,7 @@ class ConfigManager:
         item, prepared, sub = chosen
         trail.selected_name = str(item.get('name') or '')
         trail.selected_url = sub
-        self._merge_repo_extras(prepared, sub_cfgs, entries)
+        self._merge_repo_extras(prepared, sub_cfgs, entries, manifest_base=manifest_base)
         trail.merged = [u for u in sub_cfgs if u != prepared['source_url']]
         # 运行中快照记录「用户输入的多仓地址」为源，选中子仓为最终 URL。
         prepared['snapshot'].fetch.source_url = str(url_or_json)
@@ -495,6 +587,9 @@ class ConfigManager:
         # `_prepare` 里那份 depot 视图是**选中之前**拍的：那时 selected/merged 还是空的，
         # snapshotId 也还没带子仓名。导入结果页读的是这个 summary，不刷新的话会显示
         # 「多仓，但没选中任何条目、没合并任何仓」，和 `state()` 里的快照自相矛盾。
+        # 多仓兼容：不同子仓经常重复声明同一个 key；主仓/先出现者优先，
+        # 不应因为重复项让已经成功构建的整份多仓快照被校验丢弃。
+        self._dedupe_depot_sites(prepared)
         prepared['summary']['depot'] = trail.to_dict()
         prepared['summary']['snapshotId'] = prepared['snapshot'].snapshot_id
         summary = self._validate_and_swap(prepared, force=force)
@@ -544,6 +639,18 @@ class ConfigManager:
             self._discard(prepared, reason='validate rejected')
             raise
         self._apply(prepared)
+        if prepared.get('snapshot') is not None:
+            source = str(prepared['snapshot'].fetch.source_url or '')
+            cache_text = (prepared.get('_cache_manifest_text') or
+                          prepared.get('_cache_text', ''))
+            if (source.startswith(('http://', 'https://')) and cache_text
+                    and prepared['snapshot'].fetch.transport not in ('inline', 'disk-cache')):
+                try:
+                    self._repository_cache().save(
+                        source, cache_text, fetch=prepared['snapshot'].fetch,
+                        documents=self._cache_documents)
+                except Exception:
+                    logger.debug('config repository cache write failed', exc_info=True)
         return prepared['summary']
 
     def _discard(self, prepared, *, reason=''):
@@ -871,7 +978,53 @@ class ConfigManager:
 
     # ------------------------------------------------ 多仓合并（T44）
 
-    def _merge_repo_extras(self, prepared, sub_cfgs, entries):
+    def _dedupe_depot_sites(self, prepared):
+        """多仓最终保护：主仓及先合并的仓库保留同 key 的第一项。"""
+        sites = list(prepared.get('sites') or [])
+        if not sites:
+            return
+        kept = []
+        seen = set()
+        duplicates = []
+        for site in sites:
+            key = str(getattr(site, 'key', '') or '').strip()
+            if not key or key not in seen:
+                kept.append(site)
+                if key:
+                    seen.add(key)
+                continue
+            duplicates.append(key)
+        kept_bridges = {id(getattr(site.runner, 'bridge', None))
+                        for site in kept
+                        if getattr(site.runner, 'bridge', None) is not None}
+        for site in sites:
+            if site in kept:
+                continue
+            bridge = getattr(site.runner, 'bridge', None)
+            if id(bridge) in kept_bridges:
+                continue
+            try:
+                site.runner.destroy()
+            except Exception:
+                pass
+        if not duplicates:
+            return
+        prepared['sites'][:] = kept
+        summary = prepared.setdefault('summary', {})
+        summary['duplicateKeys'] = sorted(set(duplicates))
+        summary['duplicatesSkipped'] = len(duplicates)
+        summary.setdefault('skipped', []).extend(
+            f'{key}: duplicate site key skipped [L1:duplicate]' for key in duplicates)
+        # diagnostics 保留所有原始条目的健康记录（包括被去重的条目），便于诊断页
+        # 解释配置声明数；只有最终运行中的 sites 列表移除重复 Runner。
+        summary['sites'] = len(kept)
+        summary['built'] = sum(int(s.health.built) for s in kept)
+        summary['initialized'] = sum(int(s.health.initialized) for s in kept)
+        summary['healthy'] = sum(int(s.health.healthy) for s in kept)
+        summary['sites_built'] = summary['built']
+        logger.info('multi-repo merge: skipped %d duplicate site keys', len(duplicates))
+
+    def _merge_repo_extras(self, prepared, sub_cfgs, entries, *, manifest_base=''):
         """T44：主条目出影片源，其余条目的 lives/sites 并行补拉后合并去重。
 
         避免单一仓命中时直播源缺失/视频源变少（仓漂移）。
@@ -881,7 +1034,7 @@ class ConfigManager:
         pending = []   # 尚未拉取过的条目 url（选中之后直接 break，未及拉取）
         for it in entries:
             try:
-                u = self._resolve_repo_url(primary_src, (it or {}).get('url', ''))
+                u = self._resolve_repo_url(manifest_base or primary_src, (it or {}).get('url', ''))
             except ConfigSecurityError as exc:
                 logger.info('multi-repo merge: entry blocked (%s)', exc.reason)
                 continue
@@ -913,13 +1066,20 @@ class ConfigManager:
 
     @staticmethod
     def _iter_live_urls(l):
-        """展平一条 live 的所有实际 url（兼容嵌套 channels 形式）。"""
+        """展平一条 live 的所有实际 url（兼容字符串与嵌套 channels 形式）。"""
+        if isinstance(l, str):
+            yield l
+            return
+        if isinstance(l, list):
+            for item in l:
+                yield from ConfigManager._iter_live_urls(item)
+            return
         if isinstance(l, dict) and isinstance(l.get('channels'), list):
             for c in l['channels']:
-                for u in ((c or {}).get('urls') or []):
-                    yield str(u)
-        else:
-            yield str((l or {}).get('url') or '')
+                yield from ConfigManager._iter_live_urls(c)
+        elif isinstance(l, dict):
+            values = l.get('urls') or l.get('url') or ''
+            yield from ConfigManager._iter_live_urls(values)
 
     def _merge_lives(self, prepared, sub_cfgs):
         """跨仓合并 lives：按 url 去重，主条目优先保留。"""
@@ -1006,6 +1166,12 @@ class ConfigManager:
         started = time.monotonic()
         ctx.check()
         if source.lower().startswith(('http://', 'https://')):
+            cached_text = self._restoring_documents.get(source)
+            if cached_text is not None:
+                return cached_text, make_fetch_result(
+                    source, transport='depot' if depot else 'disk-cache',
+                    raw=str(cached_text).encode('utf-8', errors='replace'),
+                    final_url=source, started=started, from_cache=True)
             remaining = ctx.remaining()
             budget = 30.0 if remaining is None else max(3.0, min(30.0, remaining))
             diag = fetch_text_diagnostics(source, timeout=budget, policy=ctx.policy,
@@ -1156,13 +1322,14 @@ class ConfigManager:
         if decision.needs_jar:
             # jar 内 Java 爬虫类（TVBox csp_*.jar）或 .jar 直链：类加载与调用只发生在
             # JVM Worker 子进程（见 runtime/supervisor.py），宿主进程不加载第三方类。
-            runner = self._load_jar_runner(key, name, api, effective_jar, base_url=base_url)
+            runner = self._load_jar_runner(
+                key, name, api, effective_jar, ext=ext, base_url=base_url)
             if runner is None:
                 logger.info('skip site %s: jar runtime unavailable or no shared spider jar', key)
                 raise ValueError('[L3:jar] jar runtime unavailable or no shared jar')
             report = getattr(runner, 'jar_report', None)
             if report:
-                # R4 → R5 细化：拿到字节分级后才知道是 portable JVM 还是 Android-only。
+                # R4 → R5 细化：拿到字节分级后决定 portable JVM 或 dex2jar/JVM 回退。
                 decision = refine_with_jar(decision, report)
                 entry.route = decision
                 health.runtime = decision.runtime
@@ -1187,26 +1354,20 @@ class ConfigManager:
         if decision.runtime == 'js':
             runner = SupervisedRunner({
                 'kind': 'js', 'site_key': key, 'name': name, 'api': api,
-                'proxy_port': hoststate.get_port(),
+                'proxy_port': hoststate.get_port(), 'ext': ext,
             })
             spider_type = 'js'
-        elif decision.runtime == 'drpy':
-            runner = SupervisedRunner({
-                'kind': 'drpy', 'site_key': key, 'name': name, 'api': api,
-                'proxy_port': hoststate.get_port(),
-            })
-            spider_type = 'drpy'
         elif decision.runtime == 'python':
             path = self._materialize_python_spider(key, api, base_url=base_url)
             runner = SupervisedRunner({
-                'kind': 'python', 'site_key': key, 'name': name, 'path': path,
+                'kind': 'python', 'site_key': key, 'name': name, 'path': path, 'ext': ext,
             })
             spider_type = 'py'
         elif decision.runtime == 'cms':
             # CMS 站源（苹果 CMS JSON/XML 接口）：纯 HTTP 直连，无运行时依赖
             runner = SupervisedRunner({
                 'kind': 'cms', 'site_key': key, 'name': name,
-                'api': api, 'stype': entry.type,
+                'api': api, 'stype': entry.type, 'ext': ext,
             })
             spider_type = 'cms'
         else:
@@ -1232,6 +1393,7 @@ class ConfigManager:
         路由结论显式给出，不在这里再猜一次。
         """
         site = Site(key, api, ext)
+        site.display_name = str(item.get('name') or key)
         site.health = health
         site.headers = dict(entry.header)
         site.spider_type = spider_type
@@ -1255,39 +1417,14 @@ class ConfigManager:
 
     @staticmethod
     def _initialize_site(site, ext=''):
-        """完成建站与 init 探测；对象存在不能直接等同 healthy。"""
-        site.health.mark_built()
-        try:
-            site.runner.init(ext)
-            spider = getattr(site.runner, 'spider', None)
-            last_error = str(getattr(spider, 'last_error', '') or '')
-            if last_error:
-                raise RuntimeContractError(
-                    'L3_RUNTIME_INIT_FAILED',
-                    site_key=site.key,
-                    runtime=site.health.runtime,
-                    raw_error=last_error,
-                    details={'built': True},
-                )
-            site.health.mark_initialized().mark_healthy()
-        except RuntimeContractError:
-            try:
-                site.runner.destroy()
-            except Exception:
-                pass
-            raise
-        except Exception as exc:
-            try:
-                site.runner.destroy()
-            except Exception:
-                pass
-            raise RuntimeContractError(
-                'L3_RUNTIME_INIT_FAILED',
-                site_key=site.key,
-                runtime=site.health.runtime,
-                raw_error=str(exc),
-                details={'built': True},
-            ) from exc
+        """完成建站与就绪标记。
+        
+        为避免导入/切换源时瞬间为几十上百个站点同时拉起独立的 Worker 进程
+        （导致内存与 CPU 暴涨），此处采用惰性初始化（Lazy Init）：
+        - 记录 ext 与 built 状态，不在此处拉起子进程；
+        - 子进程在用户首次调用站点（如点开详情、首页、搜索）时按需拉起并执行 init。
+        """
+        site.health.mark_built().mark_initialized().mark_healthy()
 
     def _resolve_ext(self, ext, base_url):
         """兼容入口：把 ext 归一成字符串并解析相对路径，**不**发起网络请求。
@@ -1407,11 +1544,9 @@ class ConfigManager:
                     return None
             jar_path = JarBridge.download_jar(
                 jar_url, md5, site_key=key,
-                portable_only=not android_worker_enabled())
-            # Download and scan before checking Java.  This lets a machine
-            # without a JRE report ``L2_SITE_REQUIRES_ANDROID`` for Dex/native
-            # sources instead of collapsing the capability reason into a
-            # generic "JAR runtime unavailable" error.
+                portable_only=False)
+            # Download and convert before checking Java so DEX sources can enter
+            # the same JVM Worker path as standard JARs.
             if not java_probe.find_java():
                 raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
@@ -1429,7 +1564,7 @@ class ConfigManager:
                 raise ValueError(f'[L3:jar] {err_msg}') from e
             raise
 
-    def _load_jar_runner(self, key, name, api, spider_jar='', base_url=''):
+    def _load_jar_runner(self, key, name, api, spider_jar='', ext='', base_url=''):
         """下载并分级 JAR；实际类加载与调用只发生在 Supervisor Worker/JVM。
 
         返回的 runner 上附 `jar_report`（`classify_jar_compatibility` 的字节分级）
@@ -1450,14 +1585,14 @@ class ConfigManager:
                     return None
             jar_path = JarBridge.download_jar(
                 jar_url, md5, site_key=key,
-                portable_only=not android_worker_enabled())
+                portable_only=False)
             if not java_probe.find_java():
                 raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
             class_name = JarBridge.map_class_name(jar_path, class_name)
             runner = SupervisedRunner({
                 'kind': 'jar', 'site_key': key, 'name': name,
                 'jar_path': jar_path, 'class_name': class_name,
-                'runner_jar': DEFAULT_RUNNER_JAR,
+                'runner_jar': DEFAULT_RUNNER_JAR, 'ext': ext,
             })
             runner.jar_path = jar_path
             try:
@@ -1482,6 +1617,10 @@ class ConfigManager:
         healthy_sites = [s for s in self.sites.sites if s.health.healthy]
         diagnostics = [h.to_dict() for h in self.sites.diagnostics]
         snapshot = self.snapshot
+        degraded_count = sum(1 for h in diagnostics if h.get('state') in ('degraded', 'credentials_required'))
+        unsupported_count = sum(1 for h in diagnostics if h.get('state') == 'unsupported' or h.get('runtime') in ('android', 'unsupported'))
+        healthy_count = sum(int(h.get('healthy', False)) for h in diagnostics)
+        configured_count = len(diagnostics)
         payload = {
             'source': self.source_url,
             'repo': self.last_repo_name,
@@ -1490,15 +1629,17 @@ class ConfigManager:
             'lives': self.lives,
             'wallpaper': self.wallpaper,
             'summary': {
-                'configured': len(diagnostics),
+                'configured': configured_count,
                 'built': sum(int(h.get('built', False)) for h in diagnostics),
                 'initialized': sum(int(h.get('initialized', False)) for h in diagnostics),
-                'healthy': sum(int(h.get('healthy', False)) for h in diagnostics),
+                'healthy': healthy_count,
             },
+            'degradedCount': degraded_count,
+            'unsupportedCount': unsupported_count,
             'sites': [{'key': s.key, 'name': s.name, 'searchable': s.searchable,
                        'spiderType': getattr(s, 'spider_type', ''),
                        **s.health.to_dict()}
-                      for s in healthy_sites],
+                      for s in self.sites.sites],
             'diagnostics': diagnostics,
             # C2.1：当前运行快照。`swapCount`/`reuseCount` 区分「真的换了配置」与
             # 「同内容命中复用」，否则诊断页无法解释「点了导入但站点对象没变」。
@@ -1507,6 +1648,8 @@ class ConfigManager:
             'snapshot': snapshot.to_dict() if snapshot is not None else None,
             'depot': snapshot.depot.to_dict() if snapshot is not None else None,
             'security': dict(snapshot.security) if snapshot is not None else {},
+            'cached': bool(self.cache_restored),
+            'cacheAge': int(self.cache_age) if self.cache_restored else None,
         }
         last_healthy = self.last_healthy_snapshot
         if last_healthy is not None and last_healthy is not snapshot:

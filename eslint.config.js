@@ -18,7 +18,7 @@ const RENDERER_LEGACY_GLOBALS = [
     'bangumiMirrorUrl', 'truncateTitle', 'toFileUrl', 'openDialog', 'closeDialog',
     'confirmDialog', 'localCacheClearAll', 'setErrorToastEnabled', 'invalidatePageSizeCache',
     // 其他文件提供的跨页函数（按需补充）
-    'localCacheGet', 'localCacheSet', 'localCacheDel',
+    'localCacheGet', 'localCacheSet', 'localCacheDel', 'localCacheStats', 'localCachePrune',
 ].reduce((acc, name) => ({ ...acc, [name]: 'readonly' }), {});
 
 module.exports = [
