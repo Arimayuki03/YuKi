@@ -8,7 +8,8 @@
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
-          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId */
+          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId,
+          applyMisansFont */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -1564,10 +1565,11 @@ function initSettingsPanel() {
         window.vpc.settingsSet('errorToast', this.checked);
         if (typeof setErrorToastEnabled === 'function') setErrorToastEnabled(this.checked);
     });
-    // MiSans 界面字体开关（立即生效：重载渲染层字体注入）
-    $('#set_use_misans').on('change', function () {
+    // MiSans 界面字体开关（即时生效：注入/卸载字体 <link>，不整页 reload——
+    // reload 会重启渲染层并把用户从设置页踢回首页）
+    $('#set_use_misans').on('change', async function () {
         window.vpc.settingsSet('useMisansFont', this.checked);
-        try { window.location.reload(); } catch (e) { /* 重载失败不影响保存 */ }
+        await applyMisansFont(this.checked);
     });
     // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
     $('#set_catvod_bgm_match').on('change', function () {

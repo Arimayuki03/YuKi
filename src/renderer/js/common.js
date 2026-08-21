@@ -901,6 +901,28 @@ function _applyTextScale(pct) {
     document.head.appendChild(_textScaleEl);
 }
 
+/**
+ * MiSans 界面字体注入/卸载（开关即时生效，不再整页 reload）：
+ * - 启用 → 拉取内置字体 CSS 的 file:// URL，注入带 data-vpc-misans 标记的 <link>；
+ * - 关闭 → 移除全部标记 <link>，浏览器按 font-family 回退链自动回退系统字体。
+ * 重复调用幂等：先清旧再注新。失败（IPC 异常/资源缺失）静默回退系统字体。
+ */
+async function applyMisansFont(enabled) {
+    const SEL = 'link[data-vpc-misans]';
+    document.querySelectorAll(SEL).forEach((l) => l.remove());
+    if (!enabled) return;
+    try {
+        const urls = (window.vpc && window.vpc.fontCss && await window.vpc.fontCss()) || [];
+        urls.forEach((u) => {
+            const l = document.createElement('link');
+            l.rel = 'stylesheet';
+            l.href = u;
+            l.dataset.vpcMisans = '1';
+            document.head.appendChild(l);
+        });
+    } catch (e) { /* 注入失败回退系统字体，不影响使用 */ }
+}
+
 function applySkin(opts) {
     Object.assign(_skin, opts || {});
     const el = document.documentElement;

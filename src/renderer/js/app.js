@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, toFileUrl, setBackendInfo, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
 
 const App = {
     currentView: 'home',
@@ -170,17 +170,7 @@ $(async function bootstrap() {
     try { s = (await window.vpc.settingsGet()) || {}; } catch (e) { /* 首次运行无 settings */ }
 
     // 载入内置 MiSans 字体（打包内置、无运行时下载；开关关闭时回退系统字体，T61 / 2.11）
-    if (s.useMisansFont !== false) {
-        try {
-            const fontUrls = (window.vpc.fontCss && await window.vpc.fontCss()) || [];
-            fontUrls.forEach((u) => {
-                const l = document.createElement('link');
-                l.rel = 'stylesheet';
-                l.href = u;
-                document.head.appendChild(l);
-            });
-        } catch (e) { /* 字体加载失败回退系统字体，不影响使用 */ }
-    }
+    await applyMisansFont(s.useMisansFont !== false);
 
     // 尽早恢复主题/壁纸/明暗/缩放/字号（只依赖本地 settings，无需等后端）
     try {
