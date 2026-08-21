@@ -150,7 +150,7 @@ const Downloads = {
             warnToast(r.reason === 'mpv-missing' ? 'mpv 未安装：node scripts/download-binaries.js mpv' : `播放失败：${r.reason}`);
             return;
         }
-        warnToast('已在 mpv 窗口播放');
+        warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
         // 记入历史记录（下载文件播放）：site='download' 保持「下载文件」身份，vodId 存绝对文件路径，
         // 历史卡据此异步抓帧封面（recCard 对 site='local'/'download' 打 data-local-path → fillLocalCovers）
         try {

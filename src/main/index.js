@@ -1043,7 +1043,10 @@ app.whenReady().then(() => {
 
     // 本地媒体播放（视频/音频）：相对路径/绝对路径 → 白名单内绝对路径 → 复用 mpv-player
     fileIpc('vpc:file-push', async (rel) => {
-        if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
+        // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 vpc:play 行为一致；
+        // 此时不再依赖内置 mpv（未装内置 mpv 也能用指定播放器起播）
+        const extPrimary = primaryExternalPlayer();
+        if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
         if (!rel || !String(rel).trim()) return { ok: false, reason: 'path-denied' };
         let abs;
         const inside = (root, target) => {
@@ -1074,6 +1077,11 @@ app.whenReady().then(() => {
         const title = path.basename(abs);
         // mpv 对 Windows 反斜杠路径兼容性一般，转正斜杠可规避首播因路径转义导致的加载失败
         const playUrl = abs.replace(/\\/g, '/');
+        if (extPrimary) {
+            // 本地文件无鉴权头，直接交指定播放器起播（无 file-loaded 校验，spawn 成功即视为已交）
+            const r = launchExternalPlayer(extPrimary, playUrl);
+            return r.ok ? { ...r, viaExternal: true } : r;
+        }
         const r = mpv.play([{ url: playUrl, title }], { title, noSeq: true });
         if (!r.ok) return r;
         const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
@@ -2153,7 +2161,10 @@ app.whenReady().then(() => {
     // 下载完成一键播放：直接播本地产出文件（来源为下载任务的 files，均在下载目录内）
     ipcMain.handle('vpc:dl-play', async (_e, filePath) => {
         try {
-            if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
+            // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 vpc:play 行为一致；
+            // 此时不再依赖内置 mpv（未装内置 mpv 也能用指定播放器起播）
+            const extPrimary = primaryExternalPlayer();
+            if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
             const abs = path.resolve(String(filePath || ''));
             // L-1：路径限制在下载目录或本地媒体根目录内（path.relative 无 '..' 前缀且非绝对），
             // 防页面脚本传任意本地路径借 mpv 播放窥探磁盘
@@ -2167,6 +2178,11 @@ app.whenReady().then(() => {
             if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return { ok: false, reason: 'file-not-found' };
             if (!fileMgr.isVideo(abs)) return { ok: false, reason: 'not-video' };
             const title = path.basename(abs);
+            if (extPrimary) {
+                // 本地文件无鉴权头；Windows 反斜杠路径转正斜杠，规避个别播放器解析问题
+                const r = launchExternalPlayer(extPrimary, abs.replace(/\\/g, '/'));
+                return r.ok ? { ...r, viaExternal: true } : r;
+            }
             const r = mpv.play([{ url: abs, title }], { title });
             if (!r.ok) return r;
             const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);

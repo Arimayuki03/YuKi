@@ -495,7 +495,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     const site = String(el.data('site') || '');
                     if (site === 'local' && window.vpc && window.vpc.filePush) {
                         window.vpc.filePush(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) warnToast('已在 mpv 窗口播放');
+                            if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
                             else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
                             else warnToast('播放失败');
@@ -504,7 +504,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     }
                     if (site === 'download' && window.vpc && window.vpc.download && window.vpc.download.play) {
                         window.vpc.download.play(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) warnToast('已在 mpv 窗口播放');
+                            if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
                             else warnToast('播放失败');
                         }).catch(() => warnToast('播放失败'));

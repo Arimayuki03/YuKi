@@ -669,7 +669,7 @@ function pushFile(yes) {
     // 本地媒体直接交给主进程 mpv 播放；首播冷启动可能因 IPC 竞态短暂失败，自动重试一次
     const doPush = (rel, isRetry) => window.vpc.filePush(rel).then((r) => {
         if (r && r.ok) {
-            warnToast('已在 mpv 窗口播放');
+            warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
             // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
             try {
                 const rel2 = String(currentFile || '');
