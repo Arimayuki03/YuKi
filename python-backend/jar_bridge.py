@@ -20,13 +20,12 @@ import subprocess
 import threading
 import time
 import logging
+from collections import OrderedDict
 
 
 import hoststate
 from runtime.errors import RuntimeError as RuntimeContractError
-from runtime.android_policy import android_only_details
 from runtime.contracts import current_runtime_request
-from runtime.health import android_worker_enabled
 import http_client
 import java_probe
 
@@ -261,6 +260,79 @@ def classify_jar_compatibility(jar_path):
 # 全局 jar 桥缓存：key = jar_path → JarBridge 实例
 _jar_bridges = {}
 _jar_bridges_lock = threading.Lock()
+# 全局 JVM LRU：key = jar_path → 最近使用时间戳（monotonic）。
+# OrderedDict 维护访问顺序（move_to_end 刷新），淘汰时从头部（最久未用）取。
+# 与 _jar_bridges 同步维护，全部改动都在 _jar_bridges_lock 下。
+_jar_lru = OrderedDict()
+
+# 全局 JVM 子进程数量上限：每 JVM 约 1.5GB，配置多仓合并后可能有 10+ 不同 jar，
+# 无上限会 OOM。默认 3，可用 VPC_MAX_JVM / VPC_MAX_JAR_PROCESSES 覆盖，clamp 到 1-8。
+# 注意：dex2jar 的临时 java 进程是 subprocess.run 短暂进程，不受此限制。
+_MAX_JVM_DEFAULT = 3
+
+
+def _max_jvm():
+    """懒读环境变量得到 JVM 上限，clamp 到 [1, 8]。无效/未设置回落到默认 3。"""
+    raw = os.environ.get('VPC_MAX_JVM') or os.environ.get('VPC_MAX_JAR_PROCESSES')
+    if raw:
+        try:
+            val = int(str(raw).strip())
+        except (TypeError, ValueError):
+            val = _MAX_JVM_DEFAULT
+    else:
+        val = _MAX_JVM_DEFAULT
+    return max(1, min(8, val))
+
+
+def _touch_jar_lru(jar_path):
+    """刷新 jar_path 的 LRU 位置（标记为最近使用）。须在 _jar_bridges_lock 下调用。"""
+    if jar_path in _jar_lru:
+        _jar_lru.move_to_end(jar_path)
+    else:
+        _jar_lru[jar_path] = True
+
+
+def _evict_jvm_if_needed_locked():
+    """在插入全新 jar_path 前，若已达上限则选出可淘汰的桥并从缓存摘除。
+
+    须在 _jar_bridges_lock 下调用；返回被摘除的 bridge（调用方须在释放
+    _jar_bridges_lock 后再对其 destroy()，因为 destroy() 会重入该锁且会
+    阻塞 ~1s 等 JVM 优雅退出）。无需淘汰时返回 None。
+
+    淘汰策略：
+    - 从 LRU 头部（最久未用）遍历，尝试非阻塞获取其 _call_lock；
+      获取成功说明该桥当前无活跃调用，可安全淘汰；获取失败说明正在 call，跳过。
+    - 找到后从 _jar_bridges/_jar_lru 摘除并返回。
+    - 若所有桥都在忙（无一可淘汰），抛 L3_RUNTIME_BUSY 而非无限等待。
+    """
+    limit = _max_jvm()
+    if len(_jar_bridges) < limit:
+        return None
+    logger.warning('JVM limit (%d) reached, evicting LRU jar (current=%d)',
+                   limit, len(_jar_bridges))
+    for old_jar in list(_jar_lru.keys()):
+        victim = _jar_bridges.get(old_jar)
+        if victim is None:
+            # LRU 与桥缓存不一致（理论上不该发生），清理孤儿条目
+            _jar_lru.pop(old_jar, None)
+            continue
+        if not victim._call_lock.acquire(blocking=False):
+            continue  # 正在被调用，跳过
+        try:
+            logger.info('evicting idle LRU jar %s to free JVM slot',
+                        os.path.basename(old_jar))
+            _jar_bridges.pop(old_jar, None)
+            _jar_lru.pop(old_jar, None)
+        finally:
+            victim._call_lock.release()
+        return victim
+    # 所有桥都在忙——池已耗尽，拒绝而非阻塞
+    raise RuntimeContractError(
+        'L3_RUNTIME_BUSY',
+        runtime='jar',
+        raw_error='jvm pool exhausted, all jvm busy',
+    )
+
 # jar 下载/转换锁：key = jar_url → Lock（并发构建同一 jar 时串行化下载与 dex2jar）
 _jar_download_locks = {}
 _jar_download_locks_guard = threading.Lock()
@@ -280,13 +352,17 @@ class JarBridge:
 
     @staticmethod
     def get_or_create(jar_path, runner_jar=None):
-        """获取或创建 jar_path 对应的桥实例（全局单例）。"""
+        """获取或创建 jar_path 对应的桥实例（全局单例，受 VPC_MAX_JVM 上限约束）。"""
         runner_jar = runner_jar or DEFAULT_RUNNER_JAR
         jar_path = os.path.normpath(os.path.realpath(jar_path))
+        victim = None
         with _jar_bridges_lock:
             b = _jar_bridges.get(jar_path)
             if b is not None:
+                _touch_jar_lru(jar_path)
                 return b
+            # 达到上限先选出可淘汰的空闲桥（持锁期间只摘除，真正 destroy 在锁外）
+            victim = _evict_jvm_if_needed_locked()
             # 任务二·机制B：jar 加载期预启动其硬编码的本地代理端口，
             # 避免首次播放才补监听（首连失败）
             if os.environ.get('VPC_WORKER_CONTROL_ONLY') != '1':
@@ -300,7 +376,14 @@ class JarBridge:
             logger.info('jar compatibility %s: %s', os.path.basename(jar_path), report)
             b = JarBridge(jar_path, runner_jar=runner_jar)
             _jar_bridges[jar_path] = b
-            return b
+            _touch_jar_lru(jar_path)
+        # 锁外再真正销毁被淘汰的桥，避免在 _jar_bridges_lock 内重入阻塞 ~1s
+        if victim is not None:
+            try:
+                victim.destroy()
+            except Exception:
+                pass
+        return b
 
     @staticmethod
     def destroy_all():
@@ -312,6 +395,7 @@ class JarBridge:
                 except Exception:
                     pass
             _jar_bridges.clear()
+            _jar_lru.clear()
 
     # ------------------------------------------------------------ 静态工具
 
@@ -399,27 +483,8 @@ class JarBridge:
 
     @staticmethod
     def _require_available_runtime(jar_path, site_key='', portable_only=False):
-        """已知 Android/Dex/native JAR 不得在无 Android Worker 时假装 PC 健康。"""
-        if not portable_only or android_worker_enabled():
-            return
-        report = classify_jar_compatibility(jar_path)
-        signals = set(report.get('signals') or [])
-        requires_android = bool(
-            report.get('hasDex') or report.get('hasNative') or
-            signals.intersection({'android-api', 'android-ui-or-webview',
-                                  'native-library', 'drm-or-device-license'}))
-        if requires_android:
-            raise RuntimeContractError(
-                'L2_SITE_REQUIRES_ANDROID',
-                site_key=site_key,
-                runtime='android',
-                details={**android_only_details(),
-                    'compatibility': 'C2',
-                    'jarLevel': report.get('level'),
-                    'signals': sorted(signals),
-                    'androidWorkerEnabled': False,
-                },
-            )
+        """保留旧调用接口；桌面端统一允许进入 dex2jar/JVM 尝试路径。"""
+        return
 
     @staticmethod
     def proxy_java_args():
@@ -853,6 +918,10 @@ class JarBridge:
             params['flag'] = str(args[0]) if args else ''
             params['id'] = str(args[1]) if len(args) > 1 else ''
             params['vipFlags'] = list(args[2]) if len(args) > 2 and isinstance(args[2], (list, tuple)) else []
+        elif method == '__json_ext':
+            params['key'] = str(args[0]) if args else ''
+            params['jxs'] = dict(args[1]) if len(args) > 1 and isinstance(args[1], dict) else {}
+            params['url'] = str(args[2]) if len(args) > 2 else ''
         elif method == 'proxy':
             # 兼容旧的站点级 Spider.proxy(String)；无 siteKey 的静态
             # com.github.catvod.spider.Proxy 走 call_proxy()，避免把 Map
@@ -922,6 +991,12 @@ class JarBridge:
         if 'e' in result:
             raise result['e']
         self._crash_count = 0   # M-27a：调用成功视为进程健康，清零崩溃计数
+        # 成功调用刷新 LRU，避免被淘汰
+        try:
+            with _jar_bridges_lock:
+                _touch_jar_lru(self.jar_path)
+        except Exception:
+            pass
         return result.get('v')
 
     def call_proxy(self, params=None, class_name='', pan_cookies=None):
@@ -1037,6 +1112,11 @@ class JarBridge:
         stream = info.get('stream')
         if return_descriptor:
             self._crash_count = 0
+            try:
+                with _jar_bridges_lock:
+                    _touch_jar_lru(self.jar_path)
+            except Exception:
+                pass
             return {
                 '__vpc_proxy__': True,
                 'status': status,
@@ -1057,6 +1137,11 @@ class JarBridge:
             except Exception as e:
                 raise RuntimeError(f'[L3:jar] invalid proxy body: {e}') from e
         self._crash_count = 0
+        try:
+            with _jar_bridges_lock:
+                _touch_jar_lru(self.jar_path)
+        except Exception:
+            pass
         return ProxyResult(status=status, mime=mime, body=body,
                            headers=headers, close=close)
 
@@ -1110,6 +1195,7 @@ class JarBridge:
         # 先从全局缓存移除，避免关停中被 get_or_create 再次取走
         with _jar_bridges_lock:
             _jar_bridges.pop(self.jar_path, None)
+            _jar_lru.pop(self.jar_path, None)
         if proc:
             try:
                 proc.stdin.write(json.dumps({'id': -1, 'method': '__shutdown'}).encode('utf-8') + b'\n')

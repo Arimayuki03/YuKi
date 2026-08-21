@@ -84,6 +84,8 @@ public class SpiderRunner {
                 if ("proxy".equals(requestMethod) && requestParams != null
                         && Boolean.TRUE.equals(requestParams.get("__static_proxy"))) {
                     resp = handleStaticProxy(request);
+                } else if ("__json_ext".equals(requestMethod)) {
+                    resp = handleJsonExt(request);
                 } else {
                     resp = handle(line.trim());
                 }
@@ -152,6 +154,38 @@ public class SpiderRunner {
         Class<?> cls = spider.getClass();
         Object result = invoke(spider, cls, method, params);
         String resultStr = (result == null) ? "null" : String.valueOf(result);
+        return "{\"id\":" + id + ",\"result\":" + jsonEscape(resultStr) + "}";
+    }
+
+    /**
+     * FongMi parse type=2: invoke com.github.catvod.parser.Json&lt;key&gt;.parse.
+     * The parser belongs to the same portable JAR as the active Spider.  It is
+     * intentionally a control-plane JSON result; media bytes still use Proxy.
+     */
+    @SuppressWarnings("unchecked")
+    static String handleJsonExt(Map<String,Object> request) throws Exception {
+        long id = ((Number) request.getOrDefault("id", 0)).longValue();
+        Object rawParams = request.getOrDefault("params", new LinkedHashMap<>());
+        Map<String,Object> params = rawParams instanceof Map
+                ? (Map<String,Object>) rawParams : new LinkedHashMap<>();
+        String key = String.valueOf(params.getOrDefault("key", ""));
+        if (!key.matches("[A-Za-z0-9_$]{1,96}")) {
+            throw new IllegalArgumentException("invalid json extension key");
+        }
+        LinkedHashMap<String,String> jxs = new LinkedHashMap<>();
+        Object rawJxs = params.get("jxs");
+        if (rawJxs instanceof Map) {
+            for (Map.Entry<?,?> entry : ((Map<?,?>) rawJxs).entrySet()) {
+                if (entry.getKey() != null && entry.getValue() != null) {
+                    jxs.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+                }
+            }
+        }
+        String url = String.valueOf(params.getOrDefault("url", ""));
+        Class<?> parser = Class.forName("com.github.catvod.parser.Json" + key, true, loader);
+        Method method = parser.getMethod("parse", LinkedHashMap.class, String.class);
+        Object result = method.invoke(null, jxs, url);
+        String resultStr = result == null ? "null" : String.valueOf(result);
         return "{\"id\":" + id + ",\"result\":" + jsonEscape(resultStr) + "}";
     }
 
@@ -345,27 +379,93 @@ public class SpiderRunner {
 
     /** 向 jar 内 Init 注入 stub Application 全局 Context（对应 TVBox 宿主启动时的 Init.init(context)）。 */
     static void seedSpiderContext() {
-        android.content.Context context = new android.app.Application();
-        // 上游 CatVod 使用 com.github.catvod.Init；部分 FongMi 旧 jar 把
-        // 相同入口放在 com.github.catvod.spider.Init。两者都尝试，且兼容
-        // set(Context)/init(Context) 两种命名。
+        android.app.Application context = new android.app.Application();
         for (String name : new String[]{"com.github.catvod.Init", "com.github.catvod.spider.Init"}) {
+            Class<?> initCls;
             try {
-                Class<?> initCls = Class.forName(name, true, loader);
-                boolean invoked = false;
-                for (String method : new String[]{"init", "set"}) {
-                    try {
-                        initCls.getMethod(method, android.content.Context.class).invoke(null, context);
-                        invoked = true;
-                        break;
-                    } catch (NoSuchMethodException ignored) {
-                        // 尝试下一个兼容命名
-                    }
-                }
-                if (invoked) return;
+                initCls = Class.forName(name, false, loader);
             } catch (Throwable ignore) {
-                // 无该 Init 类或其静态初始化失败：继续尝试另一个入口。
+                continue;
             }
+            invokeContextSetter(initCls, context);
+            forceContextFields(initCls, context);
+            if (hasContext(initCls)) return;
+        }
+    }
+
+    static boolean invokeContextSetter(Class<?> initCls, android.app.Application context) {
+        String[] names = new String[]{"init", "set", "setContext", "initialize"};
+        Method[] methods;
+        try {
+            methods = initCls.getDeclaredMethods();
+        } catch (Throwable ignore) {
+            return false;
+        }
+        for (Method method : methods) {
+            if (!Modifier.isStatic(method.getModifiers())) continue;
+            boolean named = false;
+            for (String name : names) {
+                if (name.equals(method.getName())) {
+                    named = true;
+                    break;
+                }
+            }
+            Class<?>[] params = method.getParameterTypes();
+            if (!named || params.length != 1 || !params[0].isAssignableFrom(context.getClass())) continue;
+            try {
+                method.setAccessible(true);
+                method.invoke(null, context);
+                return true;
+            } catch (Throwable ignore) {
+                // 继续尝试其他兼容入口或字段注入。
+            }
+        }
+        return false;
+    }
+
+    static void forceContextFields(Class<?> initCls, android.app.Application context) {
+        Object singleton = null;
+        for (String name : new String[]{"get", "getInstance", "instance"}) {
+            try {
+                Method method = initCls.getDeclaredMethod(name);
+                if (Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0) {
+                    method.setAccessible(true);
+                    singleton = method.invoke(null);
+                    if (singleton != null) break;
+                }
+            } catch (Throwable ignore) {
+                // 没有可用的单例入口时只尝试静态字段。
+            }
+        }
+        Field[] fields;
+        try {
+            fields = initCls.getDeclaredFields();
+        } catch (Throwable ignore) {
+            return;
+        }
+        for (Field field : fields) {
+            if (!field.getType().isAssignableFrom(context.getClass())) continue;
+            try {
+                field.setAccessible(true);
+                if (Modifier.isStatic(field.getModifiers())) {
+                    field.set(null, context);
+                } else if (singleton != null) {
+                    field.set(singleton, context);
+                }
+            } catch (Throwable ignore) {
+                // 某些混淆字段不可写，不影响其他入口。
+            }
+        }
+    }
+
+    static boolean hasContext(Class<?> initCls) {
+        try {
+            Method method = initCls.getDeclaredMethod("context");
+            if (!Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 0) return false;
+            method.setAccessible(true);
+            return method.invoke(null) != null;
+        } catch (Throwable ignore) {
+            return false;
         }
     }
 

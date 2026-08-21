@@ -30,6 +30,16 @@ def _load_pan_cookies():
         return None
 
 
+def _quark_cookie_present():
+    """本机是否存有可用的夸克 Cookie。
+
+    Provider 取流（v2/play / file/download）匿名必被夸克拒绝（实测 v2/play
+    回 401 code=31001），快路径与 do=pan 兜底都依赖这份 Cookie。
+    """
+    cookies = _load_pan_cookies() or {}
+    return bool(str(cookies.get('quark') or '').strip())
+
+
 def _ensure_local_proxy_ports(result):
     """播放 URL 指向本机端口时按需补监听（TVBOX_COMPAT_PLAN 任务二·机制A）。
 
@@ -151,6 +161,28 @@ class JarSpider(Spider):
         if 'pan.quark.cn/s/' in raw:
             return {'fileId': raw}
 
+        # Several Quark JARs use an opaque five-part id rather than JSON:
+        # shareId++fileId++pwdId++fileToken++size.  Do not split or decode the
+        # token more than once; its base64 value may contain '+'.
+        parts = raw.split('++')
+        if len(parts) >= 4 and all(parts[:2]):
+            result = {
+                'shareId': parts[0],
+                'fileId': parts[1],
+                'fileToken': parts[3],
+            }
+            # 第三段在实测样本里是公开分享的 pwd_id（形如 pan.quark.cn/s/<pwd_id>，
+            # 12 位 alnum），而 shareId/fid 都是 32 位 hex。带上它，PC 侧才能用
+            # sharepage/token 建立分享会话；没有会话时 file/download?scene=share
+            # 回 400 code=14001「非法token」、v2/play 回 404 code=21001。
+            # 形状不符（例如又是 32 位 hex，或长得像 base64 token）时不猜，
+            # 让 _pan_resolvable 判成解不开，交回 JAR 解析。
+            candidate = str(parts[2] or '').strip()
+            if (re.fullmatch(r'[0-9a-zA-Z]{6,24}', candidate)
+                    and not re.fullmatch(r'[0-9a-f]{32}', candidate)):
+                result['pwdId'] = candidate
+            return result
+
         decoded = raw
         for _ in range(2):
             try:
@@ -188,9 +220,73 @@ class JarSpider(Spider):
             share_id = pick('shareId', 'share_id', 'shareid')
             file_token = pick('fileToken', 'file_token', 'shareToken',
                               'share_token', 'share_fid_token', 'fid_token')
-            return {'fileId': file_id, 'shareId': share_id,
-                    'fileToken': file_token}
+            pwd_id = pick('pwdId', 'pwd_id', 'passwordId', 'password_id')
+            share_url = pick('shareUrl', 'share_url', 'shareURL')
+            if not share_url:
+                candidate_url = pick('url', 'share_link', 'shareLink')
+                if 'pan.quark.cn/s/' in candidate_url:
+                    share_url = candidate_url
+            result = {'fileId': file_id, 'shareId': share_id,
+                      'fileToken': file_token}
+            if pwd_id:
+                result['pwdId'] = pwd_id
+            if share_url:
+                result['shareUrl'] = share_url
+            return result
         return None
+
+    @staticmethod
+    def _pan_resolvable(params):
+        """PC 侧 Quark Provider 是否真解得开这条 vodId。
+
+        - 我的网盘文件（无 shareId）：v2/play / file/download 直接出直链；
+        - 公开分享且带 pwdId / shareUrl（含 ``pan.quark.cn/s/`` 链接）：可以先
+          sharepage/token 建立分享会话（stoken），再按 fid 出直链，必要时转存兜底；
+        - 只有 shareId + fid + share_fid_token 的公开分享解不开：share_fid_token
+          只在 stoken 建立的分享会话里有效，而 stoken 只能用 pwd_id 申请。实测
+          file/download?scene=share 回 400 code=14001「非法token」、v2/play 回
+          404 code=21001，go-proxy 只能回 502，mpv 立刻退出（media 未开始播放）。
+          这种 vodId 必须交回 JAR：它在 detailContent 阶段就持有分享会话，能自己
+          出直链，并连带返回取流所需的 Cookie 头。
+        """
+        if not params or not params.get('fileId'):
+            return False
+        if not str(params.get('shareId') or ''):
+            return True
+        return bool(params.get('pwdId') or params.get('shareUrl'))
+
+    @staticmethod
+    def _vod_id_shape(raw):
+        """只描述夸克 vodId 的结构，绝不输出取值。
+
+        vodId 里含 share_fid_token 等凭据，不能进日志；但不同 JAR 的编码形状
+        直接决定 PC 侧能不能建立分享会话，取流失败时必须能据此诊断。
+        """
+        text = str(raw or '')
+        if not text:
+            return 'empty'
+        parts = text.split('++')
+        if len(parts) > 1:
+            return 'opaque parts=%d lens=%s' % (
+                len(parts), ','.join(str(len(p)) for p in parts[:8]))
+        params = JarSpider._quark_play_params(text) or {}
+        if params:
+            return 'params=%s' % ','.join(sorted(k for k, v in params.items() if v))
+        return 'unknown len=%d' % len(text)
+
+    @staticmethod
+    def _wrap_local_go_proxy(url):
+        """把裸夸克 CDN 直链包进本机 go-proxy 的 ``?url=`` 取流通道。
+
+        PC 侧解不开这条 vodId 时（见 _pan_resolvable），JAR 自己解出来的一次性
+        签名直链是唯一可播的地址，但直接交给 mpv 就不带网盘 Cookie/Referer，
+        上游一律 403。``?url=`` 通道会按域名白名单补上已配置的夸克 Cookie 与
+        Referer，并负责 Range/分段下载；请求头自带的 Cookie（JAR 返回的 header）
+        仍然优先透传。
+        """
+        return 'http://127.0.0.1:9978/proxy?' + urlencode(
+            [('url', str(url or '')), ('proxytype', 'go'), ('thread', '8')],
+            quote_via=quote)
 
     @staticmethod
     def _quark_folder_id(id):
@@ -199,14 +295,22 @@ class JarSpider(Spider):
         return str(params.get('fileId') or ''), str(params.get('shareId') or '')
 
     @staticmethod
-    def _quark_pan_url(params):
+    def _quark_pan_url(params, flag=''):
         if not params or not params.get('fileId'):
             return None
         query = [('do', 'pan'), ('site', 'quark')]
-        for key in ('shareId', 'fileId', 'fileToken'):
+        for key in ('shareId', 'fileId', 'fileToken', 'pwdId'):
             value = str(params.get(key) or '')
             if value:
                 query.append((key, value))
+        # Keep the selected line available to the native provider.  The raw
+        # flag is intentionally encoded rather than interpreted here: JAR
+        # sites may use arbitrary Unicode/numbered line names.
+        if flag:
+            query.append(('quality', str(flag)))
+        share_url = str(params.get('shareUrl') or '')
+        if share_url and 'pan.quark.cn/s/' in share_url:
+            query.append(('shareUrl', share_url))
         return 'http://127.0.0.1:9978/proxy?' + urlencode(query, quote_via=quote)
 
     @staticmethod
@@ -230,33 +334,60 @@ class JarSpider(Spider):
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _is_bare_quark_cdn_url(url):
+        """判断 JAR 直接返回的裸夸克 CDN 直链（未经本地代理）。
+
+        与 ``_is_legacy_go_proxy_url`` 同一个问题、更严重：这类地址是一次性
+        签名，且交给 mpv 时不带网盘 Cookie/Referer，上游一律 403/412。识别出
+        同一集的 pan 参数时，换成 do=pan 让 go-proxy 带凭据取流并在签名失效
+        时刷新。
+        """
+        try:
+            parts = urlsplit(str(url or ''))
+            if parts.scheme.lower() not in ('http', 'https'):
+                return False
+            host = (parts.hostname or '').lower()
+            return host.endswith(('.quark.cn', '.myquark.cn', '.uc.cn'))
+        except (TypeError, ValueError):
+            return False
+
     def playerContent(self, flag, id, vipFlags):
         # 端口泛化拦截（任务二机制A）：所有 jar 播放地址的单一流经点
         result = _ensure_local_proxy_ports(self.playerContentRaw(flag, id, vipFlags))
         return _normalize_proxy_scheme(result, self.site_key)
 
     def playerContentRaw(self, flag, id, vipFlags):
-        # 任务三：夸克特判降级为协议层兜底。
-        # 我的夸克网盘文件（shareId 空 + folder fid）：ea3f jar 的取流链路
-        # （sharepage/save 转存）对网盘内文件必失败（pwd_id 空 → 400），
-        # 且 w.l() 对无 data 响应会 NPE。这类文件不依赖 jar —— go-proxy
-        # 直接 v2/play 或 file/download 取直链。
-        #
-        # 架构调整（TVBOX_COMPAT_PLAN 任务三）：
-        # - 旧实现：检测格式 → 前置短路（绑定特定 jar 的 vodId 假设）
-        # - 新实现：jar 优先 → 失败/退化时兜底拼 go-proxy URL
-        # - 快路径开关 pan_fast_path（默认 True 保持现有行为，False 全走 jar）
+        # 夸克取流按 vodId 能不能在 PC 侧解开来分流（判据见 _pan_resolvable）：
+        # - 我的网盘文件 / 带 pwdId·shareUrl 的公开分享：走宿主 Provider 的
+        #   do=pan 快路径（pan_fast_path 默认开；关闭时退回 JAR 优先，保留完整
+        #   JAR 协议语义，JAR 失败再兜底 do=pan）。JAR 自己的取流链路依赖
+        #   Android Context/chmod 与 sharepage/save 转存，在 PC 上要么失败
+        #   （pwd_id 空 → 400，w.l() 对无 data 响应 NPE），要么只给一次性签名。
+        # - 只有 shareId+fid+fid_token 的公开分享：PC 侧建不起分享会话，必须
+        #   JAR 优先，且不能把它的结果替换成必然 502 的 do=pan。
         import hoststate
         # 新一次播放先清理同线程上一次 JAR 错误；有效的 pan 回退不应被
         # server._attach_jar_error 转成 error，阻断前端继续播放。
         self.last_error = ''
         pan_params = self._quark_play_params(id)
-        pan_url = self._quark_pan_url(pan_params)
-        if pan_url and hoststate.get_pan_fast_path():
-            # 快路径覆盖个人文件和分享文件，绕开依赖 Android Context/chmod
-            # 的 JAR 取流实现，统一交给 PC 侧 Quark Provider。
-            return {'url': pan_url, 'parse': 0, 'header': {}}
-
+        pan_url = self._quark_pan_url(pan_params, flag=flag)
+        pan_resolvable = self._pan_resolvable(pan_params)
+        # 快路径 Cookie 门禁：无本机夸克 Cookie 时 Provider 取流必然全链失败
+        # （匿名 sharepage/token 能过，但 v2/play 401、download 14001，最后
+        # 只剩 502）。此时跳过快路径交回 JAR——部分站点 jar 自带凭据仍有会话；
+        # JAR 失败后的 do=pan 兜底由 go-proxy 无 Cookie 快速失败接住（不再
+        # 跑 v2play/download/save 重试风暴），渲染层给出扫码登录引导。
+        if pan_url and pan_resolvable and hoststate.get_pan_fast_path() \
+                and not _quark_cookie_present():
+            logger.info('quark fast path skipped: 本机未存储夸克 Cookie，'
+                        '交回 JAR 解析：%s', self._vod_id_shape(id))
+        elif pan_url and pan_resolvable and hoststate.get_pan_fast_path():
+            return {'url': pan_url, 'parse': 0, 'header': {},
+                    'flag': str(flag or ''), 'quality': str(flag or '')}
+        if pan_url and not pan_resolvable:
+            logger.info('quark vodId 缺少分享会话参数（pwd_id/分享链接），'
+                        '交回 JAR 解析：%s', self._vod_id_shape(id))
         # jar 优先路径：先走 jar playerContent
         raw = self._call('playerContent', flag, id, list(vipFlags) if vipFlags else [])
         result = self._json(raw, {'url': id, 'parse': 1})
@@ -268,23 +399,43 @@ class JarSpider(Spider):
 
         # 兜底：jar 失败/退化（url 空/[] 或仍是原样 id）且命中网盘格式 → go-proxy URL
         url = (result or {}).get('url') if isinstance(result, dict) else None
-        # 旧 JAR 可能已经返回了 7944 go-proxy 地址。即使它看起来是完整
-        # URL，也只是一次性的 CDN 签名；替换为 do=pan 后，go-proxy 才能
-        # 在 401/403/404/410/412 时刷新 Provider 地址。
-        if pan_url and isinstance(url, str) and self._is_legacy_go_proxy_url(url):
+        # 旧 JAR 可能已经返回了 7944 go-proxy 地址，或干脆返回裸夸克 CDN 直链。
+        # 即使它们看起来是完整 URL，也只是一次性的 CDN 签名（裸直链还缺
+        # Cookie）；替换为 do=pan 后，go-proxy 才能带凭据取流，并在
+        # 401/403/404/410/412 时刷新 Provider 地址。
+        # 前提是 PC 侧真解得开（_pan_resolvable）：解不开时 do=pan 只会回 502，
+        # 而 JAR 那条地址配合它自己返回的 header（Cookie/UA）反而能播，
+        # 替换等于把「可能能播」换成「必定不能播」。
+        native_fallback = bool(pan_url) and pan_resolvable
+        stale_jar_url = isinstance(url, str) and (
+            self._is_legacy_go_proxy_url(url) or self._is_bare_quark_cdn_url(url))
+        if native_fallback and stale_jar_url:
             self.last_error = ''
             result = dict(result) if isinstance(result, dict) else {}
             result.update({'url': pan_url, 'parse': 0})
             result['header'] = result.get('header') or {}
-        elif pan_url and (not url or (isinstance(url, str) and url == id)):
+        elif native_fallback and (not url or (isinstance(url, str) and url == id)):
             self.last_error = ''
             header = result.get('header') if isinstance(result, dict) else {}
             result = dict(result) if isinstance(result, dict) else {}
             result.update({'url': pan_url, 'parse': 0, 'header': header or {}})
+        elif (not pan_resolvable and stale_jar_url
+                and isinstance(url, str) and self._is_bare_quark_cdn_url(url)):
+            # PC 侧解不开：保留 JAR 解出的直链，只补上取流通道（Cookie/Referer/
+            # Range）。裸直链直接给 mpv 会 403。
+            self.last_error = ''
+            result = dict(result) if isinstance(result, dict) else {}
+            result.update({'url': self._wrap_local_go_proxy(url), 'parse': 0})
+            result['header'] = result.get('header') or {}
         return result
 
     def liveContent(self, url):
         return self._call('liveContent', url) or ''
+
+    def jsonExt(self, key, jxs, url):
+        """Execute FongMi parse type=2 in this portable JAR."""
+        return self.bridge.call('__json_ext', str(key or ''), dict(jxs or {}),
+                                str(url or ''), class_name=self.class_name)
 
     def localProxy(self, param):
         raw = self._call('proxy', json.dumps(param or {}, ensure_ascii=False))
