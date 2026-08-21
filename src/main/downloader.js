@@ -178,7 +178,7 @@ class Downloader extends EventEmitter {
             this._ready = null;
         });
 
-        // 1s 初始延迟 + 200 次 × 200ms = ~41s：慢机/首次启动（AV 扫描、DHT 初始化）
+        // 立即探测 + 200 次 × 200ms = ~40s：慢机/首次启动（AV 扫描、DHT 初始化）
         // RPC 起得晚，需宽松窗口。proc 若中途死掉，_waitReady 会提前跳出而非空等满时长。
         this._ready = this._waitReady(200).catch((e) => {
             this._ready = null;
@@ -189,9 +189,10 @@ class Downloader extends EventEmitter {
     }
 
     async _waitReady(attempts) {
-        // 首次探测前给足初始化时间：AV 扫描 / DHT 监听 / RPC socket bind 均需窗口，
-        // 过早的 getVersion() 会撞上未 bind 的端口而无谓失败并竞态误判进程死亡。
-        await new Promise((r) => setTimeout(r, 1000));
+        // 立即开始探测、未就绪每 200ms 重试：RPC bind 通常几十毫秒完成，固定延迟
+        // 只会白白拖慢下载页首屏（历史 bug：此前先睡 1s 再探测，列表固定晚 1 秒出现）。
+        // 探测失败仅重试、无副作用（_rpc 为纯 HTTP 请求且异常被捕获）；进程死亡由
+        // exit/error 事件置空 this.proc 判定，与探测失败无关，不存在误判路径。
         for (let i = 0; i < attempts; i++) {
             // 进程已退出（spawn error / 立即崩溃）：继续轮询无意义，立即抛出真实原因。
             if (!this.proc) {
