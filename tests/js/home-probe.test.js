@@ -230,6 +230,83 @@ test('_getBlocked：关闭源自动检测时忽略历史 blockedSites', async ()
 
 // ---------------------------------------------------------------- 全源后台探测（T60）
 
+/** 源级探测环境：注入 settingsGet/settingsSet 捕获与 doAction 桩，渲染方法桩掉。 */
+function probeEnv(doActionImpl) {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H._allSites = [{ key: 's' }];
+    H._updateProbeBar = () => {};
+    H._renderSiteSelect = () => {};
+    const sets = {};
+    ctx.window.vpc.settingsSet = async (k, v) => { sets[k] = v; };
+    ctx.doAction = doActionImpl;
+    ctx.__sets = sets;
+    return ctx;
+}
+
+test('_probeSites：homeContent 失败包络（ok:false/error/原始串）不屏蔽，留待下次重试', async () => {
+    // 后端 spider 超时/异常返回 RuntimeResponse 失败包络（HTTP 非 2xx 但 fetch 不抛异常）
+    for (const failed of [
+        { ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '站点响应超时' } },
+        { list: [], error: { code: 'L3_RUNTIME_CALL_FAILED', message: '接口异常' } },
+        'gateway timeout', // 非 JSON 原始文本
+        null,
+    ]) {
+        const ctx = probeEnv(async () => failed);
+        const H = ctx.__Home;
+        await H._probeSites();
+        assert.ok(!ctx.__sets.probedSites || !ctx.__sets.probedSites.includes('s'),
+            `失败响应 ${JSON.stringify(failed)} 不应写入 probedSites`);
+        assert.ok(!ctx.__sets.blockedSites, '失败响应不应触发屏蔽');
+    }
+});
+
+test('_probeSites：推荐位为空但分类返回失败包络 → 证据不足不屏蔽', async () => {
+    const ctx = probeEnv(async (action) => (action === 'homeContent'
+        ? { list: [], class: [{ type_id: 'a', type_name: 'A' }, { type_id: 'b', type_name: 'B' }] }
+        : { ok: false, error: { code: 'L3_RUNTIME_TIMEOUT', message: '超时' } }));
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.ok(!ctx.__sets.blockedSites, '分类确认全部出错时不下「无内容」结论');
+    assert.ok(!ctx.__sets.probedSites || !ctx.__sets.probedSites.includes('s'), '留待下次重试');
+});
+
+test('_probeSites：真僵尸源（推荐位与全部分类均确认为空）仍正确屏蔽', async () => {
+    const ctx = probeEnv(async (action) => (action === 'homeContent'
+        ? { list: [], class: [{ type_id: 'a', type_name: 'A' }] }
+        : { list: [] }));
+    const H = ctx.__Home;
+    await H._probeSites();
+    assert.deepEqual(ctx.__sets.blockedSites, ['s'], '全部分类确认无内容才屏蔽');
+    assert.ok(ctx.__sets.probedSites.includes('s'));
+});
+
+test('_probeSites：探测请求携带 deadlineMs 与渲染层超时对齐（后端不再提前掐断慢源）', async () => {
+    const seen = [];
+    const ctx = probeEnv(async (action, kv) => {
+        seen.push({ action, deadlineMs: kv.deadlineMs });
+        if (action === 'homeContent') return { list: [{ vod_id: '1' }] };
+        return { list: [] };
+    });
+    const H = ctx.__Home;
+    await H._probeSites();
+    const home = seen.find((x) => x.action === 'homeContent');
+    assert.equal(home.deadlineMs, 60000, 'homeContent 探测 deadline 对齐 60s 渲染层超时');
+});
+
+test('_probeClassesFor：分类失败包络不判空也不标记完成（分类不被误隐藏）', async () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    H.classes = [{ type_id: 'a', type_name: 'A' }];
+    H._loadToken = 1;
+    spyRender(H, ctx);
+    ctx.doAction = async () => ({ ok: false, error: { code: 'L3_RUNTIME_CALL_FAILED', message: '接口异常' } });
+    await H._probeClasses();
+    assert.equal(H._emptyCls.s.size, 0, '失败包络不判空（分类不从栏里消失）');
+    assert.equal(H._okCls.s.size, 0);
+    assert.ok(!H._clsProbed.s, '有未判定不标记完成，下次载入重试');
+});
+
 test('_probeAllClasses：后台为多个源补齐分类空态探测并落盘', async () => {
     const ctx = loadHome();
     const H = home(ctx);

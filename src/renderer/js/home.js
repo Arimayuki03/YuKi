@@ -23,6 +23,19 @@ const HOME_CLASS_CACHE_TTL = 30 * 60 * 1000;         // 首页分类 30 分钟
 const HOME_FEED_CACHE_PREFIX = 'home::feed::v1::';   // + site → { ts, pagecount, items[] }
 const HOME_FEED_CACHE_TTL = 30 * 60 * 1000;
 
+/**
+ * doAction 失败响应识别：后端 spider 出错/超时/风控时返回 RuntimeResponse
+ * 失败包络 {ok:false, error:{code,...}}（HTTP 非 2xx，但 fetch 对非 2xx 不抛
+ * 异常，doAction 原样返回解析结果）；响应体非 JSON 时返回原始字符串。
+ * 这些一律不能作为「无内容」的证据——否则慢源（后端 homeContent 默认 15s
+ * deadline 先于渲染层超时掐断）、瞬时故障源会被误判成僵尸源而屏蔽。
+ */
+function actionResponseFailed(d) {
+    if (!d || typeof d !== 'object') return true; // 原始文本 / 空响应
+    if (d.ok === false) return true;              // 失败包络
+    return !!d.error;                             // 兜底：任何内嵌 error 字段
+}
+
 const Home = {
     sites: [],
     _allSites: [],     // 未过滤的全量站点（探测用）
@@ -348,10 +361,15 @@ const Home = {
                 let ok = false;
                 let unknown = false; // 本轮证据不足（请求出错）：不写 probed/blocked，留待下次重试
                 try {
-                    const d = await doAction('homeContent', { site: site.key, filter: 'false' }, null, 60000);
+                    // deadlineMs 与渲染层超时对齐：后端 homeContent 默认 deadline 仅 15s，
+                    // 慢源会被后端先掐断并返回失败包络（曾因此被误判为无内容源屏蔽）。
+                    const d = await doAction('homeContent', { site: site.key, filter: 'false', deadlineMs: 60000 }, null, 60000);
+                    // 失败包络（spider 异常/超时/风控）≠ 无内容：本轮不下结论，留待下次重试
+                    if (actionResponseFailed(d)) {
+                        unknown = true;
                     // 只有真实内容才算可用：推荐位(list)非空，或至少一个分类拉到资源。
                     // class 结构本身不代表有内容——全部分类皆空的「僵尸源」同样要屏蔽。
-                    if (((d && d.list) || []).length > 0) {
+                    } else if (((d && d.list) || []).length > 0) {
                         ok = true;
                     } else {
                         // 推荐位为空：逐个分类确认。任一分类有内容即可用；
@@ -428,8 +446,12 @@ const Home = {
                 try {
                     const c = await doAction('categoryContent', {
                         site: siteKey, tid, pg: '1', filter: 'false', extend: '{}',
+                        deadlineMs: PROBE_CAT_TIMEOUT,
                     }, null, PROBE_CAT_TIMEOUT);
-                    if (((c && c.list) || []).length) { hasContent = true; return; }
+                    // 失败包络（spider 异常/超时）≠ 该分类确认无内容：按出错处理，
+                    // 不参与「全部分类皆空」结论，避免故障源被误屏蔽
+                    if (actionResponseFailed(c)) { errored++; }
+                    else if (((c && c.list) || []).length) { hasContent = true; return; }
                 } catch (e) { errored++; } // 该分类出错：记为未判定，不参与「全空」结论
             }
         };
@@ -952,8 +974,11 @@ const Home = {
                 const tid = String(c.type_id != null ? c.type_id : '');
                 try {
                     const d = await doAction('categoryContent', { site, tid, pg: '1', filter: 'false', extend: '{}' });
+                    // 失败包络（spider 异常/超时）≠ 空分类：不判空也不判有内容，留给重试，
+                    // 避免把实际有影片的分类从分类栏误隐藏
+                    if (actionResponseFailed(d)) { unclassified++; }
                     // 结果按 site 键隔离记录，不随 token/当前站点变化丢弃（中断不丢进度）
-                    if (((d && d.list) || []).length) {
+                    else if (((d && d.list) || []).length) {
                         okSet.add(tid);
                         if (emptySet.delete(tid)) changed = true; // 曾判空、现恢复内容 → 重新显示
                     } else if (!emptySet.has(tid)) {
