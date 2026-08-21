@@ -95,8 +95,11 @@ const App = {
      * 超时未完成也继续进首页，配置完成后 onConfigReloaded 会刷新站点）。
      * 重载状态以主进程 configState 为准（它掌握发起时机），
      * configTask 作为后端侧双重确认。
+     * opts.quiet=true 时为后台静默模式：不操作全局 loading 遮罩（首页已有缓存
+     * 即时上屏，遮罩反而遮挡画面），完成后仅 toast 提示。
      */
-    async waitConfigDone() {
+    async waitConfigDone(opts) {
+        const quiet = !!(opts && opts.quiet);
         let loaded = 0;
         for (let i = 0; i < 15; i++) {
             let busy = false;
@@ -111,10 +114,10 @@ const App = {
                 loaded = Number(t.summary.healthy ?? t.summary.sites);
             }
             if (!busy) break;
-            showLoading();
+            if (!quiet) showLoading();
             await new Promise((r) => setTimeout(r, 1000));
         }
-        hideLoading();
+        if (!quiet) hideLoading();
         if (loaded > 0) warnToast(`已自动载入上次配置：${loaded} 个站点`);
         return loaded;
     },
@@ -238,14 +241,25 @@ $(async function bootstrap() {
     Live.init();
     // Kazumi 规则引擎前端模块（kimi UI，glm5.2 后端端点）
     if (typeof Kazumi !== 'undefined' && Kazumi.init) Kazumi.init();
-    // 有上次配置时：先等主进程自动重载完成，再首次渲染首页（避免显示示例源）
-    await App.waitConfigDone();
+    // 有上次配置时等待主进程自动重载完成后再首次渲染首页（避免显示示例源）。
+    // 但本地有站点缓存时不再阻塞：先即时上屏缓存内容（Home.init 内预渲染），
+    // 重载在后台静默进行，完成后经 onConfigReloaded → Home.loadSites 刷新站点——
+    // 否则配置重载期间（最坏 15s+）用户只能对着全局 loading 干等。
+    if (typeof Home.hasSiteCache === 'function' && Home.hasSiteCache()) {
+        App.waitConfigDone({ quiet: true }).catch(() => { /* 后台轮询失败不影响启动 */ }); // 不 await、不动遮罩
+    } else {
+        await App.waitConfigDone(); // 无缓存（首启/缓存过期）：维持原行为防示例源闪现
+    }
     await Home.init();
     // 辅助面板（工具面板）惰性初始化一次
     if (!App._auxInited) { initAuxPanels(); App._auxInited = true; }
-    // 启动进入页面（设置里可配置默认页；校验视图存在，否则首页）
-    const startupView = (s.startupView && document.getElementById('view-' + s.startupView)) ? s.startupView : 'home';
-    App.showView(startupView);
+    // 启动进入页面（设置里可配置默认页；校验视图存在，否则首页）。
+    // 启动等待期间用户若已自行切换到其他视图（_navStack 非空），则尊重当前
+    // 视图不再强制跳转——修复「启动加载完成后被自动拽回首页」的问题。
+    if (!App._navStack.length) {
+        const startupView = (s.startupView && document.getElementById('view-' + s.startupView)) ? s.startupView : 'home';
+        App.showView(startupView);
+    }
     // 后台预载推荐数据（本地缓存 + 刷新），点开推荐页即时显示、无首次网络等待
     if (typeof Popular !== 'undefined' && Popular.preload) Popular.preload();
 });

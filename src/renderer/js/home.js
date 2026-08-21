@@ -58,6 +58,7 @@ const Home = {
     _pageCache: null,   // 懒初始化 Map：key site|tid → { pagecount, pages: Map<pg, list> }
     _catWin: new Map(), // 分类源页合并窗口：key site|tid → { items, seen, sourcePg, total, perPage }（T75 多源页合并填满每页条数）
     _homeCacheBooted: false, // 首页 feed 持久化缓存只引导一次（网络返回后以最新覆盖）
+    _feedCacheBooted: false, // 本次 loadHome 是否已用持久化 feed 缓存即时上屏（上屏后提前撤全局遮罩）
     _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
     _sitesLoadToken: 0, // 配置刷新令牌：旧的站点列表请求不得覆盖新配置
@@ -125,6 +126,15 @@ const Home = {
                 if (Array.isArray(cls) && cls.length) { this.classes = cls; this.renderClass(''); }
             }
         } catch (e) { /* 预渲染失败不影响正常网络加载 */ }
+    },
+
+    /** 本地是否有可即时上屏的站点列表缓存（app.js 启动时据此决定是否阻塞等配置重载）。 */
+    hasSiteCache() {
+        if (typeof localCacheGet !== 'function') return false;
+        try {
+            const sites = localCacheGet(SITES_CACHE_KEY);
+            return Array.isArray(sites) && sites.length > 0;
+        } catch (e) { return false; }
     },
 
     /** 读取某源缓存的分类标签列表（未命中/过期返回 null）。 */
@@ -477,6 +487,7 @@ const Home = {
         if (token !== this._loadToken) return;
         $('#home-pager').empty();
         showLoading();
+        this._feedCacheBooted = false;
         try {
             // 冷启动即时上屏：先用缓存的分类标签渲染（避免空标签栏闪现），网络返回后以最新结果覆盖
             const cachedCls = this._loadClassCache(this.site);
@@ -486,10 +497,14 @@ const Home = {
             }
             // 首屏并行：homeContent（分类+推荐位）与「全部」feed 同时发起，
             // feed 先返回时先渲染，分类返回后再刷新分类栏（T77 并行提速）
-            const [data, feedItems] = await Promise.all([
+            const pFirstScreen = Promise.all([
                 doAction('homeContent', { site: this.site, filter: 'false' }),
                 this._fetchHomeFeed(this.page, size),
             ]);
+            // 持久化 feed 缓存已即时上屏 → 提前撤掉全局遮罩（遮罩会挡住缓存画面，
+            // 慢源网络期间用户被迫看转圈）；网络返回后令牌校验通过才静默覆盖。
+            if (this._feedCacheBooted) hideLoading();
+            const [data, feedItems] = await pFirstScreen;
             if (token !== this._loadToken) return;
             if (data && Array.isArray(data.class)) {
                 this.classes = data.class;
@@ -530,6 +545,7 @@ const Home = {
         const site = this.site;          // M-30b：快照本次加载的源与令牌
         const token = this._loadToken;
         // 冷启动加速：仅当首次进入、无内存窗口时，尝试用本地持久化缓存用旧 feed 先渲染
+        this._feedCacheBooted = false;
         if (pg === 1 && !this._catWin.has(site + '|__all__') && !this._homeCacheBooted) {
             const boot = this._cacheHomeGet(site);
             if (boot && boot.items.length) {
@@ -537,6 +553,7 @@ const Home = {
                 if (boot.pagecount > 0) this.pagecount = boot.pagecount;
                 this.renderGrid(this._homeList);
                 this.renderPager();
+                this._feedCacheBooted = true; // 已即时上屏：loadHome 据此提前撤全局遮罩
             }
             this._homeCacheBooted = true; // 只引导一次（网络返回后以最新覆盖）
         }
