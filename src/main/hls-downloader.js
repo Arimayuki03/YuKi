@@ -5,6 +5,8 @@
  * - add({url, out, header, concurrency})：concurrency > 1 时走分片并发模式
  *   （解析 m3u8 → 并行拉取各 .ts/.m4s 分片 → ffmpeg concat 合并），
  *   concurrency <= 1 或加密流/解析失败时回退 ffmpeg 顺序拉流模式；
+ * - 任务级并发上限（maxActive，对应设置页「并发任务数」）：活跃任务达到上限时
+ *   新任务进入 waiting 队列排队，任一任务终态后 FIFO 补位启动；
  * - AES-128 加密流（含 #EXT-X-KEY）自动回退 ffmpeg 模式（ffmpeg 自动解密）；
  * - 广告过滤（adFilter）复用 filterAdSegments，在解析阶段过滤广告分片；
  * - 任务状态结构与 aria2 flatten 对齐（kind:'hls' 供渲染层区分），
@@ -110,12 +112,40 @@ class HlsDownloader extends EventEmitter {
         super();
         this.dir = '';
         this.concurrency = 5; // 分片并发数（设置页可调，index.js 传入）
+        this.maxActive = 3;   // 同时进行的任务数上限（设置页「并发任务数」，index.js 同步）
         this._tasks = new Map(); // gid → task
+        this._pending = [];      // 并发已满时排队的任务（FIFO，status 恒为 'waiting'）
+        // 任务进入终态（completed/error 事件）即释放并发槽位，补位启动排队任务
+        this.on('completed', () => this._pump());
+        this.on('error', () => this._pump());
         this.on('error', () => { }); // EventEmitter 兜底
     }
 
     setDir(dir) { this.dir = dir || path.join(os.homedir(), 'Downloads'); }
     setConcurrency(n) { this.concurrency = Math.max(1, Math.min(32, n | 0)); }
+    /** 调整同时进行的任务数上限（设置页「并发任务数」）；调大后立即补位启动排队任务。 */
+    setMaxActive(n) {
+        this.maxActive = Math.max(1, Math.min(10, n | 0));
+        this._pump();
+    }
+
+    _activeCount() {
+        let n = 0;
+        for (const t of this._tasks.values()) if (t.status === 'active') n++;
+        return n;
+    }
+
+    /** 有空闲槽位时按 FIFO 启动等待中的任务（并发任务数设置的 HLS 侧执行点）。 */
+    _pump() {
+        while (this._pending.length && this._activeCount() < this.maxActive) {
+            const task = this._pending.shift();
+            if (!task || task.status !== 'waiting') continue; // 排队期间已被删除/清理
+            task.status = 'active';
+            console.log(`[hls] ${task.name}: 槽位空闲，开始下载`);
+            if (task._segConc > 1) { task._mode = 'concurrent'; this._runConcurrent(task, task._segConc); }
+            else { task._mode = 'ffmpeg'; this._run(task); }
+        }
+    }
 
     /** 新增任务；返回 gid。ffmpeg 缺失抛 Error('ffmpeg-missing')。
      *  concurrency > 1 时走分片并发模式（解析 m3u8 → 并行拉取分片 → ffmpeg 合并）；
@@ -132,20 +162,28 @@ class HlsDownloader extends EventEmitter {
         // 会 path.join 逃逸或指向目录本身的取值，非法一律回落默认名
         let name = (out || '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 150);
         if (!name || path.basename(name) !== name || name === '.' || name === '..') name = 'video.mp4';
+        // 防御：无扩展名时补 .mp4，避免 ffmpeg 因无法推断格式而合成失败（边下边播等调用方漏传扩展名）
+        if (!path.extname(name)) name += '.mp4';
         const dest = path.join(this.dir, name);
         const conc = Math.max(1, Math.min(32, parseInt(concurrency, 10) || 1));
+        // 并发任务数已满则排队（waiting），任一活跃任务终态后由 _pump 补位启动
+        const queued = this._activeCount() >= this.maxActive;
         const task = {
             gid, kind: 'hls', name, url, header: header || null,
-            status: 'active', percent: 0, done: 0, total: 0, speed: 0,
-            errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false,
+            status: queued ? 'waiting' : 'active', percent: 0, done: 0, total: 0, speed: 0,
+            errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false, _transcodeRetried: false,
             adFilter: !!adFilter, _adTemp: null, _input: null,
             _mode: 'ffmpeg', // 'concurrent' | 'ffmpeg'（分片并发 / ffmpeg 顺序拉流）
+            _segConc: conc,  // 启动时按此分片并发数运行（排队期间暂存）
             _segsDir: `${dest}.${gid}.segs`, // 分片临时目录（M-10：带 gid，同名任务并发互不覆盖）
             _segments: null, _totalSegs: 0, _downloaded: 0, _segBytes: 0,
             _speedTimer: null, _speedLastBytes: 0, _speedLastTs: 0,
         };
         this._tasks.set(gid, task);
-        if (conc > 1) {
+        if (queued) {
+            this._pending.push(task);
+            console.log(`[hls] ${task.name}: 并发任务数已满（${this.maxActive}），进入等待队列`);
+        } else if (conc > 1) {
             task._mode = 'concurrent';
             this._runConcurrent(task, conc);
         } else {
@@ -352,7 +390,33 @@ class HlsDownloader extends EventEmitter {
                     // aac_adtstoasc 对 fMP4/m4s 流会失败，去掉 bsf 重试
                     this._concatSegments(task, segments, false).then(resolve, reject);
                 } else {
-                    reject(new Error(`ffmpeg 合并失败 (code=${code}): ${errBuf.slice(-500)}`));
+                    // copy 均失败时尝试转码兜底（兼容封装/编码异常的切片）
+                    this._concatTranscode(task, segments).then(resolve, (e) => reject(new Error(`ffmpeg 合并失败 (code=${code}): ${errBuf.slice(-500)}; 转码也失败: ${e.message}`)));
+                }
+            });
+            proc.on('error', () => { task._proc = null; reject(new Error('ffmpeg 启动失败')); });
+        });
+    }
+
+    /** 转码兜底合并（copy 失败后以重编码方式重试） */
+    _concatTranscode(task, segments) {
+        const segsDir = task._segsDir;
+        const part = task._dest + '.incomplete' + path.extname(task._dest);
+        const listFile = path.join(segsDir, 'concat.txt');
+        return new Promise((resolve, reject) => {
+            const args = ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', part];
+            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+            task._proc = proc;
+            let errBuf = '';
+            proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
+            proc.on('exit', (code) => {
+                task._proc = null;
+                if (code === 0 && fs.existsSync(part)) {
+                    try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
+                    fs.renameSync(part, task._dest);
+                    resolve();
+                } else {
+                    reject(new Error(`ffmpeg 转码合并失败 (code=${code}): ${errBuf.slice(-500)}`));
                 }
             });
             proc.on('error', () => { task._proc = null; reject(new Error('ffmpeg 启动失败')); });
@@ -472,6 +536,12 @@ class HlsDownloader extends EventEmitter {
             }
             try { fs.rmSync(part, { force: true }); } catch (e) { /* ignore */ }
             if (!task._retried) { task._retried = true; this._spawn(task, false); return; }
+            // 格式异常兜底：-c copy 失败后尝试转码（兼容非标准封装/编码，避免直接报“格式异常”）
+            if (!task._transcodeRetried) {
+                task._transcodeRetried = true;
+                this._spawnTranscode(task);
+                return;
+            }
             task.status = 'error';
             task.errorMessage = '切片合成失败（源可能不可达或格式异常）';
             this._cleanAdTemp(task);
@@ -480,6 +550,63 @@ class HlsDownloader extends EventEmitter {
         proc.on('error', () => {
             task.status = 'error';
             task.errorMessage = 'ffmpeg 启动失败';
+            this._cleanAdTemp(task);
+            this.emit('error', this._flatten(task));
+        });
+    }
+
+    /** 转码兜底：copy 失败时以重编码方式重试，兼容封装/编码异常的源 */
+    _spawnTranscode(task) {
+        const part = task._dest + '.incomplete' + path.extname(task._dest);
+        const args = ['-hide_banner', '-y'];
+        const hs = ffmpegHeaders(task.header);
+        if (hs) args.push('-headers', hs);
+        // 转码模式（不使用 -c copy），兼容格式异常的流
+        args.push('-i', (task._input || task.url), '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', part);
+        task.speed = 0;
+        task._lastProgressTime = null;
+        task._lastProgressBytes = null;
+        task._progressBuffer = '';
+        const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+        task._proc = proc;
+        let errBuf = '';
+        proc.stderr.on('data', (chunk) => {
+            errBuf += chunk.toString();
+            const lines = (task._progressBuffer + chunk.toString()).split(/\r\n|\n|\r/);
+            task._progressBuffer = lines.pop() || '';
+            for (const line of lines) {
+                const m = line.match(/(?=.*time=(\d+):(\d+):([\d.]+))(?=.*size=\s*([\d.]+)\s*([kKmMgG](?:[iI])?B|B))/);
+                if (!m) continue;
+                const t = (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
+                if (Number.isFinite(t) && task.duration > 0) {
+                    task.percent = Math.max(task.percent, Math.min(99.9, Math.round(t / task.duration * 1000) / 10));
+                }
+            }
+        });
+        proc.on('exit', (code) => {
+            task._proc = null;
+            if (task.status === 'removed') return;
+            if (code === 0 && fs.existsSync(part)) {
+                try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
+                fs.renameSync(part, task._dest);
+                task.status = 'complete';
+                task.percent = 100;
+                this._cleanAdTemp(task);
+                this.emit('completed', this._flatten(task));
+                return;
+            }
+            try { fs.rmSync(part, { force: true }); } catch (e) { /* ignore */ }
+            task.status = 'error';
+            // 保留最后错误片段便于定位，但仍展示友好提示
+            console.warn(`[hls] ${task.name}: 转码兜底也失败: ${errBuf.slice(-500)}`);
+            task.errorMessage = '切片合成失败（源可能不可达或格式异常）';
+            this._cleanAdTemp(task);
+            this.emit('error', this._flatten(task));
+        });
+        proc.on('error', () => {
+            task.status = 'error';
+            task.errorMessage = 'ffmpeg 启动失败';
+            this._cleanAdTemp(task);
             this.emit('error', this._flatten(task));
         });
     }
@@ -493,9 +620,12 @@ class HlsDownloader extends EventEmitter {
         this._cleanAdTemp(t);
         this._cleanSegsDir(t);
         this._tasks.delete(gid);
+        // 排队中的任务直接出队，避免残留引用被 _pump 误启动
+        this._pending = this._pending.filter((x) => x !== t);
         try { fs.rmSync(t._dest + '.incomplete' + path.extname(t._dest), { force: true }); } catch (e) { /* ignore */ }
         // 历史版本临时名，旧残留顺带清理
         try { fs.rmSync(t._dest + '.part', { force: true }); } catch (e) { /* ignore */ }
+        this._pump(); // 活跃/排队槽位变化，立即补位
     }
 
     /** 清掉已停止的记录（complete/error/removed），与 aria2 purge 对应。 */

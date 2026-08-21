@@ -31,15 +31,36 @@ const _activeWriters = new Set();
 
 // 定时清空日志的计时器引用（由 startScheduledLogCleanup 管理）。
 let _cleanupTimer = null;
+// 巡检间隔：Node 将 >2^31-1ms（约 24.8 天）的计时器延时钳成 1ms，
+// 因此长周期（如 90 天）不能直接 setInterval(intervalMs)，改为低频巡检 + 到期判断。
+const CLEANUP_PATROL_MS = 60 * 60 * 1000;
 
 /** 启动定时清空日志：每 intervalMs 毫秒清空一次日志目录。
- *  intervalMs <= 0 或重复调用时先清掉旧计时器。enabled=false 时不启动。 */
-function startScheduledLogCleanup(logDir, intervalMs, enabled) {
-    if (_cleanupTimer) { clearInterval(_cleanupTimer); _cleanupTimer = null; }
+ *  intervalMs <= 0 或重复调用时先清掉旧计时器。enabled=false 时不启动。
+ *  hooks（可选）：{ getLastCleanup, markCleaned } —— 持久化“上次清理时间”，
+ *  使清理周期跨应用重启生效；启动时已逾期会立即补清一次。 */
+function startScheduledLogCleanup(logDir, intervalMs, enabled, hooks = {}) {
+    stopScheduledLogCleanup();
     if (!enabled || !intervalMs || intervalMs <= 0) return;
-    _cleanupTimer = setInterval(() => {
+    const getLast = typeof hooks.getLastCleanup === 'function' ? hooks.getLastCleanup : null;
+    const markCleaned = typeof hooks.markCleaned === 'function' ? hooks.markCleaned : () => {};
+    const run = () => {
         try { clearLogs(logDir); } catch (e) { /* 定时清空失败不阻断 */ }
-    }, intervalMs);
+        try { markCleaned(Date.now()); } catch (e) { /* 持久化失败仅影响跨重启周期 */ }
+        nextAt = Date.now() + intervalMs;
+    };
+    // 到期时间基准：有持久化钩子按上次清理时间起算，否则本次启动起算。
+    let nextAt;
+    if (getLast) {
+        const last = Number(getLast()) || 0;
+        nextAt = (last > 0 ? last : Date.now()) + intervalMs;
+        if (Date.now() >= nextAt) run(); // 已逾期（如长期未启动）：立即补清
+    } else {
+        nextAt = Date.now() + intervalMs;
+    }
+    _cleanupTimer = setInterval(() => {
+        if (Date.now() >= nextAt) run();
+    }, Math.min(CLEANUP_PATROL_MS, intervalMs));
 }
 
 /** 停止定时清空日志（退出/设置变更时调用）。 */

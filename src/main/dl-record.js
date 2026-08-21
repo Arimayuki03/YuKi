@@ -10,7 +10,10 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { app } = require('electron');
+let electronApp = null;
+try {
+    electronApp = require('electron').app;
+} catch (e) { /* test runner / non-electron environment */ }
 
 const MAX_RECORDS = 200; // 上限防无限增长，超出丢最旧
 
@@ -24,7 +27,10 @@ class DlRecordStore {
 
     _filePath() {
         if (!this._file) {
-            this._file = path.join(app.getPath('userData'), 'dl-records.json');
+            if (!electronApp || typeof electronApp.getPath !== 'function') {
+                throw new Error('userData path unavailable outside Electron runtime without explicit filePath');
+            }
+            this._file = path.join(electronApp.getPath('userData'), 'dl-records.json');
         }
         return this._file;
     }

@@ -61,6 +61,7 @@ class PythonBridge extends EventEmitter {
         const proc = spawn(this._pythonExe(), args, {
             cwd: this.backendDir,
             env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...this.extraEnv },
+            windowsHide: true,
         });
         this.proc = proc;
 
@@ -68,7 +69,9 @@ class PythonBridge extends EventEmitter {
         proc.stdout.on('data', (chunk) => {
             const text = chunk.toString('utf8');
             buf += text;
-            if (this.logWriter) this.logWriter.write('STDOUT', text.trimEnd());
+            // STDOUT/STDERR 不是有效日志级别（LEVEL_WEIGHT 无此键会绕过级别过滤），
+            // 映射为 INFO/WARN，使 Python 控制台输出同样受设置页日志级别约束。
+            if (this.logWriter) this.logWriter.write('INFO', '[python:stdout]', text.trimEnd());
             const m = buf.match(READY_RE);
             if (m && !this.info) {
                 const port = parseInt(m[1], 10);
@@ -81,7 +84,7 @@ class PythonBridge extends EventEmitter {
             }
         });
         proc.stderr.on('data', (chunk) => {
-            if (this.logWriter) this.logWriter.write('STDERR', chunk.toString('utf8').trimEnd());
+            if (this.logWriter) this.logWriter.write('WARN', '[python:stderr]', chunk.toString('utf8').trimEnd());
             process.stderr.write(`[python] ${chunk}`);
         });
         proc.on('exit', (code) => {

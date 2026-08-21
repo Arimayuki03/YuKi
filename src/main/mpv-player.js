@@ -27,6 +27,10 @@ const ROOT = (() => {
 })();
 const WIN = process.platform === 'win32';
 
+// mpv 原生截图（s 键）文件名模板：video-pc-20260820-153012-000.png
+// 合法转义见 _screenshotArgs 注释（%tX / %0Xn；裸 %w 会让 mpv 判为非法模板并放弃截图）。
+const SHOT_TEMPLATE = 'video-pc-%tY%tm%td-%tH%tM%tS-%03n';
+
 function traceFields(value) {
     const result = {};
     if (value && value.requestId) result.requestId = String(value.requestId);
@@ -96,8 +100,6 @@ class MpvPlayer extends EventEmitter {
         this.audioLang = '';       // 音轨语言偏好（非空时注入 --alang）
         this.subLang = '';         // 字幕语言偏好（非空时注入 --slang）
         this.anime4kShaders = '';  // Anime4K 着色器链（分号分隔路径；非空时注入 --glsl-shaders）
-        this.cacheMode = 'memory'; // 视频缓冲位置：'memory' 内存（mpv 默认）| 'disk' 硬盘（--cache-on-disk）
-        this.cacheDir = '';        // 硬盘缓存目录（cacheMode==='disk' 且非空时注入 --demuxer-cache-dir）
         this.screenshotDir = '';   // 截图保存目录（非空时注入 --screenshot-directory，mpv 原生 s 键也存这里）
         this._queueLen = 0;        // 当前播放队列长度（ended 事件附带，供渲染层判定队列末尾）
         this._sessionId = 0;       // 起播会话号（每次 play 自增；exit 事件附带，供渲染层匹配新旧进程）
@@ -129,8 +131,72 @@ class MpvPlayer extends EventEmitter {
 
     // ------------------------------------------------------------ 生命周期
 
+    /** 重新生成 IPC 管道路径（每次起播独立，避免残留管道导致首播 IPC 无法连接）。 */
+    _refreshIpcPath() {
+        this.ipcPath = WIN
+            ? `\\\\.\\pipe\\vpc-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+            : path.join(os.tmpdir(), `vpc-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.sock`);
+        // Linux 遗留 socket 文件（上次崩溃未清理）会阻止 mpv 绑定，需预先清理
+        if (!WIN) {
+            try { if (fs.existsSync(this.ipcPath)) fs.rmSync(this.ipcPath, { force: true }); } catch (e) { /* ignore */ }
+        }
+    }
+
+    /**
+     * 视频缓冲缓存参数（起播时拼入 argv）。
+     *
+     * **缓存一律落在内存，永不落磁盘**：无条件带 `--cache-on-disk=no`（命令行优先级高于用户
+     * `mpv.conf`，杜绝 conf 里 `cache-on-disk=yes` 把在线流写进磁盘），本地文件也一并带上。
+     *
+     * 曾经存在的 'disk' 模式（`--cache-on-disk=yes` + `--demuxer-cache-dir`，由设置键
+     * playerCacheMode 控制）已整体移除：那个键没有任何 UI 入口，一旦被历史版本写成 'disk'
+     * 用户就再也关不掉，表现为「代码默认值已改成内存但实测仍在写盘」——持久化值压过默认值。
+     * 残留的两个设置键与 mpv-cache-*.dat 由 index.js 启动时一次性迁移清理。
+     *
+     * 在线播放（isNet）统一加大预缓冲抗 CDN/转发抖动（含网盘 go-proxy 分段实时转发流），
+     * 本地文件不需要预缓冲。注：mpv 默认 `--demuxer-cache-unlink-files=immediate`，历史上
+     * 落盘的缓存文件建好即 unlink、播完消失，故排查时只见磁盘写入吞吐、目录里找不到文件。
+     */
+    _cacheArgs(isNet) {
+        const args = [];
+        if (isNet) {
+            // 网盘(夸克)go-proxy 转流 CDN 常限速（~5MB/s），并发分段几乎无增益。
+            // 加大读缓冲窗口让有限的带宽流水化填充缓存，减少 4K 起播/连播卡顿；
+            // 保持起播即时（不强制先缓冲满，否则等太久）。这些即为内存占用上限。
+            args.push('--cache=yes',
+                      '--demuxer-max-bytes=512MiB', '--demuxer-readahead-secs=60',
+                      '--demuxer-max-back-bytes=128MiB');
+            // 网盘 go-proxy 转发（do=pan）首次起播可能要先解析分享/转存（5-20s），
+            // 加大网络超时避免 mpv 等待首字节超时断开（此前 10054 播放失败）。
+            args.push('--network-timeout=120');
+        }
+        args.push('--cache-on-disk=no');
+        return args;
+    }
+
+    /**
+     * 截图参数（起播时拼入 argv），覆盖 mpv 原生 s 键（screenshot 命令）落盘的目录/格式/文件名。
+     *
+     * 文件名模板只用 mpv 合法转义：`%tX`（strftime 字段）+ `%0Xn`（序号，重名时自增避让）。
+     * **不要写裸 `%w`**——mpv 的 `%w` 必须紧跟子格式字符（%wH/%wM/%wS/%ws/%wf…），
+     * 此前模板 `video-pc-%w-%03n` 里 `%w-` 属未知转义，mpv create_fname 判为非法模板后
+     * 直接放弃截图（终端报 "Invalid screenshot filename template"），而 input.conf 的
+     * `show-text "已截图"` 照旧弹出 → 表现为「提示截了但目录里没有图」。
+     * 格式显式 png：mpv 默认 jpg，与 IPC 通道 screenshot-to-file 的 .png 统一。
+     */
+    _screenshotArgs() {
+        if (!this.screenshotDir) return [];
+        try { fs.mkdirSync(this.screenshotDir, { recursive: true }); } catch (e) { /* ignore */ }
+        return [
+            `--screenshot-directory=${this.screenshotDir}`,
+            '--screenshot-format=png',
+            `--screenshot-template=${SHOT_TEMPLATE}`,
+        ];
+    }
+
     /** 播放首项并装载播放列表。episodes: [{url, title}]；opts.header 注入 HTTP 头（解析直链常需 Referer） */
     play(episodes, opts = {}) {
+        this._refreshIpcPath();
         this.stop();
         const trace = traceFields(opts);
         if (!this.binary) return { ok: false, reason: 'mpv-missing', ...trace };
@@ -216,34 +282,11 @@ class MpvPlayer extends EventEmitter {
         if (this.subLang) args.push(`--slang=${this.subLang}`);
         // Anime4K 实时超分（动漫向）：着色器链完整存在才注入，缺文件静默跳过
         if (this.anime4kShaders) args.push(`--glsl-shaders=${this.anime4kShaders}`);
-        // 视频缓冲：网络流（含网盘 go-proxy 分段实时转发流）统一加大预缓冲，
-        // 抗 CDN/转发抖动；本地文件不需要。硬盘缓存模式（设置页可切）另加
-        // --cache-on-disk 落盘。注意 mpv v0.41 的目录选项是 --demuxer-cache-dir
-        // （--cache-dir 不是合法选项）。
+        // 视频缓冲（只走内存，永不落盘，见 _cacheArgs）
         const isNet = /^https?:\/\//i.test(String(episodes[0].url || ''));
-        if (isNet) {
-            // 网盘(夸克)go-proxy 转流 CDN 常限速（~5MB/s），并发分段几乎无增益。
-            // 加大读缓冲窗口让有限的带宽流水化填充缓存，减少 4K 起播/连播卡顿；
-            // 保持起播即时（不强制先缓冲满，否则等太久）。
-            args.push('--cache=yes',
-                      '--demuxer-max-bytes=512MiB', '--demuxer-readahead-secs=60',
-                      '--demuxer-max-back-bytes=128MiB');
-            // 网盘 go-proxy 转发（do=pan）首次起播可能要先解析分享/转存（5-20s），
-            // 加大网络超时避免 mpv 等待首字节超时断开（此前 10054 播放失败）。
-            args.push('--network-timeout=120');
-            if (this.cacheMode === 'disk' && this.cacheDir) {
-                try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
-                args.push('--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
-            }
-        } else if (this.cacheMode === 'disk' && this.cacheDir) {
-            try { fs.mkdirSync(this.cacheDir, { recursive: true }); } catch (e) { /* 目录不可写时 mpv 自会报错，不阻断 */ }
-            args.push('--cache=yes', '--cache-on-disk=yes', `--demuxer-cache-dir=${this.cacheDir}`);
-        }
-        // 截图目录：mpv 原生 s 键（screenshot 命令）与 IPC 截图都存到这里
-        if (this.screenshotDir) {
-            try { fs.mkdirSync(this.screenshotDir, { recursive: true }); } catch (e) { /* ignore */ }
-            args.push(`--screenshot-directory=${this.screenshotDir}`, '--screenshot-template=video-pc-%w-%03n');
-        }
+        args.push(...this._cacheArgs(isNet));
+        // 截图目录/格式/文件名模板（mpv 原生 s 键与 IPC 截图都存到这里，见 _screenshotArgs）
+        args.push(...this._screenshotArgs());
         args.push('--', episodes[0].url);
         for (let i = 1; i < episodes.length; i++) args.push(episodes[i].url);
         this._queueLen = episodes.length;
@@ -495,7 +538,7 @@ class MpvPlayer extends EventEmitter {
     _connectIpc(attempt = 0, sessionId = null) {
         const active = this._activeSession;
         if (!this.proc || !active || (sessionId != null && active.id !== sessionId)) return;
-        if (attempt > 50) return; // ~5s 仍连不上则放弃（播放本身不受影响，仅失去控制/事件）
+        if (attempt > 100) return; // ~10s 仍连不上则放弃（首播冷启动需更长时间，播放本身不受影响，仅失去控制/事件）
         const sock = net.connect(this.ipcPath);
         sock.once('connect', () => {
             if (!this._activeSession || this._activeSession.id !== active.id) {
@@ -623,7 +666,12 @@ class MpvPlayer extends EventEmitter {
      * filePath 必须以 .png 结尾（mpv 按扩展名推断格式）。
      */
     screenshot(filePath) {
-        return this.command('screenshot-to-file', filePath, 'subtitles');
+        // 防御：确保目录存在（调用方通常已 mkdir，此处兜底）。
+        try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } catch (e) { /* ignore */ }
+        // 归一化为 posix 斜杠：Windows 反斜杠在部分 mpv 版本的 JSON IPC 解析中被当作转义，
+        // 导致 screenshot-to-file 落盘失败。mpv 在 Windows 下同样接受正斜杠路径。
+        const posix = String(filePath).replace(/\\/g, '/');
+        return this.command('screenshot-to-file', posix, 'subtitles');
     }
 
     // ------------------------------------------------------------ ASS 弹幕

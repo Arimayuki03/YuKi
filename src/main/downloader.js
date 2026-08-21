@@ -266,19 +266,27 @@ class Downloader extends EventEmitter {
         const p = getProxyUrl();
         return p ? { ...opts, httpProxy: p, httpsProxy: p } : opts;
     }
-    /** 调整并发任务数：运行中经 changeGlobalOption 即时生效，未启动时记下待下次启动。 */
+    /** 调整并发任务数：运行中经 changeGlobalOption 即时生效（含排队中的任务重新调度），
+     *  未启动时仅记录、待下次启动随 CLI 参数生效。
+     *  注意：aria2 RPC 选项键为短横线格式（CLI 长选项去掉 --），驼峰键会被 aria2
+     *  以「无法识别的选项」拒绝且此前被静默吞掉，导致运行中改并发从不生效——
+     *  现将失败上抛，由调用方如实提示用户「重启引擎后生效」。 */
     async setConcurrency(n) {
         this.concurrency = Math.max(1, Math.min(10, n | 0));
         if (this.proc) {
-            try { await this.changeGlobalOption({ maxConcurrentDownloads: this.concurrency }); } catch (e) { /* 下轮重启生效 */ }
+            await this.changeGlobalOption({ 'max-concurrent-downloads': String(this.concurrency) });
         }
         return this.concurrency;
     }
-    /** 调整分片并发数：运行中经 changeGlobalOption 更新每服务器连接数；--split 待下次引擎启动生效。 */
+    /** 调整分片并发数：全局选项是新增任务的模板，改完即对此后新增任务生效
+     *  （进行中任务的既有连接数不变）。键名同样必须为短横线格式。 */
     async setSplit(n) {
         this.split = Math.max(1, Math.min(32, n | 0));
         if (this.proc) {
-            try { await this.changeGlobalOption({ maxConnectionPerServer: this.split }); } catch (e) { /* 下轮重启生效 */ }
+            await this.changeGlobalOption({
+                split: String(this.split),
+                'max-connection-per-server': String(this.split),
+            });
         }
         return this.split;
     }
@@ -294,8 +302,18 @@ class Downloader extends EventEmitter {
     addMetalink(b64, opts = {}) { return this._rpc('addMetalink', [b64, this._proxyOpts(opts)]); }
     pause(gid) { return this._rpc('pause', [gid]); }
     unpause(gid) { return this._rpc('unpause', [gid]); }
-    /** 全部暂停（返回被暂停的 gid 数组）。 */
-    pauseAll() { return this._rpc('pauseAll'); }
+    /** 全部暂停（返回被暂停的 gid 数组）。aria2 原生 pauseAll 仅暂停 active 任务，
+     *  腾出的并发位会被调度器立即用 waiting 任务补上，批量下载时表现为按钮失效；
+     *  故取 active + waiting 快照逐个 pause（tellWaiting 含已暂停任务，需按 status 排除），
+     *  期间被调度器补位的任务其 gid 已在快照中，pause 对 active/waiting 均生效，不受影响。 */
+    async pauseAll() {
+        const [active, waiting] = await Promise.all([
+            this.tellActive(), this.tellWaiting(),
+        ]);
+        const targets = [...active, ...waiting].filter((s) => s && s.gid && s.status !== 'paused');
+        const rs = await Promise.allSettled(targets.map((s) => this.pause(s.gid)));
+        return rs.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+    }
     /** 全部恢复（返回被恢复的 gid 数组）。 */
     unpauseAll() { return this._rpc('unpauseAll'); }
     // remove 仅适用于 active/waiting/paused；已停止（complete/error/removed）的

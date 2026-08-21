@@ -36,6 +36,81 @@ function isLoadableUrl(u) {
     return /^https?:\/\//i.test(String(u || ''));
 }
 
+function mergeHeaders(...sources) {
+    const out = {};
+    const keys = new Map();
+    const queue = [...sources];
+    while (queue.length) {
+        let source = queue.shift();
+        if (typeof source === 'string') {
+            const text = source.trim();
+            try { source = text && text[0] === '{' ? JSON.parse(text) : Object.fromEntries(
+                text.split(/\r?\n/).filter((line) => line.includes(':'))
+                    .map((line) => [line.slice(0, line.indexOf(':')).trim(), line.slice(line.indexOf(':') + 1).trim()]));
+            } catch (e) { source = null; }
+        }
+        if (Array.isArray(source)) { queue.unshift(...source); continue; }
+        if (!source || typeof source !== 'object') continue;
+        for (const [rawKey, rawValue] of Object.entries(source)) {
+            if (rawValue === null || rawValue === undefined || rawValue === '') continue;
+            const key = String(rawKey).trim();
+            if (!key) continue;
+            const lower = key.toLowerCase();
+            const old = keys.get(lower);
+            if (old) delete out[old];
+            keys.set(lower, key);
+            out[key] = String(rawValue);
+        }
+    }
+    return out;
+}
+
+function parserHeaders(parser) {
+    const ext = parser && parser.ext && typeof parser.ext === 'object' ? parser.ext : {};
+    return mergeHeaders(ext.header, ext.headers, parser && parser.header, parser && parser.headers);
+}
+
+function parserFlags(parser) {
+    const ext = parser && parser.ext && typeof parser.ext === 'object' ? parser.ext : {};
+    const raw = ext.flag !== undefined ? ext.flag
+        : (parser && (parser.flag !== undefined ? parser.flag : parser.flags));
+    if (Array.isArray(raw)) return raw.map(String);
+    if (raw === null || raw === undefined || raw === '') return [];
+    return String(raw).split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function matchesFlag(parser, flag) {
+    const flags = parserFlags(parser);
+    return !flags.length || !flag || flags.includes(String(flag));
+}
+
+function cookieHeaderForUrl(cookies, rawUrl) {
+    let url;
+    try { url = new URL(String(rawUrl || '')); } catch (e) { return ''; }
+    const now = Date.now() / 1000;
+    const pairs = [];
+    for (const cookie of cookies || []) {
+        if (!cookie || !cookie.name || cookie.expirationDate && cookie.expirationDate <= now) continue;
+        const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
+        const host = url.hostname.toLowerCase();
+        if (domain && host !== domain && !host.endsWith(`.${domain}`)) continue;
+        if (cookie.secure && url.protocol !== 'https:') continue;
+        const path = String(cookie.path || '/');
+        if (path && !url.pathname.startsWith(path)) continue;
+        pairs.push(`${cookie.name}=${cookie.value || ''}`);
+    }
+    return pairs.join('; ');
+}
+
+function parserExtUrl(parser) {
+    const url = String(parser && parser.url || '');
+    const ext = parser && parser.ext && typeof parser.ext === 'object' ? parser.ext : {};
+    if (!Object.keys(ext).length || !url.includes('?')) return url;
+    const encoded = Buffer.from(JSON.stringify(ext), 'utf8').toString('base64url');
+    const index = url.indexOf('?');
+    return `${url.slice(0, index + 1)}cat_ext=${encoded}&${url.slice(index + 1)}`;
+}
+
 /** 注入页面的轮询脚本：收集 <video>/<audio> 的媒体直链（含 <source> 子元素）。
  *  覆盖 webRequest 未命中的场景（如资源经 XHR/fetch 拉取、resourceType 非 media）。 */
 const JS_POLL_VIDEO = `(() => {
@@ -82,8 +157,9 @@ const JS_GET_IFRAME_SRC = `(() => { try { return window.__vpc_iframe_src || ''; 
 
 class ParseWindow {
     /** @param getInfo 返回 { base, token } 的后端信息提供函数 */
-    constructor(getInfo) {
+    constructor(getInfo, probe) {
         this.getInfo = getInfo;
+        this.probe = typeof probe === 'function' ? probe : null;
         this._slots = [];   // 空闲槽位（分区名 parse-0..POOL_SIZE-1）
         this._waiters = [];
         for (let i = 0; i < POOL_SIZE; i++) this._slots.push(i);
@@ -157,64 +233,123 @@ class ParseWindow {
      *        停止后续接口尝试/窗口导航并释放解析池槽位（调用方 25s 安全超时用）。
      * @returns {{ok:true, url:string, header?:object, via?:string} | {ok:false, reason:string}}
      */
-    async resolve(targetUrl, parsesOverride, legacy, abort) {
+    async resolve(targetUrl, parsesOverride, legacy, abort, context = {}) {
         if (!/^https?:\/\//i.test(String(targetUrl || ''))) {
             return { ok: false, reason: 'bad target url' };
         }
         const parses = parsesOverride || await this._fetchParses();
-        const list = (parses || []).filter((p) => p && p.url);
+        const list = (parses || []).filter((p) => p && (p.url || parseInt(p.type, 10) === 4));
         if (!list.length) return { ok: false, reason: 'no-parses' };
 
-        // FongMi 配置可显式给解析器 priority/order；未给时保持旧行为：
-        // JSON/扩展 JSON 优先，随后混合/iframe。type=4 解析器并发尝试，
-        // 但结果仍按配置优先级选择，避免“谁先返回谁覆盖高优先级”。
+        // 显式 priority/order 优先；未声明时严格保持配置顺序。解析器 type
+        // 决定执行引擎，不隐式改写用户配置的优先级。
         const ordered = list.map((parser, index) => ({ parser, index }))
             .sort((a, b) => {
-                const typePriority = (item) => {
-                    const type = parseInt(item.parser.type, 10);
-                    if (Number.isFinite(Number(item.parser.priority))) return Number(item.parser.priority);
-                    if (Number.isFinite(Number(item.parser.order))) return Number(item.parser.order);
-                    if (type === 1 || type === 2) return 0;
-                    if (type === 4) return 1;
-                    return 2;
-                };
-                return typePriority(a) - typePriority(b) || a.index - b.index;
+                const rank = (item) => Number.isFinite(Number(item.parser.priority))
+                    ? Number(item.parser.priority)
+                    : (Number.isFinite(Number(item.parser.order)) ? Number(item.parser.order) : item.index);
+                return rank(a) - rank(b) || a.index - b.index;
             });
-        const parallel = ordered.filter((item) => parseInt(item.parser.type, 10) === 4);
-        let parallelDone = false;
-        for (const item of ordered) {
+        const selectedName = String(context.parserName || '');
+        // ext.flag 只是**偏好**：上游 `VodConfig.getParses(type, flag)` 用
+        // `filter.isEmpty() ? items : filter` 兜底，没有解析器声明这条线路时
+        // 仍然按配置顺序试全部解析器，而不是直接放弃解析。
+        const byFlag = ordered.filter(({ parser }) => matchesFlag(parser, context.flag));
+        const selected = selectedName
+            ? ordered.filter(({ parser }) => [parser.name, parser.id, parser.key]
+                .filter((value) => value !== null && value !== undefined).map(String).includes(selectedName))
+            : (byFlag.length ? byFlag : ordered);
+        if (!selected.length) return { ok: false, reason: selectedName ? 'parser-not-found' : 'no-matching-parser' };
+        for (const item of selected) {
             if (abort && abort.requested) return { ok: false, reason: 'aborted' };
             const type = parseInt(item.parser.type, 10);
-            if (type === 4) {
-                if (parallelDone) continue;
-                parallelDone = true;
-                const results = await Promise.all(parallel.map((entry) =>
-                    this._tryParser(entry.parser, targetUrl, legacy, abort)));
-                for (const candidate of ordered) {
-                    if (parseInt(candidate.parser.type, 10) !== 4) continue;
-                    const result = results[parallel.findIndex((entry) => entry.index === candidate.index)];
-                    if (result) return result;
-                }
-                continue;
-            }
-            const result = await this._tryParser(item.parser, targetUrl, legacy, abort);
+            const raw = type === 4
+                ? await this._trySuper(item.parser, ordered, targetUrl, legacy, abort, context)
+                : await this._tryParser(item.parser, targetUrl, legacy, abort, context, ordered);
+            const result = await this._validateResult(raw, item.parser, abort);
             if (result) return result;
         }
         return { ok: false, reason: 'resolve-failed' };
     }
 
-    async _tryParser(parse, targetUrl, legacy, abort) {
-        const type = parseInt(parse.type, 10);
-        if (type === 1 || type === 2 || type === 4) {
-            const jsonResult = await this._tryJson(parse, targetUrl, abort);
-            if (jsonResult || type === 1 || type === 2) return jsonResult;
-        }
-        // iframe 型逐个尝试（跳过拼出畸形 scheme 的解析接口，防系统「打开方式」弹窗）
-        if (!isLoadableUrl(parse.url + targetUrl)) return null;
-        return this._tryIframe(parse, targetUrl, IFRAME_TIMEOUT, legacy, abort);
+    async _validateResult(result, parser, abort) {
+        if (!result || !result.ok || !result.url) return null;
+        if (result.probed || !this.probe || result.skipProbe || parser && parser.skipProbe) return result;
+        if (abort && abort.requested) return null;
+        const probed = await this.probe(result.url, {
+            headers: result.header, timeoutMs: 8000,
+        });
+        if (!probed || !probed.ok || abort && abort.requested) return null;
+        return { ...result, url: probed.finalUrl || result.url,
+            header: mergeHeaders(result.header, probed.headers), probed: true };
     }
 
-    /** type=1：GET parse.url+target，解析返回 JSON 里的直链（兼容多种字段名与 header 附带）。 */
+    async _trySuper(_parse, ordered, targetUrl, legacy, abort, context) {
+        // type 4 聚合只跑 type 0/1 候选；flag 同样是偏好——没有候选声明这条线路
+        // 时用全部 type 0/1 候选（对齐 `VodConfig.getParses(type, flag)`）。
+        const pool = ordered.filter(({ parser }) => {
+            const type = parseInt(parser.type, 10);
+            return type === 0 || type === 1;
+        });
+        const flagged = pool.filter(({ parser }) => matchesFlag(parser, context.flag));
+        const candidates = flagged.length ? flagged : pool;
+        if (!candidates.length) return null;
+        // JSON and Web parsers may execute concurrently, but selection waits
+        // for all and walks priority order. A fast low-priority result cannot
+        // steal a slow high-priority success.
+        const results = await Promise.all(candidates.map(async ({ parser }) => {
+            const raw = await this._tryParser(parser, targetUrl, legacy, abort, context, ordered);
+            return this._validateResult(raw, parser, abort);
+        }));
+        for (let i = 0; i < candidates.length; i++) if (results[i]) return results[i];
+        return null;
+    }
+
+    async _tryParser(parse, targetUrl, legacy, abort, context = {}, ordered = []) {
+        const type = parseInt(parse.type, 10);
+        if (type === 1) return this._tryJson(parse, targetUrl, abort);
+        if (type === 2) return this._tryJsonExt(parse, targetUrl, ordered, abort, context);
+        if (type !== 0) return null;
+        if (!isLoadableUrl(String(parse.url || '') + targetUrl)) return null;
+        return this._tryIframe(parse, targetUrl, IFRAME_TIMEOUT, legacy, abort, context);
+    }
+
+    _jsonPlayResult(data, parse) {
+        if (!data || typeof data !== 'object') return null;
+        const objects = [];
+        const add = (value) => {
+            if (!value || typeof value !== 'object' || Array.isArray(value) || objects.includes(value)) return;
+            objects.push(value);
+        };
+        add(data); add(data.data); add(data.result);
+        if (data.data) { add(data.data.data); add(data.data.result); }
+        if (data.result) { add(data.result.data); add(data.result.result); }
+        let url = '';
+        let owner = data;
+        for (const object of objects) {
+            const candidate = object.url || object.vurl || object.play_url || object.playUrl || object.src;
+            if (candidate) { url = String(candidate); owner = object; break; }
+        }
+        if (!/^https?:\/\//i.test(url) || /\.html?(?:\?|$)/i.test(url)) return null;
+        const headers = [];
+        for (const object of objects) {
+            headers.push(object.header, object.headers);
+            const aliases = {};
+            for (const [key, value] of Object.entries(object)) {
+                const lower = key.toLowerCase();
+                if (['user-agent', 'referer', 'origin', 'cookie', 'authorization'].includes(lower)) aliases[key] = value;
+                if (lower === 'ua') aliases['User-Agent'] = value;
+            }
+            headers.push(aliases);
+        }
+        return {
+            ok: true, url, header: mergeHeaders(parserHeaders(parse), ...headers),
+            via: parse.name || 'json', parse: Number(owner.parse || data.parse || 0),
+            jx: Number(owner.jx || data.jx || 0), skipProbe: !!(owner.skipProbe || data.skipProbe),
+        };
+    }
+
+    /** type=1：GET parse.url+target，解析嵌套 JSON、headers 和重定向。 */
     async _tryJson(parse, targetUrl, abort) {
         let cancelPoll = null;
         let timeoutTimer = null;
@@ -239,21 +374,13 @@ class ParseWindow {
             }
             if (abort && abort.requested) return null;
             const api = parse.url + targetUrl;
-            const rsp = await fetch(api, signal ? { signal } : {});
+            const rsp = await fetch(api, { ...(signal ? { signal } : {}),
+                headers: parserHeaders(parse), redirect: 'follow' });
             if (abort && abort.requested) return null;
+            if (!rsp.ok) return null;
             const data = await rsp.json();
             if (abort && abort.requested) return null;
-            const d = data && data.data && typeof data.data === 'object' ? data.data : {};
-            const url = data && (data.url || d.url || data.vurl || d.vurl || data.play_url || d.play_url);
-            // 解出的是播放页（.html）而非媒体直链，视为失败交给下一种方式
-            if (url && /^https?:\/\//i.test(url) && !/\.html?(\?|$)/i.test(url)) {
-                const header = {};
-                const referer = (data.header && data.header.Referer) || data.referer || d.referer;
-                const ua = (data.header && (data.header['User-Agent'] || data.header.ua)) || data.ua;
-                if (referer) header.Referer = referer;
-                if (ua) header['User-Agent'] = ua;
-                return { ok: true, url, header, via: parse.name || 'json' };
-            }
+            return this._jsonPlayResult(data, parse);
         } catch (e) { /* 下一个接口；取消由调用方统一映射为 L4_PARSE_CANCELLED */
         } finally {
             if (cancelPoll) clearInterval(cancelPoll);
@@ -262,9 +389,55 @@ class ParseWindow {
         return null;
     }
 
+    /** type=2：调用当前 portable JAR 的 Json<key>.parse(jxs, url)。 */
+    async _tryJsonExt(parse, targetUrl, ordered, abort, context) {
+        const info = this.getInfo && this.getInfo();
+        if (!info || !info.base || !context.site) return null;
+        const jxs = {};
+        for (const { parser } of ordered || []) {
+            if (parseInt(parser.type, 10) === 1 && parser.name && parser.url) {
+                jxs[String(parser.name)] = parserExtUrl(parser);
+            }
+        }
+        const controller = new AbortController();
+        const cancelPoll = abort ? setInterval(() => {
+            if (abort.requested) controller.abort();
+        }, 50) : null;
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            const body = new URLSearchParams({
+                do: 'parseExt', site: String(context.site), key: String(parse.url || ''),
+                url: targetUrl, jxs: JSON.stringify(jxs),
+                requestId: String(context.requestId || ''),
+                playSessionId: String(context.playSessionId || ''),
+            });
+            const rsp = await fetch(`${info.base}/action?token=${encodeURIComponent(info.token || '')}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body, signal: controller.signal,
+            });
+            if (!rsp.ok || abort && abort.requested) return null;
+            const data = await rsp.json();
+            const result = this._jsonPlayResult(data, parse);
+            if (!result) return null;
+            // Extension parsers may return another page with parse/jx=1.
+            if (result.parse === 1 || result.jx === 1) {
+                const captured = await this._capture({ url: result.url, via: `${result.via}·web`,
+                    timeout: IFRAME_TIMEOUT, legacy: false, abort, context,
+                    headers: result.header });
+                return captured ? { ...captured, header: mergeHeaders(result.header, captured.header) } : null;
+            }
+            return result;
+        } catch (e) { return null;
+        } finally {
+            clearTimeout(timer);
+            if (cancelPoll) clearInterval(cancelPoll);
+        }
+    }
+
     /** iframe 型：隐藏窗口加载解析页，webRequest 捕获媒体直链。 */
-    _tryIframe(parse, targetUrl, timeout, legacy, abort) {
-        return this._capture({ url: parse.url + targetUrl, via: parse.name || parse.url, timeout, legacy, abort });
+    _tryIframe(parse, targetUrl, timeout, legacy, abort, context) {
+        return this._capture({ url: parse.url + targetUrl, via: parse.name || parse.url,
+            timeout, legacy, abort, context, headers: parserHeaders(parse) });
     }
 
     /**
@@ -275,10 +448,11 @@ class ParseWindow {
      * @param abort 可选取消标记（resolve 同款）：置位后立即作废并释放槽位。
      *        注意单飞合并的并发调用共享同一窗口，任一调用方放弃即整体作废。
      */
-    captureDirect(url, timeout = IFRAME_TIMEOUT, legacy, abort) {
+    captureDirect(url, timeout = IFRAME_TIMEOUT, legacy, abort, context = {}) {
         if (!isLoadableUrl(url)) return Promise.resolve(null);
-        const key = `${legacy ? 'L' : 'N'}|${url}`;
-        return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout, legacy, abort }));
+        const key = `${legacy ? 'L' : 'N'}|${context.playSessionId || ''}|${url}`;
+        return this._captureFlight.run(key, () => this._capture({ url, via: 'page', timeout,
+            legacy, abort, context, headers: context.header }));
     }
 
     /** 隐藏窗口加载 url，webRequest 捕获媒体直链（_tryIframe/captureDirect 共用）。
@@ -286,14 +460,16 @@ class ParseWindow {
      *  legacy=true 走旧解析器：注入 MutationObserver 监听 iframe src，媒体直链即命中，
      *  非媒体页跟随加载（限深防环）；否则用 JS 轮询 <video>/<audio> 元素兜底。
      *  abort（可选）置位后立即 finish(null)：停止导航/轮询、销毁窗口并释放槽位。 */
-    _capture({ url, via, timeout, legacy, abort }) {
+    _capture({ url, via, timeout, legacy, abort, context = {}, headers = {} }) {
         return this._acquire().then((slot) => new Promise((resolve) => {
             let win;
             try {
+                const sessionKey = String(context.playSessionId || context.requestId || Date.now())
+                    .replace(/[^A-Za-z0-9_-]/g, '').slice(-48) || String(Date.now());
                 win = new BrowserWindow({
                     show: false, width: 800, height: 600,
                     webPreferences: {
-                        partition: `parse-${slot}`, // 独立槽位会话：并发解析不冲突
+                        partition: `parse-${slot}-${sessionKey}`, // 每个播放会话独立；销毁窗口即清理
                         contextIsolation: true,
                         nodeIntegration: false,
                         sandbox: true,
@@ -328,9 +504,15 @@ class ParseWindow {
                 clearInterval(legacyPoll);
                 clearInterval(abortPoll);
                 try { ses.webRequest.onBeforeRequest(null); } catch (e) { /* ignore */ }
+                try { ses.webRequest.onBeforeSendHeaders(null); } catch (e) { /* ignore */ }
                 // 先读会话 Cookie 再销毁窗口（session 随最后窗口关闭销毁）；推给后端持久化
                 ses.cookies.get({}).then((cookies) => {
                     this._pushCookies(cookies);
+                    if (r && r.url) {
+                        const cookie = cookieHeaderForUrl(cookies, r.url);
+                        const cookieHeader = cookie ? { Cookie: cookie } : {};
+                        r = { ...r, header: mergeHeaders(headers, r.header, cookieHeader) };
+                    }
                     done(r);
                 }).catch(() => done(r));
             };
@@ -354,17 +536,22 @@ class ParseWindow {
                 if (details.resourceType === 'media') return true;
                 return isMediaUrl(details.url);
             };
-            ses.webRequest.onBeforeRequest((details, cb) => {
+            // onBeforeRequest 没有可靠的 requestHeaders；等到
+            // onBeforeSendHeaders 再完成，确保 Cookie/Referer/Origin/Auth/UA
+            // 与真正命中的媒体请求一致。
+            ses.webRequest.onBeforeRequest((_details, cb) => cb({}));
+            ses.webRequest.onBeforeSendHeaders((details, cb) => {
+                const requestHeaders = details.requestHeaders || {};
                 if (isMedia(details)) {
-                    const h = details.requestHeaders || {};
-                    const referer = h.Referer || h.referer;
-                    finish({
-                        ok: true, url: details.url,
-                        header: referer ? { Referer: referer } : {},
-                        via,
-                    });
+                    const mediaHeaders = {};
+                    for (const [key, value] of Object.entries(requestHeaders)) {
+                        if (['user-agent', 'referer', 'origin', 'cookie', 'authorization']
+                            .includes(String(key).toLowerCase())) mediaHeaders[key] = value;
+                    }
+                    finish({ ok: true, url: details.url,
+                        header: mergeHeaders(headers, mediaHeaders), via });
                 }
-                cb({});
+                cb({ requestHeaders });
             });
 
             // 首帧加载完成：置位 initialLoadDone 后立即执行一次元素检测，比等 300ms 轮询快
@@ -429,7 +616,10 @@ class ParseWindow {
                 }, 300);
             }
 
-            win.loadURL(url).catch(() => { /* 加载失败等超时 */ });
+            const extraHeaders = Object.entries(mergeHeaders(headers))
+                .map(([key, value]) => `${key}: ${value}`).join('\n');
+            win.loadURL(url, extraHeaders ? { extraHeaders } : undefined)
+                .catch(() => { /* 加载失败等超时 */ });
         }));
     }
 

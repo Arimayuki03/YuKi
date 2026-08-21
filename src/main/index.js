@@ -31,6 +31,7 @@ const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require
 const Settings = require('./settings');
 const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
+const { probeMedia, isLocalProxyStreamUrl } = require('./media-probe');
 const SyncplayClient = require('./syncplay-client');
 const DlnaCaster = require('./dlna-caster');
 const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs, setLogLevel, startScheduledLogCleanup, stopScheduledLogCleanup } = require('./logger');
@@ -168,19 +169,25 @@ let isQuitting = false; // 真正退出标志（托盘菜单“退出”置位�
 let dlTimer = null;
 // 启动自动重载状态：渲染层经 vpc:config-state 轮询，避免首屏停留在示例源
 const configReload = { reloading: false, url: '' };
+// 缓存清理并发锁：clearAppCaches 会做多目录遍历+session.clearCache，禁止并行重复清理。
+let _clearingAppCaches = false;
 
 function send(channel, payload) {
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
-/** mpv 硬盘缓存文件名模式：--demuxer-cache-dir 平铺写入 mpv-cache-<hex>.dat。 */
+/**
+ * mpv 硬盘缓存文件名模式：历史 disk 模式经 --demuxer-cache-dir 平铺写入 mpv-cache-<hex>.dat。
+ * 硬盘缓存能力已移除（缓存只走内存，见 mpv-player._cacheArgs），此模式仅供启动时的
+ * 一次性残留清理（migratePlayerCache）使用。
+ */
 const MPV_CACHE_FILE_RE = /^mpv-cache-.+\.dat$/i;
 
 /**
- * 清空 mpv 硬盘缓存目录：递归遍历（兼容未来子目录结构），只删 mpv 缓存模式文件
- * （避免在用户自选目录里误删无关文件），随之变空的子目录一并移除。
- * 逐文件 try/catch：正被 mpv 写盘的文件跳过（Windows 下 mpv 以共享删除打开一般可删，
- * 但仍有竞态窗口）。返回成功释放的字节数（不含跳过文件）。
+ * 清空 mpv 硬盘缓存残留：递归遍历（兼容旧版可能的子目录结构），只删 mpv 缓存模式文件
+ * （避免在用户曾自选的目录里误删无关文件），随之变空的子目录一并移除。
+ * 逐文件 try/catch：被占用的文件跳过。返回成功释放的字节数（不含跳过文件）。
+ * 唯一调用者是 migratePlayerCache（启动时一次性迁移）。
  */
 function clearDiskCache(dir) {
     if (!dir || !fs.existsSync(dir)) return 0;
@@ -195,14 +202,95 @@ function clearDiskCache(dir) {
                     walk(p);
                     try { fs.rmdirSync(p); } catch (e) { /* 仍有文件/占用：保留 */ }
                 } else if (ent.isFile() && MPV_CACHE_FILE_RE.test(ent.name)) {
-                    const st = fs.statSync(p);
-                    try { fs.rmSync(p, { force: true }); cleaned += st.size; } catch (e) { /* 占用跳过 */ }
+                    // 单次 stat 取大小后删除；占用文件跳过（不计入 cleaned）。
+                    const size = fs.statSync(p).size;
+                    fs.rmSync(p, { force: true });
+                    cleaned += size;
                 }
-            } catch (e) { /* 单项失败不影响整体 */ }
+            } catch (e) { /* 单项失败/占用跳过，不影响整体 */ }
         }
     };
     walk(dir);
     return cleaned;
+}
+
+/**
+ * 一次性迁移：抹掉历史「硬盘缓存」模式的痕迹（启动时调用）。
+ *
+ * 早期版本用 playerCacheMode/playerCacheDir 两个设置键控制 mpv 是否把视频缓冲写进磁盘
+ * （--cache-on-disk=yes + --demuxer-cache-dir）。这两个键没有任何 UI 入口，一旦被写成
+ * 'disk' 用户就无法自行关闭，并且**持久化值会压过代码默认值**——这正是「默认已改为内存
+ * 但实测仍在写盘」的根因。硬盘缓存能力已整体移除（缓存只走内存），此处把残留清干净：
+ * 删 mpv-cache-*.dat（只匹配该模式，不碰用户曾自选目录里的无关文件）+ 删两个键。
+ *
+ * 幂等：键不存在即直接返回，不需要额外的迁移标记键。
+ */
+function migratePlayerCache() {
+    if (!settings) return;
+    const hasMode = settings.get('playerCacheMode') !== undefined;
+    const hasDir = settings.get('playerCacheDir') !== undefined;
+    if (!hasMode && !hasDir) return;
+    const dir = settings.get('playerCacheDir') || path.join(app.getPath('userData'), 'mpv-cache');
+    let cleaned = 0;
+    try { cleaned = clearDiskCache(dir); } catch (e) { /* 目录不可达/占用：键仍要删掉 */ }
+    settings.delete('playerCacheMode');
+    settings.delete('playerCacheDir');
+    console.log(`[mpv] 已移除硬盘缓存设置残留（清理 ${cleaned} 字节 @ ${dir}），视频缓冲只走内存`);
+}
+
+/**
+ * 统计目录大小：单次递归遍历累加文件字节数（不删除）。
+ * @param {string} p 目录路径
+ * @param {(name:string)=>boolean} [fileFilter] 可选文件名过滤（仅统计匹配文件）
+ * @returns {{bytes:number, files:number}}
+ */
+function getDirSize(p, fileFilter) {
+    let bytes = 0, files = 0;
+    if (!p || !fs.existsSync(p)) return { bytes, files };
+    const walk = (d) => {
+        let ents;
+        try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        for (const ent of ents) {
+            const full = path.join(d, ent.name);
+            try {
+                if (ent.isDirectory()) walk(full);
+                else if (!fileFilter || fileFilter(ent.name)) { bytes += fs.statSync(full).size; files += 1; }
+            } catch (e) { /* 单项失败跳过 */ }
+        }
+    };
+    walk(p);
+    return { bytes, files };
+}
+
+/**
+ * 清空目录内容：单次遍历，边累加大小边删除（避免先 dirSize 再 rm 的 O(n^2) 二次遍历）。
+ * 目录本身保留，仅清其内容；占用文件跳过不计入释放字节。
+ * @param {string} p 目录路径
+ * @returns {{bytes:number, files:number}} 实际释放字节与删除文件数
+ */
+function purgeDir(p) {
+    let bytes = 0, files = 0;
+    if (!p || !fs.existsSync(p)) return { bytes, files };
+    // 后序遍历：先删子内容并累加，再删空目录；避免删除后无法再 stat。
+    const walk = (d) => {
+        let ents;
+        try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        for (const ent of ents) {
+            const full = path.join(d, ent.name);
+            try {
+                if (ent.isDirectory()) {
+                    walk(full);
+                    try { fs.rmdirSync(full); } catch (e) { /* 仍有占用文件：保留 */ }
+                } else {
+                    const size = fs.statSync(full).size;
+                    fs.rmSync(full, { force: true });
+                    bytes += size; files += 1;
+                }
+            } catch (e) { /* 单文件失败/占用跳过 */ }
+        }
+    };
+    walk(p);
+    return { bytes, files };
 }
 
 /** 播放成功后的公共后处理：应用预设音量。 */
@@ -216,6 +304,20 @@ function afterPlay() {
 // 网盘首次解析/转存可能等待数秒；必须等到 mpv 真正加载媒体再向渲染层
 // 返回成功，否则 502/404 会被误报成“已在 mpv 播放”。
 const MPV_START_TIMEOUT_MS = 30000;
+
+// vpc:play 整体兜底上限：正常最慢路径 ≈ 媒体探测 8s + 解析竞速 15s/10s + mpv 起播 30s，
+// 90s 远在其上；仅在某个子步骤意外挂死时触发，保证渲染层不会因 IPC 永不返回而一直转圈。
+const PLAY_HANDLER_TIMEOUT_MS = 90000;
+
+/** 给可能挂起的异步步骤加竞速上限：到时返回 fallback（后台任务不中断）。
+ *  用于「结果不影响播放、但不能拖住响应」的次要步骤（如边下边播的 aria2 注册）。 */
+function raceWithTimeout(promise, timeoutMs, fallback) {
+    let timer = null;
+    return Promise.race([
+        Promise.resolve(promise).finally(() => { if (timer) clearTimeout(timer); }),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), timeoutMs); }),
+    ]);
+}
 
 async function verifyMpvStart(result, timeoutMs = MPV_START_TIMEOUT_MS) {
     if (!result || !result.ok) return result || { ok: false, reason: 'mpv-start-failed' };
@@ -248,6 +350,11 @@ async function verifyMpvStart(result, timeoutMs = MPV_START_TIMEOUT_MS) {
 }
 
 function playerErrorCode(reason) {
+    if (String(reason || '').startsWith('media-probe-')) {
+        if (reason === 'media-probe-probe-timeout') return 'L5_MEDIA_PROBE_TIMEOUT';
+        if (reason === 'media-probe-probe-cancelled') return 'L5_MEDIA_PROBE_CANCELLED';
+        return 'L5_MEDIA_PROBE_FAILED';
+    }
     if (reason === 'mpv-missing') return 'L6_PLAYER_MISSING';
     if (reason === 'mpv-start-timeout') return 'L6_PLAYER_START_TIMEOUT';
     if (reason === 'play-cancelled') return 'L6_PLAYER_CANCELLED';
@@ -258,7 +365,7 @@ function withPlayerTrace(result, meta = {}) {
     const value = (result && typeof result === 'object') ? { ...result } : { ok: false, reason: 'mpv-start-failed' };
     if (meta.requestId) value.requestId = String(meta.requestId);
     if (meta.playSessionId) value.playSessionId = String(meta.playSessionId);
-    if (!value.ok) {
+    if (!value.ok && !value.launched) {
         const code = playerErrorCode(String(value.reason || ''));
         value.runtimeError = {
             code, stage: 'player', retryable: !['L6_PLAYER_MISSING'].includes(code),
@@ -630,6 +737,10 @@ app.whenReady().then(() => {
             mpv.inputConfPath = path.join(scriptDir, 'input.conf');
         } catch (e) { /* 脚本写入失败不影响播放 */ }
     }
+    // 截图目录首帧就绪：首次起播前就赋值，保证 writeMpvAssets/首播的 --screenshot-directory
+    // 已带入 Pictures/video-pc（否则首播时为 '' → s 键截图落到 cwd，被误判为失效）。
+    // update-player-prefs 仍会刷新该值，保持一致。
+    mpv.screenshotDir = path.join(app.getPath('pictures'), 'video-pc');
     writeMpvAssets();
     ipcMain.handle('vpc:update-hotkeys', () => { writeMpvAssets(); return { ok: true }; });
 
@@ -655,8 +766,14 @@ app.whenReady().then(() => {
             if (!mpv.playing) return { ok: false, reason: 'not-playing' };
             const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'video-pc');
             fs.mkdirSync(dir, { recursive: true });
-            const file = path.join(dir, `video-pc-${Date.now()}.png`);
-            await mpv.screenshot(file);
+            // 随机后缀避免同毫秒多次触发时文件名冲突覆盖
+            const file = path.join(dir, `video-pc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
+            // 传给 mpv 用 posix 斜杠（Windows 反斜杠可能被 JSON IPC 转义导致失败）；
+            // 返回给前端的 path 保留系统路径（供打开目录/通知展示）。
+            const filePosix = file.replace(/\\/g, '/');
+            await mpv.screenshot(filePosix);
+            // 校验是否真的落盘：mpv 返回成功但文件未生成时明确报错，不静默
+            if (!fs.existsSync(file)) throw new Error('screenshot file not created');
             if (Notification.isSupported()) {
                 const n = new Notification({ title: '已截图', body: path.basename(file) });
                 n.on('click', () => { if (win) { win.show(); win.focus(); } });
@@ -691,8 +808,14 @@ app.whenReady().then(() => {
     //  a) 已指定外部播放器为主播放器（VLC/PotPlayer/其他）：直接把解析好的首条直链交外部播放器。
     //     （外部播放器拿不到结束事件，故选 A：只交首集、不起自动连播。）
     //  b) 否则内置 mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
-    ipcMain.handle('vpc:play', async (_e, payload) => {
-        const meta = (payload && payload.meta) || {};
+    ipcMain.handle('vpc:play', (_e, payload) => {
+        // 整体 watchdog（raceWithTimeout）：任何子步骤意外挂起时 90s 后向渲染层返回
+        // 失败结果，而不是让调用方永久等待。超时后后台工作若最终完成，其结果被丢弃
+        // （渲染层已按失败收尾）；不主动 stop mpv —— 避免误杀用户随后另起的新会话
+        // （对齐 verifyMpvStart 的所有权保护）。
+        return raceWithTimeout((async () => {
+        let meta = (payload && payload.meta) || {};
+        let requestedUrl = String(payload && payload.url || '');
         // L-1：URL 协议白名单——本地文件播放走 vpc:dl-play / vpc:file-push 专用通道，
         // 此处仅放行网络协议，拒绝 file://、edl:// 等可直接触碰本地文件的 scheme
         // （渲染层 playUrl 调用点已确认均为网络直链：站点剧集/直播源/直链播放）
@@ -703,15 +826,49 @@ app.whenReady().then(() => {
                 || (Array.isArray(meta0.playlist) && meta0.playlist.some((e) => e && e.url && !protoOk(e.url)));
             if (bad) return withPlayerTrace({ ok: false, reason: 'bad url protocol' }, meta);
         }
+        // P5.4 / R8.1：任何 HTTP 媒体在交给外部播放器/mpv 前先做 HEAD→Range 探测。
+        // 开关 media_probe（默认开）：若用户显式关闭，则跳过探测直接交由播放器。
+        // HTML、登录页、403 和已过期签名地址在这里止步，避免播放器黑屏。
+        // 例外：本机 go-proxy 取流地址（见 isLocalProxyStreamUrl）。
+        const mediaProbeEnabled = settings.get('mediaProbe') !== false && !meta.skipProbe
+            && !isLocalProxyStreamUrl(requestedUrl);
+        if (/^https?:\/\//i.test(requestedUrl) && mediaProbeEnabled) {
+            const requestId = String(meta.requestId || '');
+            const controller = new AbortController();
+            const marker = { requested: false, reason: '', controller };
+            if (requestId) runtimeAborts.set(requestId, marker);
+            try {
+                const probe = await probeMedia(requestedUrl, {
+                    headers: meta.header, skipProbe: false,
+                    signal: controller.signal, timeoutMs: 8000,
+                });
+                if (!probe.ok) {
+                    return withPlayerTrace({ ok: false, reason: `media-probe-${probe.reason}`,
+                        url: probe.finalUrl || requestedUrl, status: probe.status || 0,
+                        source: meta.source || meta.site || '' }, meta);
+                }
+                requestedUrl = probe.finalUrl || requestedUrl;
+                meta = { ...meta, header: probe.headers || meta.header,
+                    probe: { via: probe.via || probe.reason || '', status: probe.status || 0 } };
+            } finally {
+                if (requestId && runtimeAborts.get(requestId) === marker) runtimeAborts.delete(requestId);
+            }
+        }
         // 外部播放器为主：直接转交，不再走内置 mpv（mpv 缺失时也能用外部播放器起播）
         const extPrimary = primaryExternalPlayer();
         if (extPrimary) {
-            const firstUrl = (payload && payload.url) ? String(payload.url) : '';
+            const firstUrl = requestedUrl;
             if (!/^(https?|rtmp|rtsp):\/\//i.test(firstUrl)) {
                 return withPlayerTrace({ ok: false, reason: 'bad url', via: 'external' }, meta);
             }
             const r = launchExternalPlayer(extPrimary, firstUrl, meta.header);
-            return withPlayerTrace({ ...r, viaExternal: true }, meta);
+            // A detached external process has no file-loaded/first-frame
+            // acknowledgement. Report launched separately; ok=true remains
+            // reserved for a verified mpv session.
+            return withPlayerTrace(r.ok
+                ? { ...r, ok: false, launched: true, started: false,
+                    reason: 'external-start-unverified', viaExternal: true }
+                : { ...r, viaExternal: true }, meta);
         }
         if (!mpv.isAvailable()) {
             return withPlayerTrace({ ok: false, reason: 'mpv-missing', hint: '设置 → 扩展 → 下载内置播放器，或 设置 → 组件状态 指定外部播放器' }, meta);
@@ -721,7 +878,7 @@ app.whenReady().then(() => {
         // meta.playlist 仅作历史兼容兜底，正常链路不会携带
         const episodes = (Array.isArray(meta.playlist) && meta.playlist.length
             ? meta.playlist
-            : [{ url: payload.url, title }]).map((episode) => ({
+            : [{ url: requestedUrl, title }]).map((episode) => ({
                 ...episode, url: traceLocalProxy(episode.url, meta),
             }));
         // Anime4K 开关/档位实时生效（播放途中可切换，下次起播注入着色器）
@@ -751,15 +908,22 @@ app.whenReady().then(() => {
             afterPlay();
             r.anime4k = !!mpv.anime4kShaders; // 渲染层 toast 提示 Anime4K 是否生效
             // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
-            // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放
-            if (settings.get('simulDownload')) {
+            // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放。
+            // 直播（meta.source==='live'）是无限流，无法下载，跳过
+            if (settings.get('simulDownload') && meta.source !== 'live') {
                 try {
                     const ep = episodes[0];
                     const urlPath = String(ep.url).split('?')[0];
                     const isM3u8 = /\.m3u8$/i.test(urlPath);
-                    const ext = (urlPath.match(/\.(mp4|mkv|flv|mov|avi|webm|ts)$/i) || ['', ''])[1];
-                    // M-9：命中扩展名才补「.ext」，未命中（如直播/无扩展直链）不加悬挂点号
-                    const out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + (ext ? '.' + ext : '');
+                    let out;
+                    if (isM3u8) {
+                        // m3u8 合成产物固定为 mp4（避免无扩展名导致 ffmpeg 无法推断格式而合成失败）
+                        out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + '.mp4';
+                    } else {
+                        const ext = (urlPath.match(/\.(mp4|mkv|flv|mov|avi|webm|ts)$/i) || ['', ''])[1];
+                        // M-9：命中扩展名才补「.ext」，未命中（如直播/无扩展直链）不加悬挂点号
+                        out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + (ext ? '.' + ext : '');
+                    }
                     if (isM3u8) {
                         syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                         hls.add({ url: ep.url, out, header: meta.header,
@@ -767,7 +931,10 @@ app.whenReady().then(() => {
                         startDlPoll();
                         r.simulDl = true;
                     } else if (dl.isAvailable()) {
-                        await dl.start(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                        // 边下边播注册是次要步骤：aria2 引擎/RPC 偶发挂起时不能拖住
+                        // vpc:play 的响应（mpv 已开播、渲染层却在转圈），8s 竞速兜底。
+                        await raceWithTimeout(
+                            startDlEngine(dl.dir || settings.get('dlDir') || app.getPath('downloads')), 8000);
                         const opts = { out };
                         if (meta.header && typeof meta.header === 'object') {
                             const pairs = Object.entries(meta.header)
@@ -775,7 +942,7 @@ app.whenReady().then(() => {
                                 .map(([k, v]) => `${k}: ${v}`);
                             if (pairs.length) opts.header = pairs;
                         }
-                        await dl.addUri(ep.url, opts);
+                        await raceWithTimeout(dl.addUri(ep.url, opts), 8000);
                         startDlPoll();
                         r.simulDl = true;
                     }
@@ -783,6 +950,8 @@ app.whenReady().then(() => {
             }
         }
         return withPlayerTrace(r, meta);
+        })(), PLAY_HANDLER_TIMEOUT_MS, { ok: false, reason: 'play-handler-timeout' })
+            .then((result) => withPlayerTrace(result, (payload && payload.meta) || {}));
     });
 
     // 播放控制（渲染层备用；mpv 窗口自带默认快捷键）
@@ -843,23 +1012,86 @@ app.whenReady().then(() => {
     fileIpc('vpc:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
     fileIpc('vpc:file-del-folder', (rel) => { fileMgr.delFolder(rel); return {}; });
 
-    // 本地视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
+    // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
     fileIpc('vpc:file-thumb', async (rel) => {
-        const abs = fileMgr.resolveSafe(rel);
+        let abs;
+        const inside = (root, target) => {
+            if (!root || !target) return false; // 缺 target（误用漏参）返回 false，而非抛 TypeError
+            const r = path.relative(path.resolve(String(root)), target);
+            return r === '' || (!!r && !r.startsWith('..') && !path.isAbsolute(r));
+        };
+        const dlRoot = dl.dir || settings.get('dlDir') || app.getPath('downloads');
+        // 支持绝对路径（如已下载文件的绝对路径，必须在下载目录或文件管理根目录白名单内）
+        if (path.isAbsolute(String(rel || ''))) {
+            abs = path.resolve(String(rel));
+            if (!inside(dlRoot, abs) && !inside(fileMgr.root, abs)) return { ok: false };
+        } else {
+            // 相对路径：优先走 fileMgr.resolveSafe，若未配置 root 或超出则尝试在下载目录内解析
+            try {
+                abs = fileMgr.resolveSafe(rel);
+            } catch (e) {
+                if (dlRoot) {
+                    const candidate = path.resolve(dlRoot, String(rel || ''));
+                    if (inside(dlRoot, candidate)) abs = candidate;
+                    else return { ok: false };
+                } else return { ok: false };
+            }
+        }
         if (!fileMgr.isVideo(abs)) return { ok: false };
         return ffmpegThumb(abs, path.join(app.getPath('userData'), 'local-thumbs'));
     });
 
-    // 本地媒体播放（视频/音频）：相对路径 → 白名单内绝对路径 → 复用 mpv-player
+    // 本地媒体播放（视频/音频）：相对路径/绝对路径 → 白名单内绝对路径 → 复用 mpv-player
     fileIpc('vpc:file-push', async (rel) => {
         if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
-        const abs = fileMgr.resolveSafe(rel);
+        if (!rel || !String(rel).trim()) return { ok: false, reason: 'path-denied' };
+        let abs;
+        const inside = (root, target) => {
+            if (!root || !target) return false; // 缺 target（误用漏参）返回 false，而非抛 TypeError
+            const r = path.relative(path.resolve(String(root)), target);
+            return r === '' || (!!r && !r.startsWith('..') && !path.isAbsolute(r));
+        };
+        const dlRoot = dl.dir || settings.get('dlDir') || app.getPath('downloads');
+        // fileMgr 可能在极早期调用时仍未初始化（窗口已建但 app.whenReady 后半段未执行完），此时优雅降级为 dlRoot 校验
+        const fileRoot = (fileMgr && fileMgr.root) ? fileMgr.root : dlRoot;
+        if (path.isAbsolute(String(rel || ''))) {
+            abs = path.resolve(String(rel));
+            if (!inside(dlRoot, abs) && !inside(fileRoot, abs)) return { ok: false, reason: 'path-denied' };
+        } else {
+            try {
+                if (fileMgr && fileMgr.root) abs = fileMgr.resolveSafe(rel);
+                else throw new Error('root not set');
+            } catch (e) {
+                if (dlRoot) {
+                    const candidate = path.resolve(dlRoot, String(rel || ''));
+                    if (inside(dlRoot, candidate)) abs = candidate;
+                    else return { ok: false, reason: 'path-denied' };
+                } else return { ok: false, reason: 'path-denied' };
+            }
+        }
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return { ok: false, reason: 'file-not-found' };
         if (!fileMgr.isMedia(abs)) return { ok: false, reason: 'not-video' };
         const title = path.basename(abs);
-        const r = mpv.play([{ url: abs, title }], { title, noSeq: true });
+        // mpv 对 Windows 反斜杠路径兼容性一般，转正斜杠可规避首播因路径转义导致的加载失败
+        const playUrl = abs.replace(/\\/g, '/');
+        const r = mpv.play([{ url: playUrl, title }], { title, noSeq: true });
         if (!r.ok) return r;
         const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
-        if (!started.ok) return started;
+        if (!started.ok) {
+            // 首播冷启动偶发 IPC 未就绪导致 verify 超时：延迟 400ms 后重试一次本次本地文件
+            // （二次点击成功即为此竞态，自动重试可使首次点击即成功）
+            if (started.reason === 'mpv-start-timeout' || started.reason === 'mpv-exited-before-playback') {
+                await new Promise((res) => setTimeout(res, 400));
+                const retry = mpv.play([{ url: playUrl, title }], { title, noSeq: true });
+                if (!retry.ok) return started;
+                const retried = await verifyMpvStart(retry, MPV_START_TIMEOUT_MS);
+                if (!retried.ok) return retried;
+                retried.sessionId = -Math.abs(retried.sessionId);
+                afterPlay();
+                return retried;
+            }
+            return started;
+        }
         started.sessionId = -Math.abs(started.sessionId);
         afterPlay();
         return started;
@@ -917,7 +1149,7 @@ app.whenReady().then(() => {
             let timer = null;
             try {
                 const result = await Promise.race([
-                    parseWin.resolve(targetUrl, parses, legacy, abort),
+                    parseWin.resolve(targetUrl, parses, legacy, abort, payload),
                     new Promise((res) => { timer = setTimeout(() => {
                         abort.requested = true;
                         abort.reason = 'timeout';
@@ -965,7 +1197,7 @@ app.whenReady().then(() => {
             let timedOut = false;
             try {
                 const r = await Promise.race([
-                    parseWin.captureDirect(url, undefined, legacy, abort),
+                    parseWin.captureDirect(url, undefined, legacy, abort, payload),
                     new Promise((res) => { timer = setTimeout(() => {
                         timedOut = true; abort.requested = true; abort.reason = 'timeout'; res(null);
                     }, 25000); }),
@@ -995,7 +1227,10 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:runtime-cancel', async (_e, context) => {
         const requestId = String(context && context.requestId || '');
         const abort = requestId && runtimeAborts.get(requestId);
-        if (abort) { abort.requested = true; abort.reason = 'cancelled'; }
+        if (abort) {
+            abort.requested = true; abort.reason = 'cancelled';
+            if (abort.controller) abort.controller.abort();
+        }
         const backend = await bridge.cancelRuntime(context || {});
         return { ...backend, ok: backend.ok !== false, cancelled: !!abort || !!backend.cancelled, requestId };
     });
@@ -1042,7 +1277,7 @@ app.whenReady().then(() => {
 
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
-    // GET 收到任意响应即判活，立即释放连接不拉流；3xx 视为可用。
+    // GET 收到任意响应即判活，立即强制销毁连接不拉流，防止后台无限跑流量；3xx 视为可用。
     ipcMain.handle('vpc:probe-urls', async (_e, urls) => {
         if (!Array.isArray(urls) || !urls.length) return [];
         const probeOne = (url) => new Promise((resolve) => {
@@ -1051,24 +1286,33 @@ app.whenReady().then(() => {
             const mod = str.startsWith('https') ? https : http;
             const attempt = (method, timeoutMs, onDone) => {
                 let settled = false;
-                const done = (v) => { if (settled) return; settled = true; onDone(v); };
+                const done = (v) => {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) clearTimeout(timer);
+                    if (req) {
+                        try { req.destroy(); } catch (e) { /* ignore */ }
+                    }
+                    onDone(v);
+                };
                 let req;
                 let timer;
                 try {
                     req = mod.request(str, { method, timeout: timeoutMs }, (res) => {
-                        clearTimeout(timer);
                         const code = res.statusCode || 0;
+                        // 收到响应头后立即停止接收后续 stream 数据并销毁响应流，防直播流持续在后台下载
+                        try { res.destroy(); } catch (e) { /* ignore */ }
+                        
                         // 直播流首帧即判活：mpv/ffplay 等播放器都按「有响应即视为可用」处理。
                         // HEAD/GET 拿到任何 2xx/3xx 都算可用；4xx（403 防盗链等）因可能有
                         // 伪造头/时间戳要求，一律放行，避免把真实可播频道误判为死链。
-                        if (code >= 200 && code < 400) { res.resume(); done(true); return; }
-                        if (code === 403 || code === 405 || code === 501) { res.resume(); done(null); return; } // HEAD 被拒 → 回退 GET
-                        res.resume();
+                        if (code >= 200 && code < 400) { done(true); return; }
+                        if (code === 403 || code === 405 || code === 501) { done(null); return; } // HEAD 被拒 → 回退 GET
                         done(code >= 400 && code < 500);
                     });
                 } catch (e) { done(null); return; } // 构造失败同样走 GET 兜底
-                timer = setTimeout(() => { req.destroy(); done(null); }, timeoutMs);
-                req.on('error', () => { clearTimeout(timer); done(null); });
+                timer = setTimeout(() => { done(null); }, timeoutMs);
+                req.on('error', () => { done(null); });
                 req.end();
             };
             attempt('HEAD', 3000, (head) => {
@@ -1185,9 +1429,9 @@ app.whenReady().then(() => {
         return { ok: true, path: target };
     });
 
-    // ---- mpv 视频缓冲缓存（内存默认 / 硬盘 + 自定义目录） ----
+    // ---- 通用目录选择 ----
 
-    // 通用目录选择：mpv 硬盘缓存目录用（openDirectory + createDirectory，取消返回 cancelled）
+    // 通用目录选择对话框（openDirectory + createDirectory，取消返回 cancelled）
     ipcMain.handle('vpc:pick-folder', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择文件夹',
@@ -1197,110 +1441,89 @@ app.whenReady().then(() => {
         return { ok: true, path: r.filePaths[0] };
     });
 
-    /** 读设置注入 mpv 视频缓冲缓存偏好（启动时与设置变更时调用）。 */
-    function applyPlayerCache() {
-        const m = settings.get('playerCacheMode') === 'disk' ? 'disk' : 'memory';
-        mpv.cacheMode = m;
-        mpv.cacheDir = m === 'disk' ? (settings.get('playerCacheDir') || settings.defaultCacheDir()) : '';
-    }
-
-    /**
-     * 设置 mpv 视频缓冲缓存模式/目录：
-     * - mode='disk' 且 dir 非空：mkdir + 持久化 playerCacheDir；与旧目录不同则清理旧目录残留（换路径清缓存）。
-     * - mode='disk' 且 dir 为空：沿用已记忆目录（还原上次的硬盘缓存目录）。
-     * - mode='memory'：切回内存缓冲，清空原硬盘缓存目录残留。
-     * 只清旧目录、不清新选择目录（防误删刚指定的目录内容）；返回 {ok, mode, dir, cleanedBytes}。
-     */
-    ipcMain.handle('vpc:set-player-cache', (_e, mode, dir) => {
-        const m = mode === 'disk' ? 'disk' : 'memory';
-        const prevDir = settings.get('playerCacheDir') || settings.defaultCacheDir();
-        let cleanedBytes = 0;
-        let newDir = '';
-        if (m === 'disk') {
-            newDir = String(dir || '').trim() || prevDir;
-            try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
-            if (newDir !== prevDir) cleanedBytes = clearDiskCache(prevDir);
-        } else {
-            cleanedBytes = clearDiskCache(prevDir);
-            newDir = '';
-        }
-        settings.set('playerCacheMode', m);
-        if (m === 'disk') settings.set('playerCacheDir', newDir);
-        mpv.cacheMode = m;
-        mpv.cacheDir = m === 'disk' ? newDir : '';
-        return { ok: true, mode: m, dir: mpv.cacheDir, cleanedBytes };
-    });
-
-    // 清空 mpv 硬盘缓存（不改变模式/目录；正被占用文件跳过）
-    ipcMain.handle('vpc:clear-player-cache', () => {
-        const dir = settings.get('playerCacheDir') || settings.defaultCacheDir();
-        const cleanedBytes = clearDiskCache(dir);
-        return { ok: true, cleanedBytes };
-    });
-
     // 统一清理主进程侧本地缓存（配合后端 clearCache 一并调用，见渲染层 clearCache）：
-    // mpv 硬盘缓存 + 本地预览图 + 续播记录 + 解析/验证窗口 partition 会话缓存。
+    // 本地预览图 + 解析/验证窗口 partition 会话缓存。
+    // （mpv 视频缓冲只走内存，不产生可清理的磁盘缓存；历史残留由启动迁移一次性清掉。）
+    // 单次遍历累加并删除（复用 purgeDir/getDirSize，避免 O(n^2) 二次遍历）；
     // 逐目录 try/catch，占用文件跳过；返回释放字节数与各项明细。
+    // 并发锁 _clearingAppCaches：清理进行中再次调用直接返回 busy，避免并行重复 walk。
     ipcMain.handle('vpc:clear-app-caches', async () => {
-        const dirSize = (d) => {
-            let total = 0;
-            const walk = (x) => {
-                let ents; try { ents = fs.readdirSync(x, { withFileTypes: true }); } catch (e) { return; }
-                for (const ent of ents) {
-                    const p = path.join(x, ent.name);
-                    try {
-                        if (ent.isDirectory()) walk(p);
-                        else total += fs.statSync(p).size;
-                    } catch (e) { /* ignore */ }
-                }
-            };
-            if (d && fs.existsSync(d)) walk(d);
-            return total;
-        };
-        const rmContents = (d) => {
-            let freed = 0;
-            if (!d || !fs.existsSync(d)) return 0;
-            let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return 0; }
-            for (const ent of ents) {
-                const p = path.join(d, ent.name);
-                try {
-                    const sz = ent.isDirectory() ? dirSize(p) : (fs.statSync(p).size);
-                    fs.rmSync(p, { recursive: true, force: true });
-                    freed += sz;
-                } catch (e) { /* 占用跳过 */ }
-            }
-            return freed;
-        };
-        const ud = app.getPath('userData');
-        let total = 0;
-        const detail = {};
-        // mpv 硬盘缓存（只删缓存模式文件，复用 clearDiskCache）
-        try { const b = clearDiskCache(settings.get('playerCacheDir') || settings.defaultCacheDir()); detail.mpvCache = b; total += b; } catch (e) { /* ignore */ }
-        // 本地视频预览图缓存
-        try { const b = rmContents(path.join(ud, 'local-thumbs')); detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
-        // 解析/验证隐藏窗口的 partition 会话缓存（Chromium 存 userData/Partitions/parse-*）
+        if (_clearingAppCaches) return { ok: false, reason: 'busy' };
+        _clearingAppCaches = true;
         try {
-            const partRoot = path.join(ud, 'Partitions');
-            let freed = 0;
-            if (fs.existsSync(partRoot)) {
-                for (const name of fs.readdirSync(partRoot)) {
-                    if (/^parse-/i.test(name)) freed += rmContents(path.join(partRoot, name));
-                }
-            }
-            // 清各 parse-* session 的 HTTP 缓存（会话仍在用时软清理，失败忽略）
+            const ud = app.getPath('userData');
+            let total = 0;
+            const detail = {};
+            // 本地视频预览图缓存（单次遍历边算边删）
+            try { const b = purgeDir(path.join(ud, 'local-thumbs')).bytes; detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
+            // 解析/验证隐藏窗口的 partition 会话缓存（Chromium 存 userData/Partitions/parse-*）
             try {
-                for (let i = 0; i < 3; i++) {
-                    await session.fromPartition(`parse-${i}`).clearCache().catch(() => {});
+                const partRoot = path.join(ud, 'Partitions');
+                let freed = 0;
+                if (fs.existsSync(partRoot)) {
+                    for (const name of fs.readdirSync(partRoot)) {
+                        if (/^parse-/i.test(name)) freed += purgeDir(path.join(partRoot, name)).bytes;
+                    }
                 }
+                // 清各 parse-* session 的 HTTP 缓存：先测大小，clearCache 后再测差值补入
+                // （会话仍在用时磁盘文件可能被占用无法直删，session 层清理是另一部分释放量）。
+                try {
+                    for (let i = 0; i < 3; i++) {
+                        const part = `parse-${i}`;
+                        const sess = session.fromPartition(part);
+                        let before = 0;
+                        try { before = await sess.getCacheSize(); } catch (e) { /* API 不支持则忽略差值 */ }
+                        await sess.clearCache().catch(() => {});
+                        try {
+                            const after = await sess.getCacheSize();
+                            if (before > after) freed += (before - after);
+                        } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+                detail.parsePartitions = freed; total += freed;
             } catch (e) { /* ignore */ }
-            detail.parsePartitions = freed; total += freed;
-        } catch (e) { /* ignore */ }
-        return { ok: true, cleanedBytes: total, detail };
+            return { ok: true, cleanedBytes: total, detail };
+        } finally {
+            _clearingAppCaches = false;
+        }
+    });
+
+    // 统计主进程侧本地缓存占用（只统计不删）：供前端与后端 bytes 合并分类展示。
+    // 单次遍历各目录累加；parse-* 同时叠加 session HTTP 缓存大小（磁盘文件之外的部分）。
+    ipcMain.handle('vpc:cache-size', async () => {
+        try {
+            const ud = app.getPath('userData');
+            const detail = {};
+            let total = 0;
+            // 本地预览图
+            try { const b = getDirSize(path.join(ud, 'local-thumbs')).bytes; detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
+            // 解析窗口 partition：磁盘文件 + session HTTP 缓存
+            try {
+                const partRoot = path.join(ud, 'Partitions');
+                let b = 0;
+                if (fs.existsSync(partRoot)) {
+                    for (const name of fs.readdirSync(partRoot)) {
+                        if (/^parse-/i.test(name)) b += getDirSize(path.join(partRoot, name)).bytes;
+                    }
+                }
+                try {
+                    for (let i = 0; i < 3; i++) {
+                        try { b += await session.fromPartition(`parse-${i}`).getCacheSize(); } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+                detail.parsePartitions = b; total += b;
+            } catch (e) { /* ignore */ }
+            // 旧日志（只统计不删）
+            try { const b = getDirSize(path.join(ud, 'logs')).bytes; detail.logs = b; total += b; } catch (e) { /* ignore */ }
+            return { ok: true, bytes: total, detail };
+        } catch (e) {
+            return { ok: false, reason: 'stat-failed' };
+        }
     });
 
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('vpc:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'playerCacheMode', 'playerCacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
         // M-8：app.exit(0) 不触发 before-quit，复用退出清理序列停掉 mpv/aria2/推送/后端等子进程
         runQuitCleanup();
         app.relaunch();
@@ -1620,16 +1843,25 @@ app.whenReady().then(() => {
         if (dir) hls.setDir(dir);
     }
 
+    /** 按持久化设置拉起 aria2 引擎：并发任务数/分片并发数随 CLI 参数一并生效。
+     *  统一入口——此前 add/addFile/pickDir 路径首次拉起时不带持久化值，
+     *  用户改过的并发表会被默认值覆盖。 */
+    function startDlEngine(dir) {
+        return dl.start(dir,
+            parseInt(settings.get('dlConcurrency'), 10) || undefined,
+            parseInt(settings.get('dlSplitConcurrency'), 10) || undefined);
+    }
+
     ipcMain.handle('vpc:dl', async (_e, action, payload = {}) => {
         try {
             switch (action) {
                 case 'init': {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     const dir = settings.get('dlDir') || app.getPath('downloads');
-                    await dl.start(dir,
-                        parseInt(settings.get('dlConcurrency'), 10) || undefined,
-                        parseInt(settings.get('dlSplitConcurrency'), 10) || undefined);
+                    await startDlEngine(dir);
                     syncDlDir(dl.dir);
+                    // m3u8 任务队列上限与「并发任务数」保持一致（HLS 不经 aria2，需独立同步）
+                    hls.setMaxActive(Math.max(1, Math.min(10, parseInt(settings.get('dlConcurrency'), 10) || 3)));
                     startDlPoll();
                     return { ok: true, dir: dl.dir };
                 }
@@ -1645,7 +1877,7 @@ app.whenReady().then(() => {
                     syncDlDir(dir);
                     if (dl.isAvailable()) {
                         dl.stop();
-                        await dl.start(dir);
+                        await startDlEngine(dir);
                     }
                     startDlPoll();
                     return { ok: true, dir };
@@ -1655,7 +1887,7 @@ app.whenReady().then(() => {
                     const uri = String(payload.uri || '').trim();
                     if (!uri) throw new Error('empty uri');
                     if (!/^(magnet:|http:|https:)/i.test(uri)) throw new Error('unsupported uri');
-                    await dl.start(dl.dir || app.getPath('downloads'));
+                    await startDlEngine(dl.dir || app.getPath('downloads'));
                     // 详情页批量下载可带文件名与请求头（部分源校验 Referer）
                     const opts = {};
                     const out = String(payload.out || '').replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -1704,7 +1936,7 @@ app.whenReady().then(() => {
                     if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
                     const fp = r.filePaths[0];
                     const b64 = fs.readFileSync(fp).toString('base64');
-                    await dl.start(dl.dir || app.getPath('downloads'));
+                    await startDlEngine(dl.dir || app.getPath('downloads'));
                     const gid = fp.toLowerCase().endsWith('.torrent')
                         ? await dl.addTorrent(b64)
                         : await dl.addMetalink(b64);
@@ -1714,15 +1946,24 @@ app.whenReady().then(() => {
                 case 'setConcurrency': {
                     const n = Math.max(1, Math.min(10, parseInt(payload.n, 10) || 3));
                     settings.set('dlConcurrency', n);
-                    if (dl.isAvailable()) await dl.setConcurrency(n);
-                    return { ok: true, n };
+                    // aria2 运行中即时生效；RPC 失败时如实上报 ok:false（渲染层提示重启引擎后生效）
+                    let applied = false;
+                    if (dl.isAvailable()) {
+                        try { await dl.setConcurrency(n); applied = true; } catch (e) { /* 引擎异常，下轮启动生效 */ }
+                    }
+                    // m3u8 任务队列不经 aria2，始终立即按新上限调度
+                    hls.setMaxActive(n);
+                    return applied ? { ok: true, n } : { ok: false, n, reason: 'engine-restart-needed' };
                 }
                 case 'setSplit': {
                     const n = Math.max(1, Math.min(32, parseInt(payload.n, 10) || 5));
                     settings.set('dlSplitConcurrency', n);
-                    if (dl.isAvailable()) await dl.setSplit(n);
+                    let applied = false;
+                    if (dl.isAvailable()) {
+                        try { await dl.setSplit(n); applied = true; } catch (e) { /* 下轮启动生效 */ }
+                    }
                     hls.setConcurrency(n); // 即时更新 HLS 分片并发数（后续新增任务生效）
-                    return { ok: true, n };
+                    return applied ? { ok: true, n } : { ok: false, n, reason: 'engine-restart-needed' };
                 }
                 case 'pause':
                     if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'm3u8 合成任务不支持暂停，可直接删除' };
@@ -1987,35 +2228,8 @@ app.whenReady().then(() => {
         });
         // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
         if (userStopped) return;
-        // 断流自动重连：mpv 在距结尾还有一段时就 EOF/断流退出（CDN 提前断连
-        // 或 HLS 实际内容短于声明时长），自动重播当前集一次；每次会话只试一次。
-        if (mpv._stallRetried) return;
-        const pos = info && typeof info.pos === 'number' ? info.pos : null;
-        const dur = info && typeof info.duration === 'number' ? info.duration : null;
-        if (pos == null || dur == null || !(dur > 0)) return;
-        const left = dur - pos;
-        // 剩 <8s 视为正常播完；开播不到 15s 就退是起播失败（不自动切换线路）
-        if (left < 8 || pos < 15) return;
-        const url = mpv._lastUrls && mpv._lastUrls[0];
-        if (!url || !MEDIA_URL.test(String(url))) return; // 仅媒体直链重试
-        mpv._stallRetried = true;
-        if (Notification.isSupported()) {
-            new Notification({ title: 'YuKi', body: '播放被中断，正在自动重连…' }).show();
-        }
-        setTimeout(async () => {
-            if (mpv.playing) return; // 用户已另起播放
-            const t = mpv._lastTitle || '重连播放';
-            const r = mpv.play([{ url, title: t }], { title: t, header: mpv._lastHeader,
-                requestId: mpv._lastRequestId, playSessionId: mpv._lastPlaySessionId });
-            if (!r.ok) return;
-            const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
-            if (started.ok) {
-                afterPlay();
-                // 同步新会话号：重连集播完后渲染层仍能匹配并推进连播
-                send('vpc:player-session', { sessionId: started.sessionId, url: started.url,
-                    requestId: started.requestId || '', playSessionId: started.playSessionId || '' });
-            }
-        }, 1000);
+        // 断流恢复由渲染层重新调用 playerContent（refresh=1）后再进入本入口，
+        // 这样短期 CDN URL 会被重新评估；主进程不得直接复用旧地址。
     });
 
     /** 自动重载收尾：清状态并通知渲染层（ok=是否成功载入站点）。 */
@@ -2029,11 +2243,22 @@ app.whenReady().then(() => {
         // Phase 7：自动重载上次成功加载的配置 URL（状态同步置位，供 vpc:config-state 轮询）
         const lastUrl = settings.get('lastConfigUrl');
         if (lastUrl && /^https?:\/\//i.test(lastUrl)) {
-            configReload.reloading = true;
-            configReload.url = lastUrl;
-            console.log('[config] auto reload start:', lastUrl);
-            // READY 行早于端口监听：先轮询 health 确认后端可达（最长 20s）
             (async () => {
+                // 后端先尝试磁盘恢复；已有健康缓存时不再重复下载仓库。
+                try {
+                    const state = await fetch(`${info.base}/sites?token=${info.token}`, {
+                        signal: AbortSignal.timeout(5000),
+                    }).then((rsp) => rsp.ok ? rsp.json() : null);
+                    const healthy = Number(state && state.summary && state.summary.healthy || 0);
+                    if (state && state.cached === true && healthy > 0) {
+                        console.log('[config] restored from disk cache; skip auto reload');
+                        return;
+                    }
+                } catch (e) { /* 状态接口尚未就绪，继续走原有加载流程 */ }
+                configReload.reloading = true;
+                configReload.url = lastUrl;
+                console.log('[config] auto reload start:', lastUrl);
+                // READY 行早于端口监听：先轮询 health 确认后端可达（最长 20s）
                 for (let i = 0; i < 40; i++) {
                     try {
                         const h = await fetch(`${info.base}/health`, { signal: AbortSignal.timeout(2000) });
@@ -2041,7 +2266,7 @@ app.whenReady().then(() => {
                     } catch (e) { /* 未就绪，重试 */ }
                     await new Promise((r) => setTimeout(r, 500));
                 }
-            // undici 不自动编码非 ASCII 路径（如中文文件名），先 encodeURI
+                // undici 不自动编码非 ASCII 路径（如中文文件名），先 encodeURI
             return fetch(encodeURI(`${info.base}/action?token=${info.token}`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -2097,16 +2322,26 @@ app.whenReady().then(() => {
     if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
     bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
     bridge.extraEnv.VPC_PAN_FAST_PATH = settings.get('panFastPath') === false ? '0' : '1';
-    // 注入 Node/Electron 运行时路径，使 python-backend 可复用 Electron 内置 Node（ELECTRON_RUN_AS_NODE）
-    bridge.extraEnv.VPC_NODE_BIN = process.execPath;
-    bridge.extraEnv.VPC_ELECTRON_MODE = '1';
+    bridge.extraEnv.VPC_MEDIA_PROBE = settings.get('mediaProbe') === false ? '0' : '1';
+    bridge.extraEnv.VPC_AUTO_LINE_FALLBACK = settings.get('autoLineFallback') === false ? '0' : '1';
+    bridge.extraEnv.VPC_LEGACY_PARSER = settings.get('legacyParser') === false ? '0' : '1';
+    const lastConfigUrl = settings.get('lastConfigUrl');
+    if (lastConfigUrl && /^https?:\/\//i.test(lastConfigUrl)) {
+        bridge.extraEnv.VPC_LAST_CONFIG_URL = lastConfigUrl;
+    }
     // 日志级别 + 定时清空日志：启动时按持久化设置生效（可在设置页调整）
     setLogLevel(settings.get('logLevel'));
+    // Python 后端按启动环境变量决定自身日志级别（server.py _setup_logging 读取）
+    bridge.extraEnv.VPC_LOG_LEVEL = require('./logger').getLogLevel();
     (function applyScheduledLogCleanup() {
         const enabled = settings.get('logAutoCleanup') === true;
         const days = parseInt(settings.get('logCleanupDays'), 10) || 0;
-        // 每 N 天清空一次：N<=0 或开关关闭则不启动
-        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled);
+        // 每 N 天清空一次：N<=0 或开关关闭则不启动；
+        // 上次清理时间持久化到 settings，跨重启仍按完整周期判断（逾期启动即补清）
+        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled, {
+            getLastCleanup: () => settings.get('logLastCleanupAt'),
+            markCleaned: (ts) => settings.set('logLastCleanupAt', ts),
+        });
     })();
     // 弹幕（弹弹 play）凭据：设置里保存的 AppId/AppSecret 注入后端环境，供 danmaku_* 签名使用
     const ddAppId = settings.get('dandanAppId');
@@ -2125,8 +2360,9 @@ app.whenReady().then(() => {
     // 语言偏好（音轨/字幕）：读设置注入播放器
     mpv.audioLang = String(settings.get('playerAlang') || '');
     mpv.subLang = String(settings.get('playerSlang') || '');
-    // 视频缓冲缓存（内存/硬盘）：读设置注入播放器（起播时按模式追加 --cache-on-disk 参数）
-    applyPlayerCache();
+    // 视频缓冲缓存：只走内存（见 mpv-player._cacheArgs），无需注入偏好；
+    // 历史 disk 模式的残留键与缓存文件在此一次性清理。
+    migratePlayerCache();
     // 代理（2.9）：启动时按设置写入环境变量，供 Python 后端 requests 继承（重启后端即生效）
     // 手动代理优先（校验通过才注入）；同时把 settings 源注册给 system-proxy，让下载器/预览等
     // 在 getProxyUrl() 时能读到手动代理（此前只读系统代理，导致手动代理对 aria2 不生效）
@@ -2157,7 +2393,7 @@ app.whenReady().then(() => {
         if (settings.get('anime4k')) mpv.anime4kShaders = buildAnime4kChain();
     });
     bridge.start();
-    parseWin = new ParseWindow(() => bridge.info);
+    parseWin = new ParseWindow(() => bridge.info, probeMedia);
     pushServer.on('push', ({ url }) => playPushedUrl(url, '局域网'));
     pushServer.start();
     createWindow();
@@ -2268,7 +2504,8 @@ app.whenReady().then(() => {
     /** 用指定外部播放器起播：拼对应 header 参数后 spawn。返回 { ok, via, kind, headerDropped } 或 { ok:false, reason }。 */
     function launchExternalPlayer(execPath, url, header) {
         const kind = externalPlayerKind(execPath);
-        const hasHeader = !!(header && (header.Referer || header.referer || header['User-Agent'] || header.ua));
+        const hasHeader = !!(header && Object.keys(header).some((key) =>
+            ['user-agent', 'referer', 'origin', 'cookie', 'authorization'].includes(String(key).toLowerCase())));
         const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {});
         try {
             const { spawn } = require('child_process');
@@ -2289,7 +2526,8 @@ app.whenReady().then(() => {
         const u = String(url || '').trim();
         if (!/^(https?|rtmp|rtsp):\/\//i.test(u)) return { ok: false, reason: 'bad url' };
         const header = (opts && opts.header) || {};
-        const hasHeader = !!(header.Referer || header.referer || header['User-Agent'] || header.ua);
+        const hasHeader = !!Object.keys(header).some((key) =>
+            ['user-agent', 'referer', 'origin', 'cookie', 'authorization'].includes(String(key).toLowerCase()));
         const extPlayer = resolveExternalPlayerPath();
         if (!extPlayer) {
             // 未指定外部播放器：带鉴权头的直链交系统默认程序会丢 header 大概率 403，明确告知
@@ -2383,6 +2621,8 @@ app.whenReady().then(() => {
     ipcMain.handle('vpc:set-log-level', (_e, level) => {
         setLogLevel(level);
         settings.set('logLevel', String(level || 'INFO').toUpperCase());
+        // 同步到后端环境变量：后端下次（重）启动时按当前级别写 python-backend.log
+        bridge.extraEnv.VPC_LOG_LEVEL = require('./logger').getLogLevel();
         return { ok: true, level: require('./logger').getLogLevel() };
     });
     ipcMain.handle('vpc:set-log-cleanup', (_e, opts) => {
@@ -2390,14 +2630,20 @@ app.whenReady().then(() => {
         const days = Math.max(0, parseInt(opts && opts.days, 10) || 0);
         settings.set('logAutoCleanup', enabled);
         settings.set('logCleanupDays', days);
-        // days<=0 或关闭开关时 startScheduledLogCleanup 内部会停掉旧计时器并不启动
-        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled);
+        // days<=0 或关闭开关时 startScheduledLogCleanup 内部会停掉旧计时器并不启动；
+        // 周期跨重启生效：上次清理时间持久化在 settings.logLastCleanupAt
+        startScheduledLogCleanup(LOG_DIR, days > 0 ? days * 24 * 60 * 60 * 1000 : 0, enabled, {
+            getLastCleanup: () => settings.get('logLastCleanupAt'),
+            markCleaned: (ts) => settings.set('logLastCleanupAt', ts),
+        });
         return { ok: true, enabled, days };
     });
     // 渲染端错误上报：window.onerror / unhandledrejection 转发进 electron-main.log（redactSecrets 由 writer 负责）
     ipcMain.handle('vpc:log-renderer', (_e, level, message) => {
+        // 按真实级别映射 console 方法，级别过滤由 writer.write 统一执行
         const lvl = String(level || 'ERROR').toUpperCase();
-        console[lvl === 'WARN' ? 'warn' : 'error'](`[renderer] ${message}`);
+        const method = lvl === 'DEBUG' ? 'debug' : lvl === 'INFO' ? 'info' : lvl === 'WARN' ? 'warn' : 'error';
+        console[method](`[renderer] ${message}`);
         return { ok: true };
     });
 
@@ -2424,20 +2670,42 @@ app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
 
-/** 退出前清理序列（M-8）：before-quit 与 settings-reset 的 app.exit(0) 共用——
- *  app.exit 不派发 before-quit 事件，settings-reset 漏清理会残留 mpv/aria2/后端子进程。 */
+/** 退出前清理序列（M-8）：before-quit、will-quit、process exit 与 settings-reset 的 app.exit(0) 共用——
+ *  彻底清理 mpv、aria2、推送服务、Syncplay、HLS 下载及 Python 进程树，杜绝后台残留。 */
+let _cleanedUp = false;
 function runQuitCleanup() {
-    if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
-    stopScheduledLogCleanup();
-    mpv.stop();
-    dl.stop();
-    pushServer.stop();
-    try { syncplay.disconnect(); } catch (e) { /* ignore */ }
-    bridge.stop();
+    if (_cleanedUp) return;
+    _cleanedUp = true;
+    try { if (dlTimer) { clearInterval(dlTimer); dlTimer = null; } } catch (e) {}
+    try { stopScheduledLogCleanup(); } catch (e) {}
+    try { mpv.stop(); } catch (e) {}
+    try { dl.stop(); } catch (e) {}
+    try { if (hls && hls.cleanup) hls.cleanup(); } catch (e) {}
+    try { pushServer.stop(); } catch (e) {}
+    try { syncplay.disconnect(); } catch (e) {}
+    try { bridge.stop(); } catch (e) {}
 }
 
 app.on('before-quit', () => {
     runQuitCleanup();
+});
+
+app.on('will-quit', () => {
+    runQuitCleanup();
+});
+
+process.on('exit', () => {
+    runQuitCleanup();
+});
+
+process.on('SIGINT', () => {
+    runQuitCleanup();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    runQuitCleanup();
+    process.exit(0);
 });
 
 // 全局未捕获异常兜底：防进程崩溃导致窗口消失

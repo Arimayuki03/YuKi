@@ -19,7 +19,6 @@ const ENC_PREFIX = 'enc:';
 class Settings {
     constructor(dir) {
         this.file = path.join(dir, 'settings.json');
-        this.userDataDir = dir;
         this._data = this._load();
     }
 
@@ -56,11 +55,6 @@ class Settings {
             }
         } catch (e) { /* 加密失败保持明文 */ }
         return v;
-    }
-
-    /** mpv 硬盘缓存默认目录（<userData>/mpv-cache）；切到磁盘模式且未手动选过时使用。 */
-    defaultCacheDir() {
-        return path.join(this.userDataDir, 'mpv-cache');
     }
 
     all() { return { ...this._data }; }
