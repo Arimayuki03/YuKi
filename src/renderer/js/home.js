@@ -9,6 +9,10 @@
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
+// 屏蔽源探测的分类确认参数：推荐位为空时逐个分类拉第 1 页确认是否有内容
+const PROBE_CAT_CONCURRENCY = 4; // 单源分类探测并发
+const PROBE_CAT_LIMIT = 24;      // 单源最多检查的分类数（异常源护栏）
+const PROBE_CAT_TIMEOUT = 20000; // 分类探测单请求超时：短于源级 60s，控制最坏耗时
 // 站点列表 / 首页分类(class) 本地缓存：冷启动先用缓存即时渲染源下拉与分类标签，后台再拉网络刷新。
 // 站点列表变动不频繁（配置载入才变），分类结构基本稳定，故用较宽 TTL；数据以网络结果为准（命中仅提前上屏）。
 const SITES_CACHE_KEY = 'home::sites::v1';
@@ -43,6 +47,7 @@ const Home = {
     _homeCacheBooted: false, // 首页 feed 持久化缓存只引导一次（网络返回后以最新覆盖）
     _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
+    _sitesLoadToken: 0, // 配置刷新令牌：旧的站点列表请求不得覆盖新配置
     _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
     _emptyCls: {},   // T60：site → Set<空分类 type_id>（探测确认无影片的分类，持久化）
     _clsProbed: {},  // T60：site → 本会话完整探测是否已完成（同源只探一次）
@@ -125,9 +130,14 @@ const Home = {
     },
 
     async loadSites() {
+        const sitesLoadToken = ++this._sitesLoadToken;
+        const isCurrentSitesLoad = () => sitesLoadToken === this._sitesLoadToken;
+        // 配置切换时让正在进行的旧首页请求立即失效，避免旧内容回写。
+        this._loadToken++;
         // 先读取开关，再拉取源列表：即使 /sites 瞬时失败，也要保证关闭自动检测时
         // 不会继续使用历史 blockedSites 过滤源。
         const settings = await this._getSourceSettings();
+        if (!isCurrentSitesLoad()) return;
         this.setAutoProbeEnabled(settings.sourceAutoDetect !== false);
         // T77：配置/源集合变更 → 作废分类内容缓存（页缓存 + 合并窗口），回到页面立即生效
         this.invalidatePageCaches();
@@ -136,6 +146,7 @@ const Home = {
             const st = await getJson('/sites');
             all = (st && st.sites) || [];
         } catch (e) { all = []; }
+        if (!isCurrentSitesLoad()) return;
         // 网络成功且非空时刷新站点列表缓存（空结果不覆盖，防后端瞬时异常清掉可用缓存）
         if (all.length && typeof localCacheSet === 'function') {
             try { localCacheSet(SITES_CACHE_KEY, all, SITES_CACHE_TTL); } catch (e) { /* 缓存失败忽略 */ }
@@ -145,6 +156,7 @@ const Home = {
         if (!all.length && this._allSites.length) {
             // 开关刚关闭时，即使 /sites 本轮失败，也要立刻取消历史 blockedSites 过滤。
             const blocked = await this._getBlocked(settings);
+            if (!isCurrentSitesLoad()) return;
             this.sites = this._allSites.filter((s) => blocked.indexOf(s.key) < 0);
             this._renderSiteSelect();
             return;
@@ -154,8 +166,7 @@ const Home = {
         // 及其内存镜像 _emptyCls/_okCls/_clsTs/_clsStarted）：它们按源 key 复用——
         // 已探测/已屏蔽的 key 直接跳过（24h 新鲜期内零网络请求），仅新出现的 key
         // 需要探测。此前每次 sig 变化都清空记录，导致多仓每次返回不同仓时每次
-        // 重启全量重探，且用户手动屏蔽的源被悄悄恢复（T25 的顾虑由「新 key 自然
-        // 全探」满足，无需清空旧记录）。
+        // 重启全量重探，且用户手动屏蔽的源被悄悄恢复（T25 的顾虑由「新 key 自然全探」满足，无需清空旧记录）。
         const sig = all.map((s) => s.key).join('|');
         if (this._allSites.length && sig !== this._allSites.map((s) => s.key).join('|')) {
             this._probeToken++; // 进行中的旧探测写入前校验世代，结果丢弃
@@ -164,11 +175,23 @@ const Home = {
             this._clsBusy = {};
             this._probingAll = false; // 全源探测在途锁随源集合变更释放
         }
+        if (!isCurrentSitesLoad()) return;
         this._allSites = all;
         // 关闭自动检测时暂时忽略历史自动屏蔽记录；重新打开后仍可按原记录过滤，
         // 用户可通过“恢复被屏蔽的源”清除这些记录。
         const blocked = await this._getBlocked(settings);
-        this.sites = all.filter((s) => blocked.indexOf(s.key) < 0);
+        if (!isCurrentSitesLoad()) return;
+        // U6.2 健康站点展示规则：
+        // 1. healthy / degraded / half-open 正常展示；
+        // 2. Android-only / unsupported 固定隐藏，诊断页保留；
+        // 3. circuit-open 可展示置灰态或受控重试。
+        this.sites = all.filter((s) => {
+            if (blocked.indexOf(s.key) >= 0) return false;
+            const isAndroid = s.runtime === 'android' || (s.lastError && s.lastError.code === 'L2_SITE_REQUIRES_ANDROID');
+            if (isAndroid) return false;
+            if (s.state === 'unsupported' || s.runtime === 'unsupported') return false;
+            return true;
+        });
         this._renderSiteSelect();
         if (!this.sites.length) {
             $('#home-class').empty();
@@ -178,21 +201,43 @@ const Home = {
         }
         if (!this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
         $('#site-select').val(this.site);
+        if (!isCurrentSitesLoad()) return;
         await this.loadHome();
-        // 首屏就绪后后台探测未探测过的源，自动屏蔽无内容源
-        if (this._autoProbeEnabled) this._probeSites();
-        // T60：后台为所有源补齐分类空态探测（切换任意源即可直接过滤空分类）
-        if (this._autoProbeEnabled) this._probeAllClasses();
+        if (!isCurrentSitesLoad()) return;
+        if (this._autoProbeEnabled) {
+            // 首屏优先探测当前源（快速反馈），后台再补全其余未探测源；分类空态探测并行但不阻塞首屏
+            this._probeSites(this.site).then(() => {
+                if (!isCurrentSitesLoad() || !this._autoProbeEnabled) return;
+                // 首轮只探当前源后，若仍有未探测源则补探全量（避免单源模式导致其余僵尸源永不被屏蔽）
+                const s = this._allSites.some((x) => {
+                    // 轻量检查：若存在未探测且非当前源的站点，触发全量补探
+                    return x.key !== this.site;
+                });
+                if (s) this._probeSites();
+            });
+            this._probeAllClasses();
+        }
     },
-
     _renderSiteSelect() {
         const sel = $('#site-select').empty();
         if (!this.sites.length) {
-            sel.append('<option value="">（无站点 · 请先在设置→源设置载入）</option>');
+            sel.append('<option value="">（无可用站点 · 请在设置→源设置载入可移植源）</option>');
             return;
         }
-        // T65：站点选项拼串一次性写入
-        sel.append(this.sites.map((s) => `<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}</option>`).join(''));
+        const nowSec = Date.now() / 1000;
+        const optionsHtml = this.sites.map((s) => {
+            const isDegraded = s.state === 'degraded' || s.state === 'credentials_required' || s.is_pan;
+            const isCircuitOpen = s.state === 'circuit-open' || (s.circuitOpenUntil && s.circuitOpenUntil / 1000 > nowSec);
+            let tag = '';
+            if (isCircuitOpen) {
+                const remain = Math.max(0, Math.ceil((s.circuitOpenUntil / 1000) - nowSec));
+                tag = ` [熔断保护 ${remain}s]`;
+            } else if (isDegraded) {
+                tag = ' [降级·需Cookie/解析]';
+            }
+            return `<option value="${escHtml(s.key)}">${escHtml(s.name || s.key)}${tag}</option>`;
+        }).join('');
+        sel.append(optionsHtml);
     },
 
     async _getSourceSettings() {
@@ -277,12 +322,13 @@ const Home = {
     },
 
     /**
-     * 后台探测无内容源：homeContent 推荐位有内容 → 通过；推荐位空则
-     * 逐个检查分类（T40：任一分类有资源即视为可用，不屏蔽；全部分类
-     * 为空或出错才记入 blockedSites）。并发 4，只探测未探测过的源，
+     * 后台探测无内容源：只有真实内容才算可用——homeContent 推荐位(list)
+     * 非空，或至少一个分类拉到资源。推荐位为空时逐个分类确认，全部分类
+     * 均确认无内容才记入 blockedSites（仅有 class 结构不代表有内容）；
+     * 分类出错本轮不下结论，留待下次重试。并发 4，只探测未探测过的源，
      * 结果持久化（可在源配置里恢复）。
      */
-    async _probeSites() {
+    async _probeSites(onlySite = '') {
         if (!this._autoProbeEnabled || this._probing || !this._allSites.length) return;
         this._probing = true;
         const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
@@ -294,36 +340,33 @@ const Home = {
             (Array.isArray(s.probedSites) ? s.probedSites : []).forEach((k) => { probed[k] = 1; });
             const blocked = new Set(Array.isArray(s.blockedSites) ? s.blockedSites : []);
             const before = blocked.size; // toast 只报本轮新增屏蔽数，不含历史累计
-            const pending = this._allSites.filter((x) => !probed[x.key]);
+            const pending = this._allSites.filter((x) => !probed[x.key] && (!onlySite || x.key === onlySite));
             if (!pending.length) return;
             started = this._startProbe(pending.length);
             let idx = 0, changed = false;
             const probeOne = async (site) => {
-                probed[site.key] = 1;
                 let ok = false;
+                let unknown = false; // 本轮证据不足（请求出错）：不写 probed/blocked，留待下次重试
                 try {
                     const d = await doAction('homeContent', { site: site.key, filter: 'false' }, null, 60000);
-                    // T40 放宽：首页推荐位有内容，或配置了分类结构（class 非空）即视为可用。
-                    // 分类探测易受站点临时故障/蜘蛛内部错误误伤（如 Bili 系分类接口风控），
-                    // 不再仅因分类为空或出错就自动屏蔽；失效源由用户手动屏蔽或换源。
-                    const hasList = ((d && d.list) || []).length > 0;
-                    const hasClass = Array.isArray(d && d.class) && d.class.length > 0;
-                    if (hasList || hasClass) {
+                    // 只有真实内容才算可用：推荐位(list)非空，或至少一个分类拉到资源。
+                    // class 结构本身不代表有内容——全部分类皆空的「僵尸源」同样要屏蔽。
+                    if (((d && d.list) || []).length > 0) {
                         ok = true;
                     } else {
-                        // 无 list 且无 class：逐个分类再确认（兼容依赖分类内容的源）
-                        const cls = (d && d.class) || [];
-                        for (let i = 0; i < cls.length && !ok; i++) {
-                            const tid = String(cls[i].type_id != null ? cls[i].type_id : '');
-                            try {
-                                const c = await doAction('categoryContent', {
-                                    site: site.key, tid, pg: '1', filter: 'false', extend: '{}',
-                                }, null, 60000);
-                                if (((c && c.list) || []).length) ok = true;
-                            } catch (e) { /* 该分类出错跳过，继续看其他分类 */ }
-                        }
+                        // 推荐位为空：逐个分类确认。任一分类有内容即可用；
+                        // 全部分类都确认返回空才屏蔽；分类出错则本轮不下结论。
+                        const verdict = await this._probeSiteCategories(site.key, d && d.class);
+                        if (verdict === 'ok') ok = true;
+                        else if (verdict === 'unknown') unknown = true;
                     }
-                } catch (e) { /* 推荐位获取失败视为无内容，继续按分类判断 */ }
+                } catch (e) { unknown = true; }
+                if (unknown) {
+                    // 瞬时网络/超时不误屏蔽：不写入 probed/blocked，留待下次探测重试
+                    this._probeOneDone();
+                    return;
+                }
+                probed[site.key] = 1;
                 if (!ok) { blocked.add(site.key); changed = true; }
                 this._probeOneDone(); // T81：单个源探测完成
             };
@@ -336,8 +379,15 @@ const Home = {
             if (changed) {
                 await window.vpc.settingsSet('blockedSites', Array.from(blocked));
                 // 刷新下拉（不打断当前选中源）；当前源被屏蔽则切到第一个可用源
+                // 复用 loadSites 的健康过滤，避免探后把 Android 等隐藏源重新放出
                 const cur = this.site;
-                this.sites = this._allSites.filter((x) => !blocked.has(x.key));
+                this.sites = this._allSites.filter((x) => {
+                    if (blocked.has(x.key)) return false;
+                    const isAndroid = x.runtime === 'android' || (x.lastError && x.lastError.code === 'L2_SITE_REQUIRES_ANDROID');
+                    if (isAndroid) return false;
+                    if (x.state === 'unsupported' || x.runtime === 'unsupported') return false;
+                    return true;
+                });
                 this._renderSiteSelect();
                 if (this.sites.length && !this.sites.some((x) => x.key === cur)) {
                     this._cacheDropSite(cur); // 程序切源同样清理旧源缓存
@@ -353,6 +403,39 @@ const Home = {
             this._probing = false;
             if (started) this._endProbe(); // T81：一段探测完成
         }
+    },
+
+    /**
+     * 逐个分类确认某源是否有内容（首页推荐位为空时调用）。
+     * 并发拉分类第 1 页，任一分类有资源即提前结束；
+     * 有出错分类时返回 'unknown'（本轮不下结论），避免把临时故障源误屏蔽。
+     * 返回 'ok'（有内容）/ 'empty'（全部已查分类确认无内容）/ 'unknown'（证据不足）。
+     */
+    async _probeSiteCategories(siteKey, cls) {
+        const seen = new Set();
+        const tids = [];
+        (Array.isArray(cls) ? cls : []).forEach((c) => {
+            const tid = String(c && c.type_id != null ? c.type_id : '');
+            if (tid !== '' && !seen.has(tid)) { seen.add(tid); tids.push(tid); }
+        });
+        // 上限护栏：异常源分类再多也只查前 N 个，防止拖垮后台探测
+        const targets = tids.slice(0, PROBE_CAT_LIMIT);
+        if (!targets.length) return 'empty'; // 无分类可查且推荐位为空 → 确认无内容
+        let idx = 0, hasContent = false, errored = 0;
+        const worker = async () => {
+            while (idx < targets.length && !hasContent) {
+                const tid = targets[idx++];
+                try {
+                    const c = await doAction('categoryContent', {
+                        site: siteKey, tid, pg: '1', filter: 'false', extend: '{}',
+                    }, null, PROBE_CAT_TIMEOUT);
+                    if (((c && c.list) || []).length) { hasContent = true; return; }
+                } catch (e) { errored++; } // 该分类出错：记为未判定，不参与「全空」结论
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(PROBE_CAT_CONCURRENCY, targets.length) }, worker));
+        if (hasContent) return 'ok';
+        return errored ? 'unknown' : 'empty';
     },
 
     /**

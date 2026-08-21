@@ -554,9 +554,16 @@ const Kazumi = {
 
     // ---------------------------------------------------------------- Bangumi 同步
 
-    /** 读取设置里的 Bangumi token。 */
+    /** 规范化 Token：去空白、兼容用户粘贴的 `Bearer xxx` 全头。 */
+    _normalizeToken(raw) {
+        let t = String(raw || '').trim();
+        if (/^bearer\s+/i.test(t)) t = t.replace(/^bearer\s+/i, '').trim();
+        return t;
+    },
+
+    /** 读取设置里的 Bangumi token（自动规范化）。 */
     async _getBangumiToken() {
-        try { const s = (await window.vpc.settingsGet()) || {}; return s.bangumiToken || ''; } catch (e) { return ''; }
+        try { const s = (await window.vpc.settingsGet()) || {}; return this._normalizeToken(s.bangumiToken || ''); } catch (e) { return ''; }
     },
 
     /** 回填 token 输入框（设置已保存过时展示）与同步选项。 */
@@ -630,8 +637,10 @@ const Kazumi = {
 
     /** 保存 token 到 settings（仅本机）。 */
     async saveBangumiToken() {
-        const token = $('#bangumi_token').val().trim();
+        const raw = $('#bangumi_token').val().trim();
+        const token = this._normalizeToken(raw);
         if (!token) { warnToast('请输入 Bangumi Access Token'); return; }
+        if (token !== raw.trim()) $('#bangumi_token').val(token);
         try {
             await window.vpc.settingsSet('bangumiToken', token);
         } catch (e) {
@@ -644,7 +653,8 @@ const Kazumi = {
 
     /** 测试连接：GET /v0/me 显示用户名。 */
     async testBangumi() {
-        const token = $('#bangumi_token').val().trim() || await this._getBangumiToken();
+        const raw = $('#bangumi_token').val().trim() || await this._getBangumiToken();
+        const token = this._normalizeToken(raw);
         if (!token) { warnToast('请先保存 Bangumi Token'); return; }
         try {
             const rsp = await doAction('kazumiBangumiMe', { token }, '/kazumi/action');
@@ -653,9 +663,10 @@ const Kazumi = {
             if (me && me.username) {
                 status.text(`连接成功：${me.nickname || me.username}（ID ${me.id}）`).show();
             } else {
-                status.text('连接失败：Token 无效或网络不可达').show();
+                status.text('连接失败：Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取').show();
+                warnToast('Bangumi Token 无效或已过期（401），请在 https://bgm.tv/settings/token 重新获取');
             }
-        } catch (e) { warnToast('测试连接失败'); }
+        } catch (e) { warnToast('测试连接失败，请检查网络或 Token'); }
     },
 
     /** 删除某条 Bangumi 收藏；返回是否成功（详情弹窗据此刷新状态）。 */
@@ -693,7 +704,15 @@ const Kazumi = {
                 }
                 return true;
             }
-            if (!this._bgmBatchActive) warnToast('同步失败：' + ((rsp && rsp.msg) || '未知错误'));
+            if (!this._bgmBatchActive) {
+                const msg = (rsp && rsp.msg) || '未知错误';
+                // 401 鉴权失败给出可操作指引，其余保持原样
+                if (String(msg).includes('401') || String(msg).includes('Token 无效') || String(msg).includes('token')) {
+                    warnToast('Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取');
+                } else {
+                    warnToast('同步失败：' + msg);
+                }
+            }
             return false;
         } catch (e) { if (!this._bgmBatchActive) warnToast('同步失败'); return false; }
     },
@@ -788,6 +807,15 @@ const Kazumi = {
             plan = (rsp && rsp.plan) || null;
         } catch (e) { plan = null; }
         if (!plan) return { uploaded: 0, skipped: resolveSkipped, failed: localFavs.length, total };
+        if (plan.error) {
+            const msg = String(plan.error);
+            if (msg.includes('401') || msg.includes('Token 无效') || msg.includes('token')) {
+                warnToast('Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取');
+            } else {
+                warnToast('同步计划失败：' + msg);
+            }
+            return { uploaded: 0, skipped: resolveSkipped, failed: localFavs.length, total, error: plan.error };
+        }
         const uploads = plan.upload || [];
         const planSkipped = Number(plan.skipped) || 0;
         if (!uploads.length) {
@@ -796,6 +824,7 @@ const Kazumi = {
         // 阶段 C：并发上传（后端 max_workers=3 + 限速）。进度切到「上传」阶段。
         if (typeof onProgress === 'function') { try { onProgress(0, uploads.length); } catch (e) { /* ignore */ } }
         let uploaded = 0, failed = 0;
+        let applyError = '';
         try {
             const rsp = await doAction('kazumiBangumiSyncApply', {
                 token, uploads: JSON.stringify(uploads),
@@ -803,9 +832,19 @@ const Kazumi = {
             const result = (rsp && rsp.result) || {};
             uploaded = Number(result.uploaded) || 0;
             failed = Number(result.failed) || 0;
+            applyError = String(result.error || '');
+            if (applyError && (applyError.includes('401') || applyError.includes('Token 无效'))) {
+                warnToast('Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取');
+            } else if (failed && result.results) {
+                const firstFail = (result.results || []).find((r) => !r.ok);
+                const m = firstFail ? String(firstFail.msg || '') : '';
+                if (m.includes('401') || m.includes('Token 无效')) {
+                    warnToast('Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取');
+                }
+            }
         } catch (e) { failed = uploads.length; }
         if (typeof onProgress === 'function') { try { onProgress(uploads.length, uploads.length); } catch (e) { /* ignore */ } }
-        return { uploaded, skipped: resolveSkipped + planSkipped, failed, total };
+        return { uploaded, skipped: resolveSkipped + planSkipped, failed, total, error: applyError };
     },
 
     /** 立即同步：拉取 Bangumi 收藏并刷新「我的收藏」合并网格（复用 My 的缓存刷新）。
@@ -825,6 +864,12 @@ const Kazumi = {
                     if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(done, total, '上传本地收藏');
                 });
             } catch (e) { up = null; }
+            // Token 401 时直接提示并结束，避免无意义拉取远端
+            if (up && up.error && (String(up.error).includes('401') || String(up.error).includes('Token 无效'))) {
+                if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
+                else hideLoading();
+                return;
+            }
             // 阶段 2：拉取 Bangumi 远端【全量】收藏（all=1 分页，>100 也完整）
             if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(0, 0, '拉取 Bangumi 收藏');
             const rsp = await doAction('kazumiBangumiCollections', { token, all: 1 }, '/kazumi/action');
@@ -2008,7 +2053,8 @@ const Kazumi = {
             const header = {};
             if (data.userAgent) header['User-Agent'] = data.userAgent;
             if (data.referer) header['Referer'] = data.referer;
-            const legacy = !!data.useLegacyParser;
+            const legacyEnabled = (await window.vpc.settingsGet().catch(() => ({})))?.legacyParser !== false;
+            const legacy = legacyEnabled && !!data.useLegacyParser;
             let resolved = null;
             try {
                 const cap = await window.vpc.captureDirect(pageUrl, legacy);

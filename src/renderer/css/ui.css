@@ -543,7 +543,7 @@ body.frameless #top-drag-strip {
     position:fixed; top:0; height:32px; z-index:1999;
     -webkit-app-region:drag;
     pointer-events:auto;
-    transition:left .2s ease, right .2s ease;
+    transition:left .25s cubic-bezier(.2,.7,.3,1), right .25s cubic-bezier(.2,.7,.3,1);
 }
 /* 展开态：从侧栏右边缘开始到右侧边缘 */
 body.frameless #top-drag-strip { left:190px; right:0; }
@@ -607,9 +607,9 @@ body.frameless .view { padding-top:48px; }
 .view.active { display:block; }
 /* 设置页无顶部工具条，顶部间距收窄更紧凑 */
 #view-settings { padding-top:24px; }
-/* 隐藏全局滚动条（仍可滚动，观感更干净） */
-body, .view { scrollbar-width:none; }
-body::-webkit-scrollbar, .view::-webkit-scrollbar { width:0; height:0; display:none; }
+/* 隐藏全局滚动条（仍可滚动，观感更干净）—— #main-nav 同样隐藏，避免界面缩放 150% 等特大档下左侧出现垂直滚动条 */
+body, .view, #main-nav { scrollbar-width:none; }
+body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar { width:0; height:0; display:none; }
 /* 内嵌滚动区同样隐藏滚动条（保留滚轮滑动）：弹窗体 / Bangumi 详情内容 / 详情简介 / 直链视图 */
 .md-dialog-body, .bangumi-detail-content, .detail-info .detail-desc, #view-direct { scrollbar-width:none; }
 .md-dialog-body::-webkit-scrollbar, .bangumi-detail-content::-webkit-scrollbar,
@@ -1442,10 +1442,19 @@ body.frameless #view-detail { padding-top:48px !important; }
 
 /* 下载管理（卡片化：与直链/工具页同为 tool-card，限宽居中） */
 .downloads-wrap { max-width:980px; margin:0 auto; }
-/* 输入框与按钮行间距与直链页一致（12px：按钮行自带 margin-top:12px，输入框不再额外留白） */
-.downloads-wrap .search-bar { margin-bottom:0; }
-/* 按钮行与下载列表之间的间距，防止按钮与卡片重叠（T81） */
-.downloads-wrap .wall-row { margin-bottom:12px; }
+.dl-input-bar { display:flex; gap:10px; align-items:center; margin-bottom:14px; }
+.dl-input-bar .md-input { flex:1; }
+.dl-input-bar .md-btn { flex-shrink:0; white-space:nowrap; }
+
+.dl-toolbar {
+    display:flex; justify-content:space-between; align-items:center;
+    flex-wrap:wrap; gap:12px; margin-bottom:16px; padding-bottom:12px;
+    border-bottom:1px solid var(--md-outline-variant);
+}
+.dl-toolbar-left { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.dl-toolbar-right { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-left:auto; }
+.dl-btn-group { display:flex; align-items:center; gap:6px; }
+
 .dl-settings { display:flex; align-items:center; gap:10px; margin:12px 0 14px; min-width:0; }
 .dl-dir {
     font-size:12px; color:var(--md-on-surface-variant);
@@ -1606,9 +1615,6 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
 .about-version { font-size:12px; color:var(--md-on-surface-variant); margin-top:4px; }
 .about-desc { max-width:520px; margin:12px auto 0; font-size:13px; color:var(--md-on-surface-variant);
     line-height:1.7; }
-.about-stack { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
-.about-chip { font-size:12px; padding:4px 12px; border-radius:999px;
-    background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
 .about-credits { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
 .about-credit { font-size:13px; color:var(--md-on-surface-variant); line-height:1.5; }
 .about-credit b { color:var(--md-on-surface); font-weight:600; }
@@ -1797,13 +1803,43 @@ body.frameless #view-direct { padding-top:48px !important; }
     transition:background .15s;
 }
 .nav-collapse-btn:hover { background:var(--md-surface-container-high); }
-.nav-collapse-btn svg { width:22px; height:22px; fill:currentColor; transition:transform .2s; }
-#main-nav { transition:flex-basis .2s ease, padding .2s ease; }
+.nav-collapse-btn svg { width:22px; height:22px; fill:currentColor; transition:transform .25s cubic-bezier(.2,.7,.3,1); }
+#main-nav {
+    width:190px;
+    flex:0 0 190px;
+    transition:width .25s cubic-bezier(.2,.7,.3,1), flex-basis .25s cubic-bezier(.2,.7,.3,1), padding .25s cubic-bezier(.2,.7,.3,1);
+    overflow-x:hidden;
+    overflow-y:auto;
+    /* 特大缩放下内容高度超出视口时允许内部滚动，但隐藏滚动条（与 .view 保持一致的无感滚动体验） */
+    overscroll-behavior:contain;
+}
 .main-nav-item[data-view="settings"] { order:98; }
-.main-nav-item span { transition:opacity .15s; }
-body.nav-collapsed #main-nav { flex-basis:64px; padding:48px 8px 16px; }
-body.nav-collapsed .main-nav-item { justify-content:center; padding:12px 0; gap:0; }
-body.nav-collapsed .main-nav-item span { display:none; }
+.main-nav-item {
+    display:flex; align-items:center; gap:12px;
+    padding:12px 14px; border-radius:20px;
+    font-size:14px; font-weight:500; color:var(--md-on-surface-variant);
+    cursor:pointer; user-select:none;
+    transition:background .15s, color .15s, padding .25s cubic-bezier(.2,.7,.3,1), gap .25s cubic-bezier(.2,.7,.3,1);
+    white-space:nowrap;
+}
+.main-nav-item span {
+    display:inline-block;
+    max-width:120px;
+    overflow:hidden;
+    text-overflow:clip;
+    white-space:nowrap;
+    opacity:1;
+    transform:translateX(0);
+    transition:opacity .18s ease, max-width .25s cubic-bezier(.2,.7,.3,1), transform .22s cubic-bezier(.2,.7,.3,1);
+}
+body.nav-collapsed #main-nav { width:64px; flex-basis:64px; padding:48px 8px 16px; }
+body.nav-collapsed .main-nav-item { padding:12px 0; gap:0; justify-content:center; }
+body.nav-collapsed .main-nav-item span {
+    max-width:0;
+    opacity:0;
+    transform:translateX(-6px);
+    pointer-events:none;
+}
 body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 
 /* ===== 界面动画（T30：easing 统一 cubic-bezier(.2,.7,.3,1) 更顺滑；卡片错峰入场） ===== */
@@ -1843,7 +1879,6 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 .md-dialog-overlay { animation:ldIn .15s ease; }
 #cover-float img { animation:floatIn .18s ease; }
 #warnToast .md-snackbar { animation:snackIn .2s cubic-bezier(.2,.7,.3,1); }
-.main-nav-item { transition:background .15s, color .15s, padding .2s ease; }
 
 /* 禁用动画（设置页开关）：全局关掉过渡与动画 */
 html.no-anim *, html.no-anim *::before, html.no-anim *::after {

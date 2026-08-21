@@ -207,20 +207,24 @@ $(async function bootstrap() {
     // 后端重启（如更换缓存目录）后更新连接信息
     if (window.vpc.onBackendReady) window.vpc.onBackendReady((info) => setBackendInfo(info));
 
-    const ok = await waitBackend();
-    if (!ok) {
-        warnToast('后端启动失败，请检查 python-backend');
-        return;
-    }
-    // 自动重载完成事件尽早注册（防事件早于监听注册而丢失）；
-    // 若首页已初始化则刷新站点，否则由后续 Home.init 直接载入新站点
+    // 配置自动重载完成事件必须在等待后端前注册；主进程可能在后端就绪后立即完成重载。
     if (window.vpc.onConfigReloaded) {
         window.vpc.onConfigReloaded((info) => {
             if (!info || !info.ok) return;
             if (typeof Player !== 'undefined' && Player.resetVipFlags) Player.resetVipFlags();
-            if (typeof Home !== 'undefined' && Home._inited) Home.loadSites();
-            if (typeof Live !== 'undefined' && Live._inited) Live.load();
+            if (typeof Home !== 'undefined' && Home._inited && Home.loadSites) {
+                Promise.resolve().then(() => Home.loadSites()).catch(() => {});
+            }
+            if (typeof Live !== 'undefined' && Live._inited && Live.load) {
+                Promise.resolve().then(() => Live.load()).catch(() => {});
+            }
         });
+    }
+
+    const ok = await waitBackend();
+    if (!ok) {
+        warnToast('后端启动失败，请检查 python-backend');
+        return;
     }
     App.initNav();
     App.initBackTop();

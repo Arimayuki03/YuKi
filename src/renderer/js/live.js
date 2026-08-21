@@ -61,6 +61,7 @@ const Live = {
             window.vpc.playUrl(urls[0], {
                 title: ch.name,
                 subtitle: ch.group && ch.group !== '未分组' ? ch.group : '',
+                source: 'live', // 直播是无限流，主进程据此跳过边下边播
             }).then((r) => {
                 if (r && r.ok) warnToast(`正在播放：${ch.name}`);
                 else if (r && r.reason === 'mpv-missing') warnToast('直播播放失败：mpv 未安装（node scripts/download-binaries.js mpv）');

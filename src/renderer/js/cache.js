@@ -44,12 +44,14 @@
         return total;
     }
 
-    /** 按写入时间(t) 升序淘汰最旧条目，直到剩余空间可容纳 need 字节（或清空本命名空间）。 */
+    /** 按写入时间(t) 升序淘汰最旧条目，直到剩余空间可容纳 need 字节（或清空本命名空间）。
+     *  每条目只 getItem 一次并单次 JSON.parse 取 t，同时按字符长度算 size（避免旧实现的双取双解析）。 */
     function _evictUntil(ls, need) {
         const entries = _nsKeys(ls).map((k) => {
+            const raw = ls.getItem(k) || '';
             let t = 0;
-            try { t = (JSON.parse(ls.getItem(k)) || {}).t || 0; } catch (e) { t = 0; }
-            return { k, t, size: k.length + (ls.getItem(k) || '').length };
+            try { t = (JSON.parse(raw) || {}).t || 0; } catch (e) { t = 0; }
+            return { k, t, size: k.length + raw.length };
         });
         entries.sort((a, b) => a.t - b.t); // 最旧在前
         let used = entries.reduce((s, e) => s + e.size, 0);
@@ -58,6 +60,49 @@
             ls.removeItem(e.k);
             used -= e.size;
         }
+    }
+
+    /**
+     * 统计本命名空间占用：{bytes, count, expired}。
+     * 每条目只读一次 raw：bytes 为键+值字符长度之和，count 为条目数，
+     * expired 为已过期（e && Date.now()>=e）条目数（不做删除，只统计）。
+     */
+    function localCacheStats() {
+        const ls = _ls();
+        if (!ls) return { bytes: 0, count: 0, expired: 0 };
+        const now = Date.now();
+        let bytes = 0, count = 0, expired = 0;
+        _nsKeys(ls).forEach((k) => {
+            const raw = ls.getItem(k) || '';
+            bytes += k.length + raw.length;
+            count += 1;
+            try {
+                const obj = JSON.parse(raw);
+                if (obj && obj.e && now >= obj.e) expired += 1;
+            } catch (e) { /* 解析失败不计入过期 */ }
+        });
+        return { bytes, count, expired };
+    }
+
+    /**
+     * 主动清理本命名空间下已过期（e && Date.now()>=e）条目，返回删除条目数。
+     * 供设置页清理时调用或启动时惰性调用（不触碰未过期/永久条目与其他 localStorage 键）。
+     */
+    function localCachePrune() {
+        const ls = _ls();
+        if (!ls) return 0;
+        const now = Date.now();
+        let removed = 0;
+        _nsKeys(ls).forEach((k) => {
+            const raw = ls.getItem(k);
+            if (!raw) return;
+            let obj;
+            try { obj = JSON.parse(raw); } catch (e) { return; }
+            if (obj && obj.e && now >= obj.e) {
+                try { ls.removeItem(k); removed += 1; } catch (e2) { /* ignore */ }
+            }
+        });
+        return removed;
     }
 
     /**
@@ -141,11 +186,15 @@
     root.localCacheSet = localCacheSet;
     root.localCacheDel = localCacheDel;
     root.localCacheClearAll = localCacheClearAll;
+    root.localCacheStats = localCacheStats;
+    root.localCachePrune = localCachePrune;
     root.VPC = root.VPC || {};
     root.VPC.cache = {
         get: localCacheGet,
         set: localCacheSet,
         del: localCacheDel,
         clearAll: localCacheClearAll,
+        stats: localCacheStats,
+        prune: localCachePrune,
     };
 })();

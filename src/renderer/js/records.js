@@ -257,15 +257,17 @@ function recCard(v, editable, withTags, playCountByName) {
            </div>`
         : '';
     // 封面：Kazumi 源历史卡无源封面，先复用 Bangumi 封面缓存（T73 补拉成功的结果）
-    let pic = v.pic || '';
+    const fileSite = String(v.site || '');
+    const isFileRecord = fileSite === 'local' || fileSite === 'download';
+    let pic = isFileRecord ? '' : (v.pic || '');
     if (!pic && String(v.site || '').startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
         pic = Kazumi.getCachedBangumiCover(v.name) || '';
     }
     // T76：Bangumi 封面（官方 lain.bgm.tv）官方优先、镜像 lain.bangumi.lol 兜底；其余源普通 img
     const isBgmCover2 = pic && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic);
     const coverHtml = isBgmCover2 ? bangumiCoverImg(pic) : vodCoverImg(pic);
-    // 本地文件（site='local'）：vodId 存的是相对路径，异步抓帧后替换占位图
-    const isLocal = String(v.site || '') === 'local' && !pic;
+    // 本地文件（site='local'）与下载文件（site='download'）：vodId 存的是本地路径，异步抓帧后替换占位图
+    const isLocal = isFileRecord;
     // 历史卡播放信息（T73）：播放卡显示 集名 · 时长 · 播放时间；浏览卡只显示打开时间
     const isPlay = v.kind === 'play' || (v.playCount || 0) > 0;
     // 集数信息行：按同名播放卡计数（去重）计算已看集数
@@ -317,39 +319,65 @@ function recCard(v, editable, withTags, playCountByName) {
     </div>`;
 }
 
-// 本地文件历史卡：异步抓帧封面（任务八/11.2）。data-local-path 存的是本地媒体相对路径；
+// 本地/下载文件历史卡：异步抓帧封面（任务八/11.2）。data-local-path 存本地媒体路径（相对路径或下载文件绝对路径）；
 // 经主进程 vpc:file-thumb（ffmpeg 截帧 -> userData/local-thumbs 缓存）取回帧图，替换 .vod-cover 内占位图。
-// 结果按 path 记忆缓存（同会话内重复渲染不重复抓帧）；失败/未就绪保持占位图兜底。
-const _localCoverCache = new Map(); // path -> promise<{ok,path}>
+// 成功结果按 path 长期缓存（同会话内重复渲染不重复抓帧）；失败记时间戳，冷却约 30s 后下次渲染重试，
+// 避免 ffmpeg 未就绪/瞬时失败被永久缓存成占位图。成功后会移除 data-cover-missing，
+// 否则 fillMissingCovers 会把本地/下载卡当「缺封面」、用本地路径当 id 调 detailContent 无谓补拉。
+const _localCoverCache = new Map();       // path -> file:/// 帧图 URL（成功，长期）
+const _localCoverFailAt = new Map();      // path -> 失败时间戳（冷却期内不重试）
+const _localCoverRetryMs = 30000;         // 失败后重试冷却窗口
+const _localCoverInFlight = new Map();    // path -> Promise<url|null>（并发去重）
+const _localCoverCap = 500;
+
+function applyLocalCover(el, rel, url) {
+    if (!el.isConnected || el.getAttribute('data-local-path') !== rel) return;
+    const img = el.querySelector('img');
+    if (!img) return;
+    img.src = url;
+    img.classList.remove('cover-ph'); // 移除占位样式（若存在）
+    img.removeAttribute('data-cover-missing'); // 已用帧图，不再触发 fillMissingCovers 补拉
+    img.style.objectFit = 'cover';
+    img.style.width = '100%';
+    img.style.height = '100%';
+}
+
 function fillLocalCovers(grid) {
     if (!grid || !grid.length) return;
     if (!window.vpc || typeof window.vpc.fileThumb !== 'function') return;
+    const now = Date.now();
     grid.find('.vod-cover[data-local-path]').each(function () {
         const el = this;
         const rel = el.getAttribute('data-local-path');
         if (!rel) return;
-        const url = _localCoverCache.get(rel) || window.vpc.fileThumb(rel).then((r) => {
-            if (!r || !r.ok || !r.path) return null;
-            const u = 'file:///' + String(r.path).replace(/\\/g, '/');
-            return { ok: true, url: u, rel };
-        }).catch(() => null);
-        _localCoverCache.set(rel, url);
-        Promise.resolve(url).then((r) => {
-            if (!r || !r.ok || !el.isConnected || el.getAttribute('data-local-path') !== rel) return;
-            const img = el.querySelector('img');
-            if (!img) return;
-            img.src = r.url;
-            img.classList.remove('cover-ph'); // 移除占位样式（若存在）
-            img.style.objectFit = 'cover';
-            img.style.width = '100%';
-            img.style.height = '100%';
-        });
+        const hit = _localCoverCache.get(rel);
+        if (hit) { applyLocalCover(el, rel, hit); return; }
+        const failAt = _localCoverFailAt.get(rel);
+        if (failAt && now - failAt < _localCoverRetryMs) return; // 冷却期内不重试
+        let p = _localCoverInFlight.get(rel);
+        if (!p) {
+            p = window.vpc.fileThumb(rel)
+                .then((r) => {
+                    if (r && r.ok && r.path) {
+                        const u = 'file:///' + String(r.path).replace(/\\/g, '/');
+                        _localCoverCache.set(rel, u);
+                        if (_localCoverCache.size > _localCoverCap) _localCoverCache.delete(_localCoverCache.keys().next().value);
+                        return u;
+                    }
+                    _localCoverFailAt.set(rel, Date.now());
+                    if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
+                    return null;
+                })
+                .catch(() => {
+                    _localCoverFailAt.set(rel, Date.now());
+                    if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
+                    return null;
+                })
+                .finally(() => _localCoverInFlight.delete(rel));
+            _localCoverInFlight.set(rel, p);
+        }
+        Promise.resolve(p).then((u) => { if (u) applyLocalCover(el, rel, u); });
     });
-    // 防 Map 无限增长：上限 500 条
-    if (_localCoverCache.size > 500) {
-        const oldest = _localCoverCache.keys().next().value;
-        _localCoverCache.delete(oldest);
-    }
 }
 
 // ---- 编辑记录（改显示标题）：两视图共用一个对话框 ----
@@ -464,7 +492,25 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         else warnToast('Kazumi 引擎不可用');
                         return;
                     }
-                    Detail.open(String(el.data('site')), String(el.data('id')), String(el.data('name')));
+                    const site = String(el.data('site') || '');
+                    if (site === 'local' && window.vpc && window.vpc.filePush) {
+                        window.vpc.filePush(String(el.data('id') || '')).then((r) => {
+                            if (r && r.ok) warnToast('已在 mpv 窗口播放');
+                            else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
+                            else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
+                            else warnToast('播放失败');
+                        }).catch(() => warnToast('播放失败'));
+                        return;
+                    }
+                    if (site === 'download' && window.vpc && window.vpc.download && window.vpc.download.play) {
+                        window.vpc.download.play(String(el.data('id') || '')).then((r) => {
+                            if (r && r.ok) warnToast('已在 mpv 窗口播放');
+                            else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
+                            else warnToast('播放失败');
+                        }).catch(() => warnToast('播放失败'));
+                        return;
+                    }
+                    Detail.open(site, String(el.data('id')), String(el.data('name')));
                 });
             // 清空按钮仅历史页保留（T40：收藏页已删除该按钮）
             if ($(`#${viewName}-clear`).length) $(`#${viewName}-clear`).on('click', () => this.clear());

@@ -75,7 +75,11 @@ async function doAction(action, kv, path, timeoutMs) {
         // AbortController only stops the browser fetch.  Notify the backend
         // separately so cooperative Spider/JAR calls can stop at their next
         // runtime boundary; hard Worker termination remains an S1 concern.
-        if (error && error.name === 'AbortError' && window.vpc && window.vpc.cancelRuntime) {
+        // AbortSignal.timeout() 的超时拒绝是 TimeoutError（非 AbortError）：
+        // 网盘类 spider 解析一烧 20s+，若不通知取消，后端会继续占住 worker，
+        // 后续请求排队 → 连锁「一直转圈」。两种中止名都要触发 cancelRuntime。
+        if (error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+            && window.vpc && window.vpc.cancelRuntime) {
             try { await window.vpc.cancelRuntime({ requestId, playSessionId }); } catch (e) { /* best effort */ }
         }
         throw error;
@@ -421,6 +425,7 @@ function fillMissingCovers(container, isValid, options) {
         .filter(function () {
             // 有 vodId 走 detailContent 补拉；Kazumi 源 vodId 恒为空，但可按片名从 Bangumi 拉封面。
             const $c = $(this);
+            if ($c.find('.vod-cover[data-local-path]').length) return false;
             const hasId = String($c.data('id') || '') !== '';
             const isKazumi = String($c.data('source') || '').startsWith('kazumi:') && String($c.data('name') || '') !== '';
             return (hasId || isKazumi) && !pool.seen.has(this);
@@ -733,15 +738,24 @@ function errToast(msg) { if (!_errorToastOn) return; warnToast(msg); }
 
 // T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐
 let _loadingHideT = null;
-function showLoading() {
+function showLoading(text) {
     clearTimeout(_loadingHideT);
-    $('#loadingToast').removeClass('out').show();
+    const el = $('#loadingToast');
+    if (text) {
+        el.find('.md-progress-text').text(String(text));
+    } else {
+        el.find('.md-progress-text').text('载入中…');
+    }
+    el.removeClass('out').show();
 }
 function hideLoading() {
     const el = $('#loadingToast');
     if (!el.is(':visible')) return;
     el.addClass('out');
-    _loadingHideT = setTimeout(() => el.hide().removeClass('out'), 160);
+    _loadingHideT = setTimeout(() => {
+        el.hide().removeClass('out');
+        el.find('.md-progress-text').text('载入中…');
+    }, 160);
 }
 
 /**

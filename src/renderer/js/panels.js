@@ -8,7 +8,7 @@
  * 需解析的影片链接（parse=1）由 player.js 自动解析载入播放，无需手动推送。
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
-          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player */
+          openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -30,48 +30,105 @@ function ensureLocalPanel() {
 
 // ---------------------------------------------------------------- 源配置
 
+let _configLoadAbort = null;
+let _configLoadRequestId = '';
+
 /** 载入配置（名称固定 config）：URL 或 JSON 均可；异步任务轮询 configTask。
- *  长时间（多仓库扫描可达分钟级）仅显示非阻塞进度条，不遮挡 UI，用户可继续操作。 */
+ *  配置进度必须展示：获取仓库 → 解析配置 → 检测站点 → 初始化运行时 → 可用/降级/不支持数量。
+ *  支持中途主动取消，取消后保留旧配置。 */
 async function setting() {
     let text = $('#setting_text').val().trim();
     if (!text) { warnToast('请输入配置地址或 JSON'); return; }
 
-    // IDN 转换：中文域名 → punycode（复用 asciiUrl 逻辑，统一处理）
     if (text.startsWith('http://') || text.startsWith('https://')) {
         text = asciiUrl(text);
     }
 
-    warnToast('正在载入配置…');
+    if (_configLoadAbort) {
+        _configLoadAbort.abort();
+    }
+    const abortCtrl = new AbortController();
+    _configLoadAbort = abortCtrl;
+    const requestId = createRuntimeId('cfg');
+    _configLoadRequestId = requestId;
+
+    let barEl = $('#config-loading-bar');
+    if (!barEl.length) {
+        $('#setting_text').closest('.tool-card').append(
+            `<div id="config-loading-bar" class="tip-line" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="config-progress-text">正在载入配置…</span>
+                <button type="button" id="config-cancel-btn" class="md-btn md-btn-sm md-btn-tonal" style="padding:2px 8px;margin-left:8px;">取消</button>
+            </div>`
+        );
+        barEl = $('#config-loading-bar');
+    }
+    const updateProgressUi = (stepText) => {
+        barEl.find('.config-progress-text').text(stepText);
+        barEl.show();
+    };
+
+    $('#config-cancel-btn').off('click').on('click', async () => {
+        abortCtrl.abort();
+        try { await doAction('cancelConfig', { requestId }); } catch (e) { /* best-effort */ }
+        barEl.hide();
+        warnToast('已取消配置载入，保留原配置');
+    });
+
+    updateProgressUi('获取仓库 → 解析配置…');
     let rsp;
     try {
-        rsp = await doAction('setting', { text, name: 'config' });
+        rsp = await doAction('setting', { text, name: 'config', requestId }, null, {
+            requestId, signal: abortCtrl.signal, timeoutMs: 15000,
+        });
     } catch (e) {
+        barEl.hide();
+        if (abortCtrl.signal.aborted) {
+            warnToast('已取消配置载入');
+            return;
+        }
         warnToast('请求失败');
         return;
     }
-    // 后端异步加载（code:202）：轮询 configTask 直到 done/error（最长 5 分钟）
+
     if (rsp && rsp.code === 202) {
-        // 用进度条指示器替换阻塞 loading（T82 统一样式）
-        let barEl = $('#config-loading-bar');
-        if (!barEl.length) {
-            $('#setting_text').closest('.tool-card').append('<div id="config-loading-bar" class="tip-line" style="margin-top:8px;"></div>');
-            barEl = $('#config-loading-bar');
-        }
-        renderStatusBar(barEl, { text: '正在载入配置…', recv: 0, total: 0 });
-        barEl.show();
+        const stages = [
+            '获取仓库 → 解析配置',
+            '解析配置 → 检测站点',
+            '检测站点 → 初始化运行时',
+            '初始化运行时 → 校验可用性',
+        ];
         for (let i = 0; i < 150; i++) {
-            await new Promise((r) => setTimeout(r, 2000));
+            if (abortCtrl.signal.aborted || _configLoadRequestId !== requestId) {
+                barEl.hide();
+                return;
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            if (abortCtrl.signal.aborted || _configLoadRequestId !== requestId) {
+                barEl.hide();
+                return;
+            }
             let task = null;
-            try { task = await doAction('configTask', {}); } catch (e) { continue; }
+            try {
+                task = await doAction('configTask', {}, null, {
+                    requestId, signal: abortCtrl.signal, timeoutMs: 8000,
+                });
+            } catch (e) { continue; }
+
             if (!task || task.status === 'loading') {
-                renderStatusBar(barEl, { text: '正在载入配置…', recv: i + 1 });
+                const stageIdx = Math.min(stages.length - 1, Math.floor(i / 2));
+                updateProgressUi(`${stages[stageIdx]}…`);
                 continue;
             }
             barEl.hide();
             if (task.status === 'done' && task.summary) {
                 applyConfigResult(task.summary, text);
             } else {
-                warnToast(`配置载入失败：${String((task && task.msg) || '未知错误').slice(0, 80)}`);
+                const msg = String((task && task.msg) || '未知错误');
+                if (task.stage === 'cancelled' || msg.includes('cancelled')) {
+                    warnToast('配置加载已取消，保留旧配置');
+                } else {
+                    warnToast(`配置载入失败：${msg.slice(0, 80)}`);
+                }
             }
             return;
         }
@@ -79,7 +136,7 @@ async function setting() {
         warnToast('配置仍在载入中，请稍后切换站点查看结果');
         return;
     }
-    // 同步完成
+    barEl.hide();
     if (rsp && rsp.code === 200 && rsp.summary) {
         applyConfigResult(rsp.summary, text);
     } else if (rsp && rsp.code === 409) {
@@ -90,52 +147,66 @@ async function setting() {
     }
 }
 
-/** 根据加载摘要提示并（成功时）持久化 URL + 刷新站点列表。 */
+/** 配置载入完成后同步设置、首页和直播页。 */
+function refreshConfigViews() {
+    const refreshes = [];
+    if (typeof Home !== 'undefined' && Home.loadSites) {
+        refreshes.push(Promise.resolve().then(() => Home.loadSites()));
+    }
+    if (typeof Live !== 'undefined' && Live.load) {
+        refreshes.push(Promise.resolve().then(() => Live.load()));
+    }
+    refreshes.forEach((task) => task.catch(() => {}));
+}
+
+/** 根据加载摘要提示并持久化 URL。 */
 function applyConfigResult(sm, text) {
     renderConfigDiagnostics(sm);
     const configured = Number(sm.configured ?? sm.sites ?? 0);
     const built = Number(sm.built ?? sm.sites_built ?? sm.sites ?? 0);
     const initialized = Number(sm.initialized ?? built);
     const healthy = Number(sm.healthy ?? sm.sites ?? 0);
-    if (healthy > 0) {
-        const parts = [
-            `配置 ${configured} · 建成 ${built} · 初始化 ${initialized} · 健康 ${healthy}`,
-            `${sm.parses} 个解析`,
-        ];
-        if (sm.skipped && sm.skipped.length) parts.push(`跳过 ${sm.skipped.length} 个`);
-        const jarN = sm.jarSites || 0;
-        if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
+    const degraded = Number(sm.degraded ?? 0);
+    const unsupported = Number(sm.unsupported ?? (configured - healthy - degraded));
+    const safeUnsupported = unsupported >= 0 ? unsupported : 0;
 
-        // 新增：网盘源提示
-        const panN = sm.panSites || 0;
-        if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→源设置→网盘账号）`);
+    const progressSummary = `获取仓库 → 解析配置 → 检测 ${configured} 个站点 → 初始化运行时 → 可用 ${healthy} / 降级 ${degraded} / 不支持 ${safeUnsupported}`;
+    const parts = [
+        progressSummary,
+        `${sm.parses || 0} 个解析`,
+    ];
+    if (sm.skipped && sm.skipped.length) parts.push(`跳过 ${sm.skipped.length} 个`);
+    const jarN = sm.jarSites || 0;
+    if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
 
-        const build = sm.build_errors || {};
-        const diagnostics = [
-            ['L1 解析失败', sm.parse_errors],
-            ['L2 类型不支持', build.type_unsupported],
-            ['L3 JAR 失败', build.jar_failed],
-            ['L3 JS 失败', build.js_failed],
-            ['L3 Python 失败', build.py_failed],
-        ].filter(([, count]) => Number(count) > 0)
-            .map(([label, count]) => `${label} ${count}`);
-        if (diagnostics.length) parts.push(`诊断：${diagnostics.join('、')}`);
+    const panN = sm.panSites || 0;
+    if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→源设置→网盘账号）`);
 
-        warnToast(parts.join('、'));
-        // 成功才持久化，下次启动自动重载；并记入历史源
-        if (/^https?:\/\//i.test(text.trim())) {
-            window.vpc.settingsSet('lastConfigUrl', text.trim());
-            addConfigHistory(text.trim());
-        }
-        if (typeof Home !== 'undefined' && Home.loadSites) Home.loadSites();
-        if (typeof Live !== 'undefined' && Live.load) Live.load();
+    const build = sm.build_errors || {};
+    const diagnostics = [
+        ['L1 解析失败', sm.parse_errors],
+        ['L2 类型不支持', build.type_unsupported],
+        ['L3 JAR 失败', build.jar_failed],
+        ['L3 JS 失败', build.js_failed],
+        ['L3 Python 失败', build.py_failed],
+    ].filter(([, count]) => Number(count) > 0)
+        .map(([label, count]) => `${label} ${count}`);
+    if (diagnostics.length) parts.push(`诊断：${diagnostics.join('、')}`);
+
+    if (/^https?:\/\//i.test(text.trim())) {
+        window.vpc.settingsSet('lastConfigUrl', text.trim());
+        addConfigHistory(text.trim());
+    }
+    refreshConfigViews();
+
+    if (healthy > 0 || degraded > 0) {
+        warnToast(parts.join(' · '));
     } else {
-        const hint = `配置 ${configured} · 建成 ${built} · 初始化 ${initialized} · 健康 0。` +
-            '此配置可能仅含 drpy 源、需要 Android Worker 的 Dex/native JAR，或需 JRE 的 portable JAR。若你粘贴的是直播源（.txt/.m3u），请改到「设置→源设置→直播源」添加。';
+        const hint = `${progressSummary}。` +
+            '此配置当前没有被健康检查标记为可用，仍已同步到首页；请查看设置中的诊断信息。';
         warnToast(`配置已解析但没有可用站点：${hint}`);
     }
 }
-
 function renderConfigDiagnostics(data) {
     const box = $('#config_diagnostics').empty();
     const summary = data && data.summary ? data.summary : data || {};
@@ -145,12 +216,44 @@ function renderConfigDiagnostics(data) {
     const built = Number(summary.built ?? 0);
     const initialized = Number(summary.initialized ?? 0);
     const healthy = Number(summary.healthy ?? diagnostics.filter((item) => item.healthy).length);
-    $('<div class="history-item"></div>')
-        .text(`configured ${configured} · built ${built} · initialized ${initialized} · healthy ${healthy}`)
+    const degraded = Number(summary.degraded ?? diagnostics.filter((item) => item.state === 'degraded' || item.state === 'credentials_required').length);
+    const unsupported = Number(summary.unsupported ?? diagnostics.filter((item) => item.state === 'unsupported' || item.runtime === 'android').length);
+
+    $('<div class="history-item" style="font-weight:600;"></div>')
+        .text(`配置 ${configured} · 建成 ${built} · 初始化 ${initialized} · 可用 ${healthy} · 降级 ${degraded} · 不支持 ${unsupported}`)
         .appendTo(box);
+
+    const runtimeGroups = {};
+    const errorGroups = {};
+    diagnostics.forEach((item) => {
+        if (!item) return;
+        const rt = item.runtime || 'unknown';
+        runtimeGroups[rt] = (runtimeGroups[rt] || 0) + 1;
+        if (!item.healthy) {
+            const err = item.lastError || {};
+            const code = err.code || item.state || 'UNAVAILABLE';
+            errorGroups[code] = (errorGroups[code] || 0) + 1;
+        }
+    });
+
+    const rtSummary = Object.entries(runtimeGroups).map(([rt, c]) => `${rt}: ${c}`).join(' · ');
+    if (rtSummary) {
+        $('<div class="history-item" style="color:var(--md-primary);"></div>')
+            .text(`运行时分布: ${rtSummary}`)
+            .appendTo(box);
+    }
+    const errSummary = Object.entries(errorGroups).map(([c, cnt]) => `${c} (${cnt})`).join(' · ');
+    if (errSummary) {
+        $('<div class="history-item" style="color:var(--md-error);"></div>')
+            .text(`错误层级统计: ${errSummary}`)
+            .appendTo(box);
+    }
+
     const unavailable = diagnostics.filter((item) => item && !item.healthy).map((item) => {
         const error = item.lastError || {};
-        return `${item.siteKey || '?'} · ${item.state || 'unavailable'} · ${error.code || ''} ${error.message || ''}`.trim();
+        const isAndroid = item.runtime === 'android' || (error.code === 'L2_SITE_REQUIRES_ANDROID');
+        const reason = isAndroid ? '仅支持 Android / 当前上限 C1 / 请改用可移植源' : `${error.code || ''} ${error.message || ''}`.trim();
+        return `${item.siteKey || '?'} · ${item.state || 'unavailable'} · ${reason}`;
     });
     [...skipped, ...unavailable].slice(0, 50).forEach((reason) => {
         $('<div class="history-item"></div>').text(String(reason)).appendTo(box);
@@ -195,9 +298,8 @@ function renderConfigHistory(list) {
 /** 点击历史源载入；点 ✕ 删除。 */
 async function useHistoryConfig(url) {
     $('#setting_text').val(url);
-    setting();
+    return setting();
 }
-
 async function removeConfigHistory(idx) {
     try {
         const s = (await window.vpc.settingsGet()) || {};
@@ -213,44 +315,126 @@ async function removeConfigHistory(idx) {
 
 // ---------------------------------------------------------------- 设置：缓存
 
-/** 展示当前缓存占用（清理按钮同步显示大小）。 */
-async function refreshCacheSize() {
+// refreshCacheSize 防抖：上次成功刷新 3s 内不重复发起（连续切页/多次触发时省请求）。
+let _cacheSizeLastTs = 0;
+
+/**
+ * 展示当前缓存占用（清理按钮同步显示总量，行文案展示分类明细）。
+ * 并行请求后端 cacheSize 与主进程 app 缓存大小（若 preload 暴露 getAppCacheSize），
+ * 合并 bytes/items 后渲染。8s 超时；失败静默但 console.debug；3s 内不重复发起。
+ * @param {boolean} force 忽略防抖（清理后强制刷新用）
+ */
+async function refreshCacheSize(force) {
+    const now = Date.now();
+    if (!force && now - _cacheSizeLastTs < 3000) return; // 防抖：3s 内不重复
+    _cacheSizeLastTs = now;
     try {
-        const r = await doAction('cacheSize', {});
-        if (r && r.code === 200) {
-            $('#cache_size_line').text(`当前缓存占用：${fmtSize(r.bytes)}（${r.items} 个文件）`);
-            $('#cache_clear').text(r.bytes > 0 ? `清理缓存（${fmtSize(r.bytes)}）` : '清理缓存');
+        // 主进程 app 缓存大小接口可能未暴露（主进程任务补齐前）：容错为 null，不强依赖。
+        const appSizeP = (window.vpc && typeof window.vpc.getAppCacheSize === 'function')
+            ? window.vpc.getAppCacheSize().catch(() => null)
+            : Promise.resolve(null);
+        const [backendR, appR] = await Promise.all([
+            doAction('cacheSize', {}, null, 8000).catch(() => null),
+            appSizeP,
+        ]);
+
+        let localBytes = 0;
+        try { if (typeof localCacheStats === 'function') localBytes = localCacheStats().bytes || 0; } catch (e) { /* ignore */ }
+
+        let backendBytes = 0, backendItems = 0, backendOk = false;
+        if (backendR && backendR.code === 200) {
+            backendOk = true;
+            backendBytes = backendR.bytes || 0;
+            backendItems = backendR.items || 0;
         }
-    } catch (e) { /* 统计失败不影响面板 */ }
+        let appBytes = 0, appOk = false;
+        if (appR && (appR.ok || typeof appR.bytes === 'number')) {
+            appOk = true;
+            appBytes = (typeof appR.bytes === 'number' ? appR.bytes : appR.cleanedBytes) || 0;
+        }
+
+        // 后端与 app 均不可用时保持原文案不变（静默）。
+        if (!backendOk && !appOk && localBytes <= 0) return;
+
+        const total = backendBytes + appBytes + localBytes;
+        // 行文案：分类 breakdown（无 app 接口时省略应用分项）。
+        const parts = [`本地 ${fmtSize(localBytes)}`, `后端 ${fmtSize(backendBytes)}`];
+        if (appOk) parts.push(`应用 ${fmtSize(appBytes)}`);
+        parts.push(`${backendItems} 文件`);
+        $('#cache_size_line').text(`当前缓存占用：${fmtSize(total)}（${parts.join(' · ')}）`);
+        $('#cache_clear').text(total > 0 ? `清理缓存（${fmtSize(total)}）` : '清理缓存');
+    } catch (e) {
+        console.debug('[cache] refreshCacheSize failed', e);
+    }
 }
 
 async function clearCache() {
-    // T40：清理前二次确认
-    if (!await confirmDialog('清理缓存？将清除影片爬虫缓存、下载临时文件、本地预览图、mpv 硬盘缓存与解析会话缓存。已载入的源与已下载文件不受影响。', { okText: '清理' })) return;
+    // 并发守卫：清理进行中重复点击直接忽略。
+    if (clearCache._busy) return;
+    // T40：清理前二次确认（文案保持不变）
+    if (!await confirmDialog('清理缓存？将清除影片爬虫缓存、下载临时文件、本地预览图与解析会话缓存。已载入的源与已下载文件不受影响。', { okText: '清理' })) return;
+    clearCache._busy = true;
+    const $btn = $('#cache_clear');
+    $btn.prop('disabled', true);
     showLoading();
-    let backendBytes = 0, backendMsg = '', appBytes = 0, ok = false;
+
+    let backendBytes = 0, backendMsg = '', backendItems = 0, appBytes = 0, appDetail = null, localBytes = 0, ok = false;
+    // 本地命名空间清理前占用（用于 breakdown 的释放量估算）。
+    let localBefore = 0;
+    try { if (typeof localCacheStats === 'function') localBefore = localCacheStats().bytes || 0; } catch (e) { /* ignore */ }
+
     try {
-        const r = await doAction('clearCache', {});
-        if (r && r.code === 200) { ok = true; backendBytes = r.bytes || 0; backendMsg = r.msg || ''; }
-    } catch (e) { /* 后端清理失败下面统一提示 */ }
-    // 统一清理主进程侧本地缓存（mpv 缓存 / 预览图 / 解析窗口 partition）
-    try {
-        const r2 = await window.vpc.clearAppCaches();
-        if (r2 && r2.ok) { ok = true; appBytes = r2.cleanedBytes || 0; }
-    } catch (e) { /* 主进程清理失败不影响后端结果提示 */ }
-    // 任务十一：清理渲染层本地持久化缓存（vpc_cache:: 命名空间：推荐榜单/时间表等）
-    try { if (typeof localCacheClearAll === 'function') localCacheClearAll(); } catch (e) { /* ignore */ }
-    // 顺带清理旧版独立缓存键（Bangumi 封面匹配 / 首页空分类探测 / 旧推荐缓存）
-    try {
-        localStorage.removeItem('kazumi_bgm_cover');
-        localStorage.removeItem('vpc_home_empty_classes');
-        localStorage.removeItem('popular_cache');
-    } catch (e) { /* ignore */ }
-    hideLoading();
+        // 并行清理后端与主进程侧缓存（互不依赖）；本地持久化缓存同步执行（不阻塞网络）。
+        const appClearP = (window.vpc && typeof window.vpc.clearAppCaches === 'function')
+            ? window.vpc.clearAppCaches()
+            : Promise.resolve(null);
+        const [backendRes, appRes] = await Promise.allSettled([
+            doAction('clearCache', {}, null, 8000),
+            appClearP,
+        ]);
+
+        // 任务十一：清理渲染层本地持久化缓存（vpc_cache:: 命名空间：推荐榜单/时间表等），
+        // 先 prune 过期再全清（同步、不阻塞网络）。
+        try { if (typeof localCachePrune === 'function') localCachePrune(); } catch (e) { /* ignore */ }
+        try { if (typeof localCacheClearAll === 'function') localCacheClearAll(); } catch (e) { /* ignore */ }
+        // 顺带清理旧版独立缓存键（Bangumi 封面匹配 / 首页空分类探测 / 旧推荐缓存）
+        try {
+            localStorage.removeItem('kazumi_bgm_cover');
+            localStorage.removeItem('vpc_home_empty_classes');
+            localStorage.removeItem('popular_cache');
+        } catch (e) { /* ignore */ }
+
+        // 收集后端 breakdown
+        if (backendRes.status === 'fulfilled') {
+            const r = backendRes.value;
+            if (r && r.code === 200) { ok = true; backendBytes = r.bytes || 0; backendMsg = r.msg || ''; backendItems = r.items || 0; }
+        }
+        // 收集主进程 app breakdown
+        if (appRes.status === 'fulfilled') {
+            const r2 = appRes.value;
+            if (r2 && r2.ok) { ok = true; appBytes = r2.cleanedBytes || 0; appDetail = r2.detail || null; }
+        }
+        // 本地释放量 = 清理前后差（清理后应为 0，取前值为准）。
+        let localAfter = 0;
+        try { if (typeof localCacheStats === 'function') localAfter = localCacheStats().bytes || 0; } catch (e) { /* ignore */ }
+        localBytes = Math.max(0, localBefore - localAfter);
+        if (localBytes > 0) ok = true;
+    } catch (e) {
+        console.debug('[cache] clearCache error', e);
+    } finally {
+        hideLoading();
+        clearCache._busy = false;
+        $btn.prop('disabled', false);
+        refreshCacheSize(true);
+    }
+
     if (ok) {
-        const total = backendBytes + appBytes;
-        warnToast(`缓存已清理，释放 ${fmtSize(total)}${backendMsg ? '（' + backendMsg + '）' : ''}`);
-        refreshCacheSize();
+        const total = backendBytes + appBytes + localBytes;
+        warnToast(`已释放 ${fmtSize(total)}（后端 ${fmtSize(backendBytes)} · 应用 ${fmtSize(appBytes)} · 本地 ${fmtSize(localBytes)}）`);
+        // 明细日志（后端消息 / 文件数 / 应用分项）供排查。
+        if (backendMsg || backendItems || appDetail) {
+            console.info('[cache] cleared', { backendBytes, backendItems, backendMsg, appBytes, appDetail, localBytes });
+        }
     } else {
         warnToast('缓存清理失败');
     }
@@ -479,19 +663,21 @@ function selectFile(path) {
 function pushFile(yes) {
     closeDialog('fileInfoDialog');
     if (yes !== 1) return;
-    // 本地媒体直接交给主进程 mpv 播放
-    window.vpc.filePush(currentFile).then((r) => {
+    const target = String(currentFile || '').trim();
+    if (!target) { warnToast('未选中文件'); return; }
+    // 本地媒体直接交给主进程 mpv 播放；首播冷启动可能因 IPC 竞态短暂失败，自动重试一次
+    const doPush = (rel, isRetry) => window.vpc.filePush(rel).then((r) => {
         if (r && r.ok) {
             warnToast('已在 mpv 窗口播放');
             // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
             try {
-                const rel = String(currentFile || '');
-                const name = rel.split(/[\\/]/).pop() || rel || '本地文件';
+                const rel2 = String(currentFile || '');
+                const name = rel2.split(/[\\/]/).pop() || rel2 || '本地文件';
                 if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
                     Records.recordPlay({
                         site: 'local',
                         siteName: '本地文件',
-                        vodId: rel,
+                        vodId: rel2,
                         name: name,
                         pic: '',
                         remarks: '本地文件',
@@ -501,11 +687,21 @@ function pushFile(yes) {
                     }).catch(() => { /* 历史记录失败不影响播放 */ });
                 }
             } catch (e) { /* ignore */ }
+            return;
         }
-        else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
+        // 首播 IPC 超时/提前退出的偶发失败（二次点击成功即为此竞态），自动重试一次
+        if (!isRetry && r && (r.reason === 'mpv-start-timeout' || r.reason === 'mpv-exited-before-playback' || r.reason === 'mpv-exited')) {
+            setTimeout(() => doPush(rel, true), 500);
+            return;
+        }
+        if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
+        else if (r && r.reason === 'file-not-found') warnToast('文件不存在或已被移动');
+        else if (r && r.reason === 'path-denied') warnToast('路径不在白名单内');
         else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
-        else warnToast('播放失败');
+        else if (r && r.reason === 'mpv-start-timeout') warnToast('播放器启动超时，请重试');
+        else warnToast('播放失败' + (r && r.reason ? `：${r.reason}` : ''));
     }).catch(() => warnToast('播放失败'));
+    doPush(target, false);
 }
 
 /** 未选根目录时的引导态（白名单未设置）。 */
@@ -1043,6 +1239,9 @@ function initSettingsPanel() {
         if (s.pageSizeLive) $('#set_pagesize_live').val(s.pageSizeLive);
         if (s.pageSizePopular) $('#set_pagesize_popular').val(s.pageSizePopular);
         $('#set_pan_fast_path').prop('checked', s.panFastPath !== false);
+        $('#set_media_probe').prop('checked', s.mediaProbe !== false);
+        $('#set_auto_line_fallback').prop('checked', s.autoLineFallback !== false);
+        $('#set_legacy_parser').prop('checked', s.legacyParser !== false);
         // 源设置：后台自动检测/屏蔽无内容源（默认沿用旧行为）
         $('#set_source_autodetect').prop('checked', s.sourceAutoDetect !== false);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
@@ -1267,6 +1466,21 @@ function initSettingsPanel() {
         } catch (e) {
             warnToast('设置已保存，后端将在下次启动时生效');
         }
+    });
+    $('#set_media_probe').on('change', async function () {
+        const enabled = this.checked;
+        await window.vpc.settingsSet('mediaProbe', enabled);
+        warnToast(enabled ? '已开启起播前媒体流探测' : '已关闭起播探测（直接交由播放器处理）');
+    });
+    $('#set_auto_line_fallback').on('change', async function () {
+        const enabled = this.checked;
+        await window.vpc.settingsSet('autoLineFallback', enabled);
+        warnToast(enabled ? '已开启同影片备用线路自动回退' : '已关闭备用线路自动回退');
+    });
+    $('#set_legacy_parser').on('change', async function () {
+        const enabled = this.checked;
+        await window.vpc.settingsSet('legacyParser', enabled);
+        warnToast(enabled ? '已开启简易解析器与 iframe 跟随' : '已关闭简易解析器与 iframe 跟随');
     });
     // 源自动检测：关闭后停止后台探测，并恢复展示历史上被自动屏蔽的源
     $('#set_source_autodetect').on('change', async function () {
@@ -1783,7 +1997,7 @@ function updateBlockedLine(s) {
     }
     $('#blocked_line').text(n > 0
         ? `已自动屏蔽 ${n} 个无内容源；恢复后会重新探测。`
-        : '自动屏蔽探测后无内容的源，避免下拉里出现空源。');
+        : '自动屏蔽首页和分类均无内容的源，避免下拉里出现空源。');
 }
 
 /** 资产就绪状态：查询主进程各二进制（ffmpeg/mpv/aria2/Anime4K）是否有

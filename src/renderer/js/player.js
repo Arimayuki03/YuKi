@@ -11,10 +11,29 @@
  *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
-/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records */
+/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel */
 
 // 媒体直链后缀：已是直链则无需解析（share/播放页等才需解析）
 const DIRECT_MEDIA_RE = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
+
+function mergePlayHeaders(...sources) {
+    const out = {};
+    const keys = new Map();
+    for (const source of sources) {
+        if (!source || typeof source !== 'object') continue;
+        for (const [rawKey, rawValue] of Object.entries(source)) {
+            if (rawValue === null || rawValue === undefined || rawValue === '') continue;
+            const key = String(rawKey).trim();
+            if (!key) continue;
+            const lower = key.toLowerCase();
+            const old = keys.get(lower);
+            if (old) delete out[old];
+            keys.set(lower, key);
+            out[key] = String(rawValue);
+        }
+    }
+    return out;
+}
 
 const Player = {
     _mpvMissingToastShown: false,
@@ -35,6 +54,9 @@ const Player = {
     _watchChainMax: new Map(), // chainId → 该链已累计的最大 pos（重连只补增量，不重复累计）
     _watchChainCounted: new Set(), // 已计过观看次数/部数的链（重连会话不再 +1 次数）
     _lastExitedWatch: null, // 断流退出后主进程重连时复用上一会话元信息
+    _currentPlayback: null, // 原始 playerContent 参数；断流时必须重新解析，不能复用 CDN URL
+    _reconnectAttempts: 0,  // 每个原始播放请求最多自动刷新一次
+    _reconnectInProgress: false,
     _carrySpeed: null,       // 连播时从上一集延续的倍速
     _carryFullscreen: null,  // 连播时从上一集延续的全屏状态
 
@@ -118,18 +140,44 @@ const Player = {
     async _onExit(info) {
         // 观看统计（「我的」页）：任何 mpv 会话真实退出都累计时长/次数，与连播链无关
         this._recordWatch(info);
-        const seq = this._seq;
-        if (!seq) return;
         // 非当前会话的退出（切集时被杀旧进程的延迟退出/本地播放）不驱动连播
         if (info && typeof info.sessionId === 'number' && info.sessionId && info.sessionId !== this._session) return;
         const token = this._playToken;
+        const done = this._isDone(info);
+        if (info && info.quit) {
+            this._seq = null;
+            this._currentPlayback = null;
+            this._reconnectInProgress = false;
+            return;
+        }
+        const canRefresh = !done && this._currentPlayback && this._reconnectAttempts < 1
+            && typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0
+            && info.pos >= 15 && (info.duration - info.pos) >= 8;
+        if (canRefresh) {
+            this._reconnectAttempts += 1;
+            this._reconnectInProgress = true;
+            const retry = { ...this._currentPlayback };
+            warnToast('播放被中断，正在刷新播放地址并重连…');
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            if (token !== this._playToken || !this._currentPlayback) {
+                this._reconnectInProgress = false;
+                return;
+            }
+            const result = await this.play(retry.site, retry.flag, retry.id, retry.title,
+                retry.subtitle, retry.episodes, retry.epIndex, retry.kazumiSrc,
+                { reconnectAttempt: 1 });
+            this._reconnectInProgress = false;
+            if (!result || !result.ok) this._seq = null;
+            return;
+        }
+        const seq = this._seq;
+        if (!seq) return;
         // 播放途中关掉连播开关则不再推进
         let autoNext = true;
         try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
         if (!autoNext) { this._seq = null; return; }
         // 等待期间用户已手动起播新内容：旧进程的退出不再驱动连播
         if (token !== this._playToken) return;
-        const done = this._isDone(info);
         // 观看进度追踪：更新收藏条目的观看进度（仅当 seq 含 vodId 时）
         if (seq.vodId && typeof Favorites !== 'undefined' && Favorites.updateProgress) {
             try {
@@ -144,16 +192,7 @@ const Player = {
                 });
             } catch (e) { /* 进度更新失败不影响播放 */ }
         }
-        // 用户主动关闭播放器（主进程按 end-file reason=quit/stop 或 stop() 判定）：
-        // 不等待断流重连、不自动连播，终止当前链
-        if (info && info.quit) { this._seq = null; return; }
         if (!done) {
-            // 断流场景（开播≥15s 且剩余≥8s 的媒体直链）：主进程会自动重播本集一次，
-            // 保留连播链等待重连后的新会话；其余情形视为用户提前关闭，终止连播
-            const canStallRetry = typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0
-                && info.pos >= 15 && (info.duration - info.pos) >= 8
-                && this._lastUrl && DIRECT_MEDIA_RE.test(String(this._lastUrl).split('?')[0]);
-            if (canStallRetry) return;
             this._seq = null;
             return;
         }
@@ -316,9 +355,11 @@ const Player = {
     _rememberSession(result) {
         if (!result || !result.ok || typeof result.sessionId !== 'number') return;
         this._session = result.sessionId;
-        const meta = { ...(this._curMeta || {}) };
-        // 观看链：显式起播一律开新链；断流重连经 player-session 事件复用旧链元信息
-        meta.chainId = ++this._watchChain;
+        const reconnectMeta = this._reconnectInProgress && this._lastExitedWatch
+            ? this._lastExitedWatch.meta : null;
+        const meta = { ...(reconnectMeta || this._curMeta || {}) };
+        // 断流刷新后的新 mpv 会话沿用旧观看链；普通显式起播开新链。
+        if (typeof meta.chainId !== 'number') meta.chainId = ++this._watchChain;
         // Kazumi 源不使用 Detail._lastVod 的封面/源名，用自身数据
         if (String(meta.site).startsWith('kazumi:')) {
             meta.siteName = meta.siteName || String(meta.site).slice(7);
@@ -365,9 +406,16 @@ const Player = {
      * @param kazumiSrc Kazumi 番剧源页 URL（仅 kazumi: 源；写入历史记录供历史卡重新选源）
      * @returns {ok: boolean, reason?: string} 起播结果
      */
-    async play(site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc) {
+    async play(site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc, runtimeOpts = {}) {
         // 新起播占令牌：任何在途的旧进程 exit 处理随后发现令牌变化即放弃连播推进
         this._playToken += 1;
+        const reconnectAttempt = Number(runtimeOpts.reconnectAttempt || 0);
+        if (!reconnectAttempt) {
+            this._reconnectAttempts = 0;
+            this._reconnectInProgress = false;
+        }
+        this._currentPlayback = String(site).startsWith('kazumi:') ? null
+            : { site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc };
         const previousTrace = this._playContext;
         if (previousTrace && window.vpc.cancelRuntime) {
             window.vpc.cancelRuntime(previousTrace).catch(() => {});
@@ -419,12 +467,18 @@ const Player = {
                 carrySpeed, carryFullscreen, trace, playAbort.signal);
         }
 
-        showLoading();
+        const updatePlayState = (stageName) => {
+            if (this._playContext !== trace || playAbort.signal.aborted) return;
+            showLoading(`播放进度：${stageName}…`);
+        };
+
+        updatePlayState('获取播放地址');
         let rsp;
         try {
             const vipFlags = await this.getVipFlags();
             rsp = await doAction('playerContent', {
                 site, flag, id, vipFlags: JSON.stringify(vipFlags),
+                refresh: reconnectAttempt ? '1' : '0',
             }, null, { requestId: trace.requestId, playSessionId: trace.playSessionId,
                 signal: playAbort.signal, timeoutMs: 30000 });
         } catch (e) {
@@ -433,6 +487,9 @@ const Player = {
             if (playAbort.signal.aborted) {
                 return { ok: false, reason: 'play-cancelled', ...trace };
             }
+            // U6.4：自动回退尝试同影片其他线路
+            const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, '获取播放地址失败', trace);
+            if (fb && fb.ok) return fb;
             warnToast('取播放地址失败');
             return { ok: false, reason: '取播放地址失败', ...trace };
         }
@@ -443,7 +500,15 @@ const Player = {
             this._seq = null;
             const runtimeError = (data.error && typeof data.error === 'object') ? data.error : null;
             const message = runtimeError ? String(runtimeError.message || runtimeError.code || '播放运行时失败') : String(data.error);
+            const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, message, trace);
+            if (fb && fb.ok) return fb;
             warnToast(message);
+            const isPan = String(site).toLowerCase().includes('pan') || String(data.url || '').includes('quark');
+            this._showDialog(title, subtitle, '', '', message, null, {
+                canRetry: true,
+                suggestCookie: isPan || message.includes('Cookie'),
+                rawDiagnostics: { site, flag, id, error: data.error, requestId: trace.requestId },
+            });
             return {
                 ok: false,
                 reason: (runtimeError && runtimeError.code) || 'play-error',
@@ -453,11 +518,17 @@ const Player = {
             };
         }
         const rawUrl = String(data.url || '').trim();
-        const route = await this._resolvePlayerRoute(data, rawUrl);
+        updatePlayState('选择解析线路');
+        const route = await this._resolvePlayerRoute(data, rawUrl, { site, flag });
         if (!route.ok) {
             this._seq = null;
             const note = route.reason || '播放地址为空';
-            this._showDialog(title, subtitle, '', rawUrl, note, data.header);
+            const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, note, trace);
+            if (fb && fb.ok) return fb;
+            this._showDialog(title, subtitle, '', rawUrl, note, data.header, {
+                canRetry: true,
+                rawDiagnostics: { site, flag, id, routeReason: note, requestId: trace.requestId },
+            });
             return { ok: false, reason: note, requestId: trace.requestId,
                 playSessionId: trace.playSessionId };
         }
@@ -469,7 +540,10 @@ const Player = {
         if (data.drm) {
             this._seq = null;
             const note = '该播放源需要 DRM，桌面版 mpv 暂不支持';
-            this._showDialog(title, subtitle, '', url, note, playHeader);
+            this._showDialog(title, subtitle, '', url, note, playHeader, {
+                canRetry: false,
+                rawDiagnostics: { site, flag, id, drm: true, requestId: trace.requestId },
+            });
             return { ok: false, reason: 'drm-not-supported', requestId: trace.requestId,
                 playSessionId: trace.playSessionId };
         }
@@ -478,38 +552,52 @@ const Player = {
         if (parse === 1) {
             // 已是媒体直链则无需解析（部分源 parse 标记不准）
             if (DIRECT_MEDIA_RE.test(url.split('?')[0])) {
+                updatePlayState('启动播放器');
                 return await this._playDirect(url, {
                     title, subtitle, flag, header: playHeader,
                     speed: carrySpeed, fullscreen: carryFullscreen,
                     format: data.format, subs: data.subs, position: data.position,
+                    skipProbe: !!data.skipProbe, source: site, site,
                     ...trace,
                 });
             }
-            showLoading();
-            warnToast('正在后台解析播放地址…');
+            updatePlayState('选择解析线路');
             let resolved = null;
             try { resolved = await this._awaitTimeout(
-                window.vpc.resolveParse(url, route.parsers, trace), 15000, trace); } catch (e) { /* 解析异常 */ }
+                window.vpc.resolveParse(url, route.parsers, { ...trace, ...(route.context || {}) }),
+                15000, trace); } catch (e) { /* 解析异常 */ }
             if (!(resolved && resolved.ok)) {
                 // captureDirect 兜底：无解析接口时缩短超时，避免用户等太久
                 const fallbackMs = (resolved && resolved.reason === 'no-parses') ? 10000 : 15000;
                 try {
                     const cap = await this._awaitTimeout(
-                        window.vpc.captureDirect(url, false, trace), fallbackMs, trace);
+                        window.vpc.captureDirect(url, false,
+                            { ...trace, ...(route.context || {}), header: playHeader }), fallbackMs, trace);
                     if (cap && cap.ok) resolved = cap;
                 } catch (e) { /* 抓取异常 */ }
             }
             hideLoading();
             if (resolved && resolved.ok) {
+                updatePlayState('验证媒体');
                 try {
-                    const mergedHeader = { ...playHeader, ...(resolved.header || {}) };
-                    const r = await window.vpc.playUrl(resolved.url, {
+                    const mergedHeader = mergePlayHeaders(playHeader, resolved.header);
+                    updatePlayState('启动播放器');
+                    // playUrl 无内置超时：主进程侧任一子步骤挂起都会让 loading 永转，
+                    // 这里统一竞速兜底（mpv 起播上限 30s + 边下边播注册余量）。
+                    const r = await this._awaitTimeout(window.vpc.playUrl(resolved.url, {
                         title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
                         format: data.format, subs: data.subs, position: data.position,
+                        skipProbe: !!(data.skipProbe || resolved.probed), source: site, site,
                         ...trace,
-                    });
-                    if (r && r.ok) return this._mpvSuccess(r, resolved.url, `解析成功（${resolved.via || ''}），已在 mpv 播放`);
+                    }), 45000, trace);
+                    if (r && r.ok) {
+                        updatePlayState('已加载');
+                        hideLoading();
+                        return this._mpvSuccess(r, resolved.url, `解析成功（${resolved.via || ''}），已在 mpv 播放`);
+                    }
+                    if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
                     if (r && !r.ok) {
+                        hideLoading();
                         return this._mpvFailure(r, {
                             title, subtitle, url: resolved.url, header: mergedHeader,
                             prefix: '解析成功但 mpv 未能开始播放',
@@ -517,40 +605,133 @@ const Player = {
                     }
                 } catch (e) { /* 播放异常走兜底 */ }
             }
-            const note = resolved && resolved.reason === 'no-parses'
+            hideLoading();
+            const note = (resolved && resolved.reason === 'no-parses') || (data.warning && data.warning.code === 'L4_PARSE_UNAVAILABLE')
                 ? '当前配置未含解析接口：请在”设置 → 源设置”载入含 parses 的配置后重试'
                 : `解析失败：${(resolved && resolved.reason) || '未知错误'}`;
             this._seq = null; // 本集未起播，连播链终止
-            // 解析成功但 mpv 播放失败时，把解出的直链+头交给弹窗，用户可转外部播放器
+            const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, note, trace);
+            if (fb && fb.ok) return fb;
             const dlgUrl = (resolved && resolved.ok && resolved.url) ? resolved.url : url;
             const dlgHeader = (resolved && resolved.ok)
-                ? { ...playHeader, ...(resolved.header || {}) } : playHeader;
-            this._showDialog(title, subtitle, '', dlgUrl, note, dlgHeader);
+                ? mergePlayHeaders(playHeader, resolved.header) : playHeader;
+            this._showDialog(title, subtitle, '', dlgUrl, note, dlgHeader, {
+                canRetry: true,
+                rawDiagnostics: { site, flag, id, note, warning: data.warning,
+                    requestId: trace.requestId },
+            });
             return { ok: false, reason: note, url: dlgUrl, requestId: trace.requestId,
                 playSessionId: trace.playSessionId };
         }
 
-        // 直链源：单集交 mpv（连播由渲染层在 mpv 退出后推进，不再依赖 mpv 队列）
+        // 直链源：单集交 mpv
+        updatePlayState('验证媒体');
         try {
-            const r = await window.vpc.playUrl(url, {
+            updatePlayState('启动播放器');
+            // playUrl 竞速兜底（同上：防主进程侧挂起导致 loading 永转）
+            const r = await this._awaitTimeout(window.vpc.playUrl(url, {
                 title, subtitle, flag, parse, header: playHeader,
                 speed: carrySpeed, fullscreen: carryFullscreen,
                 format: data.format, subs: data.subs, position: data.position,
+                skipProbe: !!data.skipProbe, source: site, site,
                 ...trace,
-            });
-            if (r && r.ok) return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
-            if (r && !r.ok) return this._mpvFailure(r, { title, subtitle, url, header: playHeader });
+            }), 45000, trace);
+            if (r && r.ok) {
+                updatePlayState('已加载');
+                hideLoading();
+                return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
+            }
+            if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
+            if (r && !r.ok) {
+                hideLoading();
+                return this._mpvFailure(r, { title, subtitle, url, header: playHeader });
+            }
         } catch (e) { /* IPC 异常，走预览兜底 */ }
+        hideLoading();
         this._seq = null;
+
+        const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, 'mpv 播放失败', trace);
+        if (fb && fb.ok) return fb;
 
         // HTML5 预览兜底（m3u8/parse=1 不给内嵌地址，只留复制）
         const isHls = /\.m3u8(\?|$)/i.test(url);
         const note = parse === 1
             ? '该线路需要解析接口（parse=1）'
             : (isHls ? 'HLS(m3u8) 链接浏览器无法直播，建议安装 mpv 后重试' : '');
-        this._showDialog(title, subtitle, (isHls || parse === 1) ? '' : url, url, note, playHeader);
+        this._showDialog(title, subtitle, (isHls || parse === 1) ? '' : url, url, note, playHeader, {
+            canRetry: true,
+            suggestMpv: isHls,
+            rawDiagnostics: { site, flag, id, isHls, parse, requestId: trace.requestId },
+        });
         return { ok: false, reason: 'mpv-play-failed', url, requestId: trace.requestId,
             playSessionId: trace.playSessionId };
+    },
+
+    /** U6.4 自动回退：当前线路失败时尝试同影片其他可用线路（受次数和总时间限制） */
+    async _tryFallbackRoute(currentPlayback, reason, trace) {
+        if (!currentPlayback || this._fallbackActive) return null;
+        let s = {};
+        try { s = (await window.vpc.settingsGet()) || {}; } catch (e) { /* default settings */ }
+        // R8.1 功能开关 auto_line_fallback（支持 autoLineFallback / autoFallbackRoute）
+        if (s.autoLineFallback === false || s.autoFallbackRoute === false) return null;
+
+        const maxRetries = 2;
+        if (!this._fallbackAttempts) this._fallbackAttempts = 0;
+        if (this._fallbackAttempts >= maxRetries) {
+            this._fallbackAttempts = 0;
+            return null;
+        }
+
+        // 尝试从 Detail 获取当前影片的其他线路（支持 CatVod 线路与 Kazumi 规则源的备用线路）
+        let sources = [];
+        let curSourceIdx = -1;
+        if (typeof Detail !== 'undefined' && Array.isArray(Detail.sources) && Detail.sources.length > 1) {
+            sources = Detail.sources;
+            curSourceIdx = Detail.activeSource;
+        } else if (String(currentPlayback.site || '').startsWith('kazumi:') && Array.isArray(currentPlayback.episodes) && currentPlayback.episodes.length) {
+            // Kazumi 源同规则同集备用
+            sources = [{ from: currentPlayback.flag || '默认', episodes: currentPlayback.episodes }];
+            curSourceIdx = 0;
+        }
+        if (!sources.length || sources.length <= 1) return null;
+
+        const nextSourceIdx = (curSourceIdx + 1) % sources.length;
+        if (nextSourceIdx === curSourceIdx) return null;
+
+        const candidate = sources[nextSourceIdx];
+        if (!candidate || !Array.isArray(candidate.episodes) || !candidate.episodes.length) return null;
+
+        // 对齐同集（按序号 epIndex 匹配，不跨影片盲目匹配）
+        const targetEpIndex = currentPlayback.epIndex || 0;
+        const nextEp = candidate.episodes[targetEpIndex] || candidate.episodes[0];
+        if (!nextEp) return null;
+
+        this._fallbackAttempts += 1;
+        this._fallbackActive = true;
+        warnToast(`当前线路失败（${reason}），正在自动尝试备用线路「${candidate.from || '线路' + (nextSourceIdx + 1)}」…`);
+
+        try {
+            if (typeof Detail !== 'undefined') Detail.activeSource = nextSourceIdx;
+            const res = await this.play(
+                currentPlayback.site,
+                candidate.from,
+                nextEp.url || nextEp.id,
+                currentPlayback.title,
+                nextEp.name || currentPlayback.subtitle,
+                candidate.episodes,
+                targetEpIndex,
+                currentPlayback.kazumiSrc
+            );
+            this._fallbackActive = false;
+            if (res && (res.ok || res.launched)) {
+                this._fallbackAttempts = 0;
+                if (res.ok) warnToast(`已自动切换到备用线路「${candidate.from}」`);
+                return res;
+            }
+        } catch (e) {
+            this._fallbackActive = false;
+        }
+        return null;
     },
 
     /**
@@ -565,8 +746,24 @@ const Player = {
         }
         try {
             const state = await getJson('/sites');
-            const flags = state && Array.isArray(state.flags) ? state.flags : [];
-            this._vipFlags = flags.filter((v) => v !== null && v !== undefined).map((v) => String(v));
+            const rawFlags = state && state.flags;
+            let flags;
+            if (Array.isArray(rawFlags)) {
+                flags = rawFlags;
+            } else if (typeof rawFlags === 'string') {
+                flags = rawFlags.split(',');
+            } else {
+                flags = [];
+            }
+            this._vipFlags = flags.filter((v) => v !== null && v !== undefined)
+                .map((v) => {
+                    if (typeof v === 'string') return v.trim();
+                    if (typeof v === 'object') {
+                        return String(v.name || v.key || v.flag || '').trim();
+                    }
+                    return String(v).trim();
+                })
+                .filter(Boolean);
             this._vipFlagsAt = now;
         } catch (e) {
             this._vipFlags = [];
@@ -575,33 +772,74 @@ const Player = {
         return this._vipFlags.slice();
     },
 
+    /** 判断是否本机 go-proxy 网盘取流地址（127.0.0.1/localhost 的 /proxy，
+     *  带 do=pan 取流参数或 url= 裸直链转发参数）。这类地址已由本地代理
+     *  附上网盘凭据，是就绪的直连流。 */
+    _isLocalGoProxyStreamUrl(url) {
+        try {
+            const u = new URL(String(url));
+            if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+            const host = String(u.hostname).replace(/^\[|\]$/g, '');
+            if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return false;
+            if (!/\/proxy$/.test(u.pathname)) return false;
+            return u.searchParams.get('do') === 'pan' || u.searchParams.has('url');
+        } catch (e) { /* 非法 URL 按非本地流处理 */ return false; }
+    },
+
     /** 对齐 FongMi ParseJob.setParse 的 json:/parse:<name> 选择语义。 */
-    async _resolvePlayerRoute(data, rawUrl) {
+    async _resolvePlayerRoute(data, rawUrl, playback = {}) {
         if (!rawUrl) return { ok: false, reason: data.error || '播放地址为空' };
+        // 本地 go-proxy 取流地址绝不进外部解析线路：解析站无法处理本地代理
+        // 地址（必然失败），还会把分享 token/fileToken 泄露给第三方。
+        if (this._isLocalGoProxyStreamUrl(rawUrl)) {
+            return {
+                ok: true,
+                url: rawUrl,
+                parse: 0,
+                context: { site: playback.site || '', flag: String(data.flag || playback.flag || '') },
+            };
+        }
         const playUrl = String(data.playUrl || '').trim();
+        const state = await getJson('/sites').catch(() => ({}));
+        const parses = state && Array.isArray(state.parses) ? state.parses : [];
+        const configFlags = state && Array.isArray(state.flags) ? state.flags.map(String) : [];
+        const resultFlag = String(data.flag || playback.flag || '');
+        const context = { site: playback.site || '', flag: resultFlag };
         if (/^json:/i.test(playUrl)) {
             const parserUrl = playUrl.slice(5).trim();
             if (!/^https?:\/\//i.test(parserUrl)) return { ok: false, reason: 'json 解析器地址无效' };
-            return { ok: true, url: rawUrl, parse: 1,
+            return { ok: true, url: rawUrl, parse: 1, context,
                 parsers: [{ url: parserUrl, type: 1, name: 'json' }] };
         }
         if (/^parse:/i.test(playUrl)) {
             const name = playUrl.slice(6).trim();
-            const state = await getJson('/sites').catch(() => ({}));
-            const parses = state && Array.isArray(state.parses) ? state.parses : [];
             const parser = parses.find((item) => {
                 if (!item || typeof item !== 'object') return false;
                 const names = [item.name, item.id, item.key, item.flag]
                     .filter((v) => v !== undefined && v !== null).map(String);
                 return names.includes(name);
             });
-            if (!parser || !parser.url) return { ok: false, reason: `解析器不存在：${name}` };
-            return { ok: true, url: rawUrl, parse: 1, parsers: [parser] };
+            if (!parser || (!parser.url && parseInt(parser.type, 10) !== 4)) {
+                return { ok: false, reason: `解析器不存在：${name}` };
+            }
+            return { ok: true, url: rawUrl, parse: 1,
+                parsers: parseInt(parser.type, 10) === 4 ? parses : [parser],
+                context: { ...context, parserName: name } };
+        }
+        const parseValue = parseInt(data.parse, 10);
+        const jx = parseInt(data.jx, 10) === 1;
+        const flagSelectsParser = !playUrl && !!resultFlag && configFlags.includes(resultFlag);
+        if (playUrl) {
+            return { ok: true, url: rawUrl, parse: 1, context,
+                parsers: [{ name: 'playUrl', type: 0, url: playUrl,
+                    header: data.header || {} }] };
         }
         return {
             ok: true,
-            url: playUrl ? playUrl + rawUrl : rawUrl,
-            parse: parseInt(data.parse, 10) === 1 ? 1 : 0,
+            url: rawUrl,
+            parse: (parseValue === 1 || jx || flagSelectsParser) ? 1 : 0,
+            parsers: (parseValue === 1 || jx || flagSelectsParser) ? parses : undefined,
+            context,
         };
     },
 
@@ -637,11 +875,27 @@ const Player = {
             'mpv-exited': 'mpv 未能保持运行',
             'play-failed': '当前线路播放失败',
             'play-cancelled': '播放请求已被新的播放操作取消',
+            'media-probe-html-response': '媒体地址返回了 HTML 页面，已拒绝交给播放器',
+            'media-probe-login-page': '媒体地址跳转到登录页，已拒绝交给播放器',
+            'media-probe-json-error': '媒体地址返回接口错误，已拒绝交给播放器',
+            'media-probe-http-403': '媒体地址返回 403，Cookie 或签名可能已过期',
+            'media-probe-expired-url': '媒体地址签名已过期',
+            'media-probe-probe-timeout': '媒体地址探测超时',
+            'media-probe-probe-cancelled': '媒体地址探测已取消',
         };
         let note = labels[reason] || `mpv 播放失败：${reason}`;
         const detail = String(result.error || '').replace(/\s+/g, ' ').trim();
         if (detail) note += `：${detail.slice(-240)}`;
         if (meta.prefix && reason !== 'mpv-missing') note = `${meta.prefix}：${note}`;
+        // 网盘本地取流失败最常见原因是夸克 Cookie 缺失/过期（未登录时上游
+        // 401/14001，登录过期时 401/412）：给出明确的扫码登录引导而非笼统报错。
+        const panStreamFailed = this._isLocalGoProxyStreamUrl(url)
+            && /(?:^|[?&])do=pan(?:&|$)/.test(String(url));
+        if (panStreamFailed && reason !== 'play-cancelled') {
+            note = note.includes('Cookie')
+                ? note
+                : `${note}（网盘资源常见原因：夸克账号未登录或登录已过期，请在设置中重新扫码）`;
+        }
         // 旧请求等待起播期间用户可能已经点了新剧集；旧请求返回取消时不能
         // 清掉新请求刚建立的连播上下文，也不能弹出旧地址的失败窗口。
         if (reason === 'play-cancelled') return { ...result, reason, url };
@@ -650,14 +904,17 @@ const Player = {
             this._mpvMissingToastShown = true;
             warnToast('未检测到 mpv：执行 node scripts/download-binaries.js 安装后重启');
         }
-        this._showDialog(meta.title, meta.subtitle, meta.previewUrl || '', url, note, meta.header || null);
+        this._showDialog(meta.title, meta.subtitle, meta.previewUrl || '', url, note,
+            meta.header || null, panStreamFailed ? { suggestCookie: true } : undefined);
         return { ...result, reason, url };
     },
 
     /** 起播成功提示；外部播放器模式 | 开启 Anime4K/边下边播时额外标注状态。 */
     _mpvToast(r, msg) {
         if (r && r.viaExternal) {
-            warnToast('已交外部播放器播放');
+            warnToast(r.headerDropped
+                ? '外部播放器不支持所需请求头，已降级启动但可能无法播放'
+                : '已交外部播放器播放');
             return;
         }
         const extra = [];
@@ -691,7 +948,8 @@ const Player = {
             const header = {};
             if (data.userAgent) header['User-Agent'] = data.userAgent;
             if (data.referer) header['Referer'] = data.referer;
-            const legacy = !!data.useLegacyParser;
+            const legacyEnabled = (await window.vpc.settingsGet().catch(() => ({})))?.legacyParser !== false;
+            const legacy = legacyEnabled && !!data.useLegacyParser;
             // 步骤 2：captureDirect 抓真实流（主进程隐藏窗口；旧解析器规则走 iframe src 监听）
             try {
                 const cap = await this._awaitTimeout(
@@ -702,11 +960,14 @@ const Player = {
         hideLoading();
         if (resolved && resolved.ok !== false && resolved.url) {
             try {
-                const r = await window.vpc.playUrl(resolved.url, {
+                // playUrl 竞速兜底：此处 loading 已隐藏，但 IPC 挂死仍会让调用方
+                // （详情页/连播推进）永久等待，统一 45s 上限。
+                const r = await this._awaitTimeout(window.vpc.playUrl(resolved.url, {
                     title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
                     ...trace,
-                });
+                }), 45000, trace);
                 if (r && r.ok) return this._mpvSuccess(r, resolved.url, `Kazumi 源「${pluginName}」已在 mpv 播放`);
+                if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
                 if (r && !r.ok) {
                     return this._mpvFailure(r, {
                         title, subtitle, url: resolved.url, header: resolved.header,
@@ -724,14 +985,35 @@ const Player = {
         return { ok: false, reason: note, url: dlgUrl };
     },
 
-    /** 直链直接交 mpv（parse=1 但地址已是媒体直链时的快路径）。 */
+    /** 直链直接交 mpv（parse=1 但地址已是媒体直链时的快路径）。
+     *  入口处 updatePlayState 已 showLoading（「启动播放器」），因此每个出口——
+     *  成功 / 外部播放器已接管(launched) / 失败 / 异常兜底弹窗——都必须 hideLoading，
+     *  否则网盘类 parse=1 直链源会一直转圈（外部播放器模式下 launched 返回同样卡死）。 */
     async _playDirect(url, meta) {
         try {
-            const r = await window.vpc.playUrl(url, meta);
-            if (r && r.ok) return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
-            if (r && !r.ok) return this._mpvFailure(r, { ...meta, url });
+            const r = await this._awaitTimeout(window.vpc.playUrl(url, meta), 45000,
+                { requestId: meta.requestId || '', playSessionId: meta.playSessionId || '' });
+            if (r && r.ok) {
+                hideLoading();
+                return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
+            }
+            if (r && r.launched) {
+                this._seq = null;
+                hideLoading();
+                this._mpvToast(r, '');
+                return r;
+            }
+            if (r) {
+                hideLoading();
+                return this._mpvFailure(r, { ...meta, url });
+            }
+            // playUrl IPC 超时（r 为 null）：主进程可能仍会稍后接管播放，
+            // 这里按失败收尾并保证 loading 不悬挂。
         } catch (e) { /* IPC 异常 */ }
-        this._showDialog(meta.title, meta.subtitle, '', url, '', meta.header || null);
+        hideLoading();
+        this._seq = null;
+        this._showDialog(meta.title, meta.subtitle, '', url,
+            '播放器启动超时或异常，请重试或更换线路', meta.header || null);
         return { ok: false, reason: 'mpv-play-failed', url,
             requestId: meta.requestId || '', playSessionId: meta.playSessionId || '' };
     },
@@ -742,7 +1024,7 @@ const Player = {
         closeDialog('playerDialog');
     },
 
-    _showDialog(title, subtitle, previewUrl, copyUrl, note, header) {
+    _showDialog(title, subtitle, previewUrl, copyUrl, note, header, failureDetails = null) {
         $('#player-title').text((title || '播放') + (subtitle ? ' · ' + subtitle : ''));
         $('#player-note').text(note || '');
         $('#player-note').toggle(!!note);
@@ -752,9 +1034,53 @@ const Player = {
         $('#player-external').toggle(!!copyUrl);
         this._extUrl = copyUrl || '';
         this._extHeader = (header && typeof header === 'object') ? header : null;
+        this._lastFailureDetails = failureDetails;
+
+        let extraActions = $('#player-failure-actions');
+        if (!extraActions.length) {
+            $('#playerDialog .md-dialog-body').append('<div id="player-failure-actions" style="margin-top:12px;display:none;flex-direction:column;gap:8px;"></div>');
+            extraActions = $('#player-failure-actions');
+        }
+        if (failureDetails) {
+            extraActions.empty().show();
+            const actionRow = $('<div style="display:flex;gap:8px;flex-wrap:wrap;"></div>').appendTo(extraActions);
+            if (failureDetails.canRetry) {
+                $('<button class="md-btn md-btn-sm md-btn-tonal">重试当前线路</button>').on('click', () => {
+                    this._close();
+                    if (this._currentPlayback) {
+                        const p = this._currentPlayback;
+                        this.play(p.site, p.flag, p.id, p.title, p.subtitle, p.episodes, p.epIndex, p.kazumiSrc);
+                    }
+                }).appendTo(actionRow);
+            }
+            if (failureDetails.suggestCookie) {
+                $('<button class="md-btn md-btn-sm md-btn-tonal">配置网盘 Cookie</button>').on('click', () => {
+                    this._close();
+                    if (typeof openSettingsPanel === 'function') openSettingsPanel('pan');
+                }).appendTo(actionRow);
+            }
+            if (failureDetails.suggestMpv) {
+                $('<button class="md-btn md-btn-sm md-btn-tonal">安装/指定 mpv</button>').on('click', () => {
+                    this._close();
+                    if (typeof openSettingsPanel === 'function') openSettingsPanel('player');
+                }).appendTo(actionRow);
+            }
+            if (failureDetails.rawDiagnostics) {
+                $('<button class="md-btn md-btn-sm md-btn-tonal">复制技术诊断详情</button>').on('click', () => {
+                    const sanitized = JSON.stringify(failureDetails.rawDiagnostics, null, 2);
+                    navigator.clipboard.writeText(sanitized);
+                    warnToast('已复制脱敏技术详情');
+                }).appendTo(actionRow);
+            }
+        } else {
+            extraActions.hide();
+        }
+
         const v = document.getElementById('player-video');
-        v.removeAttribute('src');
-        $('#player-video').hide();
+        if (v) {
+            v.removeAttribute('src');
+            $('#player-video').hide();
+        }
         openDialog('playerDialog');
     },
 

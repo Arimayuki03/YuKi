@@ -1,7 +1,7 @@
 /**
  * about.js — 设置 → 关于分类（T46）
  *
- * 展示应用标识、技术栈、致谢与系统信息（版本 + Electron/Chromium/Node/V8）。
+ * 展示应用标识、致谢与系统信息（版本 + Electron/Chromium/Node/V8）。
  * 分类进入时渲染（数据来自主进程 vpc:app-info / vpc:app-version）。
  */
 /* global $, escHtml */

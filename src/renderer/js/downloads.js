@@ -151,7 +151,8 @@ const Downloads = {
             return;
         }
         warnToast('已在 mpv 窗口播放');
-        // 记入历史记录（下载文件播放）：取文件名作为标题，来源标记「下载文件」
+        // 记入历史记录（下载文件播放）：site='download' 保持「下载文件」身份，vodId 存绝对文件路径，
+        // 历史卡据此异步抓帧封面（recCard 对 site='local'/'download' 打 data-local-path → fillLocalCovers）
         try {
             const name = String(video).split(/[\\/]/).pop() || video || '下载视频';
             if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
