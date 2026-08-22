@@ -170,6 +170,14 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
 
+2026-08-22 R15 修复（合并站点后可用源被旧探测屏蔽误隐藏）：探测/屏蔽持久化结论附带内容指纹
+`probeFp`（`api|spiderType`，后端 `/sites` 增量暴露 `api`），指纹不符或缺失即作废重探并当场恢复展示，
+同仓重启照常零请求复用；升级后首轮全量重探一次自愈历史误屏蔽。同日回归修正：迁移性全量重探曾把
+有影片的慢源批量误杀——①连败计数改只在当前会话内累加（`init` 清跨会话欠账），死源收敛由同会话
+补探第二轮保证；②`empty` 与失败包络同阈值（连续两轮确认全空才屏蔽）。验证：home-probe 79 例、
+JS 单元 313/313、语法 41 文件 0 错、ESLint 0 error、Ruff PASS、`run_all.py` 全阶段 PASS +
+100 文件编译 0 error。
+
 2026-08-18 C2.1-C2.5 验收：`python-backend/tests/run_all.py` 28 阶段全通过、编译 79 个 Python
 文件 0 error。四个新阶段共 157 条（config-snapshot 53、ext-semantics 39、capability-router 29、
 config-security 36）全部走 `tests/offline_config_server.py` 的 loopback 夹具，不出网；配置形态

@@ -295,15 +295,19 @@ test('_probeSites：推荐位为空但分类返回失败包络 → 证据不足�
     assert.ok(!ctx.__sets.probedSites || !ctx.__sets.probedSites.includes('s'), '留待下次重试');
 });
 
-test('_probeSites：真僵尸源（推荐位与全部分类均确认为空）仍正确屏蔽', async () => {
-    const ctx = probeEnv(async (action) => (action === 'homeContent'
+test('_probeSites：真僵尸源（推荐位与全部分类均确认为空）两轮确认后正确屏蔽', async () => {
+    const ctx = statefulEnv(async (action) => (action === 'homeContent'
         ? { list: [], class: [{ type_id: 'a', type_name: 'A' }] }
         : { list: [] }));
     const H = ctx.__Home;
     await H._probeSites();
-    assert.deepEqual(ctx.__sets.blockedSites, ['s'], '全部分类确认无内容才屏蔽');
-    assert.ok(ctx.__sets.probedSites.includes('s'));
-    assert.equal(ctx.__sets.blockedReason.s, 'empty', '屏蔽原因标注为无内容');
+    assert.ok(!ctx.__store.blockedSites, '单轮确认空不屏蔽（防软限流/预热误杀有影片的源）');
+    assert.equal(ctx.__store.probeFailStreak.s, 1, '空确认计入连败');
+    assert.ok((ctx.__store.blockedSites || []).length === 0);
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '连续两轮确认全空才按无内容屏蔽');
+    assert.ok(ctx.__store.probedSites.includes('s'));
+    assert.equal(ctx.__store.blockedReason.s, 'empty', '屏蔽原因标注为无内容');
 });
 
 // ---------------------------------------------------------------- 死源连败屏蔽 + 复查
@@ -319,6 +323,64 @@ test('死源连败计数：连续 2 轮完全无响应 → 按死源屏蔽（rea
     assert.deepEqual(ctx.__store.blockedSites, ['s'], '连续 2 轮（各含二次确认）无响应按死源屏蔽');
     assert.equal(ctx.__store.blockedReason.s, 'dead', '屏蔽原因标注为连续无响应');
     assert.ok(!ctx.__store.probeFailStreak.s, '屏蔽后连败计数清除');
+});
+
+test('_resetSessionEvidence：会话开始清空跨会话连败欠账', async () => {
+    const ctx = statefulEnv(async () => ({ list: [{ vod_id: '1' }] }));
+    ctx.__store.probeFailStreak = { s: 1, other: 2 }; // 上次会话遗留（冷启动慢/中断探测）
+    const H = ctx.__Home;
+    await H._resetSessionEvidence();
+    assert.equal(Object.keys(ctx.__store.probeFailStreak).length, 0, '跨会话欠账清零：本次一轮失败不再直接越限');
+    await H._probeSites(); // 有内容的源正常出结论
+    assert.ok((ctx.__store.probedSites || []).includes('s'));
+});
+
+// ---------------------------------------------------------------- 探测状态内容指纹（probeFp）
+
+test('探测状态指纹迁移：旧版屏蔽/结论无指纹 → 作废重探，新结论附带指纹（自愈误屏蔽）', async () => {
+    const ctx = statefulEnv(async () => ({ list: [{ vod_id: '1', vod_name: 'x' }] }));
+    const H = ctx.__Home;
+    // 旧版遗留：被屏蔽的「空源」在合并换主后同名 key 实际指向了可用新源——
+    // 无指纹守卫时新鲜 probedAt 会跳过重探，可用源被永久隐藏（本 bug 的受害现场）
+    Object.assign(ctx.__store, {
+        blockedSites: ['s'],
+        blockedReason: { s: 'empty' },
+        probedSites: ['s'],
+        probedAt: { s: Date.now() },
+    });
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, [], '旧屏蔽作废并回写清除，源恢复展示');
+    assert.ok((ctx.__store.probedSites || []).includes('s'), '重新探测出结论');
+    assert.equal(ctx.__store.probeFp.s, '|', '新结论绑定当前内容指纹');
+    assert.ok(!ctx.__store.blockedReason || !ctx.__store.blockedReason.s, '屏蔽原因同步清除');
+});
+
+test('探测状态指纹复用：结论指纹与当前内容一致且新鲜 → 零请求不重探', async () => {
+    let calls = 0;
+    const ctx = statefulEnv(async () => { calls++; return { list: [] }; });
+    const H = ctx.__Home;
+    Object.assign(ctx.__store, {
+        probedSites: ['s'],
+        probedAt: { s: Date.now() },
+        probeFp: { s: '|' },
+    });
+    await H._probeSites();
+    assert.equal(calls, 0, '同仓重启场景：结论照常复用，不发探测请求');
+});
+
+test('探测状态指纹失效：同名 key 内容变更（合并漂移）→ 新鲜结论也作废重探', async () => {
+    let probes = 0;
+    const ctx = statefulEnv(async () => { probes++; return { list: [{ vod_id: '1', vod_name: 'x' }] }; });
+    const H = ctx.__Home;
+    Object.assign(ctx.__store, {
+        probedSites: ['s'],
+        probedAt: { s: Date.now() },
+        probeFp: { s: 'http://old/api.php|cms0' },
+    });
+    await H._probeSites();
+    assert.ok(probes > 0, '内容变更后即使结论新鲜也重探（防张冠李戴双向生效）');
+    assert.equal(ctx.__store.probeFp.s, '|', '重探后写入当前内容的指纹');
+    assert.ok((ctx.__store.probedSites || []).includes('s'), '新结论正常持久化');
 });
 
 // ---------------------------------------------------------------- 同会话补探第二轮 + 换仓重置
@@ -512,7 +574,8 @@ test('复查：屏蔽源恢复内容 → 自动解除屏蔽并清除原因', asy
     const ctx = statefulEnv(async (action) => (action === 'homeContent' ? homeResp : { list: [] }));
     const H = ctx.__Home;
     await H._probeSites();
-    assert.deepEqual(ctx.__store.blockedSites, ['s'], '先按无内容屏蔽');
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '先按无内容屏蔽（两轮确认）');
     // 结论过期（超过复查周期），且源恢复了内容
     ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 };
     homeResp = { list: [{ vod_id: '1', vod_name: '复活' }] };
@@ -527,9 +590,12 @@ test('复查：屏蔽源复查仍无内容 → 保持屏蔽并刷新复查时间
     const ctx = statefulEnv(async (action) => { calls++; return action === 'homeContent' ? resp() : { list: [] }; });
     const H = ctx.__Home;
     await H._probeSites();
+    await H._probeSites();
     assert.deepEqual(ctx.__store.blockedSites, ['s']);
     ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 }; // 过期复查
-    await H._probeSites();
+    await H._probeSites(); // 复查第 1 轮：仍空 → 连败 1，保持屏蔽但结论未刷新
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '复查仍空 → 保持屏蔽');
+    await H._probeSites(); // 复查第 2 轮：连败达标 → 结论刷新
     assert.deepEqual(ctx.__store.blockedSites, ['s'], '复查仍空 → 保持屏蔽');
     assert.ok(ctx.__store.probedAt.s > Date.now() - 60 * 1000, '复查时间刷新为现在（非过期旧值）');
     const callsAfterRecheck = calls;
@@ -547,18 +613,22 @@ test('复查：结论过期的可用源重新探测（内容失效后补屏蔽�
     ctx.__store.probedAt = { s: Date.now() - 8 * 24 * 3600 * 1000 };
     homeResp = { list: [], class: [] }; // 内容失效
     await H._probeSites();
-    assert.deepEqual(ctx.__store.blockedSites, ['s'], '复查发现失效 → 补屏蔽');
+    await H._probeSites();
+    assert.deepEqual(ctx.__store.blockedSites, ['s'], '连续两轮确认失效 → 补屏蔽');
     assert.equal(ctx.__store.blockedReason.s, 'empty');
 });
 
-test('迁移：旧版 probedSites 无时间戳 → 补「现在」，不触发全量重探', async () => {
+test('迁移：旧版 probedSites 无时间戳且无指纹 → 一次性作废重探（自愈），此后稳定复用', async () => {
     let calls = 0;
     const ctx = statefulEnv(async () => { calls++; return { list: [{ vod_id: '1' }] }; });
-    ctx.__store.probedSites = ['s']; // 旧格式：只有数组没有 probedAt
+    ctx.__store.probedSites = ['s']; // 旧格式：只有数组，没有 probedAt / probeFp
     const H = ctx.__Home;
     await H._probeSites();
-    assert.equal(calls, 0, '迁移补时间戳后本轮不重探');
+    assert.equal(calls, 1, '旧结论无法证明内容未变 → 升级后首轮重探一次（自愈误屏蔽）');
     assert.ok(ctx.__store.probedAt && ctx.__store.probedAt.s > 0, '时间戳已补');
+    assert.equal(ctx.__store.probeFp.s, '|', '新结论附带内容指纹');
+    await H._probeSites();
+    assert.equal(calls, 1, '带指纹的结论按原样复用：迁移只发生一次，不产生持续重探');
 });
 
 test('裁剪：离场源（多仓漂移）的探测记录不残留', async () => {
@@ -1320,14 +1390,37 @@ test('_prerenderFromCache：历史脏数据（demo-only 缓存）不预渲染', 
 test('_prerenderFromCache：过滤屏蔽源，不自动选中屏蔽源为当前源', () => {
     const ctx = loadHome();
     // 缓存列表第一个是已屏蔽源（/sites 原始顺序）——不过滤会把它选为当前源，
-    // 启动即对它发请求，恢复窗口期全是 L2_SITE_NOT_FOUND
-    const blockedSite = { key: 'blocked_1', name: '已屏蔽源', state: 'healthy', runtime: 'python' };
+    // 启动即对它发请求，恢复窗口期全是 L2_SITE_NOT_FOUND。
+    // 屏蔽记录按内容指纹（probeFp）校验后生效：指纹与当前站点内容匹配才继续隐藏。
+    const blockedSite = { key: 'blocked_1', name: '已屏蔽源', state: 'healthy', runtime: 'python', api: 'http://b/api.php', spiderType: 'cms0' };
     ctx.__ls.setItem('vpc_cache::home::sites::v1',
         JSON.stringify({ v: [blockedSite, REAL_SITE], e: Date.now() + 60000, t: Date.now() }));
     const H = home(ctx);
     H._renderSiteSelect = () => {};
-    H._prerenderFromCache(['blocked_1']);
-    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1'], '屏蔽源不进预渲染下拉');
+    H._prerenderFromCache(['blocked_1'], { probeFp: { blocked_1: 'http://b/api.php|cms0' } });
+    assert.deepEqual(H.sites.map((s) => s.key), ['zy_1'], '指纹匹配的屏蔽源不进预渲染下拉');
     assert.equal(H.site, 'zy_1', '当前源不落在屏蔽源上');
     assert.deepEqual(H._allSites.map((s) => s.key), ['blocked_1', 'zy_1'], '_allSites 保留全量（探测用）');
+});
+
+test('_validBlocked：指纹不匹配/缺失（旧版记录）的屏蔽不再隐藏源——合并换主自愈', () => {
+    const ctx = loadHome();
+    const H = home(ctx);
+    const sitesList = [
+        { key: 'k', api: 'http://a/api.php', spiderType: 'cms0' },   // 当前内容
+        { key: 'plain', state: 'healthy' },
+    ];
+    // 指纹不匹配：同名 key 在合并后指向了不同 api → 旧屏蔽失效
+    assert.deepEqual(
+        H._validBlocked(sitesList, ['k'], { probeFp: { k: 'http://old/api.php|cms0' } }),
+        [], '同名 key 内容变更后旧屏蔽不生效');
+    // 指纹匹配：屏蔽继续生效
+    assert.deepEqual(
+        H._validBlocked(sitesList, ['k'], { probeFp: { k: 'http://a/api.php|cms0' } }),
+        ['k'], '指纹匹配的屏蔽继续生效');
+    // 旧版数据没有 probeFp：无法证明内容未变，一律失效（升级后一次性重探自愈）
+    assert.deepEqual(H._validBlocked(sitesList, ['k'], {}), [], '无指纹的旧屏蔽不生效');
+    assert.deepEqual(H._validBlocked(sitesList, ['k']), [], '缺 settings 同样不生效');
+    // 不在列表里的 key 无从校验指纹，同样不生效（列表过滤场景天然如此）
+    assert.deepEqual(H._validBlocked(sitesList, ['ghost'], { probeFp: { ghost: '|' } }), []);
 });

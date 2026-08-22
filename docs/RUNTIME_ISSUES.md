@@ -20,6 +20,7 @@
 | R12 | C2 配置三层分离、prepare→validate→atomic swap、`ext` 语义、能力路由与配置安全边界 | ✅ 已验证：`run_all.py` 28 阶段全通过、编译 79 文件 0 error；四个新阶段共 157 条全部走 loopback 夹具不出网 |
 | R13 | `guard_url` 把 Windows 盘符当协议，`D:/tv.json` 报错原因与真实问题不符 | ✅ 已修复并验证：`test_config_security.py::test_blocked_local_disk_paths` |
 | R14 | `detect_text` 只剥一层 BOM，双 BOM 配置被 `json.loads` 报成第 1 列语法错误 | ✅ 已修复并验证：`test_ext_semantics.py::test_bom_and_declared_and_fallback` |
+| R15 | 多仓合并/主仓漂移后同名 key 的可用源被旧探测屏蔽记录误隐藏 | ✅ 已修复并验证：探测结论附带内容指纹 probeFp；home-probe 78 例、JS 单元 312/312、run_all.py 全阶段 PASS |
 
 ---
 
@@ -272,4 +273,13 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **现象**：以图搜番返回「未识别到番剧」或失败。探测确认：`POST https://api.trace.moe/search?anilistInfo=2&url=...` 返回 **403**（trace.moe 反爬/需它自行抓取，URL 直传被拦）；原始文件上传（`data=bytes` + `Content-Type: image/*` + 浏览器 UA）返回 200。
 - **修复**：后端 URL 搜索改为先下载图片字节再原始上传；`Content-Type` 按文件头自动识别（Kazumi 硬编码 jpeg，PNG 上传会被拒）；补浏览器 UA；失败返回 `error` 字段，前端 toast 真实原因。
 - **状态**：✅ 已验证（真实图片实测：200 + 10 条结果，相似度 0.988）。
+
+### R15 · 多仓合并/主仓漂移后同名 key 的可用源被旧探测屏蔽误隐藏
+
+- **发现时间**：2026-08-22（用户报告：重启后探测源，合并站点后列表里能用的源被屏蔽）
+- **现象**：合并多仓站点配置后重启应用，后台源探测把实际可用的源从源下拉中隐藏（提示「已自动屏蔽 N 个无内容源」），且不会自动恢复——要等 7 天复查期或到「设置 → 源设置」手动恢复。
+- **根因**：渲染层探测/屏蔽持久化状态（`probedSites`/`blockedSites`/`probedAt`/`probeFailStreak`/`blockedReason`）全部按裸 site key 复用，而不同仓常存在同名 key 指向不同 api/spider 的站点。换仓重置只认 `lastConfigUrl` 变化（home.js 换仓分支）；同一 depot URL 下合并结果漂移（主仓按偏好回退、清单增删子仓）时 key→内容映射改变但持久化状态不失效，新鲜 `probedAt` 又阻止重探——旧仓的「屏蔽」结论被无限期套在合并后同 key 的可用源上。反向同样成立：旧的「已探过 OK」结论会让漂移后的坏内容漏探。
+- **修复**：探测结论附带内容指纹 `probeFp`（key → `api|spiderType`，后端 `/sites` 增量暴露 `api` 字段）。读取时指纹不符或缺失（旧版数据无法证明内容未变）即作废旧结论、当场恢复展示并重探一次；指纹一致的同仓重启照常复用零请求。升级后首轮全量重探一次即可自愈历史误屏蔽，之后稳定无额外开销。换仓整库重置逻辑保持不变，作为粗粒度兜底。
+- **回归修正（2026-08-22 同日）**：首版修复的迁移性全量重探暴露出两个误杀放大器——① `probeFailStreak` 跨会话累积：上次冷启动慢留下的连败欠账让本次一轮失败就越过 `PROBE_FAIL_LIMIT` 按死源屏蔽；② `empty` 判定零阈值：单轮确认空即屏蔽，软限流/预热期的空响应会误杀有影片的源。修正为：连败计数只在当前会话内累加（`init` 时 `_resetSessionEvidence` 清空遗留欠账），死源/空源收敛由同会话补探第二轮保证；确认空与失败包络同阈值，连续两轮确认全空才按无内容屏蔽。
+- **状态**：✅ 已验证（`tests/js/home-probe.test.js` 79 例全绿，含指纹迁移自愈/匹配复用/变更失效、`_validBlocked` 矩阵与会话证据重置用例；JS 单元 313/313、语法 41 文件 0 错、ESLint 0 error、Ruff PASS、`run_all.py` 全部阶段 PASS + 100 文件编译 0 error）。
 

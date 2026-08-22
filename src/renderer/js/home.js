@@ -14,9 +14,11 @@ const PROBE_CAT_CONCURRENCY = 4; // 单源分类探测并发
 const PROBE_CAT_LIMIT = 24;      // 单源最多检查的分类数（异常源护栏）
 const PROBE_CAT_TIMEOUT = 20000; // 分类探测单请求超时：短于源级 60s，控制最坏耗时
 // 源级探测的失败容忍与复查节奏：
-// 「证据不足」（失败包络/超时/内嵌 error）不算无内容，但每轮探测含一次 3s 后的
-// 二次确认，连续 PROBE_FAIL_LIMIT 轮（共 2×N 次尝试）都拿不到任何响应的源实际
-// 就是死源——不设此阈值它们会永远留在列表里（每次启动重探、每次失败、永不屏蔽）。
+// 「证据不足」（失败包络/超时/内嵌 error，以及首轮确认的空结果）不下结论，但每轮
+// 探测含一次 3s 后的二次确认；连续 PROBE_FAIL_LIMIT 轮（共 2×N 次尝试）都拿不到
+// 任何响应的是死源、都确认全空的是无内容源——不设此阈值它们会永远留在列表里
+// （每次启动重探、每次失败、永不屏蔽）。连败计数只在当前会话内累加（init 清跨会话
+// 欠账），死源/空源收敛由同会话补探第二轮保证。
 // 已得出结论的源按 PROBE_RECHECK_TTL 复查：内容失效自动补屏蔽，被屏蔽源恢复
 // 内容自动解除（僵尸源复活）。
 const PROBE_FAIL_LIMIT = 2;                      // 连续 N 轮（各含二次确认）无响应 → 按死源屏蔽
@@ -64,6 +66,16 @@ function actionResponseFailed(d) {
     if (!d || typeof d !== 'object') return true; // 原始文本 / 空响应
     if (d.ok === false) return true;              // 失败包络
     return !!d.error;                             // 兜底：任何内嵌 error 字段
+}
+
+/**
+ * 探测结论的内容指纹：多仓合并下不同仓常用同名 site key 指向不同站点
+ * （api/spider 不同）。探测/屏蔽持久化记录（probeFp）按 key 附带该指纹，
+ * 读取时指纹不一致即作废旧结论——否则旧仓的「屏蔽」会继续隐藏合并后
+ * 同 key 的可用源，旧的「已探过」也会让新内容漏探。
+ */
+function siteProbeFp(s) {
+    return [(s && s.api) ? String(s.api) : '', (s && s.spiderType) ? String(s.spiderType) : ''].join('|');
 }
 
 const Home = {
@@ -149,11 +161,15 @@ const Home = {
             Detail.open(this.site, el.data('id'), el.data('name'));
         });
         this._loadPersistedEmptyClasses(); // T60：载入持久化空分类结果，首屏即隐藏空分类（无闪现）
+        await this._resetSessionEvidence(); // 连败计数只算本会话：清掉上次会话遗留的欠账
         // 预渲染前先取屏蔽列表：缓存列表是 /sites 原始输出，含已屏蔽源——不过滤
         // 会把屏蔽源重新放进下拉并自动选中（曾因此把已屏蔽的空源选为当前源，
         // 启动即对它发请求，后端恢复窗口期全是 L2_SITE_NOT_FOUND）。
-        const blocked = await this._getBlocked();
-        this._prerenderFromCache(blocked);        // 冷启动即时上屏：网络返回前先用缓存渲染源下拉 + 分类标签
+        // 屏蔽记录按内容指纹校验后生效（_validBlocked）：合并/换主导致同名 key
+        // 指向不同站点时，旧屏蔽不得隐藏新源。
+        const bootSettings = await this._getSourceSettings();
+        const blocked = await this._getBlocked(bootSettings);
+        this._prerenderFromCache(blocked, bootSettings); // 冷启动即时上屏：网络返回前先用缓存渲染源下拉 + 分类标签
         await this.loadSites();
     },
 
@@ -161,14 +177,14 @@ const Home = {
      *  仅在尚无数据时填充；loadSites/loadHome 网络返回后会以最新结果覆盖（缓存只提前呈现骨架）。
      *  过滤规则与 loadSites 一致（屏蔽源/Android/不展示），demo-only 缓存（历史坏会话把
      *  内置示例源当站点列表写进去过）不算数。blocked 为屏蔽源 key 列表。 */
-    _prerenderFromCache(blocked) {
+    _prerenderFromCache(blocked, settings) {
         if (typeof localCacheGet !== 'function') return;
         try {
             const sites = localCacheGet(SITES_CACHE_KEY);
             if (!Array.isArray(sites) || !sites.length || isDemoOnlySites(sites) || this._allSites.length) return;
-            const hidden = Array.isArray(blocked) ? blocked : [];
+            const hiddenSet = new Set(this._validBlocked(sites, blocked, settings));
             const visible = sites.filter((s) => {
-                if (hidden.indexOf(s.key) >= 0) return false;
+                if (hiddenSet.has(s.key)) return false;
                 const isAndroid = s.runtime === 'android' || (s.lastError && s.lastError.code === 'L2_SITE_REQUIRES_ANDROID');
                 if (isAndroid) return false;
                 if (s.state === 'unsupported' || s.runtime === 'unsupported') return false;
@@ -244,6 +260,7 @@ const Home = {
                 await window.vpc.settingsSet('probedSites', []);
                 await window.vpc.settingsSet('probedAt', {});
                 await window.vpc.settingsSet('probeFailStreak', {});
+                await window.vpc.settingsSet('probeFp', {});
             } catch (e) { /* 持久化失败不影响本次展示过滤 */ }
             // 空分类结果同样按 site key 复用：清内存镜像 + localStorage，新仓重新探测分类
             this._emptyCls = {};
@@ -274,7 +291,7 @@ const Home = {
         // 守望/重载事件会重新拉 /sites 覆盖。
         if ((!all.length || isDemoOnlySites(all)) && this._allSites.length && !isDemoOnlySites(this._allSites)) {
             // 开关刚关闭时，即使 /sites 本轮失败，也要立刻取消历史 blockedSites 过滤。
-            const blocked = await this._getBlocked(settings);
+            const blocked = this._validBlocked(this._allSites, await this._getBlocked(settings), settings);
             if (!isCurrentSitesLoad()) return;
             this._configPending = true; // 恢复未完成：站点请求会打空，刷新/搜索入口先提示
             this.sites = this._allSites.filter((s) => blocked.indexOf(s.key) < 0);
@@ -316,8 +333,9 @@ const Home = {
         this._allSites = all;
         this._configPending = false; // 真实站点已就绪：解除恢复期入口拦截
         // 关闭自动检测时暂时忽略历史自动屏蔽记录；重新打开后仍可按原记录过滤，
-        // 用户可通过“恢复被屏蔽的源”清除这些记录。
-        const blocked = await this._getBlocked(settings);
+        // 用户可通过“恢复被屏蔽的源”清除这些记录。屏蔽记录先按内容指纹校验：
+        // 合并/主仓漂移后同名 key 指向不同站点时，旧屏蔽不再隐藏新源。
+        const blocked = this._validBlocked(all, await this._getBlocked(settings), settings);
         if (!isCurrentSitesLoad()) return;
         // U6.2 健康站点展示规则：
         // 1. healthy / degraded / half-open 正常展示；
@@ -398,10 +416,46 @@ const Home = {
         this._probeToken++;
     },
 
+    /**
+     * 会话级证据重置：probeFailStreak 只反映「当前会话内的连续无响应」，跨会话不累加。
+     * 上次会话冷启动争用留下的连败计数若带进本次会话，源会带着欠账开局——指纹迁移/
+     * 换仓触发的全量重探里，一轮失败就直接越过 PROBE_FAIL_LIMIT 把慢但可用的源按死源
+     * 屏蔽（R15 回归修正）。死源收敛由同会话补探第二轮保证，无需跨会话计数。
+     */
+    async _resetSessionEvidence() {
+        try {
+            const s = await window.vpc.settingsGet();
+            const streak = s && s.probeFailStreak;
+            if (streak && typeof streak === 'object' && !Array.isArray(streak) && Object.keys(streak).length) {
+                await window.vpc.settingsSet('probeFailStreak', {});
+            }
+        } catch (e) { /* 读取失败不影响启动 */ }
+    },
+
     async _getBlocked(settings) {
         const s = settings || await this._getSourceSettings();
         if (s.sourceAutoDetect === false) return [];
         return Array.isArray(s.blockedSites) ? s.blockedSites : [];
+    },
+
+    /**
+     * 屏蔽记录按 key 持久化，但结论附带内容指纹（probeFp，见 siteProbeFp）：
+     * 仅当指纹与当前站点内容一致时才继续屏蔽——多仓合并/主仓漂移会让同名
+     * key 指向不同 api/spider 的站点，旧「屏蔽」不得隐藏新内容。旧版本数据
+     * 无指纹：视为失效（该源恢复展示并重探，顺带自愈历史误屏蔽）。
+     * 返回仍然有效的被屏蔽 key 列表。
+     */
+    _validBlocked(sitesList, blockedArr, settings) {
+        const raw = Array.isArray(blockedArr) ? blockedArr : [];
+        if (!raw.length || !Array.isArray(sitesList) || !sitesList.length) return [];
+        const fpMap = (settings && settings.probeFp && typeof settings.probeFp === 'object' &&
+            !Array.isArray(settings.probeFp)) ? settings.probeFp : {};
+        const byKey = {};
+        sitesList.forEach((x) => { if (x && x.key) byKey[x.key] = x; });
+        return raw.filter((k) => {
+            const s = byKey[k];
+            return !!s && fpMap[k] === siteProbeFp(s);
+        });
     },
 
     // ------------------------------------------------ 首页探测进度条（T81）
@@ -494,8 +548,11 @@ const Home = {
      * 均确认无内容才记入 blockedSites（仅有 class 结构不代表有内容）。
      *
      * 失败不误杀、死源不漏杀：
-     * - 失败包络/超时 = 证据不足，轮内隔 PROBE_RETRY_DELAY 二次确认一次；
-     * - 连续 PROBE_FAIL_LIMIT 轮都无响应 → 按死源屏蔽（探测失败连败计数持久化）；
+     * - 失败包络/超时/首轮确认空 = 证据不足，轮内隔 PROBE_RETRY_DELAY 二次确认一次；
+     * - 连续 PROBE_FAIL_LIMIT 轮无响应 → 按死源屏蔽；连续两轮确认全空 → 按无内容屏蔽。
+     *   连败计数只在当前会话内累加（init 时清跨会话欠账，_resetSessionEvidence），
+     *   同会话由补探第二轮收敛——上次冷启动慢留下的旧计数不得让本次一轮就越限，
+     *   否则指纹迁移/换仓引发的全量重探会把有影片的慢源批量误杀（R15 回归修正）；
      * - 全量轮结束时仍有未达阈值的证据不足源 → 隔 PROBE_ROUND2_DELAY 同会话自动补探
      *   第二轮（只探这批源，自终止），连败达标即在本次会话内按死源屏蔽；
      * - 已结论源按 PROBE_RECHECK_TTL 复查：内容失效补屏蔽，屏蔽源恢复内容自动解除；
@@ -518,9 +575,27 @@ const Home = {
             const probedAt = obj(s.probedAt);        // key → 结论时间戳（复查调度）
             const streak = obj(s.probeFailStreak);   // key → 连续无响应轮数
             const reason = obj(s.blockedReason);     // key → 'empty'（无内容）/ 'dead'（连续无响应）
+            const fpMap = obj(s.probeFp);            // key → 结论时的内容指纹（siteProbeFp）
+            let dirty = false;
+            let changed = false, newBlocked = 0, blockedDead = 0, revived = 0;
+            // 内容指纹守卫（换仓重置的细粒度补充）：多仓合并/主仓漂移会让同名 key
+            // 指向不同 api/spider 的站点。结论指纹与当前内容不符（含旧版本数据没有
+            // 指纹，无法证明内容未变）即作废——否则旧仓的「屏蔽」会继续隐藏合并后
+            // 同 key 的可用源、旧的「已探过」会让新内容漏探。作废的屏蔽源当场恢复
+            // 展示（并入 revived 统计），并在本轮结束时随其他状态一并回写清理。
+            {
+                const byKey = {};
+                this._allSites.forEach((x) => { byKey[x.key] = x; });
+                Object.keys(byKey).forEach((k) => {
+                    if (fpMap[k] === siteProbeFp(byKey[k])) return;
+                    if (probed[k]) { delete probed[k]; delete probedAt[k]; dirty = true; }
+                    if (streak[k]) { delete streak[k]; dirty = true; }
+                    if (reason[k]) { delete reason[k]; dirty = true; }
+                    if (blocked.delete(k)) { revived++; changed = true; }
+                });
+            }
             // 迁移：旧数据只有 probedSites 数组。补「现在」作结论时间，避免升级后
             // 首次启动把全部历史源当成过期源一次性重探；之后各自按 TTL 到期复查。
-            let dirty = false;
             Object.keys(probed).forEach((k) => {
                 if (!probedAt[k]) { probedAt[k] = Date.now(); dirty = true; }
             });
@@ -540,25 +615,39 @@ const Home = {
                 pending.sort((a, b) => (b.key === this.site) - (a.key === this.site));
             }
             started = this._startProbe(pending.length);
-            let idx = 0, changed = false, newBlocked = 0, blockedDead = 0, revived = 0;
+            let idx = 0;
             const unknowns = []; // 本轮证据不足：轮末二次确认
             const round2Candidates = []; // 二次确认仍失败且未达屏蔽阈值：30s 后同会话补探第二轮
-            const conclude = (site, ok) => {
+            const conclude = (site) => {
                 probed[site.key] = 1;
                 probedAt[site.key] = Date.now();
+                fpMap[site.key] = siteProbeFp(site); // 结论与内容绑定，内容变更后自动失效
                 delete streak[site.key];
-                if (ok) {
-                    // 复查发现屏蔽源恢复内容：自动解除（僵尸源复活）
-                    if (blocked.delete(site.key)) { revived++; changed = true; }
-                    delete reason[site.key];
-                } else if (!blocked.has(site.key)) {
-                    blocked.add(site.key); newBlocked++; changed = true;
+                // 复查发现屏蔽源恢复内容：自动解除（僵尸源复活）
+                if (blocked.delete(site.key)) { revived++; changed = true; }
+                delete reason[site.key];
+                dirty = true;
+            };
+            const markEmpty = (site) => {
+                // 确认空与失败包络同走连败阈值：单轮空响应可能是软限流/数据预热，
+                // 直接屏蔽会误杀有影片的源；连续两轮确认全空才按无内容屏蔽。
+                streak[site.key] = (streak[site.key] || 0) + 1;
+                fpMap[site.key] = siteProbeFp(site);
+                if (streak[site.key] >= PROBE_FAIL_LIMIT) {
+                    delete streak[site.key];
+                    probed[site.key] = 1;
+                    probedAt[site.key] = Date.now();
+                    if (!blocked.has(site.key)) { blocked.add(site.key); newBlocked++; changed = true; }
                     reason[site.key] = 'empty';
+                } else {
+                    // 未达阈值：本轮不下结论。同会话稍后自动补探第二轮（_scheduleProbeRound2）。
+                    round2Candidates.push(site);
                 }
                 dirty = true;
             };
             const markUnknown = (site) => {
                 streak[site.key] = (streak[site.key] || 0) + 1;
+                fpMap[site.key] = siteProbeFp(site); // 连败计数同样与内容绑定，内容变更后作废
                 if (streak[site.key] >= PROBE_FAIL_LIMIT) {
                     // 连续多轮完全无响应（首页+分类全部失败包络/超时）：实际死源，
                     // 不设阈值会永远留在列表里。按死源屏蔽，解除入口同无内容源。
@@ -596,11 +685,12 @@ const Home = {
                         verdict = v === 'ok' ? 'ok' : (v === 'unknown' ? 'unknown' : 'empty');
                     }
                 } catch (e) { verdict = 'unknown'; }
-                if (verdict === 'unknown' && firstPass) {
-                    unknowns.push(site); // 轮末再给一次机会；进度条待定论时才计
+                if ((verdict === 'unknown' || verdict === 'empty') && firstPass) {
+                    unknowns.push(site); // 首轮不下结论：失败包络与空结果都给慢超时二次确认
                 } else {
                     if (verdict === 'unknown') markUnknown(site);
-                    else conclude(site, verdict === 'ok');
+                    else if (verdict === 'empty') markEmpty(site);
+                    else conclude(site);
                     this._probeOneDone(); // T81：单个源探测完成（每源只计一次）
                 }
             };
@@ -631,6 +721,7 @@ const Home = {
                 await window.vpc.settingsSet('probedAt', pick(probedAt));
                 await window.vpc.settingsSet('probeFailStreak', pick(streak));
                 await window.vpc.settingsSet('blockedReason', pick(reason));
+                await window.vpc.settingsSet('probeFp', pick(fpMap));
             }
             if (changed) {
                 await window.vpc.settingsSet('blockedSites', Array.from(blocked));

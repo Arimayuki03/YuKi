@@ -1836,6 +1836,9 @@ class ConfigManager:
             'unsupportedCount': unsupported_count,
             'sites': [{'key': s.key, 'name': s.name, 'searchable': s.searchable,
                        'spiderType': getattr(s, 'spider_type', ''),
+                       # api 参与渲染层探测结论的内容指纹（probeFp）：多仓合并下不同仓
+                       # 常用同名 key 指向不同站点，前端需凭 api/spider 判别结论是否仍适用
+                       'api': getattr(s, 'api', ''),
                        **s.health.to_dict()}
                       for s in self.sites.sites],
             'diagnostics': diagnostics,
