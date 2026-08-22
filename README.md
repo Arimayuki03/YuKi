@@ -3,7 +3,7 @@
 <!-- TODO: GitHub 仓库创建后，将下方徽章中的 OWNER 替换为实际用户名/组织名 -->
 [![CI](https://github.com/OWNER/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/ci.yml)
 [![Release](https://github.com/OWNER/YuKi/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/release.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/OWNER/YuKi)](https://github.com/OWNER/YuKi/releases)
 
 YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面与系统宿主，使用独立 FastAPI/Python 进程运行 CatVod 与 Kazumi 两套内容引擎，并通过 mpv、aria2c 和 ffmpeg 完成播放与下载。
@@ -76,4 +76,4 @@ Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用�
 
 ## 许可证
 
-本项目代码以 [MIT](LICENSE) 许可证发布。随安装包分发的第三方二进制（mpv、ffmpeg、aria2c、Anime4K、MiSans 字体等）各自按其原始许可证执行，逐项出处与合规结论见[第三方组件与许可声明](docs/THIRD_PARTY.md)。
+本项目代码以 [GPLv3](LICENSE) 许可证发布（见根目录 LICENSE）。衍生与再分发须遵循 GPLv3 条款并提供对应源码。随安装包分发的第三方二进制（mpv GPLv2+ / ffmpeg GPLv3 / aria2c GPLv2 / Anime4K MIT / MiSans 免费商用等）各自按其原始许可证执行，逐项出处与合规结论见[第三方组件与许可声明](docs/THIRD_PARTY.md)。
