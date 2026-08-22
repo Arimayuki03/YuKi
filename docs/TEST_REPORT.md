@@ -1,20 +1,20 @@
 # 功能测试报告（YuKi）
 
-> 生成时间：2026-08-10（快照）；**最新全量回归 2026-08-22 见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) R16：`npm run test:all` ALL PASS（313 JS tests / 100 py files / ESLint 0 error / Ruff 全过）**。
+> 生成时间：2026-08-22（全量回归 ALL PASS：313 JS tests / 100 py files / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。
 > 本文是「功能测试」的唯一汇总入口；运行异常细节见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)，开发批次见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
 ## 1. 测试总览
 
-> 最近快照：2026-08-10。自动化计数随本轮改动更新；真实界面验收脚本已重跑（10 脚本 / 103 检查项全通过）。
+> 最近快照：2026-08-22 全量回归 **ALL PASS**（`run_all.py` 36 阶段 / 编译 100 文件 0 error / JS 单元 313 tests / ESLint 0 error / Ruff 全过）。
 
 | 类别 | 数量 | 结果 |
 |---|---|---|
-| JS 单元测试（`tests/js/*.test.js`） | 84 | ✅ 83/84（1 项为既有 `#popular-tags` 断言失败：该元素全库不存在，与功能无关） |
-| Python 测试（smoke + unit + compile） | 38 + compile 29 文件 | ✅ 全部通过 |
-| JS 语法检查（`scripts/check-js.js`） | 34 文件 | ✅ 0 错误 |
+| JS 单元测试（`tests/js/*.test.js`） | 313 | ✅ 全部通过 |
+| Python 测试（`run_all.py` 36 阶段 + 编译） | 100 文件 | ✅ 全部通过 |
+| JS 语法检查（`scripts/check-js.js`） | 41 文件 | ✅ 0 错误 |
 | 真实界面验收（CDP，`scripts/acceptance-*.js` × 10） | 103 检查项 | ✅ 103/103 |
-| **自动化合计** | **225** | **全部通过** |
+| **自动化合计** | **>450** | **全部通过** |
 
 真实界面验收均在**独立 userData 副本**（清空 `lastConfigUrl`、预置种子数据、清空 `bangumiToken` 避免真实收藏合并干扰计数）启动临时 Electron 实例，经 CDP 实测，结束自动清理，不污染真实用户数据。
 
@@ -78,7 +78,8 @@
 | 自动连播/断流重连/失败换线 | JS 单元（观看链/ended 会话） | ✅ 逻辑 ｜ 🔬 真实连播 |
 | 隐藏窗口媒体拦截/DOM 轮询/legacy iframe | — | 🔬 需真实解析站 |
 | 解析窗口 partition 槽位/single-flight | JS 单元（async-session 单飞） | ✅ 逻辑 ｜ 🔬 真实解析 |
-| Anime4K/VLC 外播/截图/定时关机/DLNA | — | 🔬 需真实播放/设备 |
+| Anime4K/VLC 外播/截图/定时关机 | — | 🔬 需真实播放/设备 |
+| DLNA 投屏 | — | ⏸ 未实现 |
 
 ### 3.3 下载与数据
 | 功能 | 测试方式 | 状态 |
@@ -88,7 +89,7 @@
 | 下载记录/完成通知/一键播放 | JS 单元（dl-record） | ✅ 逻辑 ｜ 🔬 真实通知 |
 | 本地文件白名单/防穿越/上传/删除/播放 | — | 🔬 需真实文件操作 |
 | WebDAV 同步 | — | 🔬 需真实 WebDAV 服务器 |
-| SyncPlay 同步播放 | — | 🔬 需多端 |
+| SyncPlay 同步播放 | — | ⏸ 未实现 |
 | 观看统计/最近观看 | JS 单元（观看链去重）+ CDP 验收（统计数值） | ✅ |
 
 ### 3.4 UI 与桌面
@@ -112,8 +113,8 @@
 2. **解析**：parse=1 源的后台解析、隐藏窗口抓流、legacy iframe（需有效解析接口）。
 3. **下载**：aria2c 直链/种子、m3u8 合成、广告过滤、完成通知、一键播放（真实下载任务）。
 4. **本地文件**：选择根目录、浏览/播放/上传/删除（真实文件）。
-5. **账号类**：Bangumi 收藏同步（真实 token）、WebDAV 同步（真实服务器）、SyncPlay（多端）。
-6. **桌面能力**：托盘驻留、全局快捷键、截图、定时关机、DLNA 投屏。
+5. **账号类**：Bangumi 收藏同步（真实 token）、WebDAV 同步（真实服务器）（SyncPlay 未实现）。
+6. **桌面能力**：托盘驻留、全局快捷键、截图、定时关机（DLNA 未实现）。
 7. **打包发布**：Windows 安装后冷启动、macOS/Linux 打包运行、自动更新、代码签名。
 8. **视觉主观**：壁纸/主题观感、封面自适应在大/小窗的实际效果。
 
