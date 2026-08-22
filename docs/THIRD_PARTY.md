@@ -16,7 +16,7 @@
 | Anime4K v4.1 着色器 | [bloc97/Anime4K](https://github.com/bloc97/Anime4K) `glsl/`（Restore / Upscale / Darken 共 6 个 .glsl 文件）；逐文件 sha256 锁定 | **MIT** | 允许再分发；保留版权声明即可（着色器文件头自带） |
 | MiSans 字体子集 | npm 包 [misans@4.1.0](https://www.npmjs.com/package/misans)（dsrkafuu 基于 Noto Sans SC 码位范围做的 woff2 分片子集），经 jsdelivr 分发；逐文件 sha256 锁定 | 字体版权 © 小米科技，按小米官方 MiSans 字体许可协议**免费商用、无需授权、允许随软件再分发**；npm 打包代码 MIT | 允许再分发；在发布页与本文件中注明字体出处即可 |
 
-> GPL 组件合规操作：发布 Release 时附带《GNU 通用公共许可证》文本（本仓库 `docs/licenses/` 目录提供 GPLv2 / GPLv3 全文副本），并在 Release Notes 中给出 mpv / ffmpeg / aria2 上游源码链接。若未来改用 LGPL 构建替换任一组件，需重新核实义务并更新本表。
+> GPL 组件合规操作：发布 Release 时附带《GNU 通用公共许可证》文本（根目录 `LICENSE` 为 GPLv3；mpv/aria2 的 GPLv2 文本见各自上游仓库），并在 Release Notes 中给出 mpv / ffmpeg / aria2 上游源码链接。若未来改用 LGPL 构建替换任一组件，需重新核实义务并更新本表。
 
 ## 二、内嵌前端库
 
@@ -62,7 +62,7 @@
 
 ## 五、依赖审计豁免记录
 
-CI 中供应链审计（`npm audit --omit=dev || true`、`pip-audit --strict || true`）当前为观察模式。发现无法短期清零的高危项时，在此记录豁免理由与跟进计划；观察期结束（见 `docs/github.md` G10）后移除 `|| true` 使审计失败阻断合并。
+CI 中供应链审计（`npm audit --omit=dev || true`、`pip-audit --strict || true`）当前为观察模式。发现无法短期清零的高危项时，在此记录豁免理由与跟进计划；观察期结束（见 git 历史 docs/github.md G10）后移除 `|| true` 使审计失败阻断合并。
 
 | 审计日期 | 工具 | 高危项 | 豁免理由 | 跟进计划 |
 |---|---|---|---|---|
@@ -85,5 +85,3 @@ YuKi 的实现参考并受益于以下上游项目：
 - [FongMi/TV](https://github.com/FongMi/TV) 与 CatVod 生态 —— TVBox 配置契约与爬虫生态参照；
 - [bloc97/Anime4K](https://github.com/bloc97/Anime4K) —— 超分辨率着色器；
 - [dsrkafuu/misans](https://github.com/dsrkafuu/misans) —— MiSans 字体子集化打包。
-
-`../Kazumi-main/` 与 `TV-fongmi/` 仅为本地开发时的对照资料，**不在本仓库内**，也未复制其源码或文档入库。

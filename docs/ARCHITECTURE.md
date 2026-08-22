@@ -84,7 +84,7 @@ FastAPI Python 后端
 - HTML、JSON、登录页、401/403 和已过期签名地址不能直接交给 mpv；Spider 可用
   `skipProbe` 标记真正一次性、探测即消耗的 URL。
 - JAR 网盘 Provider 是首选实现；native Quark Provider 只在显式快路径开启且 JAR 降级时接管。
-- DRM 策略见 [ADR-0002-drm-playback.md](ADR-0002-drm-playback.md)：当前明确不支持，不实现绕过。
+- DRM 策略：当前明确不支持，不实现绕过（原 ADR-0002 已归档，结论保留）。
 
 ## 5. 下载数据流
 
@@ -131,7 +131,7 @@ FastAPI Python 后端
 
 - 插件顶层类名为 `Spider`，继承 `base.spider.Spider` 并实现 `init`。
 - Spider 返回值必须是 `dict`，不能返回已经序列化的 JSON 字符串。
-- Python 3.12+ 通过 `compat.py` 提供旧版 `SourceFileLoader.load_module` 兼容。
+- Python 3.14（当前 `python-backend/.venv` 实测 3.14.x）通过 `compat.py` 提供旧版 `SourceFileLoader.load_module` 兼容。
 - QuickJS 原生回调只传递标量，复杂值统一使用 JSON 字符串桥接。
 - JavaScript Spider 动态创建独立子类，防止基类单例污染不同站点。
 - 配置更新采用“完整准备后一次性替换”，不能先清空当前站点。
@@ -214,7 +214,7 @@ sha256 登记，内容变化即重新评估能力与权限。
 - `runtime/android_policy.py` 是产品政策闸门：`ANDROID_WORKER_SHIPPED=false` 时，即使环境同时
   声明 enabled/ready 也不能扩大支持范围。错误 `L2_SITE_REQUIRES_ANDROID` 必须告诉用户
   “仅支持 Android、当前上限 C1、不回退 dex2jar/JVM、改用可移植源”。A4.1 的三个真实样例、
-  JVM 实测和四方案比较见 [ANDROID_WORKER_SPIKE_REPORT.md](ANDROID_WORKER_SPIKE_REPORT.md)。
+   JVM 实测和四方案比较见 git 历史归档（原 ANDROID_WORKER_SPIKE_REPORT）。
 - drpy 规则由受 Supervisor 管理的独立 Node Worker 进程承载（`drpy-engine/`），
   能力路由判定为 C1 / `worker='drpy'`，实现零增量体积复用 Electron Node 运行时。
 - 远程 Python、QuickJS、CMS 和 portable JAR 控制调用按站点进入 spawn Worker。Windows
