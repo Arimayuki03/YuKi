@@ -500,8 +500,33 @@ function createWindow() {
 
 // ---------------------------------------------------------------- 托盘
 
-/** 托盘图标：内置 16x16 PNG（深底绿三角播放标志），免外部图标资源。 */
+/**
+ * 托盘图标三级兜底：
+ * 1) assets/tray/tray-{16,20,24,32}.png——由 scripts/make-tray-icons.ps1 从应用图标
+ *    最近邻预缩（保住像素画硬边），按屏幕 DPI(100%/125%/150%/200%) 自动选用；
+ * 2) assets/icon.png 运行时直接缩放（次优，插值会略糊）；
+ * 3) 程序绘制 16x16 像素播放三角（资源全丢时的最后保障）。
+ */
 function makeTrayIcon() {
+    try {
+        const img = nativeImage.createEmpty();
+        const reps = [[16, 1], [20, 1.25], [24, 1.5], [32, 2]];
+        let loaded = 0;
+        for (const [size, scale] of reps) {
+            const p = path.join(app.getAppPath(), 'assets', 'tray', `tray-${size}.png`);
+            if (!fs.existsSync(p)) continue;
+            img.addRepresentation({ scaleFactor: scale, buffer: fs.readFileSync(p) });
+            loaded++;
+        }
+        if (loaded > 0 && !img.isEmpty()) return img;
+    } catch (e) { /* 落入下一级兜底 */ }
+    try {
+        const p = path.join(app.getAppPath(), 'assets', 'icon.png');
+        if (fs.existsSync(p)) {
+            const img = nativeImage.createFromPath(p).resize({ width: 16, height: 16 });
+            if (!img.isEmpty()) return img;
+        }
+    } catch (e) { /* 落入程序绘制兜底 */ }
     try {
         const crcT = [];
         for (let n = 0; n < 256; n++) {

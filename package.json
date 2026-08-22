@@ -19,7 +19,8 @@
     "build:win": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --win",
     "build:mac": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --mac",
     "build:linux": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --linux",
-    "build": "npm run build:py && node scripts/download-binaries.js misans && electron-builder"
+    "build": "npm run build:py && node scripts/download-binaries.js misans && electron-builder",
+    "icons:tray": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\make-tray-icons.ps1"
   },
   "build": {
     "appId": "com.yuki.app",
@@ -43,8 +44,9 @@
       }
     ],
     "files": [
-      "src/**/*",
-      "python-backend/**/*",
+        "src/**/*",
+        "assets/**/*",
+        "python-backend/**/*",
       "!python-backend/.venv/**",
       "!python-backend/__pycache__/**",
       "!python-backend/**/__pycache__/**",

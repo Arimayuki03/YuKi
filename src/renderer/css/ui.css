@@ -1610,7 +1610,7 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
 /* ===== 「关于」页面 ===== */
 .about-card { text-align:center; padding:28px 16px; border-radius:14px;
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant); margin-bottom:16px; }
-.about-logo { width:64px; height:64px; fill:var(--md-primary); margin:0 auto 10px; }
+.about-logo { display:block; width:64px; height:64px; margin:0 auto 10px; user-select:none; }
 .about-name { font-size:22px; font-weight:700; color:var(--md-on-surface); }
 .about-version { font-size:12px; color:var(--md-on-surface-variant); margin-top:4px; }
 .about-desc { max-width:520px; margin:12px auto 0; font-size:13px; color:var(--md-on-surface-variant);
