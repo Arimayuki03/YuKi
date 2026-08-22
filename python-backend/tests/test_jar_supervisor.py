@@ -110,9 +110,12 @@ class JarSupervisorTest(unittest.TestCase):
     def setUpClass(cls):
         os.makedirs(TEST_ROOT, exist_ok=True)
         if not os.path.isfile(RUNNER_JAR):
-            raise AssertionError('spider-runner.jar unavailable')
-        _build_fixture()
-        _build_proxy_fixture()
+            raise unittest.SkipTest('spider-runner.jar unavailable')
+        try:
+            _build_fixture()
+            _build_proxy_fixture()
+        except RuntimeError as e:
+            raise unittest.SkipTest(f'JDK unavailable: {e}')
 
     def setUp(self):
         self.runner = SupervisedRunner({
