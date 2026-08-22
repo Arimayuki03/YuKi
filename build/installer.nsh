@@ -15,8 +15,11 @@
 !include "LogicLib.nsh"
 
 ; 复选框状态变量（1=安装内置播放器，0=跳过）；默认安装。
+; 仅在安装器中使用，卸载器构建时不定义以避免 warning 6001 被 -WX 当作错误
+!ifndef BUILD_UNINSTALLER
 Var YukiMpvCheckbox
 Var YukiInstallMpv
+!endif
 
 ; ---------------------------------------------------------------- 自定义页面
 ; electron-builder 的 assisted 安装器（oneClick:false）在 allowToChangeInstallationDirectory
@@ -25,6 +28,7 @@ Var YukiInstallMpv
   Page custom yukiMpvPageCreate yukiMpvPageLeave
 !macroend
 
+!ifndef BUILD_UNINSTALLER
 Function yukiMpvPageCreate
   ; 默认勾选（首次进入页面时初始化为安装）
   ${If} $YukiInstallMpv == ""
@@ -62,6 +66,7 @@ Function yukiMpvPageLeave
     StrCpy $YukiInstallMpv "0"
   ${EndIf}
 FunctionEnd
+!endif
 
 ; ---------------------------------------------------------------- 安装钩子
 ; extraResources 已把 vendor/ 复制到 $INSTDIR\resources\vendor；

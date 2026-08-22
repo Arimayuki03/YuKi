@@ -1,7 +1,7 @@
-﻿{
+{
   "name": "yuki",
   "version": "0.1.0",
-  "description": "YuKi锛堝師褰辫 PC锛夛細CatVod 褰辫鑱氬悎搴旂敤妗岄潰绔紙Electron + Python 鍚庣锛?,
+  "description": "YuKi：影视聚合应用桌面端",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
