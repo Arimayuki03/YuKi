@@ -1,10 +1,10 @@
 # YuKi
 
 <!-- TODO: GitHub 仓库创建后，将下方徽章中的 OWNER 替换为实际用户名/组织名 -->
-[![CI](https://github.com/OWNER/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/ci.yml)
-[![Release](https://github.com/OWNER/YuKi/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/release.yml)
+[![CI](https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml)
+[![Release](https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml/badge.svg)](https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/OWNER/YuKi)](https://github.com/OWNER/YuKi/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/Arimayuki03/YuKi)](https://github.com/Arimayuki03/YuKi/releases)
 
 YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面与系统宿主，使用独立 FastAPI/Python 进程运行 CatVod 与 Kazumi 两套内容引擎，并通过 mpv、aria2c 和 ffmpeg 完成播放与下载。
 
