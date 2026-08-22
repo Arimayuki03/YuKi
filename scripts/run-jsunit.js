@@ -28,5 +28,5 @@ if (files.length === 0) {
 }
 
 console.log(`[run-jsunit] 发现 ${files.length} 个测试文件，执行 node --test ...`);
-const result = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' });
+const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { stdio: 'inherit' });
 process.exit(result.status ?? 1);
