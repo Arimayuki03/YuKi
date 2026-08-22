@@ -1,6 +1,6 @@
 # Kazumi 规则引擎
 
-> 整合说明 v1.4 (2026-08-09) + 差距分析 v2.2 (基于 Kazumi v2.2.6)
+> 整合说明 v1.4 (2026-08-09) + 差距分析 v2.2 (基于 Kazumi v2.2.6) | 合并于 2026-08-22（原 KAZUMI_INTEGRATION + KAZUMI_GAP_ANALYSIS）
 > 前置：PROGRESS.md + ARCHITECTURE.md
 
 ---
@@ -8,10 +8,10 @@
 ## 第一部分：整合说明
 
 > - 版本：v1.4（2026-08-09）
-> - 目标：说明 Kazumi XPath/API 规则引擎在YuKi 中的当前实现，不破坏现有 CatVod 配置链路。
+> - 目标：说明 Kazumi XPath/API 规则引擎在 YuKi 中的当前实现，不破坏现有 CatVod 配置链路。
 > - 前置文档：先读 [当前开发状态](../PROGRESS.md) 和 [系统架构](ARCHITECTURE.md)。
 > - Git 基线：tag `pre-kazumi`（commit 4269bc4）。
-> - 状态：**既定 Kazumi 接入范围已完成并通过测试**。这不表示YuKi 已与 Kazumi Flutter 原版完全等价，差距见 [KAZUMI.md](KAZUMI.md)。
+> - 状态：**既定 Kazumi 接入范围已完成并通过测试**。这不表示 YuKi 已与 Kazumi Flutter 原版完全等价，差距见本文件第二部分。
 
 ---
 
@@ -373,7 +373,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 
 - 当前完成范围和待办只在 [../PROGRESS.md](../PROGRESS.md) 维护。
 - 接口、schema、目录或解析链路变化更新本文件。
-- 与 Kazumi 原版的功能差距更新 [KAZUMI.md](KAZUMI.md)。
+- 与 Kazumi 原版的功能差距更新本文件第二部分。
 - 运行问题、日志证据和复测结论更新 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)。
 
 ---
