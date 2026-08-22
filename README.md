@@ -18,7 +18,7 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 - aria2c 直链下载、ffmpeg HLS 下载、下载记录与系统通知已接入。
 - 收藏、历史、观看统计、Bangumi、WebDAV 和本地文件管理已接入。
 - Windows 安装包已生成；macOS/Linux 打包、安装后冷启动和自动更新仍待验证或实现。
-- TVBox 兼容性基础能力已接入，但 21 仓全量回归、FongMi 契约审计和分层诊断验收仍在计划中，详见[功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md)（历史记录见 docs/archive/）。
+- TVBox 兼容性基础能力已接入，但 21 仓全量回归、FongMi 契约审计和分层诊断验收仍在计划中，详见[功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md)。
 
 产品当前不启用弹幕界面与播放时弹幕加载。仓库保留了部分 DanDanPlay API、ASS 和历史代码，仅作为兼容基础，不代表弹幕功能处于启用状态。
 
@@ -67,9 +67,9 @@ npm run build:win
 - [代码审查报告](CODE_REVIEW.md) · 安全问题、缺陷和审查基线
 - [代码审查修复任务清单](CODE_REVIEW_FIX_TASKS.md) · 修复步骤与验收记录
 - [改进优化任务清单](IMPROVEMENT_PLAN.md) · 工程化、性能和发布待办
-- [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口；历史见 docs/archive/）
+- [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口）
 
-Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是YuKi 的开发入口。
+Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是 YuKi 的开发入口。
 
 ## 许可证
 
