@@ -1,4 +1,4 @@
-# 功能测试报告（YuKi / 影视 PC）
+# 功能测试报告（YuKi）
 
 > 生成时间：2026-08-10（快照）；**最新全量回归 2026-08-22 见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) R16：`npm run test:all` ALL PASS（313 JS tests / 100 py files / ESLint 0 error / Ruff 全过）**。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。

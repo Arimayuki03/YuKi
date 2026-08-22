@@ -8,10 +8,10 @@
 ## 第一部分：整合说明
 
 > - 版本：v1.4（2026-08-09）
-> - 目标：说明 Kazumi XPath/API 规则引擎在影视 PC 中的当前实现，不破坏现有 CatVod 配置链路。
+> - 目标：说明 Kazumi XPath/API 规则引擎在YuKi 中的当前实现，不破坏现有 CatVod 配置链路。
 > - 前置文档：先读 [当前开发状态](../PROGRESS.md) 和 [系统架构](ARCHITECTURE.md)。
 > - Git 基线：tag `pre-kazumi`（commit 4269bc4）。
-> - 状态：**既定 Kazumi 接入范围已完成并通过测试**。这不表示影视 PC 已与 Kazumi Flutter 原版完全等价，差距见 [KAZUMI.md](KAZUMI.md)。
+> - 状态：**既定 Kazumi 接入范围已完成并通过测试**。这不表示YuKi 已与 Kazumi Flutter 原版完全等价，差距见 [KAZUMI.md](KAZUMI.md)。
 
 ---
 
@@ -34,7 +34,7 @@
 
 - 验证码支持检测、打开验证页面、手动过验证和 Cookie 复用；自动识别与自动提交不在当前交付范围。
 - 弹幕产品功能当前关闭。后端 API 和 ASS 基础代码属于保留兼容层，不应视为正在等待补齐的产品功能。
-- Anime4K、下载、WebDAV、SyncPlay、DLNA 等由影视 PC 公共能力提供，Kazumi 播放源直接复用，不在本模块重复实现。
+- Anime4K、下载、WebDAV、SyncPlay、DLNA 等由YuKi 公共能力提供，Kazumi 播放源直接复用，不在本模块重复实现。
 - macOS/Linux 验证、代码签名、自动更新和 CI/CD 属于项目级发布工作，不属于 Kazumi 接入范围。
 
 ### 1.3 兼容性红线
@@ -93,9 +93,9 @@
 - Kazumi Plugin 对应 CatVod Site，但独立存储，key 为 kazumi:name。
 - Kazumi SearchItem 无 vod_id/vod_pic，仅 name/src。
 - Kazumi Road 对应播放线路，但 data 是播放页 URL，非直链。
-- Kazumi 规则响应无 `detailContent`；影视 PC 使用 Bangumi API 独立补充简介、封面和评分。
+- Kazumi 规则响应无 `detailContent`；YuKi 使用 Bangumi API 独立补充简介、封面和评分。
 
-关键差异：Kazumi 规则本身没有 CatVod 式 `detailContent` 概念，`searchResult` 直接得到番剧详情页 URL，`chapterResult` 从详情页提取剧集播放页 URL。规则层只有标题和链接；影视 PC 另外使用 Bangumi API 补充封面、简介和评分等元数据。
+关键差异：Kazumi 规则本身没有 CatVod 式 `detailContent` 概念，`searchResult` 直接得到番剧详情页 URL，`chapterResult` 从详情页提取剧集播放页 URL。规则层只有标题和链接；YuKi 另外使用 Bangumi API 补充封面、简介和评分等元数据。
 
 ---
 

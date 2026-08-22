@@ -1,4 +1,4 @@
-# 影视 PC — 历史开发记录
+# YuKi — 历史开发记录
 
 > 本文档归档 Phase 0~8、U/T 批次、历史架构决策和踩坑记录，不再作为当前待办入口。
 > 当前状态请读 [../PROGRESS.md](../PROGRESS.md)，现行架构请读 [ARCHITECTURE.md](ARCHITECTURE.md)。历史内容原则上只追加或勘误。
@@ -160,7 +160,7 @@ $env:CSC_IDENTITY_AUTO_DISCOVERY="false"
 npx electron-builder --win --publish=never --config.directories.output="C:/temp/yuki-dist"
 ```
 
-- **产物**：`影视 PC Setup 0.1.0.exe`（NSIS，约 175 MB）+ `win-unpacked/`（约 1.7 GB）；macOS/Linux 预留未测。
+- **产物**：`YuKi Setup 0.1.0.exe`（NSIS，约 175 MB）+ `win-unpacked/`（约 1.7 GB）；macOS/Linux 预留未测。
 - **electron-builder 配置**在 `package.json` 的 `"build"` 字段：extraResources `python-dist/` → `resources/python-backend/`、`vendor/` → `resources/vendor/`；files 排除 `.venv/`、`__pycache__/`、`.pyc`、`tests/`；NSIS 可选安装路径 + 快捷方式 + 中英文。
 - **打包后目录**：`resources/app.asar` + `resources/python-backend/`（yuki-backend.exe + js-engine/spiders/base）+ `resources/vendor/`（mpv/aria2/ffmpeg/anime4k）。
 - **已知问题**：① Windows Defender 锁文件 → 用外部输出目录 C:/temp/yuki-dist；② winCodeSign macOS dylib 符号链接报错不影响安装器生成；③ 自定义图标已配置（assets/icon.png → .ico，8.7.3 完成）；④ 无代码签名（CSC_LINK/CSC_KEY_PASSWORD 未配）；⑤ PyInstaller 警告 tzdata hidden import not found（非关键）。
@@ -258,7 +258,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 | T15 | 下载页仿直链播放卡片样式（标题+说明+输入行）+ 总网速显示（dl-speed 汇总 active 任务速度，render 时刷新） | 已完成 |
 | T16 | 透明按钮全量去透明化：新增 .md-btn-danger-tonal（error-container 底）替换全部 md-btn-danger-text（清空收藏/历史、删除勾选×2、恢复默认）；弹窗 md-dialog-btn 补 surface 底色 | 已完成 |
 | T17 | 设置页再整理：一级导航加大（15px/200px 列）；字体颜色移至主题色下；壁纸区改名「背景」且选图/移除按钮前置遮罩后置；界面动画改普通复选框（.set-check，T22 再改下拉筛选框）；快捷键（步长+键位）拆独立一级板块 hotkey；卡片内 select 统一 240px 宽 | 已完成 |
-| T18 | 侧栏移除「影视 PC」brand 文字（首页本就首位，同步清理 .brand 相关 CSS） | 已完成 |
+| T18 | 侧栏移除「YuKi」brand 文字（首页本就首位，同步清理 .brand 相关 CSS） | 已完成 |
 | T19 | 详情页选集区重排：全选/勾选操作栏移至视频源按钮下方；共 X 集改胶囊框；倒序按钮移至集数旁紧邻 | 已完成 |
 | T20 | 举一反三文案精简：直链播放去 mpv 术语、本地文件说明短语化 | 已完成 |
 | T21 | 详情页倒序按钮移至播放勾选集左侧（同 md-btn-tonal/sm 样式大小一致）；收藏/想看/已看按钮行改 flex gap 12px 加大间距 | 已完成 |
