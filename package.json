@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "yuki",
   "version": "0.1.0",
-  "description": "YuKi（原影视 PC）：CatVod 影视聚合应用桌面端（Electron + Python 后端）",
+  "description": "YuKi锛堝師褰辫 PC锛夛細CatVod 褰辫鑱氬悎搴旂敤妗岄潰绔紙Electron + Python 鍚庣锛?,
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -13,7 +13,7 @@
     "test:compat": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\test_config_compat.py",
     "lint": "eslint src tests scripts",
     "lint:py": "python-backend\\.venv\\Scripts\\ruff.exe check python-backend",
-    "test:jsunit": "node --test tests/js",
+    "test:jsunit": "node --test tests/js/*.test.js",
     "test:all": "npm run test:py && npm run test:jsunit && npm run test:js && npm run lint && npm run lint:py",
     "build:py": "node scripts/build-python.js",
     "build:win": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --win",
