@@ -21,6 +21,7 @@
 | R13 | `guard_url` 把 Windows 盘符当协议，`D:/tv.json` 报错原因与真实问题不符 | ✅ 已修复并验证：`test_config_security.py::test_blocked_local_disk_paths` |
 | R14 | `detect_text` 只剥一层 BOM，双 BOM 配置被 `json.loads` 报成第 1 列语法错误 | ✅ 已修复并验证：`test_ext_semantics.py::test_bom_and_declared_and_fallback` |
 | R15 | 多仓合并/主仓漂移后同名 key 的可用源被旧探测屏蔽记录误隐藏 | ✅ 已修复并验证：探测结论附带内容指纹 probeFp；home-probe 78 例、JS 单元 312/312、run_all.py 全阶段 PASS |
+| R16 | `spider-loader.js` 协议桥命名与宿主断裂：243afd9 全局重命名 VPC→YuKi 时漏改 loader，宿主 `ctx.get('__YUKI_CALL__')` 取到 None，所有 JS 源方法调用报 `'NoneType' object is not callable` | ✅ 已修复并验证：loader 对齐 `__YUKI_CALL__/__YUKI_PENDING__/__YUKI_RESULT__/__YUKI_FETCH_RESULT__/__yuki_err__`；test_phase3 30/30 PASS（修复前必现 KeyError）、test_jar_proxy 4/4 OK、全量回归见 PROGRESS 同日记录 |
 
 ---
 

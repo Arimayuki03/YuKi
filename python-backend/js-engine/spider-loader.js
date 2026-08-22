@@ -14,30 +14,30 @@ if (!globalThis.__JS_SPIDER__) {
 
 // ---------- 宿主方法调用桥 ----------
 // 返回约定：字符串(方法原始返回，通常为 JSON 串) / '__PROMISE__'(异步方法)
-globalThis.__VPC_CALL__ = function (method, argsJson) {
+globalThis.__YUKI_CALL__ = function (method, argsJson) {
     try {
         var s = globalThis.__JS_SPIDER__;
         if (!s || typeof s[method] !== 'function') {
-            return JSON.stringify({ __vpc_err__: 'no method: ' + method });
+            return JSON.stringify({ __yuki_err__: 'no method: ' + method });
         }
         var args = argsJson ? JSON.parse(argsJson) : [];
         var r = s[method].apply(s, args);
         if (r && typeof r.then === 'function') {
-            globalThis.__VPC_PENDING__ = true;
-            globalThis.__VPC_RESULT__ = undefined;
+            globalThis.__YUKI_PENDING__ = true;
+            globalThis.__YUKI_RESULT__ = undefined;
             r.then(
-                function (v) { globalThis.__VPC_RESULT__ = v; globalThis.__VPC_PENDING__ = false; },
-                function (e) { globalThis.__VPC_RESULT__ = { __vpc_err__: String(e && e.message || e) }; globalThis.__VPC_PENDING__ = false; }
+                function (v) { globalThis.__YUKI_RESULT__ = v; globalThis.__YUKI_PENDING__ = false; },
+                function (e) { globalThis.__YUKI_RESULT__ = { __yuki_err__: String(e && e.message || e) }; globalThis.__YUKI_PENDING__ = false; }
             );
             return '__PROMISE__';
         }
         return typeof r === 'string' ? r : JSON.stringify(r === undefined ? null : r);
     } catch (e) {
-        return JSON.stringify({ __vpc_err__: String(e && e.message || e) });
+        return JSON.stringify({ __yuki_err__: String(e && e.message || e) });
     }
 };
 
-globalThis.__VPC_FETCH_RESULT__ = function () {
-    var v = globalThis.__VPC_RESULT__;
+globalThis.__YUKI_FETCH_RESULT__ = function () {
+    var v = globalThis.__YUKI_RESULT__;
     return typeof v === 'string' ? v : JSON.stringify(v === undefined ? null : v);
 };
