@@ -108,8 +108,6 @@ contextBridge.exposeInMainWorld('yuki', {
     pickWallpaper: () => ipcRenderer.invoke('yuki:pick-wallpaper'),
     /** 应用版本号（关于分类展示） */
     appVersion: () => ipcRenderer.invoke('yuki:app-version'),
-    /** 关于页系统信息：{version, platform, arch, electron, chromium, node, v8} */
-    appInfo: () => ipcRenderer.invoke('yuki:app-info'),
     /** 窗口控制（无边框模式下的最小化/最大化/关闭） */
     winMinimize: () => ipcRenderer.invoke('yuki:win-minimize'),
     winMaximize: () => ipcRenderer.invoke('yuki:win-maximize'),

@@ -584,16 +584,6 @@ app.whenReady().then(() => {
         return { ok: true };
     });
 
-    // 关于页系统信息：应用版本 + 运行环境版本
-    ipcMain.handle('yuki:app-info', () => ({
-        version: app.getVersion(),
-        platform: process.platform,
-        arch: process.arch,
-        electron: process.versions.electron,
-        chromium: process.versions.chrome,
-        node: process.versions.node,
-        v8: process.versions.v8,
-    }));
     // 内置 MiSans 字体 CSS 的 file:// URL（渲染层注入 <link>；打包内置，无运行时下载，T61）
     ipcMain.handle('yuki:font-css', () => misans.fontCssUrls());
     // 窗口控制（无边框模式下渲染层调用）

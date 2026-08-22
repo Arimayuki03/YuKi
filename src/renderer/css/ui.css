@@ -1618,12 +1618,6 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
 .about-credits { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
 .about-credit { font-size:13px; color:var(--md-on-surface-variant); line-height:1.5; }
 .about-credit b { color:var(--md-on-surface); font-weight:600; }
-.about-sysinfo { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
-.about-row { display:flex; justify-content:space-between; font-size:13px;
-    padding:6px 0; border-bottom:1px solid var(--md-outline-variant); }
-.about-row:last-child { border-bottom:none; }
-.about-row span:first-child { color:var(--md-on-surface-variant); }
-.about-row span:last-child { color:var(--md-on-surface); font-variant-numeric:tabular-nums; }
 
 
 /* ===== 封面点击放大：原图保留在原位，另开全屏浮层（滚轮缩放，点击关闭） ===== */

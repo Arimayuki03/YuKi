@@ -203,23 +203,19 @@ class CDP {
         if (any) { any.click(); return 'data-cat'; }
         return false;
     })()`);
-    await sleep(1200); // 关于分类可能异步拉 yuki:app-info
+    await sleep(800); // 关于分类异步拉版本号
     out.about = await cdp.evaluate(`(() => {
         // 关于分类 = #view-settings 下 data-setcat="about" 的卡片
         const aboutCards = [...document.querySelectorAll('#view-settings .tool-card[data-setcat="about"]')].filter(c => c.offsetParent !== null);
         const text = aboutCards.map(c => c.innerText || '').join('\\n');
         const versionElText = (document.querySelector('#about-version') || {}).innerText || '';
-        const sysinfoText = (document.querySelector('#about-sysinfo') || {}).innerText || '';
         const versionMatch = (versionElText + ' ' + text).match(/v?([0-9]+\\.[0-9]+\\.[0-9]+)/);
         return {
             clickedAbout: ${JSON.stringify(aboutClicked)},
             aboutCardCount: aboutCards.length,
             versionElText: versionElText.trim(),
             versionText: versionMatch ? versionMatch[0].trim() : null,
-            hasElectron: /Electron/i.test(sysinfoText + ' ' + text),
-            hasChromium: /Chromium|Chrome/i.test(sysinfoText + ' ' + text),
-            hasNode: /Node/i.test(sysinfoText + ' ' + text),
-            hasPlatform: /操作系统|platform|win32|Windows/i.test(sysinfoText + ' ' + text),
+            sysinfoCardGone: !document.querySelector('#about-sysinfo'),
             snippet: text.replace(/\\s+/g, ' ').slice(0, 400),
         };
     })()`);
