@@ -41,6 +41,9 @@ jobs:
           # --strict 失败暂不拦截（首轮基线先观察），稳定后去掉 || true
       - name: 运行后端回归
         run: python python-backend/tests/run_all.py
+        env:
+          PYTHONUTF8: 1
+          PYTHONIOENCODING: utf-8
         # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真跑
       - name: Ruff lint
         run: |
