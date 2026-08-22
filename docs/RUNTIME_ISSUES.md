@@ -16,6 +16,7 @@
 | R7 | 观看统计断流重连重复累计已改为按观看链去重 | ✅ 已验证：独立实例 CDP 实测重连只补增量、次数不重复 |
 | R8 | `ended` 事件附带会话号并按会话匹配「看完」判定 | ✅ 已验证：旧会话延迟 ended 不误判新会话，新会话自身 ended 判看完 |
 | R9 | G0 运行时契约、站点健康和兼容夹具退出边界 | ✅ 已验证：离线 4 夹具、Python 全量、Node 222/222、JS 语法 40/40 |
+| R10 | 以图搜番 URL 直传被拦（trace.moe 需原始上传） | ✅ 已验证：原始文件上传 200 + 10 条结果 |
 | R11 | S1 不可信运行时隔离、硬超时、聚合取消和熔断恢复 | ✅ 已验证：Python 24 阶段、Node 225/225、JS 语法 40/40、Ruff/ESLint 0 error |
 | R12 | C2 配置三层分离、prepare→validate→atomic swap、`ext` 语义、能力路由与配置安全边界 | ✅ 已验证：`run_all.py` 28 阶段全通过、编译 79 文件 0 error；四个新阶段共 157 条全部走 loopback 夹具不出网 |
 | R13 | `guard_url` 把 Windows 盘符当协议，`D:/tv.json` 报错原因与真实问题不符 | ✅ 已修复并验证：`test_config_security.py::test_blocked_local_disk_paths` |
