@@ -43,7 +43,7 @@ npm run test:all
 npm run build:win
 ```
 
-更完整的环境、架构与构建说明见 [开发状态](PROGRESS.md)、[架构说明](docs/ARCHITECTURE.md)与[文件结构](docs/FILE_STRUCTURE.md)。` .omo/`、`.zcode/`、`.claude/` 等 Agent 工具目录已在 `.gitignore` 中排除，不会上传或打入安装包。
+更完整的环境、架构与构建说明见 [开发状态](PROGRESS.md)、[架构说明](docs/ARCHITECTURE.md)与[文件结构](docs/FILE_STRUCTURE.md)。
 
 ## 文档导航
 
