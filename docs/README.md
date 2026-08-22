@@ -18,6 +18,7 @@
 | [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) | 运行异常、日志证据、修复和复测状态 | 按问题追加并更新结论 |
 | [TEST_REPORT.md](TEST_REPORT.md) | 自动化测试、界面验收和用户实测清单 | 测试结果变化时更新 |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | 第三方组件与许可声明 | 依赖变化时更新 |
+| [FILE_STRUCTURE.md](FILE_STRUCTURE.md) | 代码文件结构与目录职责 | 结构变化时更新 |
 | [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md) | Phase、U/T 批次、历史决策和踩坑记录 | 只追加或勘误 |
 
 ## 审查、计划与兼容性文档
