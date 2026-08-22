@@ -47,7 +47,7 @@ FastAPI Python 后端
 - 规则只负责找到番剧详情页和剧集播放页，真实媒体地址由 Electron 隐藏窗口提取。
 - 规则搜索、商店、编辑、测试、有效性检测、批量更新和 Bangumi 元数据均属于 Kazumi 子系统。
 
-详细 schema 和端点见 [KAZUMI_INTEGRATION.md](KAZUMI_INTEGRATION.md)。
+详细说明与差距对照见 [KAZUMI.md](KAZUMI.md)。
 
 ## 4. 播放数据流
 

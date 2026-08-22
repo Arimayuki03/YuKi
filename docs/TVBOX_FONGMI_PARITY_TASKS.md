@@ -1385,4 +1385,4 @@ session/redirect Cookie，外部播放器无法透传时显式降级。离线证
 - 当前项目总状态同步到 `PROGRESS.md`；
 - 具体故障证据同步到 `RUNTIME_ISSUES.md`；
 - 架构或进程边界变化同步到 `ARCHITECTURE.md`；
-- 上一轮 Phase A-F 的外部环境验收记录已归档至 `archive/TVBOX_COMPAT_PLAN_REMAINING.md`，契约差距详见 `archive/TVBOX_CONTRACT_GAPS.md`；本文为当前唯一执行入口。
+- 上一轮 Phase A-F 记录与契约差距已整合归档；本文为当前唯一执行入口。

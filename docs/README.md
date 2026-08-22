@@ -14,25 +14,17 @@
 | 文档 | 用途 | 维护方式 |
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 当前系统架构、接口契约和安全边界 | 架构变化时更新 |
-| [KAZUMI_INTEGRATION.md](KAZUMI_INTEGRATION.md) | Kazumi 规则系统的数据模型、接口和实现 | 实现变化时更新 |
-| [KAZUMI_GAP_ANALYSIS.md](KAZUMI_GAP_ANALYSIS.md) | 与 Kazumi 原版的功能差距和产品取舍 | 对比结论变化时更新 |
+| [KAZUMI.md](KAZUMI.md) | Kazumi 规则引擎整合说明与原版差距对照 | 实现或差距变化时更新 |
 | [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) | 运行异常、日志证据、修复和复测状态 | 按问题追加并更新结论 |
 | [TEST_REPORT.md](TEST_REPORT.md) | 自动化测试、界面验收和用户实测清单 | 测试结果变化时更新 |
+| [THIRD_PARTY.md](THIRD_PARTY.md) | 第三方组件与许可声明 | 依赖变化时更新 |
 | [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md) | Phase、U/T 批次、历史决策和踩坑记录 | 只追加或勘误 |
 
 ## 审查、计划与兼容性文档
 
-这些文档位于根目录或专项位置，属于执行资料；它们不能替代 `PROGRESS.md` 的当前状态快照。
-
 | 文档 | 用途 | 使用建议 |
 |---|---|---|
 | [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 当前唯一执行入口 |
-| [归档：代码审查报告](archive/CODE_REVIEW.md) | 历史审查基线 | 按需查阅 |
-| [归档：修复任务清单](archive/CODE_REVIEW_FIX_TASKS.md) | 修复步骤与验收记录 | 按需查阅 |
-| [归档：改进计划](archive/IMPROVEMENT_PLAN.md) | 工程化、性能和发布待办 | 按需查阅 |
-| [归档：兼容性测试仓库清单](archive/test-repos.md) | 兼容性测试语料 | 按需查阅 |
-| [归档：TVBox 合同/探针/矩阵报告](archive/) | FongMi 契约、DRPY/Android 探针、播放/测试矩阵 | 按需查阅 |
-| [ADR 决策记录](adr/) | 架构决策（drpy 运行时、DRM 播放） | 按需查阅 |
 
 ## 文档状态优先级
 
@@ -52,8 +44,7 @@
 - 当前状态只写入 `PROGRESS.md`，不要在历史文档中复制第二份总待办。
 - 运行故障只在 `RUNTIME_ISSUES.md` 维护详细日志、根因和复测结论。
 - 架构、接口或数据目录变化先更新 `ARCHITECTURE.md`，再改代码。
-- Kazumi schema、端点或解析流程变化同步更新 `KAZUMI_INTEGRATION.md`。
-- 与上游的功能差距变化时更新 `KAZUMI_GAP_ANALYSIS.md`。
+- Kazumi 规则、端点或解析流程变化同步更新 `KAZUMI.md`。
 - 已完成批次和重要历史原因写入 `DEVELOPMENT_HISTORY.md`，避免把流水账塞回 `PROGRESS.md`。
 - 计划文档保留“目标、当前状态、剩余验收项”三部分；完成后标明完成日期，并链接到测试证据。
 - 新增长期维护文档优先放入 `docs/`；根目录只保留项目入口、当前状态和需要显眼访问的执行计划。

@@ -26,8 +26,7 @@
 |---|---|
 | 文档层级与维护规则 | [docs/README.md](docs/README.md) |
 | 进程、接口、数据流和关键约束 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Kazumi 规则引擎实现 | [docs/KAZUMI_INTEGRATION.md](docs/KAZUMI_INTEGRATION.md) |
-| Kazumi 与原版的功能差距 | [docs/KAZUMI_GAP_ANALYSIS.md](docs/KAZUMI_GAP_ANALYSIS.md) |
+| Kazumi 规则引擎 | [docs/KAZUMI.md](docs/KAZUMI.md)（整合说明与差距对照） |
 | 最新运行异常与修复验证 | [docs/RUNTIME_ISSUES.md](docs/RUNTIME_ISSUES.md) |
 | 全量功能测试矩阵与测试结果 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) |
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
@@ -169,7 +168,7 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
 
-2026-08-22 开源发布准备（[docs/github.md](docs/github.md) G01–G12）：**G01** 敏感扫描——全历史曾跟踪
+2026-08-22 开源发布准备（G01–G12，任务书见 git 历史 docs/github.md）：**G01** 敏感扫描——全历史曾跟踪
 `TV-fongmi/` 上游源码（729 路径）与 3 个 `*-error.zip` 运行残留，已用 git-filter-repo 清除并重扫零命中
 （`.git` 约 39MB→3.6MB；清洗前备份 bundle 留存于临时目录）；当前跟踪的 cookie/token 命名文件均为测试
 代码与 `fixture.invalid` 假数据。**G02** 通过：最大跟踪文件 1.16MB。**G03–G05/G06–G09/G12** 新增
@@ -181,8 +180,7 @@ Anime4K MIT / MiSans 免费商用逐项核实）与 [.github/workflows/release.y
 无已知漏洞；门槛收紧（移除 `|| true`）按观察期执行。**R16 回归修复**：243afd9 重命名漏改
 spider-loader.js 致 JS 源调用全挂（详见 [RUNTIME_ISSUES](docs/RUNTIME_ISSUES.md) R16）。验证：
 `npm run test:all` 全绿——run_all.py 全阶段 ALL PASS（smoke 13 + phase3 30 + kazumi 18+5 等）、编译
-100 文件 0 error、JS 单元 tests 313、ESLint 0 error（69 条既有 warning）、Ruff 全过。发布 Notes 草稿见
-[docs/RELEASE_NOTES_v0.1.0.md](docs/RELEASE_NOTES_v0.1.0.md)。
+100 文件 0 error、JS 单元 tests 313、ESLint 0 error（69 条既有 warning）、Ruff 全过。发布说明见 CHANGELOG.md。
 
 2026-08-22 R15 修复（合并站点后可用源被旧探测屏蔽误隐藏）：探测/屏蔽持久化结论附带内容指纹
 `probeFp`（`api|spiderType`，后端 `/sites` 增量暴露 `api`），指纹不符或缺失即作废重探并当场恢复展示，

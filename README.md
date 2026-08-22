@@ -54,8 +54,7 @@ npm run build:win
 | 了解当前状态、边界和下一步 | [PROGRESS.md](PROGRESS.md) |
 | 了解项目文档层级和维护规则 | [docs/README.md](docs/README.md) |
 | 了解进程、接口、数据流和安全边界 | [系统架构](docs/ARCHITECTURE.md) |
-| 了解 Kazumi 当前实现 | [Kazumi 整合说明](docs/KAZUMI_INTEGRATION.md) |
-| 查看 Kazumi 与原版的差距 | [Kazumi 功能差距](docs/KAZUMI_GAP_ANALYSIS.md) |
+| 了解 Kazumi 当前实现与差距 | [Kazumi 规则引擎](docs/KAZUMI.md) |
 | 查看最新运行异常与复测证据 | [运行时问题](docs/RUNTIME_ISSUES.md) |
 | 查看自动化测试和用户实测清单 | [功能测试报告](docs/TEST_REPORT.md) |
 | 查看历史批次和设计决策 | [历史开发记录](docs/DEVELOPMENT_HISTORY.md) |
