@@ -13,7 +13,7 @@
     "test:compat": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\test_config_compat.py",
     "lint": "eslint src tests scripts",
     "lint:py": "python-backend\\.venv\\Scripts\\ruff.exe check python-backend",
-    "test:jsunit": "node --test tests/js/*.test.js",
+    "test:jsunit": "node scripts/run-jsunit.js",
     "test:all": "npm run test:py && npm run test:jsunit && npm run test:js && npm run lint && npm run lint:py",
     "build:py": "node scripts/build-python.js",
     "build:win": "npm run build:py && node scripts/download-binaries.js misans && electron-builder --win",
