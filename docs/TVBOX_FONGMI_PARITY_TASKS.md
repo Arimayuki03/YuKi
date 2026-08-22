@@ -5,7 +5,7 @@
 - **状态**：G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 验收通过；A4.1 已完成并作出 No-Go，A4.2-A4.5 关闭
 - **目标平台**：Windows 优先，macOS/Linux 在 PC 原生运行时稳定后跟进
 - **正式产品目标**：C1 PC 原生兼容。用户只输入一个影视仓库地址，应用自动获取配置、识别并加载 C1 可运行站点，最终成功播放用户有权访问的媒体
-- **相关文档**：[现有兼容计划](TVBOX_COMPAT_PLAN.md)、[剩余验收项](TVBOX_COMPAT_PLAN_REMAINING.md)、[契约差距](TVBOX_CONTRACT_GAPS.md)、[FongMi 功能实现](FONGMI_FEATURE_IMPLEMENTATION.md)、[系统架构](ARCHITECTURE.md)
+- **相关文档**：[剩余验收项](TVBOX_COMPAT_PLAN_REMAINING.md)、[契约差距](TVBOX_CONTRACT_GAPS.md)、[FongMi 功能实现](FONGMI_FEATURE_IMPLEMENTATION.md)、[系统架构](ARCHITECTURE.md)
 
 本文不重复已经完成的配置解析、代理、网盘和播放器补丁，而是定义从当前状态走到“使用体验接近 TVBox/FongMi”的完整执行路径。本文中的任务完成状态必须以测试证据为准，不能以“代码已写”或“仓库能导入”代替验收。
 

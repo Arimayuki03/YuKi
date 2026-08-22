@@ -2,7 +2,7 @@
 
 - **写入日期**: 2026-08-17
 - **状态**: 已批准待执行（Phase A–F 按序实施）
-- **配套**: `TVBOX_COMPAT_PLAN.md`（原计划）。旧版进度总结已并入本文件，后续只保留这一份执行记录。
+- **配套**: 原 `TVBOX_COMPAT_PLAN.md` 已归档移除，相关内容并入 [TVBOX_FONGMI_PARITY_TASKS.md](TVBOX_FONGMI_PARITY_TASKS.md)；本文件为当前剩余工作唯一执行记录。
 
 ## 2026-08-17 本轮代码验收结果
 
@@ -114,7 +114,7 @@
 - `python-backend/config.py`、`server.py`、`js-engine/quickjs_host.py`、`hoststate.py`
 - `src/renderer/js/panels.js`
 - `docs/TVBOX_CONTRACT_GAPS.md`（新）
-- `TVBOX_COMPAT_PLAN.md`、`TVBOX_COMPAT_PLAN_REMAINING.md`
+- `docs/TVBOX_FONGMI_PARITY_TASKS.md`、`docs/TVBOX_COMPAT_PLAN_REMAINING.md`
 - `.github/workflows/ci.yml`
 
 ## 验证

@@ -996,7 +996,6 @@ P5 的离线逐项证据见 [P5_PLAYBACK_MATRIX.md](P5_PLAYBACK_MATRIX.md)；DRM
 ### 相关现有文档
 
 - [系统架构](ARCHITECTURE.md)
-- [TVBox 兼容性计划](TVBOX_COMPAT_PLAN.md)
 - [TVBox 剩余工作计划](TVBOX_COMPAT_PLAN_REMAINING.md)
 - [FongMi 契约差距审计](TVBOX_CONTRACT_GAPS.md)
 - [数据地图](DATA_MAP.md)

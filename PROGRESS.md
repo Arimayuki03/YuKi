@@ -33,8 +33,7 @@
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
 | 代码审查及修复状态 | [CODE_REVIEW.md](CODE_REVIEW.md) / [CODE_REVIEW_FIX_TASKS.md](CODE_REVIEW_FIX_TASKS.md) |
 | 工程化改进待办 | [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) |
-| TVBox 兼容性总览 | [docs/TVBOX_COMPAT_PLAN.md](docs/TVBOX_COMPAT_PLAN.md) |
-| TVBox 兼容性执行计划 | [docs/TVBOX_COMPAT_PLAN_REMAINING.md](docs/TVBOX_COMPAT_PLAN_REMAINING.md) |
+| TVBox 兼容性总览/执行计划 | [docs/TVBOX_FONGMI_PARITY_TASKS.md](docs/TVBOX_FONGMI_PARITY_TASKS.md) / [docs/TVBOX_COMPAT_PLAN_REMAINING.md](docs/TVBOX_COMPAT_PLAN_REMAINING.md) |
 
 状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
 
