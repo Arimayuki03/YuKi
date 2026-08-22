@@ -1,6 +1,7 @@
 # YuKi 系统架构
 
-> 更新时间：2026-08-19
+> 更新时间：2026-08-22
+> 许可证：[GPLv3](../LICENSE)（`package.json` `GPL-3.0-only`，见 [THIRD_PARTY.md](THIRD_PARTY.md)）
 >
 > 本文描述当前有效架构。历史方案、详细批次和踩坑记录见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
@@ -234,23 +235,16 @@ sha256 登记，内容变化即重新评估能力与权限。
 ## 11. 构建与验证
 
 ```powershell
-npm run test:all
-npm run build:py
-npm run build:win
+npm run test:all   # test:py + test:jsunit + test:js + lint + lint:py
+npm run build:py   # PyInstaller -> python-dist/
+npm run build:win  # NSIS x64 安装包 -> dist/
 ```
 
-`test:all` 依次执行 Python 测试、Node 单元测试和 JavaScript 语法检查。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。
+`test:all` 最新全量 **ALL PASS**（2026-08-22：`run_all.py` 36 阶段全过、编译 100 文件 0 error、JS 单元 313 tests、ESLint 0 error、Ruff 全过；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
 
-Python 侧的入口是 `python-backend/tests/run_all.py`（按阶段串行，任一阶段失败即停）。
-配置与路由相关的四个阶段是 `config-snapshot`、`ext-semantics`、`capability-router`、
-`config-security`，全部通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的
-loopback 夹具跑，不出网也不依赖公共仓库；夹具进入时会隔离宿主的代理环境变量与 Windows
-系统代理，否则开发机上的代理会把请求吞掉，装配结果随宿主环境变化。gzip、JPEG/PNG 伪装
-三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，gzip 固定 `mtime=0`），
-所以四种载体解出来的内容哈希必须相等，任何解码错误表现为哈希不等而不是夹具写错。
+`run_all.py` 按阶段串行（任一阶段失败即停），其中 `config-snapshot`/`ext-semantics`/`capability-router`/`config-security` 四个阶段通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的 loopback 夹具跑，不出网；其余阶段覆盖 smoke/phase3/kazumi/cache/代理/JAR/站点健康等。夹具进入时会隔离宿主代理环境变量与 Windows 系统代理，否则开发机代理会吞请求；gzip、JPEG/PNG 伪装三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，`mtime=0`），四种载体哈希必须相等。
 
-跑单个阶段要用项目虚拟环境的解释器，裸 `python` 缺 `lxml` 会在导入 `config` 时报
-`ModuleNotFoundError`（属于环境问题，不是被测代码的缺陷）：
+跑单个阶段要用项目虚拟环境的解释器，裸 `python` 缺 `lxml` 会在导入 `config` 时报 `ModuleNotFoundError`（环境问题）：
 
 ```powershell
 cd python-backend
