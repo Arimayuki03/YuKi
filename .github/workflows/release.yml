@@ -1,0 +1,68 @@
+name: Release
+
+# tag 驱动的发布流水线：推送 v* 标签后自动构建 Windows 安装包并创建 Draft Release。
+# 发布流程见 CONTRIBUTING.md「发布流程」章节。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 与上传产物所必需
+
+jobs:
+  windows:
+    name: Windows NSIS 安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 构建 Python 后端（PyInstaller → python-dist/）
+        run: npm run build:py
+      # 与本地 build:win 的差异：CI 是全新 checkout，vendor/ 为空；
+      # extraResources 会把 vendor/** 打入安装包，必须先完整填充，
+      # 否则产物缺少 mpv/aria2c/ffmpeg，与开发机构建的安装包不一致。
+      - name: 下载全部第三方二进制（mpv/aria2c/anime4k/ffmpeg/misans）
+        run: node scripts/download-binaries.js all
+      - name: 打包 Windows 安装包
+        run: npx electron-builder --win --publish never
+      - name: 上传构建构件
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuki-windows-installer
+          path: dist/*.exe
+          if-no-files-found: error
+      - name: 创建 Draft Release 并挂载安装包
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true # 维护者随后替换为 CHANGELOG 提炼的正式 Notes 再 publish
+          files: dist/*.exe
+
+  # macOS / Linux 打包与安装后冷启动验证仍在 PROGRESS.md 计划内，
+  # 验证通过后再启用对应 job（build:mac = dmg / build:linux = AppImage+deb）：
+  #
+  # macos:
+  #   name: macOS DMG
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 20, cache: npm }
+  #     - run: npm ci
+  #     - run: npm run build:mac -- --publish never
+  #
+  # linux:
+  #   name: Linux AppImage / deb
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 20, cache: npm }
+  #     - run: npm ci
+  #     - run: npm run build:linux -- --publish never

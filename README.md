@@ -1,5 +1,11 @@
 # YuKi（原影视 PC）
 
+<!-- TODO: GitHub 仓库创建后，将下方徽章中的 OWNER 替换为实际用户名/组织名 -->
+[![CI](https://github.com/OWNER/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/ci.yml)
+[![Release](https://github.com/OWNER/YuKi/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/OWNER/YuKi)](https://github.com/OWNER/YuKi/releases)
+
 YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面与系统宿主，使用独立 FastAPI/Python 进程运行 CatVod 与 Kazumi 两套内容引擎，并通过 mpv、aria2c 和 ffmpeg 完成播放与下载。
 
 当前版本为 `0.1.0`，主要开发和验证平台是 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`/`yuki`，仅显示名为 YuKi。
@@ -53,6 +59,9 @@ npm run build:win
 | 查看最新运行异常与复测证据 | [运行时问题](docs/RUNTIME_ISSUES.md) |
 | 查看自动化测试和用户实测清单 | [功能测试报告](docs/TEST_REPORT.md) |
 | 查看历史批次和设计决策 | [历史开发记录](docs/DEVELOPMENT_HISTORY.md) |
+| 参与贡献 / 行为准则 / 发布流程 | [CONTRIBUTING.md](CONTRIBUTING.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
+| 查看版本变更记录 | [CHANGELOG.md](CHANGELOG.md) |
+| 查看随安装包分发的第三方组件许可 | [第三方组件与许可声明](docs/THIRD_PARTY.md) |
 
 ### 工程审查与执行计划
 
@@ -64,3 +73,7 @@ npm run build:win
 - [TVBox 剩余工作计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) · 当前未完成项与执行顺序
 
 Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是影视 PC 的开发入口。
+
+## 许可证
+
+本项目代码以 [MIT](LICENSE) 许可证发布。随安装包分发的第三方二进制（mpv、ffmpeg、aria2c、Anime4K、MiSans 字体等）各自按其原始许可证执行，逐项出处与合规结论见[第三方组件与许可声明](docs/THIRD_PARTY.md)。
