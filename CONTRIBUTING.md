@@ -2,6 +2,8 @@
 
 感谢关注 YuKi。本文档帮助你在本地跑起来项目并提交合格的贡献。行为准则见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
+> **许可证**：本项目以 [GPLv3](LICENSE) 发布，提交的贡献默认以同许可证贡献（除非另有说明）。请确保你有权以 GPLv3 提交代码。
+
 ## 环境要求
 
 | 依赖 | 版本 | 说明 |
@@ -67,7 +69,7 @@ npm run test:all
 - 当前状态只写根目录 `PROGRESS.md`，不要另建第二份总待办；
 - 运行故障只进 `docs/RUNTIME_ISSUES.md`（带时间、证据、复测结论）；
 - 架构 / 接口变化先改 `docs/ARCHITECTURE.md` 再改代码；
-- Kazumi 行为变化同步 `docs/KAZUMI_INTEGRATION.md`；
+- Kazumi 规则、端点或差距变化同步 `docs/KAZUMI.md`；
 - 第三方依赖变化同步 `docs/THIRD_PARTY.md`。
 
 ## Issue 与 PR 流程
