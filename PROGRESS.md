@@ -1,6 +1,7 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-08-18
+> 更新时间：2026-08-22
+> 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
 
@@ -32,7 +33,7 @@
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
 | 代码审查及修复状态 | [CODE_REVIEW.md](CODE_REVIEW.md) / [CODE_REVIEW_FIX_TASKS.md](CODE_REVIEW_FIX_TASKS.md) |
 | 工程化改进待办 | [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) |
-| TVBox 兼容性总览/执行计划 | [docs/TVBOX_FONGMI_PARITY_TASKS.md](docs/TVBOX_FONGMI_PARITY_TASKS.md)（历史记录见 docs/archive/） |
+| TVBox 兼容性总览/执行计划 | [docs/TVBOX_FONGMI_PARITY_TASKS.md](docs/TVBOX_FONGMI_PARITY_TASKS.md) |
 
 状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
 
@@ -115,8 +116,7 @@
 - [x] TVBox/FongMi C2.1-C2.5：ConfigSnapshot 三层与原子换入、`ext` 完整语义、站点字段矩阵、
   Capability Router、配置安全边界（`run_all.py` 28 阶段全通过）。
 - [ ] TVBox 兼容性 N3（drpy / PC 原生运行时）及真实公共仓/发布环境验收：按
-  [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 与
-  [执行计划](docs/TVBOX_COMPAT_PLAN_REMAINING.md) 推进。
+  [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
 - [x] 自动更新基础链路已接入 `electron-updater`（打包模式检查/下载/退出安装）；tag 发布 CI（release.yml）已就绪，GitHub 发布仓库与代码签名仍待定。
