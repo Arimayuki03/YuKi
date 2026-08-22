@@ -69,7 +69,7 @@ npm run build:win
 - [改进优化任务清单](IMPROVEMENT_PLAN.md) · 工程化、性能和发布待办
 - [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口）
 
-Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是 YuKi 的开发入口。
+Kazumi Flutter 原版仅作为架构与行为对照的上游参考，不在本仓库内。
 
 ## 许可证
 
