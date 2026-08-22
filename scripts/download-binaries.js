@@ -62,9 +62,8 @@ async function verifyDownload(p, expected, label) {
     log(`${label} sha256 校验通过`);
 }
 
-// shinchiro 构建（mpv 官方推荐的 Windows 发行渠道），从 latest release 动态取 tag
-const MPV_API = 'https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest';
-// aria2 官方 release（Windows 64 位 zip，内含 aria2c.exe）
+// shinchiro 构建（mpv 官方推荐的 Windows 发行渠道）；release 经 lock 锁定，
+// 下载走 releases/download 直链（ghfast.top 镜像在前），API 动态解析仅兜底。
 const ARIA2_API = 'https://api.github.com/repos/aria2/aria2/releases/latest';
 // ffmpeg 官方 essentials 构建（m3u8 合成 + 抓帧，约 90MB；与主进程 ffmpeg.js 同源）
 const FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
@@ -126,16 +125,42 @@ function download(url, dest, { redirects = 0, binary = true } = {}) {
     });
 }
 
-/** 压缩包解压：Windows 10 1803+ 内置 tar 可直接解 7z/zip，其余平台用 7z/unzip。 */
-function extract(archivePath, destDir) {
-    ensureDir(destDir);
+// 解压用 tar 定位：优先 Windows 10 1803+ 内置 bsdtar（libarchive，支持 7z/zip）。
+// PATH 里可能藏着 GNU tar（Git Bash / MSYS 等开发环境）：它不认 7z，还会把
+// "C:\..." 的盘符冒号解析成「主机:文件」远程语法——两者都必须避开。
+const WIN_TAR = (() => {
+    if (!WIN) return 'tar';
+    const sys = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows',
+        'System32', 'tar.exe');
+    return fs.existsSync(sys) ? sys : 'tar';
+})();
+
+/** 压缩包解压：Windows 用内置 bsdtar 解 7z/zip，其余平台用 7z/unzip。
+ * 以 cwd=暂存目录 + 相对文件名调用，避免绝对路径的盘符冒号歧义。 */
+function extract(archiveName, stageDir, destName) {
+    ensureDir(path.join(stageDir, destName));
     if (WIN) {
-        execSync(`tar -xf "${archivePath}" -C "${destDir}"`, { stdio: 'inherit' });
-    } else if (archivePath.endsWith('.7z')) {
-        execSync(`7z x "${archivePath}" -o"${destDir}" -y`, { stdio: 'inherit' });
+        execSync(`"${WIN_TAR}" -xf "${archiveName}" -C "${destName}"`, { cwd: stageDir, stdio: 'inherit' });
+    } else if (archiveName.endsWith('.7z')) {
+        execSync(`7z x "${archiveName}" -o"${destName}" -y`, { cwd: stageDir, stdio: 'inherit' });
     } else {
-        execSync(`unzip -o "${archivePath}" -d "${destDir}"`, { stdio: 'inherit' });
+        execSync(`unzip -o "${archiveName}" -d "${destName}"`, { cwd: stageDir, stdio: 'inherit' });
     }
+}
+
+/** 按候选顺序下载 + sha256 校验；单个候选失败（网络错误/哈希不符）删残档试下一个。 */
+async function fetchVerified(candidates, dest, expectedSha, label) {
+    for (const url of candidates) {
+        try {
+            await download(url, dest);
+            if (expectedSha) await verifyDownload(dest, expectedSha, label);
+            return url;
+        } catch (e) {
+            log(`${label} 候选源失败（${e.message}）：${url}`);
+            try { fs.unlinkSync(dest); } catch (e2) { /* ignore */ }
+        }
+    }
+    return null;
 }
 
 async function downloadMpv(vendorDir) {
@@ -152,27 +177,45 @@ async function downloadMpv(vendorDir) {
     ensureDir(stage);
     const lock = loadLock();
     const pinned = lock && lock.mpv;
+    const repo = 'shinchiro/mpv-winbuild-cmake';
+    const ghProxy = (u) => `https://ghfast.top/${u}`;
 
-    // 1) 取 release：优先 lock 锁定 tag（可复现），无 lock 时退回 latest
-    const api = pinned && pinned.tag
-        ? `https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/tags/${pinned.tag}`
-        : MPV_API;
-    const meta = JSON.parse(await download(api, null, { binary: false }));
-    const tag = meta.tag_name;
-    let asset = (meta.assets || []).find((a) => /^mpv-x86_64-\d+-git-[\da-f]+\.7z$/.test(a.name));
-    if (pinned && pinned.asset) {
-        asset = (meta.assets || []).find((a) => a.name === pinned.asset) || asset;
-    }
-    if (!asset) throw new Error(`no mpv-x86_64 7z asset in release ${tag}`);
-    log(`release ${tag} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
-
-    // 2) 下载、校验、解压
     const archive = path.join(stage, 'yuki-mpv.7z');
-    await download(asset.browser_download_url, archive);
-    if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `mpv ${tag}`);
-    const tmp = path.join(stage, 'yuki-mpv-extract');
-    extract(archive, tmp);
-    const found = findFile(tmp, 'mpv.exe');
+
+    // 1) lock 锁定 tag+asset 时可直构 releases/download URL，无需先过
+    //    api.github.com（目标用户网络下 API 常不可达）；镜像在前、直连在后，
+    //    逐候选 sha256 校验，错误页/残档过不了校验即换下一源。
+    let src = null;
+    if (pinned && pinned.tag && pinned.asset) {
+        const direct = `https://github.com/${repo}/releases/download/${pinned.tag}/${pinned.asset}`;
+        src = await fetchVerified([ghProxy(direct), direct], archive,
+            pinned.sha256, `mpv ${pinned.tag}`);
+    }
+
+    // 2) 直链全败（或未锁版本）→ API 动态解析 latest/锁定 tag 后再试
+    if (!src) {
+        const api = pinned && pinned.tag
+            ? `https://api.github.com/repos/${repo}/releases/tags/${pinned.tag}`
+            : `https://api.github.com/repos/${repo}/releases/latest`;
+        const meta = JSON.parse(await download(api, null, { binary: false }));
+        const tag = meta.tag_name;
+        let asset = (meta.assets || []).find((a) => /^mpv-x86_64-\d+-git-[\da-f]+\.7z$/.test(a.name));
+        if (pinned && pinned.asset) {
+            asset = (meta.assets || []).find((a) => a.name === pinned.asset) || asset;
+        }
+        if (!asset) throw new Error(`no mpv-x86_64 7z asset in release ${tag}`);
+        log(`release ${tag} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
+        src = await fetchVerified(
+            [ghProxy(asset.browser_download_url), asset.browser_download_url],
+            archive, pinned && pinned.sha256, `mpv ${tag}`);
+    }
+    if (!src) throw new Error('mpv 所有下载源（镜像/直连/API）均失败，请检查网络后重试');
+    log(`mpv 压缩包就绪（源：${src}）`);
+
+    // 3) 解压、落位
+    const EXTRACT_DIR = 'yuki-mpv-extract';
+    extract('yuki-mpv.7z', stage, EXTRACT_DIR);
+    const found = findFile(path.join(stage, EXTRACT_DIR), 'mpv.exe');
     if (!found) throw new Error('mpv.exe not found in archive');
     fs.copyFileSync(found, target);
     try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
@@ -218,9 +261,9 @@ async function downloadAria2() {
     const archive = path.join(stage, 'yuki-aria2.zip');
     await download(asset.browser_download_url, archive);
     if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `aria2 ${meta.tag_name}`);
-    const tmp = path.join(stage, 'yuki-aria2-extract');
-    extract(archive, tmp);
-    const found = findFile(tmp, 'aria2c.exe');
+    const EXTRACT_DIR = 'yuki-aria2-extract';
+    extract('yuki-aria2.zip', stage, EXTRACT_DIR);
+    const found = findFile(path.join(stage, EXTRACT_DIR), 'aria2c.exe');
     if (!found) throw new Error('aria2c.exe not found in archive');
     fs.copyFileSync(found, target);
     try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
@@ -268,9 +311,9 @@ async function downloadFfmpeg() {
 
     const archive = path.join(stage, 'yuki-ffmpeg.zip');
     await download(FFMPEG_URL, archive);
-    const tmp = path.join(stage, 'yuki-ffmpeg-extract');
-    extract(archive, tmp);
-    const found = findFile(tmp, 'ffmpeg.exe');
+    const EXTRACT_DIR = 'yuki-ffmpeg-extract';
+    extract('yuki-ffmpeg.zip', stage, EXTRACT_DIR);
+    const found = findFile(path.join(stage, EXTRACT_DIR), 'ffmpeg.exe');
     if (!found) throw new Error('ffmpeg.exe not found in archive');
     fs.copyFileSync(found, target);
     try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }

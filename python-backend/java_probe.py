@@ -8,14 +8,16 @@
 4. PATH 中的 java
 
 探测结果带版本号缓存（进程内），命中即返回；每次探测失败会清缓存，下次再试。
-打包场景（PyInstaller onefile）中 vendor 不在 _MEIPASS 内，由 YUKI_RESOURCES_ROOT 指向
-resources/ 目录；开发模式回退到项目根。
+resources 根经 hoststate.resources_root 解析：主进程注入 YUKI_RESOURCES_ROOT
+（打包=resources/，开发=仓库根）；冻结产物缺注入时按 exe 位置上溯兜底。
 """
 import os
 import re
 import shutil
 import subprocess
 import logging
+
+import hoststate
 
 logger = logging.getLogger('yuki.java')
 
@@ -26,11 +28,8 @@ _JAVA_EXES = ('java.exe', 'java')
 
 
 def _resources_root():
-    """打包后 extraResources 在 resources/（electron-builder 会以 YUKI_RESOURCES_ROOT 注入）。"""
-    env = os.environ.get('YUKI_RESOURCES_ROOT', '')
-    if env and os.path.isdir(env):
-        return env
-    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    """resources 根（含 vendor/）：统一走 hoststate 解析（见模块 docstring）。"""
+    return hoststate.resources_root()
 
 
 def _candidates():

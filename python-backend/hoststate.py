@@ -7,6 +7,7 @@ PC 端统一由本模块提供；server.py 启动时调用 configure() 写入。
 import os
 import shutil
 import hmac
+import sys
 
 _HOME = os.path.join(os.path.expanduser('~'), '.yuki')
 
@@ -128,6 +129,36 @@ def get_proxy_url(local=True):
 def get_pan_fast_path():
     """任务三：网盘快路径开关（True=前置短路；False=jar优先+兜底）。"""
     return _state.get('pan_fast_path', True)
+
+
+def resources_root():
+    """extraResources 根目录（打包后为 resources/；开发模式为仓库根）。
+
+    jar 运行时资产（spider-runner.jar、dex-tools、dexdeps、jre 等）都在
+    resources/vendor/ 下，而 vendor 不打进 PyInstaller 产物——冻结产物里
+    ``__file__`` 位于 _internal/，向上一级是 exe 运行目录（那里没有 vendor），
+    所以路径必须在宿主/Worker 进程里统一解析：
+    1. 主进程注入的 YUKI_RESOURCES_ROOT（python-bridge 启动后端时设置）；
+    2. 冻结产物按 exe 位置上溯找带 vendor/ 的目录（onedir：
+       resources/python-backend/yuki-backend/yuki-backend.exe 上溯 2 级；
+       旧 onefile 平铺 exe 上溯 1 级）；
+    3. 开发模式回退本文件上一级（python-backend/.. = 仓库根）。
+    """
+    env = os.environ.get('YUKI_RESOURCES_ROOT', '').strip()
+    if env and os.path.isdir(env):
+        return env
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        for up in (2, 1):
+            cand = os.path.abspath(os.path.join(exe_dir, *(['..'] * up)))
+            if os.path.isdir(os.path.join(cand, 'vendor')):
+                return cand
+    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+
+def vendor_dir():
+    """vendor/ 目录（spider-runner.jar / dex-tools / jre 等）；不保证存在。"""
+    return os.path.join(resources_root(), 'vendor')
 
 
 def ensure_dirs():

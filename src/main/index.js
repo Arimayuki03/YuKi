@@ -792,6 +792,10 @@ app.whenReady().then(() => {
     // 已带入 Pictures/yuki（否则首播时为 '' → s 键截图落到 cwd，被误判为失效）。
     // update-player-prefs 仍会刷新该值，保持一致。
     mpv.screenshotDir = path.join(app.getPath('pictures'), 'yuki');
+    // mpv 运行日志（--log-file，每次起播覆盖）：--no-terminal 吞掉终端输出后，
+    // 起播失败的唯一可读原因（HTTP 4xx/TLS/超时）只在落盘日志里，退出时回读进
+    // 失败详情并随渲染层提示展示；也可在 设置 → 日志 里直接查看文件。
+    mpv.logFilePath = path.join(LOG_DIR, 'mpv.log');
     writeMpvAssets();
     ipcMain.handle('yuki:update-hotkeys', () => { writeMpvAssets(); return { ok: true }; });
 
@@ -1431,8 +1435,15 @@ app.whenReady().then(() => {
         if (_mpvDownloading) return { ok: false, reason: 'downloading' };
         _mpvDownloading = true;
         send('yuki:mpv-download-state', { downloading: true });
+        let downloadMpv;
         try {
-            const { downloadMpv } = require('../../scripts/download-binaries');
+            ({ downloadMpv } = require('../../scripts/download-binaries'));
+        } catch (e) {
+            // 打包配置（package.json build.files）已随 asar 带上该脚本；此处兜底
+            // 旧安装包/脚本损坏的场景，给出可操作的提示而非模块加载错误。
+            return { ok: false, reason: '下载组件缺失，请更新或重新安装 YuKi' };
+        }
+        try {
             const vendorDir = path.join(app.getPath('userData'), 'vendor');
             const target = await downloadMpv(vendorDir);
             if (!target || !fs.existsSync(target)) return { ok: false, reason: 'download-failed' };

@@ -21,6 +21,7 @@ import socket
 import secrets
 import logging
 import hashlib
+import multiprocessing
 from logging.handlers import RotatingFileHandler
 import re
 import threading
@@ -249,6 +250,29 @@ class _RedactingFormatter(logging.Formatter):
         return redact_sensitive(text, 16000)
 
 
+def _ensure_std_streams():
+    """标准流缺失时兜底成 devnull，禁止任何库因 sys.stdout is None 崩溃。
+
+    PyInstaller --windowed 产物是 GUI 子系统 exe，本身没有控制台；而 Windows 上
+    multiprocessing spawn 的 CreateProcess 传 bInheritHandles=False，子进程也拿不到
+    父进程的管道句柄。两者叠加后 Python 把 sys.stdout/stderr 置为 None，凡是假设
+    标准流存在的代码都会炸——例如 uvicorn 的 ColourizedFormatter 会调
+    sys.stdout.isatty()，最终表现为 ValueError: Unable to configure formatter。
+    """
+    for name, mode in (('stdin', 'r'), ('stdout', 'w'), ('stderr', 'w')):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            stream = open(os.devnull, mode, encoding='utf-8')
+        except OSError:
+            continue
+        setattr(sys, name, stream)
+        # logging.handleError()/traceback 直接取 sys.__stderr__，同样要补
+        dunder = '__%s__' % name
+        if getattr(sys, dunder, None) is None:
+            setattr(sys, dunder, stream)
+
+
 def _setup_logging():
     """控制台 + UTF-8 轮转文件；单文件 5 MiB，保留 5 份。"""
     log_dir = os.environ.get('YUKI_LOG_DIR') or hoststate.get_log_dir()
@@ -258,9 +282,10 @@ def _setup_logging():
     root.handlers.clear()
     # 级别由 Electron 主进程经 YUKI_LOG_LEVEL 注入（设置页“日志级别”），缺省 INFO
     root.setLevel(getattr(logging, os.environ.get('YUKI_LOG_LEVEL', 'INFO').upper(), logging.INFO))
-    console = logging.StreamHandler()
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    if sys.stderr is not None:  # --windowed 构建可能没有标准流
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(formatter)
+        root.addHandler(console)
     rotating = RotatingFileHandler(
         os.path.join(log_dir, 'python-backend.log'),
         maxBytes=5 * 1024 * 1024,
@@ -2370,8 +2395,20 @@ def main():
     if last_cached_url:
         _start_config_restore_async(last_cached_url)
     import uvicorn
-    uvicorn.run(fastapi_app, host='127.0.0.1', port=port, log_level='warning')
+    # log_config=None：跳过 uvicorn 自己的 dictConfig。它的 ColourizedFormatter 用
+    # sys.stdout.isatty() 探测颜色，标准流为 None 时抛 ValueError: Unable to
+    # configure formatter 'default'；跳过后 uvicorn 日志沿 root 传播进上面的脱敏
+    # 轮转文件，打包版才留得下服务器日志。
+    uvicorn.run(fastapi_app, host='127.0.0.1', port=port,
+                log_level='warning', log_config=None)
 
 
 if __name__ == '__main__':
+    # 冻结产物（PyInstaller onefile）里 multiprocessing spawn 靠重新执行本 exe 创建
+    # Worker，必须先让 freeze_support 认领 --multiprocessing-fork 并接管子进程。缺
+    # 这一行时子进程会把 main() 整个再跑一遍（再起一个 uvicorn，并递归拉起更多
+    # Worker），运行时 Worker 永远不上报 booted，于是每个站点都在启动屏障上超时成
+    # L3_RUNTIME_TIMEOUT。
+    _ensure_std_streams()
+    multiprocessing.freeze_support()
     main()

@@ -4,8 +4,8 @@
  * 职责：spawn server.py → 解析 READY 行获得 port/token → 健康检查 →
  * 崩溃后指数退避重启（1s/2s/4s...上限 60s，就绪后重置）。
  *
- * 打包模式（app.isPackaged）：启动 PyInstaller 单文件 exe
- * （extraResources/python-backend/yuki-backend.exe），无 venv 依赖。
+ * 打包模式（app.isPackaged）：启动 PyInstaller onedir 产物
+ * （extraResources/python-backend/yuki-backend/yuki-backend.exe），无 venv 依赖。
  */
 const { app } = require('electron');
 const { spawn, spawnSync } = require('child_process');
@@ -22,10 +22,13 @@ class PythonBridge extends EventEmitter {
         super();
         this.rootDir = rootDir;
         this.resourcesRoot = resourcesRoot || rootDir;
-        // 开发模式：venv python + server.py；打包模式：PyInstaller 单文件 exe
+        // 开发模式：venv python + server.py；打包模式：PyInstaller 产物
         if (app.isPackaged) {
             this.backendDir = path.join(this.resourcesRoot, 'python-backend');
-            this.script = path.join(this.backendDir, 'yuki-backend.exe');
+            // onedir 产物在 yuki-backend/ 子目录（exe + _internal/）；兼容旧 onefile 平铺 exe
+            const onedir = path.join(this.backendDir, 'yuki-backend', 'yuki-backend.exe');
+            const onefile = path.join(this.backendDir, 'yuki-backend.exe');
+            this.script = fs.existsSync(onedir) ? onedir : onefile;
             this._isPackaged = true;
         } else {
             this.backendDir = path.join(this.rootDir, 'python-backend');
@@ -60,7 +63,16 @@ class PythonBridge extends EventEmitter {
         const args = this._isPackaged ? [] : ['-X', 'utf8', this.script];
         const proc = spawn(this._pythonExe(), args, {
             cwd: this.backendDir,
-            env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...this.extraEnv },
+            // YUKI_RESOURCES_ROOT：vendor/（spider-runner.jar、dex-tools、jre 等）
+            // 所在的 resources 根。后端在冻结产物里按 __file__ 拼不出 vendor 路径，
+            // 必须显式告知；开发模式 resourcesRoot 即仓库根，行为一致。
+            env: {
+                ...process.env,
+                PYTHONIOENCODING: 'utf-8',
+                PYTHONUTF8: '1',
+                YUKI_RESOURCES_ROOT: this.resourcesRoot,
+                ...this.extraEnv,
+            },
             windowsHide: true,
         });
         this.proc = proc;

@@ -55,9 +55,9 @@ RESTORE_LOAD_BUDGET = float(os.environ.get('YUKI_RESTORE_LOAD_BUDGET') or 45)
 # 恢复模式的合并阶段上限：主条目建完即可用，附加仓合并（可能撞死镜像）只给零头。
 RESTORE_MERGE_BUDGET = float(os.environ.get('YUKI_RESTORE_MERGE_BUDGET') or 8)
 
-# 内置 JVM runner jar（与 python-backend 同层 vendor/，开发与打包路径均兼容）
-DEFAULT_RUNNER_JAR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'spider-runner.jar')
+# 内置 JVM runner jar（vendor/ 经 hoststate.vendor_dir 解析：开发=仓库根，
+# 打包=resources/vendor——冻结产物里 __file__/.. 指向 exe 目录，拼不出 vendor）
+DEFAULT_RUNNER_JAR = os.path.join(hoststate.vendor_dir(), 'spider-runner.jar')
 
 
 def fetch_text(url, timeout=15):

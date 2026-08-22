@@ -95,6 +95,7 @@ class MpvPlayer extends EventEmitter {
         this._laneCounter = 0;
         this.scriptPath = null;   // 可选 lua 脚本（主进程写入的快捷键提示，见 index.js）
         this.inputConfPath = null; // 可选 input.conf（自定义快捷键步长，见 index.js）
+        this.logFilePath = null;  // 可选 mpv 运行日志（--log-file，主进程指定，见 index.js）
         this.watchLaterDir = null; // 续播位置记录目录（--save-position-on-quit）
         this.defaultSpeed = 1;     // 默认倍速（≠1 时起播注入 --speed）
         this.audioLang = '';       // 音轨语言偏好（非空时注入 --alang）
@@ -229,16 +230,19 @@ class MpvPlayer extends EventEmitter {
             '--title=yuki · ${media-title}',
         ];
         if (WIN) args.push('--osd-font=Microsoft YaHei');
-        if (opts.header && typeof opts.header === 'object') {
-            const pairs = Object.entries(opts.header)
-                .filter(([, v]) => v != null && v !== '')
-                .map(([k, v]) => `${k}: ${v}`).join(', ');
-            if (pairs) args.push(`--http-header-fields=${pairs}`);
-        }
+        const headerFields = MpvPlayer.headerFieldsValue(opts.header);
+        if (headerFields) args.push(`--http-header-fields=${headerFields}`);
         // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
         // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
         if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
         if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
+        // mpv 运行日志落盘（每次启动覆盖）：--no-terminal 会吞掉全部终端输出，
+        // 起播失败时 stderr 为空、用户只能看到无信息量的 'error'；落盘日志让
+        // HTTP 4xx/5xx、TLS、超时等真实原因可以在退出时回读（见 exit 处理）。
+        if (this.logFilePath) {
+            try { fs.mkdirSync(path.dirname(this.logFilePath), { recursive: true }); } catch (e) { /* ignore */ }
+            args.push(`--log-file=${this.logFilePath}`);
+        }
         // 续播：退出时记录位置，同一地址再次起播自动跳转（mpv 按 URL 哈希匹配）；
         // 直播地址（opts.resume===false）不记录，避免下次误跳旧位置
         if (this.watchLaterDir && opts.resume !== false) {
@@ -348,6 +352,15 @@ class MpvPlayer extends EventEmitter {
             this.emit('spawn-error', { sessionId, code: err && err.code, message: err && err.message });
         });
         proc.on('exit', (code) => {
+            // 起播前失败时 stderr 常为空（--no-terminal 吞掉终端输出）；从落盘的
+            // --log-file 取真实原因（HTTP 4xx/5xx、TLS、超时），否则退出信息里只剩
+            // 无信息量的 endReason='error'，渲染层提示无法给出可操作的原因。
+            if (!session.ready && !session.stderr && this.logFilePath) {
+                try {
+                    const logText = fs.readFileSync(this.logFilePath, 'utf8').trim();
+                    if (logText) session.stderr = logText.slice(-4000);
+                } catch (e) { /* 日志缺失时保持原样 */ }
+            }
             // ChildProcess 的 exit 触发时 mpv IPC 通常已经断开；直接使用播放期间持续观察的缓存。
             // 观看时长（墙钟）：从起播到退出的总运行时长（打开播放器后运行了多久），暂停期间也算。
             const wallWatched = Math.max(0, Math.round((Date.now() - session.playStartMs) / 1000));
@@ -725,6 +738,20 @@ class MpvPlayer extends EventEmitter {
         const mode = (rawMode === 4) ? 4 : (rawMode === 5) ? 5 : (rawMode === 6) ? 6 : 1;
         const color = parseInt(parts[2], 10);
         return { time, mode, size: 25, color: isNaN(color) ? 0xFFFFFF : color, content };
+    }
+
+    /** 构造 --http-header-fields 值；无可发头时返回 ''。
+     *  mpv 的该选项是逗号分隔的列表：头值里的逗号（Accept 协商串、含逗号的
+     *  Cookie 等）会被当成头分隔符拆开，拼出畸形请求——实测 CDN 直接回
+     *  HTTP 400，mpv 以 "Errors when loading file" 退出，对应用户看到的
+     *  「解析成功但 mpv 未能开始播放：error」。按 mpv 列表转义语法把值内
+     *  逗号写成 \,，头与头之间仍用逗号分隔。 */
+    static headerFieldsValue(header) {
+        if (!header || typeof header !== 'object') return '';
+        return Object.entries(header)
+            .filter(([, v]) => v != null && v !== '')
+            .map(([k, v]) => `${k}: ${String(v).replace(/,/g, '\\,')}`)
+            .join(', ');
     }
 
     /** 解析 [time,mode,size,color]text；time 缺省 0。mode: 1滚动 4底部 5顶部 6反向滚动 */

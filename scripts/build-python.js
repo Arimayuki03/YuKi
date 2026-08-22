@@ -46,7 +46,10 @@ console.log('[build-python] 清理旧产物…');
 try { fs.rmSync(DIST, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 fs.mkdirSync(DIST, { recursive: true });
 
-// 3. PyInstaller 打包（单文件 exe，不含控制台窗口）
+// 3. PyInstaller 打包（onedir 目录产物，不含控制台窗口）
+// 不用 --onefile：单文件每次启动都要把全部依赖解压到 %TEMP% 再执行，后端冷启动
+// 因此多出数秒（杀软扫描时更久）；onedir 免解压，启动 ~1s。产物布局：
+// python-dist/yuki-backend/yuki-backend.exe + _internal/（依赖与 --add-data 数据）。
 console.log('[build-python] PyInstaller 打包中（约 1-3 分钟）…');
 const distDir = path.join(DIST);
 const workDir = path.join(ROOT, 'python-dist-tmp');
@@ -54,7 +57,6 @@ try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { /* ign
 
 const cmd = [
     `"${VENV_PYTHON}" -m PyInstaller`,
-    '--onefile',
     '--windowed',
     '--name', 'yuki-backend',
     '--distpath', `"${distDir}"`,
@@ -73,7 +75,9 @@ const cmd = [
 
 run(cmd, BACKEND);
 
-// 4. 复制数据文件（PyInstaller --add-data 对 onefile 支持有限，额外手动复制）
+// 4. 复制数据文件到 python-dist 根（extraResources 根 = resources/python-backend，
+// 与 onedir 的 _internal/ 数据并存：_internal 供 BASE_DIR 解析，根副本供
+// cwd 相对路径与人工排查使用）
 console.log('[build-python] 复制数据文件…');
 const dataDirs = ['js-engine', 'spiders', 'base', 'kazumi/assets'];
 for (const dir of dataDirs) {

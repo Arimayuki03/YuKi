@@ -59,6 +59,10 @@ STAGES = [
     ('q7-perf-metrics', [PY, os.path.join(HERE, 'test_q7_perf_metrics.py')]),
     # R8.1 ~ R8.3 功能开关、数据迁移与发布门禁
     ('r8-release-gates', [PY, os.path.join(HERE, 'test_r8_release_gates.py')]),
+    # 打包版入口契约：freeze_support / 标准流兜底 / uvicorn log_config
+    ('frozen-entrypoint', [PY, os.path.join(HERE, 'test_frozen_entrypoint.py')]),
+    # vendor/resources 根解析契约：jar 运行时资产在冻结产物里的定位
+    ('resources-root', [PY, os.path.join(HERE, 'test_resources_root.py')]),
 ]
 
 SKIP_DIRS = {'.venv', '__pycache__', 'tests'}

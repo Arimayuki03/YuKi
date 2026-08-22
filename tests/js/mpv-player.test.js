@@ -323,3 +323,32 @@ test('_screenshotArgs(): 未设目录时不注入任何截图参数', () => {
     p.screenshotDir = '';
     assert.deepEqual(p._screenshotArgs(), []);
 });
+
+// ---------------------------------------------------------------- HTTP 请求头（--http-header-fields 逗号转义）
+
+// mpv 的 --http-header-fields 是逗号分隔列表：值内逗号不转义会被拆成多个头，
+// 拼出畸形请求（实测 CDN 回 400，mpv "Errors when loading file" 退出，
+// 即「解析成功但 mpv 未能开始播放：error」）。
+test('headerFieldsValue(): 多头以逗号+空格连接', () => {
+    assert.equal(
+        MpvPlayer.headerFieldsValue({ 'User-Agent': 'libmpv', Referer: 'https://x/' }),
+        'User-Agent: libmpv, Referer: https://x/');
+});
+
+test('headerFieldsValue(): 值内逗号转义为 \\,（mpv 列表转义语法）', () => {
+    assert.equal(
+        MpvPlayer.headerFieldsValue({ Accept: 'text/html,application/xhtml+xml,xml;q=0.9' }),
+        'Accept: text/html\\,application/xhtml+xml\\,xml;q=0.9');
+    assert.equal(
+        MpvPlayer.headerFieldsValue({ Cookie: 'a=1,b=2' }),
+        'Cookie: a=1\\,b=2');
+});
+
+test('headerFieldsValue(): 空/缺失头被过滤，非法输入返回空串', () => {
+    assert.equal(MpvPlayer.headerFieldsValue({ Referer: '', 'X-B': null, 'X-C': undefined, 'X-D': 'ok' }),
+        'X-D: ok');
+    assert.equal(MpvPlayer.headerFieldsValue(null), '');
+    assert.equal(MpvPlayer.headerFieldsValue(undefined), '');
+    assert.equal(MpvPlayer.headerFieldsValue(' Referer: x'), '');
+    assert.equal(MpvPlayer.headerFieldsValue({}), '');
+});

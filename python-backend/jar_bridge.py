@@ -114,14 +114,15 @@ def _is_md5(s):
     return len(s) == 32 and all(c in '0123456789abcdefABCDEF' for c in s)
 
 
-DEFAULT_RUNNER_JAR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'spider-runner.jar')
+# vendor 资产根：开发模式为仓库根 vendor/，打包模式为 resources/vendor/
+# （经 hoststate.resources_root 解析——冻结产物里 __file__ 在 _internal/ 下，
+# 向上一级是 exe 目录，那里没有 vendor，直接拼路径会全部落空）
+DEFAULT_RUNNER_JAR = os.path.join(hoststate.vendor_dir(), 'spider-runner.jar')
 
 # dex2jar 工具（转换 Android DEX 为 JVM .class）
 DEX2JAR_JAR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar')
-DEXDEPS_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'dexdeps')
+    hoststate.vendor_dir(), 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar')
+DEXDEPS_DIR = os.path.join(hoststate.vendor_dir(), 'dexdeps')
 
 # jar 蜘蛛（夸克/FongMi 系）以自身 cwd 为基准写运行时状态（DuoDuo/.quark 含登录
 # Cookie、FM/、VOX/、TVBox/ 等）。JVM 不设 cwd 会继承后端进程 cwd —— 历史上曾

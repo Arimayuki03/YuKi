@@ -51,7 +51,9 @@
       "!python-backend/__pycache__/**",
       "!python-backend/**/__pycache__/**",
       "!python-backend/**/*.pyc",
-      "!python-backend/tests/**"
+      "!python-backend/tests/**",
+      "scripts/download-binaries.js",
+      "scripts/binaries.lock.json"
     ],
     "win": {
       "target": [
