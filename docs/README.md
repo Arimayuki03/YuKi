@@ -26,12 +26,13 @@
 
 | 文档 | 用途 | 使用建议 |
 |---|---|---|
-| [代码审查报告](../CODE_REVIEW.md) | 安全问题、缺陷和审查基线 | 追溯问题来源 |
-| [代码审查修复任务清单](../CODE_REVIEW_FIX_TASKS.md) | 修复步骤、工作流和验收记录 | 执行或复核修复 |
-| [改进优化任务清单](../IMPROVEMENT_PLAN.md) | 测试、工程化、性能和发布待办 | 规划后续工作 |
-| [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 下一阶段主执行入口 |
-| [TVBox 剩余工作计划](TVBOX_COMPAT_PLAN_REMAINING.md) | 未完成项、验收要求和执行顺序 | 当前继续开发入口 |
-| [兼容性测试仓库清单](../test-repos.md) | 兼容性测试语料和手动测试步骤 | 执行兼容性测试 |
+| [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 当前唯一执行入口 |
+| [归档：代码审查报告](archive/CODE_REVIEW.md) | 历史审查基线 | 按需查阅 |
+| [归档：修复任务清单](archive/CODE_REVIEW_FIX_TASKS.md) | 修复步骤与验收记录 | 按需查阅 |
+| [归档：改进计划](archive/IMPROVEMENT_PLAN.md) | 工程化、性能和发布待办 | 按需查阅 |
+| [归档：兼容性测试仓库清单](archive/test-repos.md) | 兼容性测试语料 | 按需查阅 |
+| [归档：TVBox 合同/探针/矩阵报告](archive/) | FongMi 契约、DRPY/Android 探针、播放/测试矩阵 | 按需查阅 |
+| [ADR 决策记录](adr/) | 架构决策（drpy 运行时、DRM 播放） | 按需查阅 |
 
 ## 文档状态优先级
 
