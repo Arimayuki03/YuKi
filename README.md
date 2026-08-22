@@ -14,9 +14,9 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 
 - CatVod 配置、Python/JavaScript/CMS 爬虫、聚合搜索、详情与播放链路已经完成。
 - Kazumi 规则导入、商店、编辑、测试、搜索、剧集解析和真实视频流提取已经接入。
-- mpv 播放、自动连播、续播、Anime4K、截图、外部播放和 DLNA 已接入；画中画已在 2A 中移除。
+- mpv 播放、自动连播、续播、Anime4K、截图、外部播放已接入；画中画已在 2A 中移除。
 - aria2c 直链下载、ffmpeg HLS 下载、下载记录与系统通知已接入。
-- 收藏、历史、观看统计、Bangumi、WebDAV、SyncPlay 和本地文件管理已接入。
+- 收藏、历史、观看统计、Bangumi、WebDAV 和本地文件管理已接入。
 - Windows 安装包已生成；macOS/Linux 打包、安装后冷启动和自动更新仍待验证或实现。
 - TVBox 兼容性基础能力已接入，但 21 仓全量回归、FongMi 契约审计和分层诊断验收仍在计划中，详见[功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md)（历史记录见 docs/archive/）。
 
