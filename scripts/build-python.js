@@ -32,7 +32,14 @@ console.log('[build-python] 按 requirements-build.txt 校准 PyInstaller…');
 if (!fs.existsSync(BUILD_REQUIREMENTS)) {
     throw new Error(`缺少构建依赖锁文件：${BUILD_REQUIREMENTS}`);
 }
-run(`"${VENV_PIP}" install -r "${BUILD_REQUIREMENTS}"`);
+const pipCmd = fs.existsSync(VENV_PIP) ? `"${VENV_PIP}"` : 'pip';
+try {
+    run(`${pipCmd} install -r "${BUILD_REQUIREMENTS}"`);
+} catch (e) {
+    // venv 不存在时回退到 python -m pip（CI 全新 checkout 场景）
+    console.log(`[build-python] ${pipCmd} 不可用，尝试 python -m pip…`);
+    run(`python -m pip install -r "${BUILD_REQUIREMENTS}"`);
+}
 
 // 2. 清理旧产物
 console.log('[build-python] 清理旧产物…');
