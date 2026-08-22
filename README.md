@@ -1,4 +1,4 @@
-# YuKi（原影视 PC）
+# YuKi
 
 <!-- TODO: GitHub 仓库创建后，将下方徽章中的 OWNER 替换为实际用户名/组织名 -->
 [![CI](https://github.com/OWNER/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/YuKi/actions/workflows/ci.yml)
@@ -69,7 +69,7 @@ npm run build:win
 - [改进优化任务清单](IMPROVEMENT_PLAN.md) · 工程化、性能和发布待办
 - [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口；历史见 docs/archive/）
 
-Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是影视 PC 的开发入口。
+Kazumi Flutter 原版源码与文档位于同级目录 `../Kazumi-main/`，用于架构和行为对照，不是YuKi 的开发入口。
 
 ## 许可证
 

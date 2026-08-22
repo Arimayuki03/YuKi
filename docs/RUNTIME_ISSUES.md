@@ -196,7 +196,7 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **现象**：3 条内置默认规则（7sefun/DM84/enlie，开箱即用规则）连续两轮搜索**全部失败**：
   ```
   [kazumi] search failed: 7sefun: 7sefun returned no search results
-  [DM84] search request failed: 522 Server Error ... https://dmbus.cc/s----------.html?wd=...
+  [DM84] search request failed: 522 Server Error ... https://example.invalid/search
   [enlie] search request failed: HTTPSConnectionPool(host='enlienli.link', port=443): ... SSLEOFError ... EOF occurred in violation of protocol
   ```
 - **影响**：默认装好的 3 条规则搜不到东西，「开箱即用」体验失效；但其他规则（AGE/baimao/fcdm/MXdm 等）搜索正常，非全局故障。
@@ -217,14 +217,14 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 
 - **发现时间**：2026-08-09 13:12 前后（用户点击播放后）
 - **现象**：点击播放后界面持续「加载中」约 2 分钟才出结果（甚至更久），体验即「一直加载中」。
-- **日志原文**（目标地址 `https://v.lzcdn31.com/share/d9fbed9da256e344c1fa46bb46c34c5f`，6 个解析站全部 `ERR_CONNECTION_CLOSED`）：
+- **日志原文**（目标地址 `https://example.invalid/video-share 个解析站全部 `ERR_CONNECTION_CLOSED`）：
   ```
-  (node:32208) electron: Failed to load URL: https://chaxun.truechat365.com/?url=... with error: ERR_CONNECTION_CLOSED
-  (node:32208) electron: Failed to load URL: https://jx.bozrc.com:4433/player/?url=... with error: ERR_CONNECTION_CLOSED
-  (node:32208) electron: Failed to load URL: https://jx.parwix.com:4433/player/?url=... with error: ERR_CONNECTION_CLOSED
-  (node:32208) electron: Failed to load URL: https://jx.parwix.com:4433/player/analysis.php?v=... with error: ERR_CONNECTION_CLOSED
-  (node:32208) electron: Failed to load URL: https://www.m3u8.tv.cdn.8old.cn/jx.php?url=... with error: ERR_CONNECTION_CLOSED
-  (node:32208) electron: Failed to load URL: https://jx.zui.cm/?url=... with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://example.invalid/jx-proxy with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://jx.example.invalid/player with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://jx.example.invalid/player with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://jx.example.invalid/player with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://example.invalid/m3u8-jx with error: ERR_CONNECTION_CLOSED
+  (node:32208) electron: Failed to load URL: https://jx.example.invalid/player with error: ERR_CONNECTION_CLOSED
   ```
 - **触发链路**：CatVod parse=1 源 → 渲染层 `player.js` 走 `window.yuki.resolveParse(url)`（`preload.js:82`）→ `yuki:parse`（`index.js:750`，**无整体超时**）→ `ParseWindow.resolve()`（`parse-window.js:151`）串行遍历 JSON 解析（15s/个）→ iframe 解析（20s/个）。
 - **代码根因**：
@@ -271,7 +271,7 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 ### R10 · 以图搜番失效（trace.moe URL 直传 403）
 
 - **发现时间**：2026-08-10（用户报告，T74）
-- **现象**：以图搜番返回「未识别到番剧」或失败。探测确认：`POST https://api.trace.moe/search?anilistInfo=2&url=...` 返回 **403**（trace.moe 反爬/需它自行抓取，URL 直传被拦）；原始文件上传（`data=bytes` + `Content-Type: image/*` + 浏览器 UA）返回 200。
+- **现象**：以图搜番返回「未识别到番剧」或失败。探测确认：`POST https://example.invalid/trace-moe 返回 **403**（trace.moe 反爬/需它自行抓取，URL 直传被拦）；原始文件上传（`data=bytes` + `Content-Type: image/*` + 浏览器 UA）返回 200。
 - **修复**：后端 URL 搜索改为先下载图片字节再原始上传；`Content-Type` 按文件头自动识别（Kazumi 硬编码 jpeg，PNG 上传会被拒）；补浏览器 UA；失败返回 `error` 字段，前端 toast 真实原因。
 - **状态**：✅ 已验证（真实图片实测：200 + 10 条结果，相似度 0.988）。
 
