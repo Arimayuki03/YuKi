@@ -28,9 +28,12 @@ DuoDuo/
 VOX/
 TV/
 TVBox/
-# 本地工具/编排器配置与运行日志
+# 本地工具/编排器配置与运行日志（Agent 产生，禁止入库与打包）
 .omo/
 .zcode/
+.claude/
+.codegraph/
+.playwright-mcp/
 ha-orchestrator.config*.json
 dsh-ha-orchestrator.*
 analysis-tmp/

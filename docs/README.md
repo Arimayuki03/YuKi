@@ -53,4 +53,4 @@
 ## 不纳入项目文档索引的 Markdown
 
 - `node_modules/`、Python 虚拟环境等依赖目录中的许可证和上游说明。
-- `.omo/`、`.zcode/` 中的一次性侦查和代理工作记录；它们只用于追溯过程，不作为当前事实来源。
+- `.omo/`、`.zcode/`、`.claude/`、`.codegraph/`、`.playwright-mcp/` 等 Agent/编排器产生的目录：一次性侦查、代理工作记录、模型索引、浏览器 MCP 临时文件等；它们只用于追溯过程，不作为当前事实来源，已在 `.gitignore` 中排除，不会上传至 GitHub 或打入安装包（`package.json` `build.files` 未包含）。
