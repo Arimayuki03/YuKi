@@ -14,7 +14,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9338);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9338);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -54,8 +54,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-bf-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-bf-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     // 预置 25 条收藏（pageSizeFavorites 默认 20 → 应出 2 页分页器）
     const favorites = [];
     for (let i = 1; i <= 25; i++) {

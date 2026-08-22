@@ -91,7 +91,7 @@ class SupervisedRunner:
 
     @staticmethod
     def _decode_proxy(result):
-        if not isinstance(result, dict) or not result.get('__vpc_proxy__'):
+        if not isinstance(result, dict) or not result.get('__yuki_proxy__'):
             return result
         headers = {str(key): str(value) for key, value in (result.get('headers') or {}).items()}
         stream = result.get('stream')

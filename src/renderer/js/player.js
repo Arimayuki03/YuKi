@@ -7,7 +7,7 @@
  *   mpv 缺失：<video> 预览兜底（m3u8 等 HLS 直链提示需 mpv）。
  *
  * 自动连播（统一由渲染层驱动，直链/解析源同一套逻辑）：
- *   每次只交 mpv 单集；mpv 播完自然退出（vpc:player-exit 附带进度），
+ *   每次只交 mpv 单集；mpv 播完自然退出（yuki:player-exit 附带进度），
  *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
@@ -81,11 +81,11 @@ const Player = {
         $('#player-external').on('click', () => this._openExternal());
         // mpv 事件：ended 记录「播完」时间戳；exit 附退出进度，驱动连播推进；
         // session 事件：断流重连后同步新会话号，重连集播完仍可继续连播
-        if (window.vpc && window.vpc.onPlayerEnded) {
-            window.vpc.onPlayerEnded((info) => this._onEnded(info));
-            window.vpc.onPlayerExit((info) => this._onExit(info));
-            if (window.vpc.onPlayerSession) {
-                window.vpc.onPlayerSession((info) => this._adoptSession(info));
+        if (window.yuki && window.yuki.onPlayerEnded) {
+            window.yuki.onPlayerEnded((info) => this._onEnded(info));
+            window.yuki.onPlayerExit((info) => this._onExit(info));
+            if (window.yuki.onPlayerSession) {
+                window.yuki.onPlayerSession((info) => this._adoptSession(info));
             }
         }
     },
@@ -174,7 +174,7 @@ const Player = {
         if (!seq) return;
         // 播放途中关掉连播开关则不再推进
         let autoNext = true;
-        try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
+        try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
         if (!autoNext) { this._seq = null; return; }
         // 等待期间用户已手动起播新内容：旧进程的退出不再驱动连播
         if (token !== this._playToken) return;
@@ -229,7 +229,7 @@ const Player = {
     async _writeWatch(info, meta, watched) {
         let s = {};
         try {
-            s = (await window.vpc.settingsGet()) || {};
+            s = (await window.yuki.settingsGet()) || {};
             if (s.watchStatsEnabled === false) return;
         } catch (e) { /* 默认统计 */ }
         const title = meta.title || '未知影片';
@@ -293,7 +293,7 @@ const Player = {
                 stats.bySite[srcKey] = (stats.bySite[srcKey] || 0) + addSeconds;
             }
             // 有实际变化（新计链 或 补了秒数）才写盘
-            if (!alreadyCounted || addSeconds > 0) await window.vpc.settingsSet('watchStats', stats);
+            if (!alreadyCounted || addSeconds > 0) await window.yuki.settingsSet('watchStats', stats);
             // ---- 最近观看（有 vodId 按 site|vodId 去重合并，无则按标题追加展示；进度取链内最新） ----
             const rw = Array.isArray(s.recentWatches) ? s.recentWatches : [];
             const percent = (info.duration > 0) ? Math.min(100, Math.round(bestPos / info.duration * 100)) : 0;
@@ -309,7 +309,7 @@ const Player = {
             if (idx >= 0) rw.splice(idx, 1);
             rw.unshift(entry);
             if (rw.length > 50) rw.length = 50;
-            await window.vpc.settingsSet('recentWatches', rw);
+            await window.yuki.settingsSet('recentWatches', rw);
             // 历史记录：每次真实播放结束更新一次（总集数 + 最近集/时长/时间），由 records.js 持久化
             if (typeof Records !== 'undefined' && Records.recordPlay) {
                 // Kazumi 源无源封面：优先从 Bangumi 缓存取封面，避免历史卡首帧空白
@@ -339,8 +339,8 @@ const Player = {
                 // abandoned main-process parse must also release its hidden
                 // window/slot.  The requestId scopes cancellation to this
                 // play session.
-                if (cancelContext && window.vpc && window.vpc.cancelRuntime) {
-                    Promise.resolve(window.vpc.cancelRuntime(cancelContext)).catch(() => {});
+                if (cancelContext && window.yuki && window.yuki.cancelRuntime) {
+                    Promise.resolve(window.yuki.cancelRuntime(cancelContext)).catch(() => {});
                 }
                 resolve(null);
             }, ms);
@@ -381,7 +381,7 @@ const Player = {
     async _maybeLoadDanmaku(meta) {
         try {
             if (typeof Kazumi === 'undefined' || !Kazumi.loadDanmaku) return;
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (!s.danmakuEnable) return;
             const title = (meta && meta.title) || '';
             if (!title) return;
@@ -417,8 +417,8 @@ const Player = {
         this._currentPlayback = String(site).startsWith('kazumi:') ? null
             : { site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc };
         const previousTrace = this._playContext;
-        if (previousTrace && window.vpc.cancelRuntime) {
-            window.vpc.cancelRuntime(previousTrace).catch(() => {});
+        if (previousTrace && window.yuki.cancelRuntime) {
+            window.yuki.cancelRuntime(previousTrace).catch(() => {});
         }
         if (this._playAbort) this._playAbort.abort();
         const playAbort = new AbortController();
@@ -442,7 +442,7 @@ const Player = {
         this._carryFullscreen = null;
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
-        try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
+        try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
         // 尝试从当前视图取 vodId（详情页连播时记录观看进度）。仅 CatVod 源使用 Detail.vodId：
         // Kazumi 源从弹窗直接起播，Detail.vodId 可能残留上一次 CatVod 详情的 id，须隔离（T4）。
         let vodId = '';
@@ -564,14 +564,14 @@ const Player = {
             updatePlayState('选择解析线路');
             let resolved = null;
             try { resolved = await this._awaitTimeout(
-                window.vpc.resolveParse(url, route.parsers, { ...trace, ...(route.context || {}) }),
+                window.yuki.resolveParse(url, route.parsers, { ...trace, ...(route.context || {}) }),
                 15000, trace); } catch (e) { /* 解析异常 */ }
             if (!(resolved && resolved.ok)) {
                 // captureDirect 兜底：无解析接口时缩短超时，避免用户等太久
                 const fallbackMs = (resolved && resolved.reason === 'no-parses') ? 10000 : 15000;
                 try {
                     const cap = await this._awaitTimeout(
-                        window.vpc.captureDirect(url, false,
+                        window.yuki.captureDirect(url, false,
                             { ...trace, ...(route.context || {}), header: playHeader }), fallbackMs, trace);
                     if (cap && cap.ok) resolved = cap;
                 } catch (e) { /* 抓取异常 */ }
@@ -584,7 +584,7 @@ const Player = {
                     updatePlayState('启动播放器');
                     // playUrl 无内置超时：主进程侧任一子步骤挂起都会让 loading 永转，
                     // 这里统一竞速兜底（mpv 起播上限 30s + 边下边播注册余量）。
-                    const r = await this._awaitTimeout(window.vpc.playUrl(resolved.url, {
+                    const r = await this._awaitTimeout(window.yuki.playUrl(resolved.url, {
                         title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
                         format: data.format, subs: data.subs, position: data.position,
                         skipProbe: !!(data.skipProbe || resolved.probed), source: site, site,
@@ -629,7 +629,7 @@ const Player = {
         try {
             updatePlayState('启动播放器');
             // playUrl 竞速兜底（同上：防主进程侧挂起导致 loading 永转）
-            const r = await this._awaitTimeout(window.vpc.playUrl(url, {
+            const r = await this._awaitTimeout(window.yuki.playUrl(url, {
                 title, subtitle, flag, parse, header: playHeader,
                 speed: carrySpeed, fullscreen: carryFullscreen,
                 format: data.format, subs: data.subs, position: data.position,
@@ -671,7 +671,7 @@ const Player = {
     async _tryFallbackRoute(currentPlayback, reason, trace) {
         if (!currentPlayback || this._fallbackActive) return null;
         let s = {};
-        try { s = (await window.vpc.settingsGet()) || {}; } catch (e) { /* default settings */ }
+        try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { /* default settings */ }
         // R8.1 功能开关 auto_line_fallback（支持 autoLineFallback / autoFallbackRoute）
         if (s.autoLineFallback === false || s.autoFallbackRoute === false) return null;
 
@@ -926,7 +926,7 @@ const Player = {
     /**
      * Kazumi 源播放（kimi UI 设计，glm5.2 实现逻辑）：
      * 1. 调 /kazumi/action do=kazumiResolve 取播放页 URL 与规则 headers
-     * 2. 调 window.vpc.captureDirect 抓真实视频流（隐藏 BrowserWindow 拦截 m3u8/mp4）
+     * 2. 调 window.yuki.captureDirect 抓真实视频流（隐藏 BrowserWindow 拦截 m3u8/mp4）
      * 3. 抓到直链后与规则 headers 合并交 mpv 播放
      * 4. 连播上下文与 CatVod 源共用同一套渲染层驱动机制
      */
@@ -948,12 +948,12 @@ const Player = {
             const header = {};
             if (data.userAgent) header['User-Agent'] = data.userAgent;
             if (data.referer) header['Referer'] = data.referer;
-            const legacyEnabled = (await window.vpc.settingsGet().catch(() => ({})))?.legacyParser !== false;
+            const legacyEnabled = (await window.yuki.settingsGet().catch(() => ({})))?.legacyParser !== false;
             const legacy = legacyEnabled && !!data.useLegacyParser;
             // 步骤 2：captureDirect 抓真实流（主进程隐藏窗口；旧解析器规则走 iframe src 监听）
             try {
                 const cap = await this._awaitTimeout(
-                    window.vpc.captureDirect(pageUrl, legacy, trace), 15000, trace);
+                    window.yuki.captureDirect(pageUrl, legacy, trace), 15000, trace);
                 if (cap && cap.ok) resolved = { url: cap.url, header: { ...header, ...(cap.header || {}) } };
             } catch (e) { /* 抓取异常 */ }
         } catch (e) { /* 解析异常 */ }
@@ -962,7 +962,7 @@ const Player = {
             try {
                 // playUrl 竞速兜底：此处 loading 已隐藏，但 IPC 挂死仍会让调用方
                 // （详情页/连播推进）永久等待，统一 45s 上限。
-                const r = await this._awaitTimeout(window.vpc.playUrl(resolved.url, {
+                const r = await this._awaitTimeout(window.yuki.playUrl(resolved.url, {
                     title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
                     ...trace,
                 }), 45000, trace);
@@ -991,7 +991,7 @@ const Player = {
      *  否则网盘类 parse=1 直链源会一直转圈（外部播放器模式下 launched 返回同样卡死）。 */
     async _playDirect(url, meta) {
         try {
-            const r = await this._awaitTimeout(window.vpc.playUrl(url, meta), 45000,
+            const r = await this._awaitTimeout(window.yuki.playUrl(url, meta), 45000,
                 { requestId: meta.requestId || '', playSessionId: meta.playSessionId || '' });
             if (r && r.ok) {
                 hideLoading();
@@ -1091,7 +1091,7 @@ const Player = {
         if (!url) { warnToast('没有可播放的地址'); return; }
         let r;
         try {
-            r = await window.vpc.externalPlayer(url, { header: this._extHeader || undefined });
+            r = await window.yuki.externalPlayer(url, { header: this._extHeader || undefined });
         } catch (e) { warnToast('调用外部播放器失败'); return; }
         if (r && r.ok) {
             if (r.via === 'system-default') warnToast('已交系统默认程序打开');
@@ -1110,6 +1110,6 @@ const Player = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.player = Player;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.player = Player;
 }(typeof window !== 'undefined' ? window : globalThis));

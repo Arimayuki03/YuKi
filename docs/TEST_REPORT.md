@@ -26,7 +26,7 @@
 | `player-watch.test.js` | 观看统计 sessionId 元信息、未知/重复退出去重、断流重连观看链增量、ended 会话归属、isDone 判定 |
 | `timeline.test.js` | 季度区间 `_seasonRange`、季度标签 `_seasonLabel`、排序 `_sortItems`、收藏过滤 `_applyFilters` |
 | `mpv-player.test.js` | 弹幕行解析、ASS 颜色/时间戳、进度缓存、旧会话 teardown、end-file eof 会话号 |
-| `settings-2a.test.js` | 关于为设置分类、无画中画钩子、MiSans 内置 vpc:font-css、字体栈 MiSans 优先、导航 order（含 1 项既有 `#popular-tags` 失败） |
+| `settings-2a.test.js` | 关于为设置分类、无画中画钩子、MiSans 内置 yuki:font-css、字体栈 MiSans 优先、导航 order（含 1 项既有 `#popular-tags` 失败） |
 | `records.test.js` | 历史按次记录（recordPlay 每播一条独立）、卡片「集名·时长·时间」、收藏/历史卡片、标签模型、fmtDur |
 | `kazumi-init.test.js` | init 单次绑定、不抢跑、`openBangumiInfoPage` 委托统一详情页 |
 | `cover-chain.test.js` | 封面多级兜底 `vodCoverChain`/`coverChainNext`：失败逐级切换、空链占位、加载策略 |
@@ -141,4 +141,4 @@ node scripts/acceptance-2a.js
 node scripts/acceptance-t55.js
 ```
 
-> 验收脚本均读取 `%APPDATA%/video-pc/settings.json` 作为基底复制到临时副本，若真实设置缺失会以全新态运行。CDP 端口默认 9333-9342，可用环境变量 `VPC_CDP_PORT` 覆盖。
+> 验收脚本均读取 `%APPDATA%/yuki/settings.json` 作为基底复制到临时副本，若真实设置缺失会以全新态运行。CDP 端口默认 9333-9342，可用环境变量 `YUKI_CDP_PORT` 覆盖。

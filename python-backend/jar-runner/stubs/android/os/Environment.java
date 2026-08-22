@@ -6,7 +6,7 @@ import java.io.File;
 public class Environment {
     /** 固定可写根目录：FongMi 蜘蛛把 cookie/临时文件写到 <extStorage>/TVBox/ 下。 */
     public static File getExternalStorageDirectory() {
-        return new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-cache");
+        return new File(System.getProperty("user.home"), ".yuki" + File.separator + "jar-cache");
     }
     public static File getDataDirectory() { return new File(System.getProperty("java.io.tmpdir")); }
     public static File getDownloadCacheDirectory() { return new File(System.getProperty("java.io.tmpdir")); }

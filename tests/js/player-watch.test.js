@@ -30,13 +30,13 @@ function loadPlayer(settings, extras = {}) {
         warnToast() {},
         $: jqueryStub,
         window: {
-            vpc: {
+            yuki: {
                 settingsGet: async () => JSON.parse(JSON.stringify(settings)),
                 settingsSet: async (key, value) => { settings[key] = JSON.parse(JSON.stringify(value)); },
             },
         },
     };
-    if (extras.vpc) Object.assign(context.window.vpc, extras.vpc);
+    if (extras.yuki) Object.assign(context.window.yuki, extras.yuki);
     // 注入可选的全局 mock（Records / Kazumi / Detail 等）
     if (extras.Records) context.Records = extras.Records;
     if (extras.Kazumi) context.Kazumi = extras.Kazumi;
@@ -273,7 +273,7 @@ test('_awaitTimeout：解析 IPC 挂起时超时返回 null（loading 不会卡�
 test('_awaitTimeout：解析超时通知主进程取消并携带 requestId', async () => {
     const cancelled = [];
     const player = loadPlayer({}, {
-        vpc: { cancelRuntime: async (context) => { cancelled.push(context); } },
+        yuki: { cancelRuntime: async (context) => { cancelled.push(context); } },
     });
     await player._awaitTimeout(new Promise(() => {}), 20, {
         requestId: 'parse-timeout-0001', playSessionId: 'session-timeout-0001',

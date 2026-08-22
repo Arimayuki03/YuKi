@@ -170,7 +170,7 @@ class GuardUrlTest(unittest.TestCase):
             self.assertEqual(got, url)
 
     def test_strict_mode_blocks_cross_origin_loopback_and_private(self):
-        """严格 SSRF 防护（对应 VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）：
+        """严格 SSRF 防护（对应 YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）：
         公网信任根引用回环/内网仍要被拒——开关是给需要它的部署留的。"""
         policy = _policy(allow_private_network=False)
         trust = SourceTrust.for_source('https://cdn.fixture.invalid/tv.json',
@@ -218,7 +218,7 @@ class GuardUrlTest(unittest.TestCase):
 
 class LocalConfigPathTest(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='vpc-c25-')
+        self.dir = tempfile.mkdtemp(prefix='yuki-c25-')
         self.path = os.path.join(self.dir, 'tv.json')
         with open(self.path, 'w', encoding='utf-8') as handle:
             handle.write('{"sites":[]}')
@@ -358,7 +358,7 @@ class FetchGuardedTest(unittest.TestCase):
 class ArtifactRegistryTest(unittest.TestCase):
     def test_same_url_changed_content_forces_reevaluation(self):
         registry = ArtifactRegistry()
-        directory = tempfile.mkdtemp(prefix='vpc-c25-art-')
+        directory = tempfile.mkdtemp(prefix='yuki-c25-art-')
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, 'spider.jar')
         url = 'https://cdn.fixture.invalid/spider.jar'
@@ -378,7 +378,7 @@ class ArtifactRegistryTest(unittest.TestCase):
     def test_unreadable_artifact_does_not_raise(self):
         registry = ArtifactRegistry()
         got = registry.register('jar', 'https://x.invalid/a.jar',
-                                os.path.join(tempfile.gettempdir(), 'vpc-missing.jar'))
+                                os.path.join(tempfile.gettempdir(), 'yuki-missing.jar'))
         self.assertEqual(got.sha256, '')
         self.assertEqual(got.size, 0)
 

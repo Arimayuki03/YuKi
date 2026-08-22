@@ -184,6 +184,6 @@ const Popular = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.popular = Popular;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.popular = Popular;
 }(typeof window !== 'undefined' ? window : globalThis));

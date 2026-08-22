@@ -42,18 +42,18 @@ from runtime.config_snapshot import (
 from runtime.ext_resolver import ExtCancelled, ExtResolver
 from runtime.config_cache import ConfigRepositoryCache
 
-logger = logging.getLogger('vpc.config')
+logger = logging.getLogger('yuki.config')
 
 # 多仓扫描上限：防止条目过多导致加载时间不可控
 MAX_MULTI_REPO_ENTRIES = 12
 
 # 单次配置加载的总预算（秒）。ext 展开、子仓回退都在这个预算内，
 # 超出后按 L1_CONFIG_TIMEOUT 结束，不无限等待。
-CONFIG_LOAD_BUDGET = float(os.environ.get('VPC_CONFIG_LOAD_BUDGET') or 90)
+CONFIG_LOAD_BUDGET = float(os.environ.get('YUKI_CONFIG_LOAD_BUDGET') or 90)
 # 磁盘缓存恢复预算：恢复要「快」，远小于常规加载预算；预算耗尽保留已建成部分。
-RESTORE_LOAD_BUDGET = float(os.environ.get('VPC_RESTORE_LOAD_BUDGET') or 45)
+RESTORE_LOAD_BUDGET = float(os.environ.get('YUKI_RESTORE_LOAD_BUDGET') or 45)
 # 恢复模式的合并阶段上限：主条目建完即可用，附加仓合并（可能撞死镜像）只给零头。
-RESTORE_MERGE_BUDGET = float(os.environ.get('VPC_RESTORE_MERGE_BUDGET') or 8)
+RESTORE_MERGE_BUDGET = float(os.environ.get('YUKI_RESTORE_MERGE_BUDGET') or 8)
 
 # 内置 JVM runner jar（与 python-backend 同层 vendor/，开发与打包路径均兼容）
 DEFAULT_RUNNER_JAR = os.path.join(
@@ -400,7 +400,7 @@ class ConfigManager:
         """多仓子仓地址：相对路径以多仓配置源 URL 为基址，并过 C2.5 安全边界。
 
         子仓地址来自**远端配置内容**：`guard_url` 会拒掉 `file://`、本地磁盘路径，
-        以及严格模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下跨源的内网/回环地址；
+        以及严格模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）下跨源的内网/回环地址；
         默认策略允许子仓指向局域网 NAS / 本机服务。
         """
         ctx = self._context()

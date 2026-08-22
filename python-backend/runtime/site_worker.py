@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-logger = logging.getLogger('vpc.site_worker')
+logger = logging.getLogger('yuki.site_worker')
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_DIR = os.path.join(BASE_DIR, 'js-engine')
@@ -168,7 +168,7 @@ class SiteRuntimeWorker:
             path = os.path.realpath(str(self.spec.get('path') or ''))
             if not os.path.isfile(path):
                 raise ValueError('python spider file not found')
-            module_name = 'vpc_worker_' + hashlib.sha256(
+            module_name = 'yuki_worker_' + hashlib.sha256(
                 (self.site_key + '|' + path).encode('utf-8')).hexdigest()[:16]
             module_spec = importlib.util.spec_from_file_location(module_name, path)
             if module_spec is None or module_spec.loader is None:
@@ -197,7 +197,7 @@ class SiteRuntimeWorker:
                 raise ValueError('JS spider produced no export')
             spider = make_js_spider_class(self.site_key, engine, self.name)
         elif self.kind == 'jar':
-            os.environ['VPC_WORKER_CONTROL_ONLY'] = '1'
+            os.environ['YUKI_WORKER_CONTROL_ONLY'] = '1'
             from jar_bridge import JarBridge
             from jar_spider import make_jar_spider_class
             bridge = JarBridge.get_or_create(
@@ -296,7 +296,7 @@ class SiteRuntimeWorker:
             )
         raw = body.encode('utf-8') if isinstance(body, str) else body
         return {
-            '__vpc_proxy__': True,
+            '__yuki_proxy__': True,
             'status': int(result.status),
             'mime': str(result.mime),
             'headers': dict(result.headers or {}),

@@ -195,7 +195,7 @@ test('play(): binary=null 时返回 mpv-missing，不 spawn、不抛异常', () 
 
 test('play(): binary 指向不存在的文件时提前拦截为 mpv-missing 并清空 binary', () => {
     const p = Object.create(MpvPlayer.prototype);
-    const ghost = require('path').join(require('os').tmpdir(), 'vpc-no-such-mpv-xyz.exe');
+    const ghost = require('path').join(require('os').tmpdir(), 'yuki-no-such-mpv-xyz.exe');
     try { require('fs').rmSync(ghost, { force: true }); } catch (e) { /* ignore */ }
     p.binary = ghost;
     p.stop = () => {};
@@ -215,7 +215,7 @@ test('isAvailable(): binary 缺失时为 false（渲染层据此走友好提示/
 test('setCustomPath(): 不存在的路径返回 false，不改变现有 binary', () => {
     const p = Object.create(MpvPlayer.prototype);
     p.binary = null;
-    const ok = p.setCustomPath(require('path').join(require('os').tmpdir(), 'vpc-nope-mpv.exe'));
+    const ok = p.setCustomPath(require('path').join(require('os').tmpdir(), 'yuki-nope-mpv.exe'));
     assert.equal(ok, false);
     assert.equal(p.binary, null);
 });
@@ -243,7 +243,7 @@ test('_cacheArgs(): 残留的旧 disk 字段也不得让缓存落盘（防回归
     // 硬盘缓存能力已移除；旧版本的 cacheMode/cacheDir 字段或历史设置键都不应再有任何效力
     const p = Object.create(MpvPlayer.prototype);
     p.cacheMode = 'disk';
-    p.cacheDir = require('path').join(require('os').tmpdir(), 'vpc-legacy-mpv-cache');
+    p.cacheDir = require('path').join(require('os').tmpdir(), 'yuki-legacy-mpv-cache');
     for (const isNet of [true, false]) {
         const a = p._cacheArgs(isNet);
         assert.ok(a.includes('--cache-on-disk=no'));
@@ -296,14 +296,14 @@ function shotTemplateBad(tpl) {
     return '';
 }
 
-test('shotTemplateBad(): 能识别出旧模板 video-pc-%w-%03n 非法（本次 bug 的根因）', () => {
-    assert.equal(shotTemplateBad('video-pc-%w-%03n'), '%w 子格式非法：%w-');
+test('shotTemplateBad(): 能识别出旧模板 yuki-%w-%03n 非法（本次 bug 的根因）', () => {
+    assert.equal(shotTemplateBad('yuki-%w-%03n'), '%w 子格式非法：%w-');
     assert.equal(shotTemplateBad('mpv-shot%n'), '');
     assert.equal(shotTemplateBad('%wH.%wM.%wS-%03n'), '');
 });
 
 test('_screenshotArgs(): 目录/png/合法模板三件套', () => {
-    const dir = require('path').join(require('os').tmpdir(), 'vpc-shot-args-test');
+    const dir = require('path').join(require('os').tmpdir(), 'yuki-shot-args-test');
     const p = Object.create(MpvPlayer.prototype);
     p.screenshotDir = dir;
     const a = p._screenshotArgs();

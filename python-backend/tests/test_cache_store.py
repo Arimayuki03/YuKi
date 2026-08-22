@@ -12,7 +12,7 @@ import unittest
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, 'js-engine'))
-TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+TEST_ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
 os.makedirs(TEST_ROOT, exist_ok=True)
 
 from cache_store import CacheStore  # noqa: E402

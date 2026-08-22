@@ -15,7 +15,7 @@ import logging
 
 from base.spider import Spider
 
-logger = logging.getLogger('vpc.jsspider')
+logger = logging.getLogger('yuki.jsspider')
 
 
 class JsSpider(Spider):

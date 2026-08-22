@@ -501,12 +501,12 @@ public class SpiderRunner {
      * 的登录判定要求 cookie / member_type / nickname 三字段都非空，因此
      * 写入 JSON 格式而非裸 cookie 串；不写文件则蜘蛛永远「未登录」。
      */
-    /** 蜘蛛可写根目录（L-10）：用户主目录下私有路径，替代共享 %TMP%/vpc-jar-cache
+    /** 蜘蛛可写根目录（L-10）：用户主目录下私有路径，替代共享 %TMP%/yuki-jar-cache
      *  （明文 cookie 落共享临时目录可被同机其他用户读取）。与 Context/
      *  Environment stub 的映射保持一致。 */
     static File cacheRoot() {
         return new File(System.getProperty("user.home"),
-                ".video-pc" + File.separator + "jar-cache");
+                ".yuki" + File.separator + "jar-cache");
     }
 
     /** 递归删除缓存目录（shutdown hook 调用）。 */

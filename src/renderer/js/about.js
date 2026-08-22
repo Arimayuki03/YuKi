@@ -2,7 +2,7 @@
  * about.js — 设置 → 关于分类（T46）
  *
  * 展示应用标识、致谢与系统信息（版本 + Electron/Chromium/Node/V8）。
- * 分类进入时渲染（数据来自主进程 vpc:app-info / vpc:app-version）。
+ * 分类进入时渲染（数据来自主进程 yuki:app-info / yuki:app-version）。
  */
 /* global $, escHtml */
 
@@ -21,10 +21,10 @@ const About = {
 
     async render() {
         let info = null;
-        try { info = await window.vpc.appInfo(); } catch (e) { /* ignore */ }
+        try { info = await window.yuki.appInfo(); } catch (e) { /* ignore */ }
         let version = info && info.version;
         if (!version) {
-            try { version = await window.vpc.appVersion(); } catch (e) { /* 使用内置版本兜底 */ }
+            try { version = await window.yuki.appVersion(); } catch (e) { /* 使用内置版本兜底 */ }
         }
         $('#about-version').text(version || '0.1.0');
         if (!info) return;
@@ -42,6 +42,6 @@ const About = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.about = About;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.about = About;
 }(typeof window !== 'undefined' ? window : globalThis));

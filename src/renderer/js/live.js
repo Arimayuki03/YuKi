@@ -58,7 +58,7 @@ const Live = {
             const ch = this.channels[idx];
             if (!ch) return;
             const urls = (ch.urls && ch.urls.length) ? ch.urls : [ch.url];
-            window.vpc.playUrl(urls[0], {
+            window.yuki.playUrl(urls[0], {
                 title: ch.name,
                 subtitle: ch.group && ch.group !== '未分组' ? ch.group : '',
                 source: 'live', // 直播是无限流，主进程据此跳过边下边播
@@ -112,7 +112,7 @@ const Live = {
             this.lives = [];
         }
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             // customLives 兼容旧版纯 URL 字符串与新版 {name,url} 条目（TVBox 配置导入）
             (Array.isArray(s.customLives) ? s.customLives : []).forEach((l) => {
                 if (typeof l === 'string') {
@@ -160,7 +160,7 @@ const Live = {
             let cacheHit = false;
             if (!force && channels.length) {
                 try {
-                    const s = (await window.vpc.settingsGet()) || {};
+                    const s = (await window.yuki.settingsGet()) || {};
                     const c = (s.liveProbeCache || {})[live.url];
                     if (c && Array.isArray(c.dead)) {
                         const dead = {};
@@ -198,7 +198,7 @@ const Live = {
             if (token === this._probeToken) hideLoading();
         }
         // 频道立即渲染完毕，可用性在后台静默分批探测（首次进入/手动刷新；不再占用 loading 遮罩）
-        if (window.vpc && window.vpc.probeUrls) this._probeChannels(token, live.url);
+        if (window.yuki && window.yuki.probeUrls) this._probeChannels(token, live.url);
     },
 
     /** 静默分批探测频道可用性：每批 50 串行 probeUrls，返回后原地过滤并刷新列表。
@@ -216,7 +216,7 @@ const Live = {
             for (let i = 0; i < all.length; i += BATCH) {
                 if (!alive()) return;
                 const batch = all.slice(i, i + BATCH);
-                const results = await window.vpc.probeUrls(batch.map((c) => c.url));
+                const results = await window.yuki.probeUrls(batch.map((c) => c.url));
                 if (!alive()) return; // 探测期间已切源/刷新，丢弃本批
                 results.forEach((ok, j) => { kept[i + j] = !!ok; });
                 this.channels = all.filter((c, k) => kept[k]);
@@ -303,7 +303,7 @@ const Live = {
     /** T35：可用性探测结果写入 settings.liveProbeCache（按源 URL 索引，最多留 20 个源，超出丢最旧）。 */
     async _saveProbeCache(url, all, kept) {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             const cache = s.liveProbeCache || {};
             cache[url] = { ts: Date.now(), dead: all.filter((c, i) => !kept[i]).map((c) => c.url) };
             const keys = Object.keys(cache);
@@ -311,7 +311,7 @@ const Live = {
                 keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
                 delete cache[keys[0]];
             }
-            await window.vpc.settingsSet('liveProbeCache', cache);
+            await window.yuki.settingsSet('liveProbeCache', cache);
         } catch (e) { /* 写缓存失败不影响本次探测结果展示 */ }
     },
 
@@ -409,6 +409,6 @@ const Live = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.live = Live;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.live = Live;
 }(typeof window !== 'undefined' ? window : globalThis));

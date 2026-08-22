@@ -16,7 +16,7 @@ from .process_transport import (
 def worker_main(connection, spec, policy):
     enter_worker_process_group()
     apply_worker_limits(policy)
-    os.environ['VPC_RUNTIME_WORKER'] = '1'
+    os.environ['YUKI_RUNTIME_WORKER'] = '1'
     handler = None
     try:
         # The spawned interpreter must not import or initialize any untrusted

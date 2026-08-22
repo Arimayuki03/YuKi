@@ -22,7 +22,7 @@ function loadHome(sharedStore) {
         setTimeout, clearTimeout, document: {},
         localStorage: ls,
         $: () => ({ on() { return this; }, off() { return this; }, empty() { return this; }, html() {}, val() { return ''; } }),
-        window: { vpc: { settingsGet: async () => ({}), settingsSet: async () => {} }, localStorage: ls },
+        window: { yuki: { settingsGet: async () => ({}), settingsSet: async () => {} }, localStorage: ls },
         escHtml: (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'),
         truncateTitle: (s) => String(s || '').slice(0, 60),
         vodCoverImg: (pic) => `<img src="${pic || ''}">`,
@@ -92,7 +92,7 @@ test('_probeClasses：空/有内容分类正确分类并落盘持久化', async 
     assert.ok(H._okCls.s.has('b'), '有内容分类 b 应被标记为有内容');
     assert.equal(H._clsProbed.s, true, '全部分类确认后标记完成');
     assert.equal(ctx.__rcCalls, 1, '有变化应重渲分类栏');
-    assert.deepEqual(JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes')).s.empty, ['a'], '持久化只含空分类 a');
+    assert.deepEqual(JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes')).s.empty, ['a'], '持久化只含空分类 a');
 });
 
 test('_probeClasses：完整探测过则不再探测（同源只探一次）', async () => {
@@ -142,7 +142,7 @@ test('_probeClasses：中断不丢进度，全部分类仍记录并落盘', asyn
     assert.deepEqual([...H._emptyCls.s].sort(), ['a', 'c'], '中断后 a/c 仍确认空');
     assert.deepEqual([...H._okCls.s].sort(), ['b'], '中断后 b 仍确认有内容');
     assert.equal(H._clsProbed.s, true, '全部分类确认（含中断后）标记完成');
-    assert.deepEqual([...JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes')).s.empty].sort(), ['a', 'c'], '空分类已落盘');
+    assert.deepEqual([...JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes')).s.empty].sort(), ['a', 'c'], '空分类已落盘');
 });
 
 test('_probeClasses：探测期间换源，结果仍记录并落盘，但不重渲（避免覆盖新源栏）', async () => {
@@ -159,7 +159,7 @@ test('_probeClasses：探测期间换源，结果仍记录并落盘，但不重�
     await p1;
     assert.ok(H._emptyCls.s.has('a'), '旧源结果仍按 site 键记录');
     assert.equal(H._clsProbed.s, true, '旧源全部分类确认');
-    assert.deepEqual(JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes')).s.empty, ['a'], '旧源空分类已落盘');
+    assert.deepEqual(JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes')).s.empty, ['a'], '旧源空分类已落盘');
     assert.equal(ctx.__rcCalls || 0, 0, '换源后不重渲当前分类栏');
 });
 
@@ -212,7 +212,7 @@ test('_probeClasses：曾判空分类恢复内容后取消隐藏并更新持久�
     assert.ok(H._okCls.s.has('a'));
     assert.ok(H._emptyCls.s.has('b'), 'b 仍为空');
     assert.equal(ctx.__rcCalls, 1, '取消隐藏需要重渲');
-    assert.deepEqual(JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes')).s.empty, ['b'], '持久化只保留仍空的 b');
+    assert.deepEqual(JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes')).s.empty, ['b'], '持久化只保留仍空的 b');
 });
 
 test('源自动检测关闭：不执行源/分类探测，也不应用历史空分类结果', async () => {
@@ -252,7 +252,7 @@ function probeEnv(doActionImpl) {
     H._renderSiteSelect = () => {};
     H._probeRetryDelayMs = 0; // 轮内二次确认不真等 3s
     const sets = {};
-    ctx.window.vpc.settingsSet = async (k, v) => { sets[k] = v; };
+    ctx.window.yuki.settingsSet = async (k, v) => { sets[k] = v; };
     ctx.doAction = doActionImpl;
     ctx.__sets = sets;
     return ctx;
@@ -262,8 +262,8 @@ function probeEnv(doActionImpl) {
 function statefulEnv(doActionImpl) {
     const ctx = probeEnv(doActionImpl);
     const store = {};
-    ctx.window.vpc.settingsGet = async () => ({ ...store });
-    ctx.window.vpc.settingsSet = async (k, v) => { store[k] = v; };
+    ctx.window.yuki.settingsGet = async () => ({ ...store });
+    ctx.window.yuki.settingsSet = async (k, v) => { store[k] = v; };
     ctx.__store = store;
     return ctx;
 }
@@ -428,9 +428,9 @@ function repoEnv(getJsonImpl, initialStore) {
     const ctx = loadHome();
     const H = home(ctx);
     const store = Object.assign({}, initialStore || {});
-    ctx.window.vpc.settingsGet = async () => ({ ...store });
-    ctx.window.vpc.settingsSet = async (k, v) => { store[k] = v; };
-    H._getSourceSettings = async () => ({ ...(await ctx.window.vpc.settingsGet()) });
+    ctx.window.yuki.settingsGet = async () => ({ ...store });
+    ctx.window.yuki.settingsSet = async (k, v) => { store[k] = v; };
+    H._getSourceSettings = async () => ({ ...(await ctx.window.yuki.settingsGet()) });
     H.setAutoProbeEnabled = () => {}; // 保持默认开启
     H.invalidatePageCaches = () => {};
     H._renderSiteSelect = () => {};
@@ -477,11 +477,11 @@ test('换仓重置：localStorage 空分类缓存一并作废（按 site key 复
         },
     );
     const H = ctx.__Home;
-    ctx.__ls.setItem('vpc_home_empty_classes', JSON.stringify({ zy_1: { ts: Date.now(), empty: ['a'], ok: [] } }));
+    ctx.__ls.setItem('yuki_home_empty_classes', JSON.stringify({ zy_1: { ts: Date.now(), empty: ['a'], ok: [] } }));
     H._loadPersistedEmptyClasses(); // 模拟启动载入旧仓分类结论
     await H.loadSites();
     assert.deepEqual(H._emptyCls.zy_1, undefined, '内存镜像清空');
-    assert.equal(ctx.__ls.getItem('vpc_home_empty_classes'), null, '持久化空分类缓存清除');
+    assert.equal(ctx.__ls.getItem('yuki_home_empty_classes'), null, '持久化空分类缓存清除');
     assert.ok(!H._clsStarted.zy_1 && !H._clsTs.zy_1, '新仓该源重新全量探测分类');
 });
 
@@ -699,7 +699,7 @@ test('_probeAllClasses：后台为多个源补齐分类空态探测并落盘', a
     assert.ok(H._okCls.s1.has('b'), 's1 的 b 判有内容');
     assert.ok(H._emptyCls.s2.has('a'), 's2 的 a 判空');
     assert.ok(H._clsProbed.s1 && H._clsProbed.s2, '两源均标记完成');
-    const persisted = JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes'));
+    const persisted = JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes'));
     assert.ok(persisted.s1.empty.includes('a') && persisted.s2.empty.includes('a'), '两源空分类均落盘');
 });
 
@@ -994,7 +994,7 @@ test('持久化：写入（时间戳 + empty/ok）→ 载入往返，清空后 k
     H._okCls.s = new Set(['ok1']);
     H._emptyCls.other = new Set(['x']);
     H._persistEmptyClasses();
-    const raw = JSON.parse(ctx.__ls.getItem('vpc_home_empty_classes'));
+    const raw = JSON.parse(ctx.__ls.getItem('yuki_home_empty_classes'));
     assert.deepEqual([...raw.s.empty].sort(), ['movie', 'serie']);
     assert.deepEqual([...raw.s.ok], ['ok1']);
     assert.ok(typeof raw.s.ts === 'number', '落盘含时间戳');
@@ -1010,12 +1010,12 @@ test('持久化：写入（时间戳 + empty/ok）→ 载入往返，清空后 k
     assert.ok(H2._clsStarted.s, '新鲜数据标记已开始（首次只探未知）');
     // 清空
     H2._clearPersistedEmptyClasses();
-    assert.equal(ctx2.__ls.getItem('vpc_home_empty_classes'), null, '清空后 key 移除');
+    assert.equal(ctx2.__ls.getItem('yuki_home_empty_classes'), null, '清空后 key 移除');
 });
 
 test('持久化：旧格式 { site: [tids] } 兼容，按过期处理（重新探测）', () => {
     const ctx = loadHome();
-    ctx.__ls.setItem('vpc_home_empty_classes', JSON.stringify({ s: ['movie'] }));
+    ctx.__ls.setItem('yuki_home_empty_classes', JSON.stringify({ s: ['movie'] }));
     const H = home(ctx);
     H._loadPersistedEmptyClasses();
     assert.deepEqual([...H._emptyCls.s], ['movie'], '旧格式空分类仍载入');
@@ -1024,7 +1024,7 @@ test('持久化：旧格式 { site: [tids] } 兼容，按过期处理（重新�
 
 test('持久化：数据新鲜 → 探测只补未知分类，不重复探测已知', async () => {
     const ctx = loadHome();
-    ctx.__ls.setItem('vpc_home_empty_classes', JSON.stringify({
+    ctx.__ls.setItem('yuki_home_empty_classes', JSON.stringify({
         s: { ts: Date.now(), empty: ['a'], ok: ['b'] },
     }));
     const H = home(ctx);
@@ -1041,7 +1041,7 @@ test('持久化：数据新鲜 → 探测只补未知分类，不重复探测已
 
 test('持久化：数据过期 → 探测全量重探（刷新分类状态）', async () => {
     const ctx = loadHome();
-    ctx.__ls.setItem('vpc_home_empty_classes', JSON.stringify({
+    ctx.__ls.setItem('yuki_home_empty_classes', JSON.stringify({
         s: { ts: Date.now() - 2 * 24 * 3600 * 1000, empty: ['a'], ok: ['b'] }, // 48h 前
     }));
     const H = home(ctx);
@@ -1061,7 +1061,7 @@ test('持久化：数据过期 → 探测全量重探（刷新分类状态）', 
 
 test('持久化：损坏数据按空处理（重新探测）', () => {
     const ctx = loadHome();
-    ctx.__ls.setItem('vpc_home_empty_classes', '{not-json');
+    ctx.__ls.setItem('yuki_home_empty_classes', '{not-json');
     const H = home(ctx);
     H._loadPersistedEmptyClasses();
     assert.equal(H._emptyCls.s || undefined, undefined, '损坏数据忽略');
@@ -1206,14 +1206,14 @@ const DEMO_SITE = { key: 'demo', name: '示例源', state: 'healthy', runtime: '
 test('loadSites：/sites 返回 demo 兜底时不写入站点缓存（示例源不是用户内容）', async () => {
     const ctx = sitesEnv(async () => ({ sites: [DEMO_SITE] }));
     await ctx.__Home.loadSites();
-    assert.equal(ctx.__ls.getItem('vpc_cache::home::sites::v1'), null,
+    assert.equal(ctx.__ls.getItem('yuki_cache::home::sites::v1'), null,
         'demo-only 不得写入站点列表缓存');
 });
 
 test('loadSites：真实站点列表正常写缓存，重启可预渲染', async () => {
     const ctx = sitesEnv(async () => ({ sites: [REAL_SITE, DEMO_SITE] }));
     await ctx.__Home.loadSites();
-    assert.notEqual(ctx.__ls.getItem('vpc_cache::home::sites::v1'), null, '真实列表写缓存');
+    assert.notEqual(ctx.__ls.getItem('yuki_cache::home::sites::v1'), null, '真实列表写缓存');
 });
 
 test('loadSites：已有真实站点展示时，demo-only /sites 不把示例源顶上屏', async () => {
@@ -1304,7 +1304,7 @@ test('_fetchHomeFeed：网络失败（失败包络）不把已上屏的缓存内
     H.site = 's';
     H._loadToken = 1;
     // 预置持久化 feed 缓存（冷启动即时上屏源）
-    ctx.__ls.setItem('vpc_cache::home::feed::v1::s',
+    ctx.__ls.setItem('yuki_cache::home::feed::v1::s',
         JSON.stringify({ v: { ts: Date.now(), pagecount: 1, items: makeItems('c-', 5) }, e: Date.now() + 60000, t: Date.now() }));
     H.renderGrid = () => {}; // 不碰 DOM
     H.renderPager = () => {};
@@ -1372,7 +1372,7 @@ test('searchCurrent：失败包络显示「源暂不可用」，不显示「未�
 
 test('_prerenderFromCache：历史脏数据（demo-only 缓存）不预渲染', async () => {
     const ctx = loadHome();
-    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+    ctx.__ls.setItem('yuki_cache::home::sites::v1',
         JSON.stringify({ v: [DEMO_SITE], e: Date.now() + 60000, t: Date.now() }));
     const H = home(ctx);
     H._renderSiteSelect = () => {};
@@ -1380,7 +1380,7 @@ test('_prerenderFromCache：历史脏数据（demo-only 缓存）不预渲染', 
     assert.equal(H._allSites.length, 0, 'demo-only 缓存不预渲染');
     assert.equal(H.hasSiteCache(), false);
     // 真实缓存正常预渲染
-    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+    ctx.__ls.setItem('yuki_cache::home::sites::v1',
         JSON.stringify({ v: [REAL_SITE], e: Date.now() + 60000, t: Date.now() }));
     H._prerenderFromCache();
     assert.deepEqual(H._allSites.map((s) => s.key), ['zy_1'], '真实缓存照常预渲染');
@@ -1393,7 +1393,7 @@ test('_prerenderFromCache：过滤屏蔽源，不自动选中屏蔽源为当前�
     // 启动即对它发请求，恢复窗口期全是 L2_SITE_NOT_FOUND。
     // 屏蔽记录按内容指纹（probeFp）校验后生效：指纹与当前站点内容匹配才继续隐藏。
     const blockedSite = { key: 'blocked_1', name: '已屏蔽源', state: 'healthy', runtime: 'python', api: 'http://b/api.php', spiderType: 'cms0' };
-    ctx.__ls.setItem('vpc_cache::home::sites::v1',
+    ctx.__ls.setItem('yuki_cache::home::sites::v1',
         JSON.stringify({ v: [blockedSite, REAL_SITE], e: Date.now() + 60000, t: Date.now() }));
     const H = home(ctx);
     H._renderSiteSelect = () => {};

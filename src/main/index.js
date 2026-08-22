@@ -3,7 +3,7 @@
  *
  * 生命周期：拉起 Python 后端（python-bridge）→ 创建窗口 → 通过 IPC
  * 向渲染进程提供 backend-info。
- * Phase 4：vpc:play 由 mpv-player 接管（缺失时返回 ok:false 走 HTML5 降级）。
+ * Phase 4：yuki:play 由 mpv-player 接管（缺失时返回 ok:false 走 HTML5 降级）。
  * Phase 5：本地文件管理走 file-manager（白名单根目录 + 防穿越），
  * 本地视频播放复用 mpv-player。
  * Phase 6：下载管理走 downloader（aria2c JSON-RPC），1s 轮询推送进度，
@@ -11,7 +11,7 @@
  * Phase 7：URL 推送（push-server 局域网端口）、设置持久化（settings.js，
  * config URL 自动重载 + 播放偏好）、VIP 解析隐藏窗口（parse-window.js）。
  * UX 批次：弹幕轮询已移除（用户不再需要）；启动自动重载状态经
- * vpc:config-state 提供给渲染层（修复首屏停留示例源需手动刷新）；
+ * yuki:config-state 提供给渲染层（修复首屏停留示例源需手动刷新）；
  * 播放失败只返回失败原因和实际播放地址，不自动切换其它线路。
  */
 const { app, BrowserWindow, ipcMain, dialog, Notification, Tray, nativeImage, shell, session } = require('electron');
@@ -40,6 +40,38 @@ const PanQr = require('./pan-qr');
 const PanQrWindow = require('./pan-qr-window');
 const misans = require('./misans');
 const { setupAutoUpdater } = require('./updater');
+
+// ---- 数据目录迁移（项目改名 video-pc → yuki）----
+// 历史版本：Electron userData=%APPDATA%\video-pc，日志/后端数据=~\.video-pc。
+// 首次以新名启动时整体搬移，设置/历史/收藏/缓存无感延续；
+// 目标目录已存在且非空则不动（避免覆盖新数据），失败不阻断启动。
+function migrateLegacyDataDir(oldDir, newDir) {
+    try {
+        if (!oldDir || !newDir || oldDir === newDir) return;
+        if (!fs.existsSync(oldDir)) return;
+        if (!fs.existsSync(newDir)) {
+            fs.renameSync(oldDir, newDir);
+            console.log('[migrate] legacy data dir moved:', oldDir, '->', newDir);
+            return;
+        }
+        // Electron 启动早期可能预创建空的 userData 目录：清掉空壳再搬
+        if (fs.readdirSync(newDir).length === 0) {
+            fs.rmdirSync(newDir);
+            fs.renameSync(oldDir, newDir);
+            console.log('[migrate] legacy data dir moved:', oldDir, '->', newDir);
+        }
+    } catch (e) {
+        console.warn('[migrate] legacy data dir move failed:', oldDir, e && e.message);
+    }
+}
+try {
+    const ud = app.getPath('userData'); // %APPDATA%\yuki
+    migrateLegacyDataDir(path.join(path.dirname(ud), 'video-pc'), ud);
+} catch (e) { /* userData 不可得时跳过 */ }
+migrateLegacyDataDir(
+    path.join(os.homedir(), '.video-pc'),
+    path.join(os.homedir(), '.yuki'),
+);
 
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -115,7 +147,7 @@ async function downloadAnime4kOne(dest, rel) {
             const res = await fetch(toUrl(rel), {
                 redirect: 'follow',
                 signal: AbortSignal.timeout(12000),
-                headers: { 'User-Agent': 'video-pc/1.0' },
+                headers: { 'User-Agent': 'yuki/1.0' },
             });
             if (!res.ok) continue;
             const buf = Buffer.from(await res.arrayBuffer());
@@ -147,7 +179,7 @@ async function ensureAnime4k() {
 const ROOT = path.join(__dirname, '..', '..');
 // 打包后 extraResources 放在 resources/ 下，vendor 与 python-backend 均从该处读取
 const RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT;
-const LOG_DIR = path.join(os.homedir(), '.video-pc', 'logs');
+const LOG_DIR = path.join(os.homedir(), '.yuki', 'logs');
 installConsoleLogger(LOG_DIR);
 const bridge = new PythonBridge(ROOT, RESOURCES_ROOT, {
     logWriter: new RotatingLogWriter(path.join(LOG_DIR, 'python-console.log')),
@@ -167,7 +199,7 @@ let win = null;
 let tray = null;       // 托盘图标（关闭→缩小至托盘时应用驻留）
 let isQuitting = false; // 真正退出标志（托盘菜单“退出”置位，关窗拦截据此放行）
 let dlTimer = null;
-// 启动自动重载状态：渲染层经 vpc:config-state 轮询，避免首屏停留在示例源
+// 启动自动重载状态：渲染层经 yuki:config-state 轮询，避免首屏停留在示例源
 const configReload = { reloading: false, url: '' };
 // 缓存清理并发锁：clearAppCaches 会做多目录遍历+session.clearCache，禁止并行重复清理。
 let _clearingAppCaches = false;
@@ -305,7 +337,7 @@ function afterPlay() {
 // 返回成功，否则 502/404 会被误报成“已在 mpv 播放”。
 const MPV_START_TIMEOUT_MS = 30000;
 
-// vpc:play 整体兜底上限：正常最慢路径 ≈ 媒体探测 8s + 解析竞速 15s/10s + mpv 起播 30s，
+// yuki:play 整体兜底上限：正常最慢路径 ≈ 媒体探测 8s + 解析竞速 15s/10s + mpv 起播 30s，
 // 90s 远在其上；仅在某个子步骤意外挂死时触发，保证渲染层不会因 IPC 永不返回而一直转圈。
 const PLAY_HANDLER_TIMEOUT_MS = 90000;
 
@@ -461,8 +493,8 @@ function createWindow() {
     win.on('closed', () => { win = null; });
     // 鼠标侧键前进/后退：转发给渲染层做视图导航（Electron 将 XBUTTON1/2 映射为 browser-backward/forward）
     win.on('app-command', (_e, cmd) => {
-        if (cmd === 'browser-backward') send('vpc:mouse-nav', { dir: 'back' });
-        else if (cmd === 'browser-forward') send('vpc:mouse-nav', { dir: 'forward' });
+        if (cmd === 'browser-backward') send('yuki:mouse-nav', { dir: 'back' });
+        else if (cmd === 'browser-forward') send('yuki:mouse-nav', { dir: 'forward' });
     });
 }
 
@@ -534,12 +566,12 @@ function initTray() {
 
 app.whenReady().then(() => {
     ipcMain.handle('backend-info', () => bridge.getInfo());
-    ipcMain.handle('vpc:config-state', () => ({ ...configReload }));
-    ipcMain.handle('vpc:app-version', () => app.getVersion());
+    ipcMain.handle('yuki:config-state', () => ({ ...configReload }));
+    ipcMain.handle('yuki:app-version', () => app.getVersion());
 
     // ---- 夸克网盘扫码登录（官方页面方案，见 pan-qr-window.js）----
     // 打开官方落地页登录窗口，官方 JS 完成全部流程后收割完整 Cookie（含 __puus）。
-    ipcMain.handle('vpc:pan-qr-login', async () => {
+    ipcMain.handle('yuki:pan-qr-login', async () => {
         try {
             const result = await PanQrWindow.openLoginWindow();
             return { ok: true, cookies: result.cookies };
@@ -547,13 +579,13 @@ app.whenReady().then(() => {
             return { ok: false, message: String((e && e.message) || e).slice(0, 200) };
         }
     });
-    ipcMain.handle('vpc:pan-qr-cancel', async () => {
+    ipcMain.handle('yuki:pan-qr-cancel', async () => {
         PanQrWindow.closeLoginWindow();
         return { ok: true };
     });
 
     // 关于页系统信息：应用版本 + 运行环境版本
-    ipcMain.handle('vpc:app-info', () => ({
+    ipcMain.handle('yuki:app-info', () => ({
         version: app.getVersion(),
         platform: process.platform,
         arch: process.arch,
@@ -563,13 +595,13 @@ app.whenReady().then(() => {
         v8: process.versions.v8,
     }));
     // 内置 MiSans 字体 CSS 的 file:// URL（渲染层注入 <link>；打包内置，无运行时下载，T61）
-    ipcMain.handle('vpc:font-css', () => misans.fontCssUrls());
+    ipcMain.handle('yuki:font-css', () => misans.fontCssUrls());
     // 窗口控制（无边框模式下渲染层调用）
-    ipcMain.handle('vpc:win-minimize', () => { if (win) win.minimize(); return { ok: true }; });
-    ipcMain.handle('vpc:win-maximize', () => { if (!win) return { ok: false }; if (win.isMaximized()) win.unmaximize(); else win.maximize(); return { ok: true, maximized: win.isMaximized() }; });
-    ipcMain.handle('vpc:win-close', () => { if (win) win.close(); return { ok: true }; });
+    ipcMain.handle('yuki:win-minimize', () => { if (win) win.minimize(); return { ok: true }; });
+    ipcMain.handle('yuki:win-maximize', () => { if (!win) return { ok: false }; if (win.isMaximized()) win.unmaximize(); else win.maximize(); return { ok: true, maximized: win.isMaximized() }; });
+    ipcMain.handle('yuki:win-close', () => { if (win) win.close(); return { ok: true }; });
     // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
-    ipcMain.handle('vpc:asset-status', () => {
+    ipcMain.handle('yuki:asset-status', () => {
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
         const mpvAvail = mpv.isAvailable();
         const aria2exe = process.platform === 'win32' ? 'aria2c.exe' : 'aria2c';
@@ -606,11 +638,15 @@ app.whenReady().then(() => {
     });
 
     // mpv 起播资产：lua 快捷键提示脚本 + input.conf 自定义步长（设置页可调），
-    // 均写 userData 供 --scripts-append / --input-conf 加载；改步长后经 vpc:update-hotkeys 重写。
+    // 均写 userData 供 --scripts-append / --input-conf 加载；改步长后经 yuki:update-hotkeys 重写。
     // input.conf 合并用户全局键位：--input-conf 会取代 mpv 默认 input.conf 加载（而不是追加），
     // 因此生成文件里保留用户自己的 input.conf 行，且放在应用段之后（mpv 同键后绑定优先 → 用户自定义不被覆盖）。
-    const VPC_CONF_MARK = '# ---- video-pc custom bindings ----';
-    const VPC_CONF_END = '# ---- video-pc custom bindings end ----';
+    const YUKI_CONF_MARK = '# ---- yuki custom bindings ----';
+    const YUKI_CONF_END = '# ---- yuki custom bindings end ----';
+    // 改名前（video-pc 时代）写入用户全局 input.conf 的段标记：
+    // 老用户全局文件里仍是旧标记，读取时一并剔除，避免旧键位残留覆盖用户自定义。
+    const LEGACY_CONF_MARK = '# ---- video-pc custom bindings ----';
+    const LEGACY_CONF_END = '# ---- video-pc custom bindings end ----';
 
     /** 用户全局 mpv input.conf 路径：WIN %APPDATA%\mpv\input.conf；POSIX ~/.config/mpv/input.conf。 */
     function getUserMpvInputConfPath() {
@@ -619,7 +655,7 @@ app.whenReady().then(() => {
             : path.join(os.homedir(), '.config', 'mpv', 'input.conf');
     }
 
-    /** 读用户全局 input.conf 并剔除本应用旧版写入的 video-pc 段，返回用户原始行（写坏不阻断）。 */
+    /** 读用户全局 input.conf 并剔除本应用旧版写入的 yuki 段，返回用户原始行（写坏不阻断）。 */
     function readUserMpvInputConf() {
         try {
             const p = getUserMpvInputConfPath();
@@ -629,8 +665,8 @@ app.whenReady().then(() => {
             let inSection = false;
             for (const ln of lines) {
                 const t = ln.trim();
-                if (t === VPC_CONF_MARK) { inSection = true; continue; }
-                if (t === VPC_CONF_END) { inSection = false; continue; }
+                if (t === YUKI_CONF_MARK || t === LEGACY_CONF_MARK) { inSection = true; continue; }
+                if (t === YUKI_CONF_END || t === LEGACY_CONF_END) { inSection = false; continue; }
                 if (!inSection) out.push(ln);
             }
             return out;
@@ -697,7 +733,7 @@ app.whenReady().then(() => {
                 'end)',
                 '',
             ].join('\n');
-            fs.writeFileSync(path.join(scriptDir, 'vpc-hints.lua'), lua, 'utf8');
+            fs.writeFileSync(path.join(scriptDir, 'yuki-hints.lua'), lua, 'utf8');
             // input.conf：键位取自设置（mpv 语法：add speed 支持小数步长），动作附中文 show-text 反馈。
             // 同键重复只留首个；用户全局 input.conf 已绑定的键不写入应用段，用户行追加在后（同键以用户为准）。
             const userLines = readUserMpvInputConf();
@@ -724,28 +760,28 @@ app.whenReady().then(() => {
                 defaults.push(msg ? `${key} ${cmd}; show-text "${msg}"` : `${key} ${cmd}`);
             }
             const conf = [
-                VPC_CONF_MARK,
+                YUKI_CONF_MARK,
                 ...defaults,
-                VPC_CONF_END,
+                YUKI_CONF_END,
                 '',
                 '# 以下为用户全局 mpv input.conf 的键位（自动合并，请编辑全局文件或此段上方）',
                 ...userLines,
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'input.conf'), conf, 'utf8');
-            mpv.scriptPath = path.join(scriptDir, 'vpc-hints.lua');
+            mpv.scriptPath = path.join(scriptDir, 'yuki-hints.lua');
             mpv.inputConfPath = path.join(scriptDir, 'input.conf');
         } catch (e) { /* 脚本写入失败不影响播放 */ }
     }
     // 截图目录首帧就绪：首次起播前就赋值，保证 writeMpvAssets/首播的 --screenshot-directory
-    // 已带入 Pictures/video-pc（否则首播时为 '' → s 键截图落到 cwd，被误判为失效）。
+    // 已带入 Pictures/yuki（否则首播时为 '' → s 键截图落到 cwd，被误判为失效）。
     // update-player-prefs 仍会刷新该值，保持一致。
-    mpv.screenshotDir = path.join(app.getPath('pictures'), 'video-pc');
+    mpv.screenshotDir = path.join(app.getPath('pictures'), 'yuki');
     writeMpvAssets();
-    ipcMain.handle('vpc:update-hotkeys', () => { writeMpvAssets(); return { ok: true }; });
+    ipcMain.handle('yuki:update-hotkeys', () => { writeMpvAssets(); return { ok: true }; });
 
     // 播放偏好变更（默认倍速 / 记忆位置 / 语言偏好 / Anime4K）：重读设置注入 mpv，下次起播生效
-    ipcMain.handle('vpc:update-player-prefs', () => {
+    ipcMain.handle('yuki:update-player-prefs', () => {
         const sp = parseFloat(settings.get('playerSpeed'));
         mpv.defaultSpeed = (sp && sp > 0) ? Math.max(0.25, Math.min(4, sp)) : 1;
         mpv.watchLaterDir = settings.get('resumePos') !== false
@@ -754,20 +790,20 @@ app.whenReady().then(() => {
         mpv.audioLang = String(settings.get('playerAlang') || '');
         mpv.subLang = String(settings.get('playerSlang') || '');
         mpv.anime4kShaders = anime4kChainFromSettings();
-        mpv.screenshotDir = path.join(app.getPath('pictures'), 'video-pc');
+        mpv.screenshotDir = path.join(app.getPath('pictures'), 'yuki');
         writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示
         return { ok: true };
     });
 
     // 截图：把 mpv 当前帧存为 PNG（快捷键走 input.conf 的 screenshot 命令；此端点供程序化触发）
-    ipcMain.handle('vpc:mpv-screenshot', async () => {
+    ipcMain.handle('yuki:mpv-screenshot', async () => {
         try {
             if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
             if (!mpv.playing) return { ok: false, reason: 'not-playing' };
-            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'video-pc');
+            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'yuki');
             fs.mkdirSync(dir, { recursive: true });
             // 随机后缀避免同毫秒多次触发时文件名冲突覆盖
-            const file = path.join(dir, `video-pc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
+            const file = path.join(dir, `yuki-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
             // 传给 mpv 用 posix 斜杠（Windows 反斜杠可能被 JSON IPC 转义导致失败）；
             // 返回给前端的 path 保留系统路径（供打开目录/通知展示）。
             const filePosix = file.replace(/\\/g, '/');
@@ -784,9 +820,9 @@ app.whenReady().then(() => {
     });
 
     // 打开截图目录（资源管理器）
-    ipcMain.handle('vpc:mpv-screenshot-dir', async () => {
+    ipcMain.handle('yuki:mpv-screenshot-dir', async () => {
         try {
-            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'video-pc');
+            const dir = mpv.screenshotDir || path.join(app.getPath('pictures'), 'yuki');
             fs.mkdirSync(dir, { recursive: true });
             const err = await shell.openPath(dir);
             if (err) return { ok: false, reason: err };
@@ -796,7 +832,7 @@ app.whenReady().then(() => {
 
     // 弹幕装载（方案 A）：渲染层拉到弹弹 play 整集弹幕后一次性推给 mpv，转 ASS 并 sub-reload。
     // 仅播放中有意义；返回装载条数。
-    ipcMain.handle('vpc:load-danmaku', (_e, comments) => {
+    ipcMain.handle('yuki:load-danmaku', (_e, comments) => {
         try {
             if (!mpv.playing) return { ok: false, reason: 'not-playing' };
             const n = mpv.loadDanmakuBatch(comments);
@@ -808,7 +844,7 @@ app.whenReady().then(() => {
     //  a) 已指定外部播放器为主播放器（VLC/PotPlayer/其他）：直接把解析好的首条直链交外部播放器。
     //     （外部播放器拿不到结束事件，故选 A：只交首集、不起自动连播。）
     //  b) 否则内置 mpv 就绪则接管；否则 ok:false 让渲染层 <video> 预览兜底
-    ipcMain.handle('vpc:play', (_e, payload) => {
+    ipcMain.handle('yuki:play', (_e, payload) => {
         // 整体 watchdog（raceWithTimeout）：任何子步骤意外挂起时 90s 后向渲染层返回
         // 失败结果，而不是让调用方永久等待。超时后后台工作若最终完成，其结果被丢弃
         // （渲染层已按失败收尾）；不主动 stop mpv —— 避免误杀用户随后另起的新会话
@@ -816,7 +852,7 @@ app.whenReady().then(() => {
         return raceWithTimeout((async () => {
         let meta = (payload && payload.meta) || {};
         let requestedUrl = String(payload && payload.url || '');
-        // L-1：URL 协议白名单——本地文件播放走 vpc:dl-play / vpc:file-push 专用通道，
+        // L-1：URL 协议白名单——本地文件播放走 yuki:dl-play / yuki:file-push 专用通道，
         // 此处仅放行网络协议，拒绝 file://、edl:// 等可直接触碰本地文件的 scheme
         // （渲染层 playUrl 调用点已确认均为网络直链：站点剧集/直播源/直链播放）
         {
@@ -932,7 +968,7 @@ app.whenReady().then(() => {
                         r.simulDl = true;
                     } else if (dl.isAvailable()) {
                         // 边下边播注册是次要步骤：aria2 引擎/RPC 偶发挂起时不能拖住
-                        // vpc:play 的响应（mpv 已开播、渲染层却在转圈），8s 竞速兜底。
+                        // yuki:play 的响应（mpv 已开播、渲染层却在转圈），8s 竞速兜底。
                         await raceWithTimeout(
                             startDlEngine(dl.dir || settings.get('dlDir') || app.getPath('downloads')), 8000);
                         const opts = { out };
@@ -955,7 +991,7 @@ app.whenReady().then(() => {
     });
 
     // 播放控制（渲染层备用；mpv 窗口自带默认快捷键）
-    ipcMain.handle('vpc:player', (_e, cmd, value) => {
+    ipcMain.handle('yuki:player', (_e, cmd, value) => {
         if (!mpv.playing) return { ok: false };
         const table = {
             pause: () => mpv.setPause(true),
@@ -971,7 +1007,7 @@ app.whenReady().then(() => {
         return Promise.resolve(fn()).then(() => ({ ok: true })).catch((e) => ({ ok: false, reason: e.message }));
     });
 
-    ipcMain.handle('vpc:player-state', () => ({ available: mpv.isAvailable(), playing: mpv.playing }));
+    ipcMain.handle('yuki:player-state', () => ({ available: mpv.isAvailable(), playing: mpv.playing }));
 
     // ---- Phase 5 本地文件管理（白名单根目录 + 防穿越） ----
     const fileIpc = (channel, fn) => ipcMain.handle(channel, async (_e, ...args) => {
@@ -979,9 +1015,9 @@ app.whenReady().then(() => {
         catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    fileIpc('vpc:file-root', () => ({ root: fileMgr.root }));
+    fileIpc('yuki:file-root', () => ({ root: fileMgr.root }));
 
-    ipcMain.handle('vpc:file-pick-root', async () => {
+    ipcMain.handle('yuki:file-pick-root', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择本地文件根目录（白名单）',
             properties: ['openDirectory', 'createDirectory'],
@@ -991,12 +1027,12 @@ app.whenReady().then(() => {
         return { ok: true, root };
     });
 
-    fileIpc('vpc:file-list', (rel) => {
+    fileIpc('yuki:file-list', (rel) => {
         if (!fileMgr.root) return { needRoot: true };
         return fileMgr.list(rel);
     });
 
-    ipcMain.handle('vpc:file-upload', async (_e, rel) => {
+    ipcMain.handle('yuki:file-upload', async (_e, rel) => {
         try {
             const r = await dialog.showOpenDialog(win, {
                 title: '选择要上传的文件',
@@ -1008,12 +1044,12 @@ app.whenReady().then(() => {
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    fileIpc('vpc:file-new-folder', (rel, name) => { fileMgr.newFolder(rel, name); return {}; });
-    fileIpc('vpc:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
-    fileIpc('vpc:file-del-folder', (rel) => { fileMgr.delFolder(rel); return {}; });
+    fileIpc('yuki:file-new-folder', (rel, name) => { fileMgr.newFolder(rel, name); return {}; });
+    fileIpc('yuki:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
+    fileIpc('yuki:file-del-folder', (rel) => { fileMgr.delFolder(rel); return {}; });
 
     // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
-    fileIpc('vpc:file-thumb', async (rel) => {
+    fileIpc('yuki:file-thumb', async (rel) => {
         let abs;
         const inside = (root, target) => {
             if (!root || !target) return false; // 缺 target（误用漏参）返回 false，而非抛 TypeError
@@ -1042,8 +1078,8 @@ app.whenReady().then(() => {
     });
 
     // 本地媒体播放（视频/音频）：相对路径/绝对路径 → 白名单内绝对路径 → 复用 mpv-player
-    fileIpc('vpc:file-push', async (rel) => {
-        // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 vpc:play 行为一致；
+    fileIpc('yuki:file-push', async (rel) => {
+        // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 yuki:play 行为一致；
         // 此时不再依赖内置 mpv（未装内置 mpv 也能用指定播放器起播）
         const extPrimary = primaryExternalPlayer();
         if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
@@ -1126,7 +1162,7 @@ app.whenReady().then(() => {
         if (started.ok) {
             started.sessionId = -Math.abs(started.sessionId);
             afterPlay();
-            send('vpc:push-received', { url, source });
+            send('yuki:push-received', { url, source });
             if (Notification.isSupported()) {
                 new Notification({ title: '推送播放', body: url.slice(0, 80) }).show();
             }
@@ -1134,14 +1170,14 @@ app.whenReady().then(() => {
         return started;
     }
 
-    ipcMain.handle('vpc:push-url', async (_e, url) => {
+    ipcMain.handle('yuki:push-url', async (_e, url) => {
         try { return await playPushedUrl(String(url || '').trim(), '面板'); }
         catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    ipcMain.handle('vpc:push-info', () => pushServer.info());
+    ipcMain.handle('yuki:push-info', () => pushServer.info());
 
-    ipcMain.handle('vpc:parse', async (_e, url) => {
+    ipcMain.handle('yuki:parse', async (_e, url) => {
         const payload = (url && typeof url === 'object') ? url : { url };
         const requestId = String(payload.requestId || '');
         const playSessionId = String(payload.playSessionId || '');
@@ -1190,7 +1226,7 @@ app.whenReady().then(() => {
     });
 
     // 无解析接口（或解析失败）时的兜底：隐藏窗口直开链接抓媒体请求（share 分享页自带播放器）
-    ipcMain.handle('vpc:capture-direct', async (_e, payload) => {
+    ipcMain.handle('yuki:capture-direct', async (_e, payload) => {
         const requestId = String(payload && typeof payload === 'object' ? payload.requestId || '' : '');
         const playSessionId = String(payload && typeof payload === 'object' ? payload.playSessionId || '' : '');
         const trace = { ...(requestId ? { requestId } : {}), ...(playSessionId ? { playSessionId } : {}) };
@@ -1232,7 +1268,7 @@ app.whenReady().then(() => {
                 message: String(err && err.message || '播放地址解析失败').slice(0, 240) }, ...trace }; }
     });
 
-    ipcMain.handle('vpc:runtime-cancel', async (_e, context) => {
+    ipcMain.handle('yuki:runtime-cancel', async (_e, context) => {
         const requestId = String(context && context.requestId || '');
         const abort = requestId && runtimeAborts.get(requestId);
         if (abort) {
@@ -1244,7 +1280,7 @@ app.whenReady().then(() => {
     });
 
     // 验证码源验证（T73）：可见窗口供用户交互，关闭/超时后收割 Cookie 交给后端持久化
-    ipcMain.handle('vpc:captcha-verify', async (_e, url) => {
+    ipcMain.handle('yuki:captcha-verify', async (_e, url) => {
         try {
             const u = String((url && typeof url === 'object') ? url.url || '' : url || '');
             if (!/^https?:\/\//i.test(u)) return { ok: false, reason: 'bad url' };
@@ -1256,10 +1292,10 @@ app.whenReady().then(() => {
         } catch (err) { return { ok: false, reason: err.message }; }
     });
 
-    ipcMain.handle('vpc:settings-get', () => settings.all());
+    ipcMain.handle('yuki:settings-get', () => settings.all());
     // settings-set 键白名单（M-1）：仅放行渲染层实际使用的偏好/数据键，防页面脚本写任意键；
     // 敏感路径键（播放器/缓存/下载目录，可指向本地任意位置）不在此列，只能经
-    // vpc:pick-player / vpc:pick-cache-dir / vpc:dl pickDir 等主进程对话框设置，走 settings-set 一律忽略。
+    // yuki:pick-player / yuki:pick-cache-dir / yuki:dl pickDir 等主进程对话框设置，走 settings-set 一律忽略。
     const SETTINGS_SET_ALLOWED = new Set([
         'anime4k', 'anime4kMode', 'animEnabled', 'autoNext',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
@@ -1277,7 +1313,7 @@ app.whenReady().then(() => {
         'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
         'webDavPassword', 'webDavUrl', 'webDavUsername',
     ]);
-    ipcMain.handle('vpc:settings-set', (_e, key, value) => {
+    ipcMain.handle('yuki:settings-set', (_e, key, value) => {
         const k = String(key);
         if (!SETTINGS_SET_ALLOWED.has(k)) return { value: undefined, ignored: true };
         return { value: settings.set(k, value) };
@@ -1286,7 +1322,7 @@ app.whenReady().then(() => {
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
     // GET 收到任意响应即判活，立即强制销毁连接不拉流，防止后台无限跑流量；3xx 视为可用。
-    ipcMain.handle('vpc:probe-urls', async (_e, urls) => {
+    ipcMain.handle('yuki:probe-urls', async (_e, urls) => {
         if (!Array.isArray(urls) || !urls.length) return [];
         const probeOne = (url) => new Promise((resolve) => {
             const str = String(url);
@@ -1342,7 +1378,7 @@ app.whenReady().then(() => {
     });
 
     // 自定义 mpv 播放器路径：选择本地 mpv.exe 替代内置版本
-    ipcMain.handle('vpc:pick-mpv', async () => {
+    ipcMain.handle('yuki:pick-mpv', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择 mpv 可执行文件',
             filters: [
@@ -1358,13 +1394,13 @@ app.whenReady().then(() => {
         return { ok: true, path: p };
     });
 
-    ipcMain.handle('vpc:clear-mpv-path', () => {
+    ipcMain.handle('yuki:clear-mpv-path', () => {
         settings.set('mpvPath', '');
         mpv.resetBinary();
         return { ok: true, available: mpv.isAvailable() };
     });
 
-    ipcMain.handle('vpc:mpv-path', () => {
+    ipcMain.handle('yuki:mpv-path', () => {
         return { customPath: settings.get('mpvPath') || '', available: mpv.isAvailable() };
     });
 
@@ -1372,14 +1408,14 @@ app.whenReady().then(() => {
     // 下载到 userData/vendor（安装目录 resources/ 常在 Program Files 无写权限），完成后
     // 复用自定义路径机制（setCustomPath + 持久化 mpvPath），下次起播即可用。
     let _mpvDownloading = false;
-    ipcMain.handle('vpc:download-mpv', async () => {
+    ipcMain.handle('yuki:download-mpv', async () => {
         if (process.platform !== 'win32') {
             return { ok: false, reason: '非 Windows 平台请用系统包管理器安装 mpv（brew/apt install mpv）' };
         }
         if (mpv.isAvailable()) return { ok: true, path: mpv.binary, already: true };
         if (_mpvDownloading) return { ok: false, reason: 'downloading' };
         _mpvDownloading = true;
-        send('vpc:mpv-download-state', { downloading: true });
+        send('yuki:mpv-download-state', { downloading: true });
         try {
             const { downloadMpv } = require('../../scripts/download-binaries');
             const vendorDir = path.join(app.getPath('userData'), 'vendor');
@@ -1395,12 +1431,12 @@ app.whenReady().then(() => {
             return { ok: false, reason: err.message || 'download-failed' };
         } finally {
             _mpvDownloading = false;
-            send('vpc:mpv-download-state', { downloading: false });
+            send('yuki:mpv-download-state', { downloading: false });
         }
     });
 
     // 换肤：选择本地图片作壁纸（返回路径，渲染层转 file:// 引用）
-    ipcMain.handle('vpc:pick-wallpaper', async () => {
+    ipcMain.handle('yuki:pick-wallpaper', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择壁纸图片',
             properties: ['openFile'],
@@ -1410,8 +1446,8 @@ app.whenReady().then(() => {
         return { ok: true, path: r.filePaths[0] };
     });
 
-    // 缓存位置自定义：选目录 → 持久化 → 重启后端（VPC_CACHE_DIR 生效）
-    ipcMain.handle('vpc:pick-cache-dir', async (_e, dir) => {
+    // 缓存位置自定义：选目录 → 持久化 → 重启后端（YUKI_CACHE_DIR 生效）
+    ipcMain.handle('yuki:pick-cache-dir', async (_e, dir) => {
         const target = String(dir || '').trim();
         if (!target) {
             const r = await dialog.showOpenDialog(win, {
@@ -1424,14 +1460,14 @@ app.whenReady().then(() => {
         if (target === '__default__') {
             // 恢复默认缓存位置：清除自定义路径，重启后端
             settings.delete('cacheDir');
-            delete bridge.extraEnv.VPC_CACHE_DIR;
+            delete bridge.extraEnv.YUKI_CACHE_DIR;
             bridge.stop();
             bridge.start();
             return { ok: true, path: '__default__' };
         }
         try { fs.mkdirSync(target, { recursive: true }); } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
         settings.set('cacheDir', target);
-        bridge.extraEnv.VPC_CACHE_DIR = target;
+        bridge.extraEnv.YUKI_CACHE_DIR = target;
         bridge.stop();
         bridge.start();
         return { ok: true, path: target };
@@ -1440,7 +1476,7 @@ app.whenReady().then(() => {
     // ---- 通用目录选择 ----
 
     // 通用目录选择对话框（openDirectory + createDirectory，取消返回 cancelled）
-    ipcMain.handle('vpc:pick-folder', async () => {
+    ipcMain.handle('yuki:pick-folder', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择文件夹',
             properties: ['openDirectory', 'createDirectory'],
@@ -1455,7 +1491,7 @@ app.whenReady().then(() => {
     // 单次遍历累加并删除（复用 purgeDir/getDirSize，避免 O(n^2) 二次遍历）；
     // 逐目录 try/catch，占用文件跳过；返回释放字节数与各项明细。
     // 并发锁 _clearingAppCaches：清理进行中再次调用直接返回 busy，避免并行重复 walk。
-    ipcMain.handle('vpc:clear-app-caches', async () => {
+    ipcMain.handle('yuki:clear-app-caches', async () => {
         if (_clearingAppCaches) return { ok: false, reason: 'busy' };
         _clearingAppCaches = true;
         try {
@@ -1498,7 +1534,7 @@ app.whenReady().then(() => {
 
     // 统计主进程侧本地缓存占用（只统计不删）：供前端与后端 bytes 合并分类展示。
     // 单次遍历各目录累加；parse-* 同时叠加 session HTTP 缓存大小（磁盘文件之外的部分）。
-    ipcMain.handle('vpc:cache-size', async () => {
+    ipcMain.handle('yuki:cache-size', async () => {
         try {
             const ud = app.getPath('userData');
             const detail = {};
@@ -1530,7 +1566,7 @@ app.whenReady().then(() => {
     });
 
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
-    ipcMain.handle('vpc:settings-reset', () => {
+    ipcMain.handle('yuki:settings-reset', () => {
         settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
         // M-8：app.exit(0) 不触发 before-quit，复用退出清理序列停掉 mpv/aria2/推送/后端等子进程
         runQuitCleanup();
@@ -1540,7 +1576,7 @@ app.whenReady().then(() => {
         return { ok: true };
     });
     // 代理设置（2.9）：校验 → 写入环境变量（后端 requests 继承）+ Electron session 代理（渲染层图片/请求），并重启后端使生效
-    ipcMain.handle('vpc:set-proxy', async (_e, opts) => {
+    ipcMain.handle('yuki:set-proxy', async (_e, opts) => {
         const raw = String((opts && opts.url) || '').trim();
         const enable = !!(opts && opts.enable);
         // 参数校验（仿 Kazumi：启用前必须通过格式校验，非法地址直接拒绝，不落盘）
@@ -1579,10 +1615,10 @@ app.whenReady().then(() => {
     });
 
     // 夸克网盘 JAR 快路径开关：环境变量在后端进程启动时读取，因此修改后重启后端。
-    ipcMain.handle('vpc:set-pan-fast-path', (_e, enabled) => {
+    ipcMain.handle('yuki:set-pan-fast-path', (_e, enabled) => {
         const fast = !!enabled;
         settings.set('panFastPath', fast);
-        bridge.extraEnv.VPC_PAN_FAST_PATH = fast ? '1' : '0';
+        bridge.extraEnv.YUKI_PAN_FAST_PATH = fast ? '1' : '0';
         try { bridge.stop(); bridge.start(); return { ok: true, enabled: fast }; }
         catch (e) { return { ok: false, reason: e.message }; }
     });
@@ -1593,7 +1629,7 @@ app.whenReady().then(() => {
     //     旧实现用 https.request 且请求行带完整 URL → 实际把 TLS ClientHello 发给代理，
     //     普通 http 代理会直接断开（EPROTO/ECONNRESET），导致 https 测试地址恒失败。
     //   - socks5 代理：RFC1928 握手（无认证）+ CONNECT 隧道，建通即视为连通。
-    ipcMain.handle('vpc:test-proxy', async (_e, opts) => {
+    ipcMain.handle('yuki:test-proxy', async (_e, opts) => {
         const raw = String((opts && opts.proxyUrl) || '').trim();
         const testUrl = String((opts && opts.url) || '').trim() || 'https://www.google.com/generate_204';
         if (!raw) return { ok: false, reason: '请填写代理地址' };
@@ -1759,7 +1795,7 @@ app.whenReady().then(() => {
         });
     });
     // 弹幕凭据：保存弹弹 play AppId/AppSecret，注入后端环境并重启后端生效
-    ipcMain.handle('vpc:set-dandan', async (_e, opts) => {
+    ipcMain.handle('yuki:set-dandan', async (_e, opts) => {
         const appid = String((opts && opts.appid) || '').trim();
         const secret = String((opts && opts.secret) || '').trim();
         settings.set('dandanAppId', appid);
@@ -1827,7 +1863,7 @@ app.whenReady().then(() => {
             try {
                 let items = [];
                 try { items = await Promise.race([dl.listAll(), Promise.resolve([])]); } catch (e) { /* aria2 未就绪 */ }
-                send('vpc:dl-list', buildDlList(items, hls.list()));
+                send('yuki:dl-list', buildDlList(items, hls.list()));
                 persistInProgress(items, hls.list());
             } catch (e) { /* ignore */ }
         })();
@@ -1837,7 +1873,7 @@ app.whenReady().then(() => {
                 let items = [];
                 try { items = await dl.listAll(); } catch (e) { /* 下一轮会重新拉起 aria2c */ }
                 const hlsItems = hls.list();
-                send('vpc:dl-list', buildDlList(items, hlsItems));
+                send('yuki:dl-list', buildDlList(items, hlsItems));
                 // 持久化进行中任务（T81）：每轮尝试，但仅状态变化时才写盘，重启后恢复
                 persistInProgress(items, hlsItems);
                 // 空闲自停（T10 泄漏/功耗审计）：无进行中任务时停掉 1s 轮询，下次 add 时重新拉起
@@ -1862,7 +1898,7 @@ app.whenReady().then(() => {
             parseInt(settings.get('dlSplitConcurrency'), 10) || undefined);
     }
 
-    ipcMain.handle('vpc:dl', async (_e, action, payload = {}) => {
+    ipcMain.handle('yuki:dl', async (_e, action, payload = {}) => {
         try {
             switch (action) {
                 case 'init': {
@@ -1986,7 +2022,7 @@ app.whenReady().then(() => {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     let gids = [];
                     try { gids = (await dl.pauseAll()) || []; } catch (e) { /* 无活跃任务时 aria2 可能返回空，忽略 */ }
-                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
                 }
@@ -2024,7 +2060,7 @@ app.whenReady().then(() => {
                             gids.push(rec.gid);
                         } catch (e) { /* 单个恢复失败不阻塞其余任务 */ }
                     }
-                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
                 }
@@ -2043,7 +2079,7 @@ app.whenReady().then(() => {
                                 });
                                 dlRecords.remove(payload.gid);
                                 startDlPoll();
-                                try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                                try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                                 return { ok: true, gid, resumed: true };
                             } catch (e) {
                                 if (e && e.message === 'ffmpeg-missing' && ffmpegEnsuring()) return { ok: false, reason: 'ffmpeg-downloading' };
@@ -2067,7 +2103,7 @@ app.whenReady().then(() => {
                             dlRecords.remove(payload.gid); // 移除旧 gid 记录，新任务会重新持久化
                             startDlPoll();
                             // 立即推送新列表，避免旧卡消失后新卡延迟 1s 才出现
-                            try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                            try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                             return { ok: true, gid, resumed: true };
                         }
                         return { ok: false, reason: 'task not found and cannot resume' };
@@ -2122,7 +2158,7 @@ app.whenReady().then(() => {
                         try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ }
                     }
                     // 删除后立即推送刷新列表 + 重启轮询（可能有剩余活跃任务）
-                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true };
                 }
@@ -2149,7 +2185,7 @@ app.whenReady().then(() => {
                     n += hls.clearFailed();
                     dlRecords.clearErrors(); // 同步清掉失败记录
                     // 删除后立即推送刷新列表 + 重启轮询
-                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true, n };
                 }
@@ -2169,7 +2205,7 @@ app.whenReady().then(() => {
                     hls.clearStopped();
                     dlRecords.clearFinished(); // 清已结束记录，保留进行中任务（T81：未完成卡片不消失）
                     // 清除后立即推送刷新列表 + 重启轮询
-                    try { send('vpc:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                    try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
                     return { ok: true };
                 }
@@ -2179,7 +2215,7 @@ app.whenReady().then(() => {
     });
 
     // 打开下载目录（不依赖 aria2 状态；未更换过则打开系统默认下载目录）
-    ipcMain.handle('vpc:dl-open-dir', async () => {
+    ipcMain.handle('yuki:dl-open-dir', async () => {
         try {
             const dir = dl.dir || settings.get('dlDir') || app.getPath('downloads');
             const err = await shell.openPath(dir);
@@ -2189,9 +2225,9 @@ app.whenReady().then(() => {
     });
 
     // 下载完成一键播放：直接播本地产出文件（来源为下载任务的 files，均在下载目录内）
-    ipcMain.handle('vpc:dl-play', async (_e, filePath) => {
+    ipcMain.handle('yuki:dl-play', async (_e, filePath) => {
         try {
-            // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 vpc:play 行为一致；
+            // 指定播放器为主播放器（VLC/PotPlayer 等）时优先交它，与 yuki:play 行为一致；
             // 此时不再依赖内置 mpv（未装内置 mpv 也能用指定播放器起播）
             const extPrimary = primaryExternalPlayer();
             if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
@@ -2226,47 +2262,47 @@ app.whenReady().then(() => {
     dl.on('completed', (task) => {
         if (Notification.isSupported()) {
             const n = new Notification({ title: '下载完成', body: task.name || task.gid });
-            n.on('click', () => { if (win) { win.show(); win.focus(); send('vpc:dl-goto', {}); } });
+            n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
         dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
             size: task.total || 0, status: 'complete', completedAt: Date.now() });
-        send('vpc:dl-event', { type: 'completed', task });
+        send('yuki:dl-event', { type: 'completed', task });
     });
     dl.on('error', (task) => {
         dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
             size: task.total || 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
-        send('vpc:dl-event', { type: 'error', task });
+        send('yuki:dl-event', { type: 'error', task });
     });
     // m3u8 合成任务完成/失败：与 aria2 同一套通知链路
     hls.on('completed', (task) => {
         if (Notification.isSupported()) {
             const n = new Notification({ title: '下载完成（m3u8 已合成）', body: task.name });
-            n.on('click', () => { if (win) { win.show(); win.focus(); send('vpc:dl-goto', {}); } });
+            n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
         dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
             size: 0, status: 'complete', completedAt: Date.now() });
-        send('vpc:dl-event', { type: 'completed', task });
+        send('yuki:dl-event', { type: 'completed', task });
     });
     hls.on('error', (task) => {
         dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
             size: 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
-        send('vpc:dl-event', { type: 'error', task });
+        send('yuki:dl-event', { type: 'error', task });
     });
 
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
-    mpv.on('ended', (info) => send('vpc:player-ended', info));
+    mpv.on('ended', (info) => send('yuki:player-ended', info));
     // mpv 进程异步启动失败（ENOENT/EACCES：文件被删/损坏/无权限）：友好告知渲染层，不崩溃、不静默
     mpv.on('spawn-error', (info) => {
-        send('vpc:player-spawn-error', {
+        send('yuki:player-spawn-error', {
             code: (info && info.code) || 'unknown',
             reason: 'mpv-missing',
         });
     });
     mpv.on('exit', (info) => {
         const userStopped = !!(info && info.userStopped);
-        send('vpc:player-exit', {
+        send('yuki:player-exit', {
             pos: (info && typeof info.pos === 'number') ? info.pos : null,
             duration: (info && typeof info.duration === 'number') ? info.duration : null,
             sessionId: (info && typeof info.sessionId === 'number') ? info.sessionId : 0,
@@ -2286,12 +2322,12 @@ app.whenReady().then(() => {
     /** 自动重载收尾：清状态并通知渲染层（ok=是否成功载入站点）。 */
     function finishReload(ok, sites) {
         configReload.reloading = false;
-        send('vpc:config-reloaded', { url: configReload.url, ok: !!ok, sites: sites || 0 });
+        send('yuki:config-reloaded', { url: configReload.url, ok: !!ok, sites: sites || 0 });
     }
 
     bridge.on('ready', (info) => {
         if (win) win.webContents.send('backend-ready', info);
-        // Phase 7：自动重载上次成功加载的配置 URL（状态同步置位，供 vpc:config-state 轮询）
+        // Phase 7：自动重载上次成功加载的配置 URL（状态同步置位，供 yuki:config-state 轮询）
         const lastUrl = settings.get('lastConfigUrl');
         if (lastUrl && /^https?:\/\//i.test(lastUrl)) {
             (async () => {
@@ -2306,7 +2342,7 @@ app.whenReady().then(() => {
                 // 后端的磁盘缓存恢复已改为后台线程（READY 不再等待它）：这里先等
                 // 启动恢复结束再做决策，避免与网络重载并发重复构建全部站点。
                 // 恢复完成（loading→done 且 healthy>0）按一次成功重载收尾，渲染层
-                // 经 vpc:config-reloaded 刷新站点。t=null（端点暂不可达）时继续轮询
+                // 经 yuki:config-reloaded 刷新站点。t=null（端点暂不可达）时继续轮询
                 // 而非放弃——READY 刚打印时 uvicorn 可能尚未完成绑定。
                 const taskUrl = `${info.base}/action?token=${info.token}`;
                 let sawLoading = false;
@@ -2393,20 +2429,20 @@ app.whenReady().then(() => {
     syncDlDir(settings.get('dlDir') || app.getPath('downloads'));
     // 自定义缓存目录：后端 spawn 前注入环境变量（更换目录后重启后端生效）
     const cacheDir = settings.get('cacheDir');
-    if (cacheDir) bridge.extraEnv.VPC_CACHE_DIR = cacheDir;
-    bridge.extraEnv.VPC_LOG_DIR = LOG_DIR;
-    bridge.extraEnv.VPC_PAN_FAST_PATH = settings.get('panFastPath') === false ? '0' : '1';
-    bridge.extraEnv.VPC_MEDIA_PROBE = settings.get('mediaProbe') === false ? '0' : '1';
-    bridge.extraEnv.VPC_AUTO_LINE_FALLBACK = settings.get('autoLineFallback') === false ? '0' : '1';
-    bridge.extraEnv.VPC_LEGACY_PARSER = settings.get('legacyParser') === false ? '0' : '1';
+    if (cacheDir) bridge.extraEnv.YUKI_CACHE_DIR = cacheDir;
+    bridge.extraEnv.YUKI_LOG_DIR = LOG_DIR;
+    bridge.extraEnv.YUKI_PAN_FAST_PATH = settings.get('panFastPath') === false ? '0' : '1';
+    bridge.extraEnv.YUKI_MEDIA_PROBE = settings.get('mediaProbe') === false ? '0' : '1';
+    bridge.extraEnv.YUKI_AUTO_LINE_FALLBACK = settings.get('autoLineFallback') === false ? '0' : '1';
+    bridge.extraEnv.YUKI_LEGACY_PARSER = settings.get('legacyParser') === false ? '0' : '1';
     const lastConfigUrl = settings.get('lastConfigUrl');
     if (lastConfigUrl && /^https?:\/\//i.test(lastConfigUrl)) {
-        bridge.extraEnv.VPC_LAST_CONFIG_URL = lastConfigUrl;
+        bridge.extraEnv.YUKI_LAST_CONFIG_URL = lastConfigUrl;
     }
     // 日志级别 + 定时清空日志：启动时按持久化设置生效（可在设置页调整）
     setLogLevel(settings.get('logLevel'));
     // Python 后端按启动环境变量决定自身日志级别（server.py _setup_logging 读取）
-    bridge.extraEnv.VPC_LOG_LEVEL = require('./logger').getLogLevel();
+    bridge.extraEnv.YUKI_LOG_LEVEL = require('./logger').getLogLevel();
     (function applyScheduledLogCleanup() {
         const enabled = settings.get('logAutoCleanup') === true;
         const days = parseInt(settings.get('logCleanupDays'), 10) || 0;
@@ -2452,13 +2488,13 @@ app.whenReady().then(() => {
             delete process.env.no_proxy;
         }
     } else {
-        // 开关关闭：注入 NO_PROXY 使后端 requests 强制直连（不被系统代理接管），与 vpc:set-proxy 关闭分支一致
+        // 开关关闭：注入 NO_PROXY 使后端 requests 强制直连（不被系统代理接管），与 yuki:set-proxy 关闭分支一致
         process.env.NO_PROXY = '*';
         process.env.no_proxy = '*';
     }
     // ffmpeg 内置：启动后台自动补齐（m3u8 下载合成与本地预览图依赖；缺失时静默降级）
     ensureFfmpeg().catch(() => { });
-    // 内置 MiSans 字体就绪探测（打包内置，无运行时下载；渲染层经 vpc:font-css 注入，T61）
+    // 内置 MiSans 字体就绪探测（打包内置，无运行时下载；渲染层经 yuki:font-css 注入，T61）
     misans.ensureMisans().catch(() => { });
     // Anime4K 超分：启动自动补齐着色器（内置免手动下载）；用户从未设置过开关则默认开启，
     // 已手动关闭过（值 false）保持关闭；文件不全时链为空静默降级
@@ -2475,37 +2511,37 @@ app.whenReady().then(() => {
     initTray();
 
     // SyncPlay 事件转发到渲染层
-    syncplay.on('state', (info) => send('vpc:syncplay-state', info));
-    syncplay.on('chat', (info) => send('vpc:syncplay-chat', info));
-    syncplay.on('file', (info) => send('vpc:syncplay-file', info));
-    syncplay.on('users', (info) => send('vpc:syncplay-users', info));
-    syncplay.on('disconnect', () => send('vpc:syncplay-disconnect', {}));
-    syncplay.on('error', (err) => send('vpc:syncplay-error', { message: String(err.message || err) }));
+    syncplay.on('state', (info) => send('yuki:syncplay-state', info));
+    syncplay.on('chat', (info) => send('yuki:syncplay-chat', info));
+    syncplay.on('file', (info) => send('yuki:syncplay-file', info));
+    syncplay.on('users', (info) => send('yuki:syncplay-users', info));
+    syncplay.on('disconnect', () => send('yuki:syncplay-disconnect', {}));
+    syncplay.on('error', (err) => send('yuki:syncplay-error', { message: String(err.message || err) }));
 
     // DLNA 事件转发
-    dlna.on('devices', (devices) => send('vpc:dlna-devices', devices));
-    dlna.on('error', (err) => send('vpc:dlna-error', { message: String(err.message || err) }));
+    dlna.on('devices', (devices) => send('yuki:dlna-devices', devices));
+    dlna.on('error', (err) => send('yuki:dlna-error', { message: String(err.message || err) }));
 
     // SyncPlay IPC
-    ipcMain.handle('vpc:syncplay-connect', async (_e, opts) => {
+    ipcMain.handle('yuki:syncplay-connect', async (_e, opts) => {
         try {
             await syncplay.connect(opts.server, opts.port, opts.username, opts.room, opts.useTls !== false);
             return { ok: true };
         } catch (e) { return { ok: false, reason: e.message }; }
     });
-    ipcMain.handle('vpc:syncplay-disconnect', () => { syncplay.disconnect(); return { ok: true }; });
-    ipcMain.handle('vpc:syncplay-state', (_e, pos, paused, seek) => { syncplay.sendState(pos, paused, seek); return { ok: true }; });
-    ipcMain.handle('vpc:syncplay-file', (_e, name, duration) => { syncplay.sendFile(name, duration); return { ok: true }; });
-    ipcMain.handle('vpc:syncplay-chat', (_e, msg) => { syncplay.sendChat(msg); return { ok: true }; });
+    ipcMain.handle('yuki:syncplay-disconnect', () => { syncplay.disconnect(); return { ok: true }; });
+    ipcMain.handle('yuki:syncplay-state', (_e, pos, paused, seek) => { syncplay.sendState(pos, paused, seek); return { ok: true }; });
+    ipcMain.handle('yuki:syncplay-file', (_e, name, duration) => { syncplay.sendFile(name, duration); return { ok: true }; });
+    ipcMain.handle('yuki:syncplay-chat', (_e, msg) => { syncplay.sendChat(msg); return { ok: true }; });
 
     // DLNA IPC
-    ipcMain.handle('vpc:dlna-search', async () => {
+    ipcMain.handle('yuki:dlna-search', async () => {
         try { await dlna.search(); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
     });
-    ipcMain.handle('vpc:dlna-cast', async (_e, deviceUrl, mediaUrl, title) => {
+    ipcMain.handle('yuki:dlna-cast', async (_e, deviceUrl, mediaUrl, title) => {
         try { await dlna.cast(deviceUrl, mediaUrl, title); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
     });
-    ipcMain.handle('vpc:dlna-stop', async (_e, deviceUrl) => {
+    ipcMain.handle('yuki:dlna-stop', async (_e, deviceUrl) => {
         try { await dlna.stop(deviceUrl); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
     });
 
@@ -2596,7 +2632,7 @@ app.whenReady().then(() => {
         return externalPlayerKind(p) === 'mpv' ? '' : p;
     }
 
-    ipcMain.handle('vpc:external-player', async (_e, url, opts) => {
+    ipcMain.handle('yuki:external-player', async (_e, url, opts) => {
         const u = String(url || '').trim();
         if (!/^(https?|rtmp|rtsp):\/\//i.test(u)) return { ok: false, reason: 'bad url' };
         const header = (opts && opts.header) || {};
@@ -2618,7 +2654,7 @@ app.whenReady().then(() => {
 
     /** 统一「指定播放器」：选中 mpv → 作为内置引擎（全功能：弹幕/连播/统计）；
      *  选中 VLC/PotPlayer/其他 → 作为主播放器（所有起播直接交它，无弹幕/连播/统计）。 */
-    ipcMain.handle('vpc:pick-player', async () => {
+    ipcMain.handle('yuki:pick-player', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择播放器（mpv 全功能；VLC/PotPlayer 等仅外部播放）',
             filters: [
@@ -2643,7 +2679,7 @@ app.whenReady().then(() => {
     });
 
     /** 当前播放器配置：外部为主则 mode='external'，否则内置 mpv。 */
-    ipcMain.handle('vpc:player-config', () => {
+    ipcMain.handle('yuki:player-config', () => {
         const ext = settings.get('externalPlayerPath') || '';
         if (ext && externalPlayerKind(ext) !== 'mpv') {
             return { mode: 'external', path: ext, kind: externalPlayerKind(ext) };
@@ -2656,7 +2692,7 @@ app.whenReady().then(() => {
     });
 
     /** 恢复默认播放器：清除内置 mpv 自定义路径与外部播放器指定，mpv 回到自动发现。 */
-    ipcMain.handle('vpc:clear-player', () => {
+    ipcMain.handle('yuki:clear-player', () => {
         settings.set('mpvPath', '');
         settings.set('externalPlayerPath', '');
         mpv.resetBinary();
@@ -2665,7 +2701,7 @@ app.whenReady().then(() => {
 
     // ---- 定时关机 ----
     let shutdownTimer = null;
-    ipcMain.handle('vpc:shutdown-timer', (_e, minutes) => {
+    ipcMain.handle('yuki:shutdown-timer', (_e, minutes) => {
         if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
         if (!minutes || minutes <= 0) return { ok: true, msg: '已取消定时关机' };
         shutdownTimer = setTimeout(() => {
@@ -2686,20 +2722,20 @@ app.whenReady().then(() => {
     });
 
     // ---- 日志查看器 ----
-    ipcMain.handle('vpc:get-logs', async (_e, page, pageSize, source) => {
+    ipcMain.handle('yuki:get-logs', async (_e, page, pageSize, source) => {
         return readRecentLogs(LOG_DIR, page, pageSize, source);
     });
     // 清空日志（当前进程日志句柄继续写新文件）
-    ipcMain.handle('vpc:clear-logs', async () => clearLogs(LOG_DIR));
+    ipcMain.handle('yuki:clear-logs', async () => clearLogs(LOG_DIR));
     // 日志级别 + 定时清空日志：设置页变更后实时生效
-    ipcMain.handle('vpc:set-log-level', (_e, level) => {
+    ipcMain.handle('yuki:set-log-level', (_e, level) => {
         setLogLevel(level);
         settings.set('logLevel', String(level || 'INFO').toUpperCase());
         // 同步到后端环境变量：后端下次（重）启动时按当前级别写 python-backend.log
-        bridge.extraEnv.VPC_LOG_LEVEL = require('./logger').getLogLevel();
+        bridge.extraEnv.YUKI_LOG_LEVEL = require('./logger').getLogLevel();
         return { ok: true, level: require('./logger').getLogLevel() };
     });
-    ipcMain.handle('vpc:set-log-cleanup', (_e, opts) => {
+    ipcMain.handle('yuki:set-log-cleanup', (_e, opts) => {
         const enabled = !!(opts && opts.enabled);
         const days = Math.max(0, parseInt(opts && opts.days, 10) || 0);
         settings.set('logAutoCleanup', enabled);
@@ -2713,7 +2749,7 @@ app.whenReady().then(() => {
         return { ok: true, enabled, days };
     });
     // 渲染端错误上报：window.onerror / unhandledrejection 转发进 electron-main.log（redactSecrets 由 writer 负责）
-    ipcMain.handle('vpc:log-renderer', (_e, level, message) => {
+    ipcMain.handle('yuki:log-renderer', (_e, level, message) => {
         // 按真实级别映射 console 方法，级别过滤由 writer.write 统一执行
         const lvl = String(level || 'ERROR').toUpperCase();
         const method = lvl === 'DEBUG' ? 'debug' : lvl === 'INFO' ? 'info' : lvl === 'WARN' ? 'warn' : 'error';
@@ -2722,7 +2758,7 @@ app.whenReady().then(() => {
     });
 
     // ---- 首次引导状态 ----
-    ipcMain.handle('vpc:onboarding-done', () => {
+    ipcMain.handle('yuki:onboarding-done', () => {
         settings.set('onboarded', true);
         return { ok: true };
     });

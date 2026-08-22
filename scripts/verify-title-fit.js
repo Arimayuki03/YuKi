@@ -18,7 +18,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9343);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9343);
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -69,7 +69,7 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-title-fit-'));
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-title-fit-'));
     try {
         fs.writeFileSync(path.join(tmpUserData, 'settings.json'), JSON.stringify({ lastConfigUrl: '', onboarded: true }, null, 2), 'utf8');
     } catch (e) { }

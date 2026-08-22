@@ -10,18 +10,18 @@
 
 async function recGet(key) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         const list = Array.isArray(s[key]) ? s[key] : [];
         // 迁移：历史/收藏记录缺 uid 时按 ts 回填并持久化，保证后续按 uid 匹配稳定
         if ((key === 'history' || key === 'favorites') && ensureRecUids(list)) {
-            try { await window.vpc.settingsSet(key, list); } catch (e) { /* 迁移写盘失败不影响读取 */ }
+            try { await window.yuki.settingsSet(key, list); } catch (e) { /* 迁移写盘失败不影响读取 */ }
         }
         return list;
     } catch (e) { return []; }
 }
 
 async function recSet(key, list) {
-    try { await window.vpc.settingsSet(key, list); } catch (e) { /* 保存失败不影响主流程 */ }
+    try { await window.yuki.settingsSet(key, list); } catch (e) { /* 保存失败不影响主流程 */ }
     // 收藏变更后统一通知订阅者（Kazumi CollectController.loadCollectibles 的集中刷新模式）：
     // 所有消费者（详情页收藏按钮、我的收藏页、时间表）只需订阅一次即可自动刷新，
     // 避免在每个点击处理程序里重复手写缓存失效 + 重渲染。
@@ -172,7 +172,7 @@ const Records = {
         // 收藏状态变动自动同步到 Bangumi（开关默认关）：仅新加入收藏时触发单条上传
         if (added && v.site !== 'bangumi') {
             try {
-                const s = (await window.vpc.settingsGet()) || {};
+                const s = (await window.yuki.settingsGet()) || {};
                 if (s.bangumiAutoSyncStatus === true && typeof Kazumi !== 'undefined' && Kazumi._autoSyncFavItem) {
                     Kazumi._autoSyncFavItem(entry).catch(() => { /* 后台失败不阻塞 UI */ });
                 }
@@ -207,7 +207,7 @@ const Records = {
         // 收藏标签变动自动同步到 Bangumi（开关默认关）：仅标签变化时触发单条上传
         if (v.site !== 'bangumi') {
             try {
-                const s = (await window.vpc.settingsGet()) || {};
+                const s = (await window.yuki.settingsGet()) || {};
                 if (s.bangumiAutoSyncStatus === true && typeof Kazumi !== 'undefined' && Kazumi._autoSyncFavItem) {
                     Kazumi._autoSyncFavItem(it).catch(() => { /* 后台失败不阻塞 UI */ });
                 }
@@ -320,7 +320,7 @@ function recCard(v, editable, withTags, playCountByName) {
 }
 
 // 本地/下载文件历史卡：异步抓帧封面（任务八/11.2）。data-local-path 存本地媒体路径（相对路径或下载文件绝对路径）；
-// 经主进程 vpc:file-thumb（ffmpeg 截帧 -> userData/local-thumbs 缓存）取回帧图，替换 .vod-cover 内占位图。
+// 经主进程 yuki:file-thumb（ffmpeg 截帧 -> userData/local-thumbs 缓存）取回帧图，替换 .vod-cover 内占位图。
 // 成功结果按 path 长期缓存（同会话内重复渲染不重复抓帧）；失败记时间戳，冷却约 30s 后下次渲染重试，
 // 避免 ffmpeg 未就绪/瞬时失败被永久缓存成占位图。成功后会移除 data-cover-missing，
 // 否则 fillMissingCovers 会把本地/下载卡当「缺封面」、用本地路径当 id 调 detailContent 无谓补拉。
@@ -344,7 +344,7 @@ function applyLocalCover(el, rel, url) {
 
 function fillLocalCovers(grid) {
     if (!grid || !grid.length) return;
-    if (!window.vpc || typeof window.vpc.fileThumb !== 'function') return;
+    if (!window.yuki || typeof window.yuki.fileThumb !== 'function') return;
     const now = Date.now();
     grid.find('.vod-cover[data-local-path]').each(function () {
         const el = this;
@@ -356,7 +356,7 @@ function fillLocalCovers(grid) {
         if (failAt && now - failAt < _localCoverRetryMs) return; // 冷却期内不重试
         let p = _localCoverInFlight.get(rel);
         if (!p) {
-            p = window.vpc.fileThumb(rel)
+            p = window.yuki.fileThumb(rel)
                 .then((r) => {
                     if (r && r.ok && r.path) {
                         const u = 'file:///' + String(r.path).replace(/\\/g, '/');
@@ -493,8 +493,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         return;
                     }
                     const site = String(el.data('site') || '');
-                    if (site === 'local' && window.vpc && window.vpc.filePush) {
-                        window.vpc.filePush(String(el.data('id') || '')).then((r) => {
+                    if (site === 'local' && window.yuki && window.yuki.filePush) {
+                        window.yuki.filePush(String(el.data('id') || '')).then((r) => {
                             if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
                             else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
@@ -502,8 +502,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         }).catch(() => warnToast('播放失败'));
                         return;
                     }
-                    if (site === 'download' && window.vpc && window.vpc.download && window.vpc.download.play) {
-                        window.vpc.download.play(String(el.data('id') || '')).then((r) => {
+                    if (site === 'download' && window.yuki && window.yuki.download && window.yuki.download.play) {
+                        window.yuki.download.play(String(el.data('id') || '')).then((r) => {
                             if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
                             else warnToast('播放失败');
@@ -815,8 +815,8 @@ const Favorites = makeRecordView('view-favorites', 'favorites', '暂无收藏。
 const HistoryView = makeRecordView('view-history', 'history', '暂无播放历史。打开影片详情页会自动记录。', true, false, 'pageSizeHistory');
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.records = Records;
-    root.VPC.favorites = Favorites;
-    root.VPC.history = HistoryView;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.records = Records;
+    root.YUKI.favorites = Favorites;
+    root.YUKI.history = HistoryView;
 }(typeof window !== 'undefined' ? window : globalThis));

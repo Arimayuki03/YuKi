@@ -29,7 +29,7 @@ import urllib.request
 
 import requests
 
-logger = logging.getLogger('vpc.goproxy')
+logger = logging.getLogger('yuki.goproxy')
 
 
 # 系统代理解析收编到 http_client（环境变量优先 + WinINET 兜底，全后端唯一实现）

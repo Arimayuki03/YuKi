@@ -1,6 +1,6 @@
 # 运行时问题记录（实时监测）
 
-> 来源：后台运行日志 `video-pc/session-logs/`（2026-08-09 起，实时监测）。
+> 来源：后台运行日志 `yuki/session-logs/`（2026-08-09 起，实时监测）。
 > 本文件只维护运行异常、日志证据、代码修复和复测结果。当前待办汇总见 [../PROGRESS.md](../PROGRESS.md)。
 
 ## 当前结论
@@ -157,8 +157,8 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **日志级别**：WARNING
 - **日志原文**：
   ```
-  [python] 2026-08-09 13:10:04,295 vpc.kazumi.manager WARNING [kazumi] bangumi collections failed: 404 Client Error: Not Found for url: https://api.bangumi.lol/v0/users/-/collections?subject_type=2&limit=100&offset=0
-  [python] 2026-08-09 13:10:04,296 vpc.kazumi.manager WARNING [kazumi] bangumi collections failed: 404 Client Error: Not Found for url: https://api.bangumi.lol/v0/users/-/collections?subject_type=2&limit=100&offset=0
+  [python] 2026-08-09 13:10:04,295 yuki.kazumi.manager WARNING [kazumi] bangumi collections failed: 404 Client Error: Not Found for url: https://api.bangumi.lol/v0/users/-/collections?subject_type=2&limit=100&offset=0
+  [python] 2026-08-09 13:10:04,296 yuki.kazumi.manager WARNING [kazumi] bangumi collections failed: 404 Client Error: Not Found for url: https://api.bangumi.lol/v0/users/-/collections?subject_type=2&limit=100&offset=0
   ```
 - **触发链路**：前端 → `/kazumi/action do=kazumiBangumiCollections` → `PluginManager.bangumi_user_collections()`（`python-backend/kazumi/plugin_manager.py:529`）→ `GET https://api.bangumi.lol/v0/users/-/collections`
 - **证据**：`bangumi_user_collections()` 在无 token 时提前返回 `[]`（`plugin_manager.py:532-533`），出现 404 说明**已配置 bangumiToken**，即真实请求打到镜像返回 404。
@@ -174,7 +174,7 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **日志级别**：WARNING
 - **日志原文**：
   ```
-  [python] 2026-08-09 13:32:05,747 vpc.kazumi.manager WARNING [kazumi] bangumi search failed: 404 Client Error: Not Found for url: https://next.bangumi.lol/p1/search/subjects?limit=5&offset=0&keyword=%E6%9A%97%E9%BB%91%E7%81%AF%E7%81%AB
+  [python] 2026-08-09 13:32:05,747 yuki.kazumi.manager WARNING [kazumi] bangumi search failed: 404 Client Error: Not Found for url: https://next.bangumi.lol/p1/search/subjects?limit=5&offset=0&keyword=%E6%9A%97%E9%BB%91%E7%81%AF%E7%81%AB
   ```
 - **触发链路**：Kazumi 源弹窗/Bangumi 搜索 → `PluginManager.bangumi_search()`（`plugin_manager.py:359`）→ `GET next.bangumi.lol/p1/search/subjects?limit=5&offset=0&keyword=...`
 - **实测确认**（本机 curl）：
@@ -225,11 +225,11 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
   (node:32208) electron: Failed to load URL: https://www.m3u8.tv.cdn.8old.cn/jx.php?url=... with error: ERR_CONNECTION_CLOSED
   (node:32208) electron: Failed to load URL: https://jx.zui.cm/?url=... with error: ERR_CONNECTION_CLOSED
   ```
-- **触发链路**：CatVod parse=1 源 → 渲染层 `player.js` 走 `window.vpc.resolveParse(url)`（`preload.js:82`）→ `vpc:parse`（`index.js:750`，**无整体超时**）→ `ParseWindow.resolve()`（`parse-window.js:151`）串行遍历 JSON 解析（15s/个）→ iframe 解析（20s/个）。
+- **触发链路**：CatVod parse=1 源 → 渲染层 `player.js` 走 `window.yuki.resolveParse(url)`（`preload.js:82`）→ `yuki:parse`（`index.js:750`，**无整体超时**）→ `ParseWindow.resolve()`（`parse-window.js:151`）串行遍历 JSON 解析（15s/个）→ iframe 解析（20s/个）。
 - **代码根因**：
   1. `parse-window.js _capture()`（213-316 行）**未监听 `did-fail-load`**。解析窗口 `loadURL` 失败（ERR_CONNECTION_CLOSED）时，`did-finish-load` 不触发，只能干等 20s `IFRAME_TIMEOUT`（23 行）超时后才 `finish(null)` 跳到下一个解析站。
   2. `resolve()`（165-168 行）串行尝试全部 iframe 解析，死站越多累计越久：6 个 ≈ 120s+，加上可能先试的 JSON 解析，总等待超 2 分钟。
-  3. `vpc:parse` 与渲染层 `resolveParse` 都无整体超时上限，期间前端 `showLoading()`（`player.js:233`）一直转圈，到 `hideLoading()`（244 行）才结束。
+  3. `yuki:parse` 与渲染层 `resolveParse` 都无整体超时上限，期间前端 `showLoading()`（`player.js:233`）一直转圈，到 `hideLoading()`（244 行）才结束。
 - **性质**：解析站本身已死（外部配置/网络问题），但**应用对"加载失败"不快速失败**是缺陷——死链应秒级跳过而非烧满超时。
 - **建议修复**：
   1. `_capture` 增加 `win.webContents.on('did-fail-load', ...)`：仅当 `isMainFrame && errorCode !== -3(ABORTED)` 时 `finish(null)` 快速跳过（子框架/主动中断忽略，避免误伤 legacy 跟随加载）。
@@ -249,7 +249,7 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 
 - **发现时间**：2026-08-10（代码审查，PROGRESS.md §4.1 进行中项）
 - **现象**：断流退出时 `_recordWatch` 按首次绝对 `pos` 已累计并删除旧会话；主进程重连后新会话结束再次 `_recordWatch`，按重连段的绝对 `pos` 再累计，导致 `totalSeconds` 两段相加（而非该集实际进度）、`sessionCount`/`titles` 同一次观看被计两次。
-- **触发链路**：`player.js _recordWatch` → `_writeWatch`（两段各自绝对 `pos` 叠加）；主进程 `index.js` 断流重连经 `vpc:player-session` 同步新会话号，渲染层复用旧元信息。
+- **触发链路**：`player.js _recordWatch` → `_writeWatch`（两段各自绝对 `pos` 叠加）；主进程 `index.js` 断流重连经 `yuki:player-session` 同步新会话号，渲染层复用旧元信息。
 - **修复**：观看统计改按「观看链」（chainId）去重——显式起播开新链，断流重连经 `player-session` 复用旧链元信息（`_adoptSession`），`_writeWatch` 按「链内最大进度 − 已计进度」只补增量；观看次数与部数每条链只计一次；最近观看进度取链内最新。
 - **状态**：✅ 已验证（2026-08-10 独立实例 CDP 实测：重连后 `totalSeconds=60`（30+增量 30，非 90）、`sessionCount=1`、标题计数 1、链内最大进度 60；`scripts/acceptance-my-watch.js` 24/24 通过）。
 

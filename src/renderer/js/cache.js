@@ -6,7 +6,7 @@
  *
  * 设计要点：
  *   - 每条目 JSON 结构 { v: value, e: 过期时间戳(0=永久), t: 写入时间戳 }。
- *   - 统一键前缀 vpc_cache::，与其他 localStorage 键隔离，clearAll 只清本命名空间。
+ *   - 统一键前缀 yuki_cache::，与其他 localStorage 键隔离，clearAll 只清本命名空间。
  *   - 总容量上限 ~1.5MB：写入前预估体积，超限按最旧写入时间(t)淘汰直至可容纳；
  *     仍 QuotaExceededError 时静默放弃（缓存是优化，失败不影响主流程）。
  *   - 只由调用方缓存成功响应；本层不判定数据有效性（读回过期即视为未命中）。
@@ -17,7 +17,7 @@
     'use strict';
 
     const root = typeof window !== 'undefined' ? window : globalThis;
-    const NS = 'vpc_cache::';           // 命名空间前缀
+    const NS = 'yuki_cache::';           // 命名空间前缀
     const MAX_BYTES = 1.5 * 1024 * 1024; // 总容量上限 ~1.5MB（本命名空间内所有条目字符串长度之和）
 
     function _ls() {
@@ -170,7 +170,7 @@
 
     /**
      * 清空本命名空间下的全部缓存（设置页「清理缓存」调用）。返回删除条目数。
-     * 只清 vpc_cache:: 前缀键，不影响 kazumi_bgm_cover / vpc_home_empty_classes 等
+     * 只清 yuki_cache:: 前缀键，不影响 kazumi_bgm_cover / yuki_home_empty_classes 等
      * 独立业务键（这些由各自模块的清理入口负责）。
      */
     function localCacheClearAll() {
@@ -188,8 +188,8 @@
     root.localCacheClearAll = localCacheClearAll;
     root.localCacheStats = localCacheStats;
     root.localCachePrune = localCachePrune;
-    root.VPC = root.VPC || {};
-    root.VPC.cache = {
+    root.YUKI = root.YUKI || {};
+    root.YUKI.cache = {
         get: localCacheGet,
         set: localCacheSet,
         del: localCacheDel,

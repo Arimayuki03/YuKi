@@ -1,4 +1,4 @@
-# video-pc 代码审查报告
+# yuki 代码审查报告
 
 - **审查日期**: 2026-08-16
 - **审查范围**: `src/main`(Electron 主进程)、`src/preload`、`src/renderer`(渲染层)、`python-backend`(FastAPI 后端 / go-proxy / jar 桥 / Kazumi 规则引擎 / QuickJS 引擎 / SpiderRunner)、`scripts` 构建脚本(约 4.5 万行核心代码,不含 jar-runner 生成的 Android stubs)
@@ -117,7 +117,7 @@ if not path.startswith(TOKEN_EXEMPT):
 
 **问题**: 注释写"仅 127.0.0.1",但**无任何来源校验**。form-urlencoded POST 是浏览器简单请求(无预检),任意网页可:
 
-- `do=set` 写入任意 KV(spider 的 `getCache` 会消费这些值 → 数据投毒),或循环写大 value 无上限向 `~/.video-pc/cache/kv` 落盘撑爆磁盘;
+- `do=set` 写入任意 KV(spider 的 `getCache` 会消费这些值 → 数据投毒),或循环写大 value 无上限向 `~/.yuki/cache/kv` 落盘撑爆磁盘;
 - 调 `/proxy` 以完全攻击者可控的参数触发已加载 spider 的 `localProxy`(任意副作用、开放重定向、响应头原样透传)。
 
 另外 `startswith` 是前缀匹配,`/cacheXxx` 也会被豁免(防御纵深缺陷)。
@@ -139,7 +139,7 @@ function escHtml(s) {
 <img ... onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${escHtml(bangumiMirrorUrl(cover))}';}else{...}">
 ```
 
-**问题**: `cover` 来自远端 Bangumi API(开镜像代理时经第三方 `lain.bangumi.lol`,可被篡改)。escHtml 不转义单引号,而 URL 被拼进 onerror 属性内的**单引号 JS 字符串**——URL 含 `'` 即可闭合字符串注入任意 JS。渲染进程一旦执行任意脚本,即可通过 `window.vpc`(contextBridge 暴露 `fileDelFile`/`fileDelFolder`/`setProxy`/`download.control` 等破坏性 IPC)造成文件删除、任意下载、代理劫持。叠加:全项目**无任何 CSP**(index.html 与主进程均无),无纵深防御。
+**问题**: `cover` 来自远端 Bangumi API(开镜像代理时经第三方 `lain.bangumi.lol`,可被篡改)。escHtml 不转义单引号,而 URL 被拼进 onerror 属性内的**单引号 JS 字符串**——URL 含 `'` 即可闭合字符串注入任意 JS。渲染进程一旦执行任意脚本,即可通过 `window.yuki`(contextBridge 暴露 `fileDelFile`/`fileDelFolder`/`setProxy`/`download.control` 等破坏性 IPC)造成文件删除、任意下载、代理劫持。叠加:全项目**无任何 CSP**(index.html 与主进程均无),无纵深防御。
 
 **修复**: 两处改用 `common.js:186-210` 已有的 `data-fb` 兜底链安全模式;`escHtml` 补 `'` → `&#39;`;逐步收敛内联事件并注入 CSP(见 M-24)。
 
@@ -153,7 +153,7 @@ function escHtml(s) {
 const mergedHeader = {...header, ...(resolved.header || {})};
 ```
 
-**问题**: `play()` 函数作用域内不存在 `header`(全文件仅 `_playKazumi`(player.js:506)与 kazumi.js:1993 内部有同名局部变量,均不可见)。`{...header}` 抛 `ReferenceError` 被 `catch (e) { /* 播放异常走兜底 */ }` 静默吞掉,`window.vpc.playUrl` **从未执行**——所有 `parse=1` 且解析成功的播放一律落入失败对话框,连播链(`this._seq`)被误判终止。
+**问题**: `play()` 函数作用域内不存在 `header`(全文件仅 `_playKazumi`(player.js:506)与 kazumi.js:1993 内部有同名局部变量,均不可见)。`{...header}` 抛 `ReferenceError` 被 `catch (e) { /* 播放异常走兜底 */ }` 静默吞掉,`window.yuki.playUrl` **从未执行**——所有 `parse=1` 且解析成功的播放一律落入失败对话框,连播链(`this._seq`)被误判终止。
 
 **修复**: 改为 `const mergedHeader = { ...(resolved.header || {}) };`(该分支本无源 header 可合并)。
 
@@ -208,23 +208,23 @@ proc.on('exit', (code) => {
 
 ### Electron 主进程
 
-#### M-1 [安全] `vpc:settings-set` 无 key 白名单 → 可写 `externalPlayerPath` 启动任意可执行文件
+#### M-1 [安全] `yuki:settings-set` 无 key 白名单 → 可写 `externalPlayerPath` 启动任意可执行文件
 
 **位置**: `src/main/index.js:880`(handler,已复核)、`2076`(spawn)
 
 ```js
-ipcMain.handle('vpc:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
+ipcMain.handle('yuki:settings-set', (_e, key, value) => ({ value: settings.set(String(key), value) }));
 ...
 spawn(execPath, args, { detached: true, stdio: 'ignore' }).unref();
 ```
 
-渲染进程被攻破后(H-6 即可),先写 `externalPlayerPath` 为任意 exe,再经 `vpc:play` 触发 `launchExternalPlayer` 直接 spawn——纯 IPC 即可完成任意程序启动,配合下载能力构成完整 RCE 链。**修复**: settings-set 按键白名单;`externalPlayerPath` 仅允许对话框选择。
+渲染进程被攻破后(H-6 即可),先写 `externalPlayerPath` 为任意 exe,再经 `yuki:play` 触发 `launchExternalPlayer` 直接 spawn——纯 IPC 即可完成任意程序启动,配合下载能力构成完整 RCE 链。**修复**: settings-set 按键白名单;`externalPlayerPath` 仅允许对话框选择。
 
-#### M-2 [安全] `vpc:dl addHls` 不校验 URI 协议 → `file://` 读任意本地媒体文件外泄
+#### M-2 [安全] `yuki:dl addHls` 不校验 URI 协议 → `file://` 读任意本地媒体文件外泄
 
 **位置**: `src/main/index.js:1502-1506`(对比 `add` 分支 1486 行有 `/^(magnet:|http:|https:)/` 校验)
 
-`uri` 原样交给 ffmpeg `-i`。渲染层被攻破时可传 `file:///C:/Users/.../xxx.mp4`,ffmpeg 把本地文件复制输出到下载目录(文件名 `out` 可控),再经 `vpc:dl-play`/打开目录获得副本;`rtsp://`、`smb://` 可触达内网。**修复**: addHls 与 `hls.add` 内部加 `^https?://` 白名单。
+`uri` 原样交给 ffmpeg `-i`。渲染层被攻破时可传 `file:///C:/Users/.../xxx.mp4`,ffmpeg 把本地文件复制输出到下载目录(文件名 `out` 可控),再经 `yuki:dl-play`/打开目录获得副本;`rtsp://`、`smb://` 可触达内网。**修复**: addHls 与 `hls.add` 内部加 `^https?://` 白名单。
 
 #### M-3 [安全] push-server 首页向整个局域网回显 token
 
@@ -258,7 +258,7 @@ webPreferences: { partition: PARTITION, contextIsolation: false, nodeIntegration
 
 `mpvStartedOk` 无法区分"未开播"与"用户主动关闭",用户关窗后 `watchLiveFallbacks` 继续逐条 `mpv.play` 备用线路,窗口反复弹回。**修复**: 检查 `_activeSession.userStopped` 后再续播。
 
-#### M-8 [bug] `vpc:settings-reset` 用 `app.exit(0)` 跳过退出清理
+#### M-8 [bug] `yuki:settings-reset` 用 `app.exit(0)` 跳过退出清理
 
 **位置**: `src/main/index.js:1141-1149`。注释自知不触发 `before-quit`,但只手动停了 mpv——`dl.stop()`(aria2)、`bridge.stop()`(Python)、`syncplay.disconnect()` 全被跳过,Windows 下子进程默认存活,孤儿进程累积。**修复**: 抽公共清理函数,`app.exit` 前调用。
 
@@ -390,12 +390,12 @@ merged_query = {**dict(parsed.query), **{k: str(v) for k, v in rendered_query.it
 
 | # | 位置 | 问题 |
 |---|------|------|
-| L-1 | `src/main/index.js:1734-1741, 658-691` | `vpc:dl-play` 白名单外任意本地文件播放;`vpc:play` URL 无协议限制(mpv 支持 `file://`/`edl://`) |
-| L-2 | `src/main/index.js:887-895` | `vpc:probe-urls` 是内网探测原语(可探 `127.0.0.1`/`169.254.169.254`/内网 C 段,回传可达性) |
+| L-1 | `src/main/index.js:1734-1741, 658-691` | `yuki:dl-play` 白名单外任意本地文件播放;`yuki:play` URL 无协议限制(mpv 支持 `file://`/`edl://`) |
+| L-2 | `src/main/index.js:887-895` | `yuki:probe-urls` 是内网探测原语(可探 `127.0.0.1`/`169.254.169.254`/内网 C 段,回传可达性) |
 | L-3 | `src/main/dlna-caster.js:110, 144-157` | ✅ 已修复：SOAP `CurrentURI` XML 实体转义，cast/stop 仅允许 SSDP 已发现设备的 controlUrl |
 | L-4 | `src/main/index.js:2046-2047` | ✅ 已修复：PotPlayer Referer/UA 中的双引号按参数语义转义，阻断额外开关注入 |
 | L-5 | `src/main/index.js:1364-1365` + `settings.js:43-48` | dandanAppSecret、bangumiToken、夸克 Cookie 等凭据明文持久化于 settings.json(建议 `safeStorage`) |
-| L-6 | `src/main/index.js:844-861` | `vpc:parse` 超时不取消解析,槽位(3 个)可被"已放弃仍在跑"的解析占满 |
+| L-6 | `src/main/index.js:844-861` | `yuki:parse` 超时不取消解析,槽位(3 个)可被"已放弃仍在跑"的解析占满 |
 | L-7 | `src/main/index.js:110-127` | ✅ 已修复：Anime4K 文件写盘前递归创建父目录，目录缺失可自动恢复 |
 | L-8 | `src/main/index.js:1410-1415, 1581-1585` | ✅ 已修复：HLS header 随任务列表持久化，重启恢复时重新传给下载器 |
 | L-9 | `src/main/mpv-player.js:415-427` | ✅ 已修复：IPC 应答、同步写失败和 teardown 均清理对应超时定时器 |

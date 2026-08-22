@@ -37,7 +37,7 @@ function apiUrl(path) {
 
 async function waitBackend() {
     for (let i = 0; i < 30; i++) {
-        const info = window.vpc ? await window.vpc.getBackendInfo() : null;
+        const info = window.yuki ? await window.yuki.getBackendInfo() : null;
         if (info) { backend = info; return true; }
         await new Promise((r) => setTimeout(r, 1000));
     }
@@ -79,8 +79,8 @@ async function doAction(action, kv, path, timeoutMs) {
         // 网盘类 spider 解析一烧 20s+，若不通知取消，后端会继续占住 worker，
         // 后续请求排队 → 连锁「一直转圈」。两种中止名都要触发 cancelRuntime。
         if (error && (error.name === 'AbortError' || error.name === 'TimeoutError')
-            && window.vpc && window.vpc.cancelRuntime) {
-            try { await window.vpc.cancelRuntime({ requestId, playSessionId }); } catch (e) { /* best effort */ }
+            && window.yuki && window.yuki.cancelRuntime) {
+            try { await window.yuki.cancelRuntime({ requestId, playSessionId }); } catch (e) { /* best effort */ }
         }
         throw error;
     }
@@ -585,7 +585,7 @@ const PAGE_SIZE_OPTIONS = [10, 16, 20, 24, 36, 60, 120];
 async function pageSizeOf(key) {
     if (_pageSizeCache[key]) return _pageSizeCache[key];
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         let n = parseInt(s[key], 10);
         if (!(PAGE_SIZE_OPTIONS.indexOf(n) >= 0) && key === 'pageSizeHome') {
             n = parseInt(s.listPageSize, 10); // 旧版单一设置迁移
@@ -923,21 +923,21 @@ function _applyTextScale(pct) {
 
 /**
  * MiSans 界面字体注入/卸载（开关即时生效，不再整页 reload）：
- * - 启用 → 拉取内置字体 CSS 的 file:// URL，注入带 data-vpc-misans 标记的 <link>；
+ * - 启用 → 拉取内置字体 CSS 的 file:// URL，注入带 data-yuki-misans 标记的 <link>；
  * - 关闭 → 移除全部标记 <link>，浏览器按 font-family 回退链自动回退系统字体。
  * 重复调用幂等：先清旧再注新。失败（IPC 异常/资源缺失）静默回退系统字体。
  */
 async function applyMisansFont(enabled) {
-    const SEL = 'link[data-vpc-misans]';
+    const SEL = 'link[data-yuki-misans]';
     document.querySelectorAll(SEL).forEach((l) => l.remove());
     if (!enabled) return;
     try {
-        const urls = (window.vpc && window.vpc.fontCss && await window.vpc.fontCss()) || [];
+        const urls = (window.yuki && window.yuki.fontCss && await window.yuki.fontCss()) || [];
         urls.forEach((u) => {
             const l = document.createElement('link');
             l.rel = 'stylesheet';
             l.href = u;
-            l.dataset.vpcMisans = '1';
+            l.dataset.yukiMisans = '1';
             document.head.appendChild(l);
         });
     } catch (e) { /* 注入失败回退系统字体，不影响使用 */ }
@@ -965,7 +965,7 @@ function applySkin(opts) {
     // 页面级缩放在 CSS 字体匹配之上生效，等比缩放整个 UI 且不影响字体匹配。
     const fsPct = _fontSizePct(_skin.fontSize);
     el.style.zoom = ''; // 清除历史遗留的 CSS zoom
-    if (window.vpc && window.vpc.setZoomFactor) window.vpc.setZoomFactor(fsPct / 100);
+    if (window.yuki && window.yuki.setZoomFactor) window.yuki.setZoomFactor(fsPct / 100);
     // 字体大小：数值百分比仅缩放文字
     _applyTextScale(_fontSizePct(_skin.textSize));
     // 自定义文字颜色：覆写主文字变量；恢复默认时移除行内覆写
@@ -1007,8 +1007,8 @@ $(document).on('click', '.info-dot', function () {
 });
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.common = {
+    root.YUKI = root.YUKI || {};
+    root.YUKI.common = {
         escHtml, normalizePic, vodCoverImg, vodCoverChain, coverChainNext,
         coverFadeIn, confirmDialog, showLoading, hideLoading,
     };

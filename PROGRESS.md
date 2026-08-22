@@ -15,7 +15,7 @@
 | 播放 | mpv 独立窗口 |
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
-| 数据目录 | `~/.video-pc/` 与 Electron `userData` |
+| 数据目录 | `~/.yuki/` 与 Electron `userData` |
 | 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
@@ -202,7 +202,7 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 
 2026-08-17 回归入口补全 + 配置解析回归修复：`test_kazumi.py`（83 用例）接入 `run_all.py` STAGES，Python 回归从 38 项扩到 121 项（smoke 13 + phase3 25 + kazumi 83），`npm run test:py` 全绿。接入后即捕获一处 HEAD 回归：7816695 的 `_strip_json_comment_lines` 无条件先剥行内 `//`，损坏内嵌 JS spider 源码（phase3 `ijs` 站点加载失败）——已改为严格 JSON 先行解析、注释剥除仅兜底（aa9002f）。同批：夸克 Cookie 误入库处置（214a8c8，DuoDuo/.quark 解除跟踪 + jar JVM cwd 固定到 `<cache>/jar-runtime`）。改进任务清单见 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)。
 
-2026-08-17 TVBox Phase A–E 代码收口：兼容套件 S1/S2/S4 改走真实 FastAPI `/action`，新增重试、离线 SKIP、JSON 报告和分层 skipped 原因聚合；新增端口泛化与夸克降级行为测试；`VPC_PAN_FAST_PATH` 接入设置页；L1-L4 诊断、QuickJS 缺失全局警告和配置导入摘要完成；新增 [TVBOX_CONTRACT_GAPS.md](docs/TVBOX_CONTRACT_GAPS.md) 与 [DATA_MAP.md](docs/DATA_MAP.md)。渲染层 17 个脚本完成 `VPC.<module>` 导出，兼容浏览器与 VM 测试环境。验证：Python 全量回归 ALL PASS、JS 单元 206/206、JS 语法 40/40、ESLint 0 错误、Ruff PASS。21 仓网络基线与实机/发布验收仍待外部环境。
+2026-08-17 TVBox Phase A–E 代码收口：兼容套件 S1/S2/S4 改走真实 FastAPI `/action`，新增重试、离线 SKIP、JSON 报告和分层 skipped 原因聚合；新增端口泛化与夸克降级行为测试；`YUKI_PAN_FAST_PATH` 接入设置页；L1-L4 诊断、QuickJS 缺失全局警告和配置导入摘要完成；新增 [TVBOX_CONTRACT_GAPS.md](docs/TVBOX_CONTRACT_GAPS.md) 与 [DATA_MAP.md](docs/DATA_MAP.md)。渲染层 17 个脚本完成 `YUKI.<module>` 导出，兼容浏览器与 VM 测试环境。验证：Python 全量回归 ALL PASS、JS 单元 206/206、JS 语法 40/40、ESLint 0 错误、Ruff PASS。21 仓网络基线与实机/发布验收仍待外部环境。
 
 2026-08-10 全量功能测试（已完成）：自动化测试共 **200 项全部通过**——JS 单元 60/60、Python 38/38（smoke 13 + phase3 25）、JS 语法 34 文件 0 错误、真实界面验收 10 个脚本 **102/102** 检查项（内容页/系统页/时间表/推荐/详情卡/我的页/观看统计/Kazumi 布局/分页滚动条/MiSans）。完整功能测试矩阵、自动化明细与需用户实测清单见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 
@@ -261,7 +261,7 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 
 ### 2026-08-11 首页空分类隐藏加固（T60 续）
 
-- [x] 空分类结果持久化：`Home._emptyCls` 按 site 落盘到 `localStorage['vpc_home_empty_classes']`（`{ site: { ts, empty, ok } }`，兼容旧数组格式），`init()` 时载入——再次载入该源/重启后首屏即隐藏已知空分类，无「先闪现再隐藏」；源集合变更时同步清空持久化。
+- [x] 空分类结果持久化：`Home._emptyCls` 按 site 落盘到 `localStorage['yuki_home_empty_classes']`（`{ site: { ts, empty, ok } }`，兼容旧数组格式），`init()` 时载入——再次载入该源/重启后首屏即隐藏已知空分类，无「先闪现再隐藏」；源集合变更时同步清空持久化。
 - [x] 探测不丢进度：结果按 site 键隔离记录，不随 token/换源丢弃——中断/换源不影响分类，任一轮完整探测即全部分类；`unclassified===0`（全部分类确认）才标记 `_clsProbed[site]`，出错留待下次载入重试且只探测未知分类；`_clsBusy[site]` 防并发重复探测。
 - [x] **全源探测**：新增 `_probeAllClasses()` 后台扫描——为所有未探测分类的活跃源补齐类别空态探测（站点级并发 2、分类级并发 6），切换任意源即可直接过滤空分类；数据新鲜（`EMPTY_CLS_TTL` 24h）的源跳过不重复探测，过期/缺失才补探。
 - [x] `renderClass` 激活分类判断做 `String(type_id)` 归一化，防数字型 type_id 误隐藏激活分类；曾判空分类恢复内容后自动取消隐藏并重渲。
@@ -360,7 +360,7 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 
 - [x] Kazumi 独立首页推荐页及趋势数据适配（T62：新增「推荐」导航 + #view-popular，bangumi_trends 归一化 {items,total} 解 {subject} 包裹，卡片封面/排名角标/评分，分页，点击进二级详情页）。
 - [x] 影片详情页仿 Kazumi 的视觉与二级内容结构优化（T63：`_renderBangumiDetail` banner 改仿 Kazumi InfoPage 信息卡——大标题 + 封面/放送开始/评分星级/「Bangumi Ranked」排名/评分透视柱状图，弹窗与二级页复用；新增 `.bangumi-info-card` 系列样式，窄窗隐藏柱状图）。
-- [x] MiSans 改为打包内置并统一全站字体（T61：misans.js 去运行时下载仅探测内置字体、恢复主进程 vpc:font-css → 渲染层注入 <link>、ui.css 字体栈 MiSans 优先、build:* 前置 download-binaries misans 保证打包随附；真实验收确认 file:// 内置加载非网络下载）。
+- [x] MiSans 改为打包内置并统一全站字体（T61：misans.js 去运行时下载仅探测内置字体、恢复主进程 yuki:font-css → 渲染层注入 <link>、ui.css 字体栈 MiSans 优先、build:* 前置 download-binaries misans 保证打包随附；真实验收确认 file:// 内置加载非网络下载）。
 - [x] 响应式封面/字体与整体现代化交互收尾：滚动条隐藏（T59）、无内容源/空分类过滤（T59/T60）、列表批量渲染（T65）、卡片列宽与标题/备注字号随窗口自适应（T66）均已完成；交互动效（卡片 hover、视图切换、封面淡入）此前已具备。
 - [ ] 完成 Windows 冷启动、打包后资源、离线/慢网和多窗口尺寸实测。
 
@@ -368,10 +368,10 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 
 - [x] 本地文件页背景模糊闪烁修复（T54）：根因为 `.view.active` 入场动画作用在含 `backdrop-filter` 视图的祖先上（Chromium 合成闪烁）+ 列表逐条 append 反复重栅格化；修复为入场动画排除 `#view-tools`/`#view-detail`、`renderLocalPage` 改拼串一次性写入并删除逐条 `addFile`。
 - [x] Kazumi 规则设置布局优化（T55）：Kazumi 分类卡并入全宽组（grid-column 1/-1，≥1500px 跨 2 列）；规则行改「名称+版本 / 安装·更新时间」两行主块，控件跨行对齐，去掉误导 pointer 与 break-all 折名，编辑钮 hover 与删除红区分，清空按钮改危险色；版本号内联样式收敛为 `.kazumi-subver`。
-- [x] 软件显示名全面改为 YuKi（T56）：窗口标题/托盘/通知/关于/引导页/`build.productName`/`shortcutName`；内部兼容键保留——`name=video-pc`、`appId`、数据目录 `~/.video-pc/`、Electron userData（`AppData/Roaming/video-pc`，由 package name 决定不受 productName 影响）、协议标识与 IPC 前缀 `vpc:*`。
+- [x] 软件显示名全面改为 YuKi（T56）：窗口标题/托盘/通知/关于/引导页/`build.productName`/`shortcutName`；内部兼容键保留——`name=yuki`、`appId`、数据目录 `~/.yuki/`、Electron userData（`AppData/Roaming/yuki`，由 package name 决定不受 productName 影响）、协议标识与 IPC 前缀 `yuki:*`。
 - [x] 时间表完整复刻（T57，对齐 Kazumi TimelinePage）：①后端新增 `bangumi_season_calendar(start,end)` + `/kazumi/action do=kazumiBangumiSeason` 端点（v0/search/subjects 按 air_date 区间多页拉取去重、按播出星期分桶，与本周放送同形状）②近 20 年季节索引（下拉按年 optgroup，首项「本周（在播）」，季度键算日期区间）③排序（热度/评分/播出时间）④收藏过滤（不显示已抛弃/已看完、只看在看；经 Bangumi token 拉收藏建集合，无 token 置灰降级）⑤卡片排名角标（`rating.rank`）+ 评分/播出日期，二级详情弹窗 banner 补 Ranked #N⑥星期 tab 默认今天。真实界面验收 11/11 通过（本周 14 卡、8 排名角标实测渲染）。
 - [x] 返工两项（T58，按用户最新要求）：①「我的」页移除「最近观看」标签与面板（与左侧历史页重复），保留 观看统计 + 我的收藏 两标签，my.js 删除 recent 渲染逻辑②时间表卡片点击改为进入仿 Kazumi 二级详情页（新增 `#view-bangumi-info` 视图 + 返回键回时间表），不再用弹窗；`Kazumi._renderBangumiDetail` 重构为容器化（`$box` 参数 + tabs/content 由 id 改 class），弹窗（Kazumi 源流程）与二级页复用同一渲染。真实界面验收 10/10 通过（`scripts/acceptance-rework.js`）。
-- [x] Bug 清理批次（T59/T60）：①搜索封面立即加载——`vodCoverImg`/`vodCard` 增 eager 参数，搜索当前页封面改 `loading="eager"` 不再等懒加载②内嵌滚动区统一隐藏滚动条（弹窗体/Bangumi 详情内容/详情简介/直链视图，补 `scrollbar-width:none` + webkit 伪元素）③搜索页隐藏无结果的源（不出分组卡与来源筛选标签，源计数只统计有结果源）④首页屏蔽无影片分类（`_probeClasses` 后台并发 4 探测各分类 categoryContent，确认空的分类从分类栏隐藏，同源只探一次、激活分类不隐藏、出错保留，源集合变更作废缓存）⑤修复 `bangumi_user_collections` limit 上限钳制为 100（此前时间表收藏过滤请求 limit=200 触发 Bangumi API 400）⑥验证日志功能有效（`~/.video-pc/logs/` electron-main/python-backend/python-console 正常写入，RotatingLogWriter 轮转）。真实界面验收：分页实测正常（25 条收藏→2 页、翻页生效，`scripts/acceptance-bugfix.js` 6/6 通过）；分页代码经核查本无缺陷。
+- [x] Bug 清理批次（T59/T60）：①搜索封面立即加载——`vodCoverImg`/`vodCard` 增 eager 参数，搜索当前页封面改 `loading="eager"` 不再等懒加载②内嵌滚动区统一隐藏滚动条（弹窗体/Bangumi 详情内容/详情简介/直链视图，补 `scrollbar-width:none` + webkit 伪元素）③搜索页隐藏无结果的源（不出分组卡与来源筛选标签，源计数只统计有结果源）④首页屏蔽无影片分类（`_probeClasses` 后台并发 4 探测各分类 categoryContent，确认空的分类从分类栏隐藏，同源只探一次、激活分类不隐藏、出错保留，源集合变更作废缓存）⑤修复 `bangumi_user_collections` limit 上限钳制为 100（此前时间表收藏过滤请求 limit=200 触发 Bangumi API 400）⑥验证日志功能有效（`~/.yuki/logs/` electron-main/python-backend/python-console 正常写入，RotatingLogWriter 轮转）。真实界面验收：分页实测正常（25 条收藏→2 页、翻页生效，`scripts/acceptance-bugfix.js` 6/6 通过）；分页代码经核查本无缺陷。
 - [x] 搜索页 Kazumi 结果封面从 Bangumi 拉取并缓存（T73）：Kazumi 规则源搜索无源封面，现按片名查 Bangumi 首个匹配 `{id, cover}` 并缓存——`Kazumi.getBangumiMatch`/`getCachedBangumiMatch`/`getBangumiCover`（内存 Map + `kazumi_bgm_cover` localStorage 持久化，同片名在途搜索去重、空匹配仅会话内缓存、旧版仅封面格式自动迁移）；复用既有 `fillMissingCovers` 补拉池（视口优先/并发/abortCoverFill），`_coverFillOne` 对 `kazumi:` 源改走 Bangumi 而非 detailContent，补上后重插规则名徽章；`_paintGrp` Kazumi 卡命中缓存直接渲染、未命中占位图标 `data-cover-missing`；点击卡片命中缓存 id 直接进 Bangumi 二级详情页（免重复搜索、封面与详情同源一致），搜索后回填缓存；设置页新增「Bangumi 封面缓存」卡 + 清空按钮（`clearBangumiCoverCache`）供匹配错误时重置。
 
 ### 2026-08-10 第二轮（问题清单批处理）
@@ -381,7 +381,7 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 - [x] 历史卡片按次记录（T74）：`recordPlay` 每次真实播放新增一条独立 `kind:'play'` 记录，不再合并累加「已播几集」；`addHistory`（打开详情）标 `kind:'view'`，`recordPlay` 清掉同片名浏览卡避免「开→播」双卡；`recCard` 移除「已播 N 集」文案，改为显示「集名 · 时长 · 播放时间」；历史/收藏缺封面后台补拉（`fillMissingCovers` + `data-source`），Kazumi 源历史卡封面从 Bangumi 拉取并缓存。
 - [x] 搜索页 Kazumi 边搜边加载（T74）：新增后端 SSE 端点 `/search/kazumi-stream`（每源完成即推一条，含状态字段），前端 `_runKazumi` 改走 EventSource 流式渲染，不再等全部源结束。
 - [x] 搜索进度提示优化（T74）：`#search-status` 由纯文字改为「spinner + 进度条 + 源/结果计数」组件（`.search-status` 系列样式）；后端 `/search/stream` 先发 `event: meta` 携总源数，进度条按已收/总数确定填充；Kazumi 页签按启用规则数确定进度；搜索启动立即显示（消除首个源到达前的空档），完成态转摘要文字 + 进度条满。
-- [x] Kazumi 验证码源可见窗口验证（T74）：主进程 `vpc:captcha-verify` + `ParseWindow.captchaVerify`（可见 BrowserWindow，关闭/超时收割会话 Cookie 推给后端 cookie_jar，rule_engine 搜索自动带上）；搜索页验证码源分组提示行 + Kazumi 源弹窗验证码项点击打开，完成后自动重搜。
+- [x] Kazumi 验证码源可见窗口验证（T74）：主进程 `yuki:captcha-verify` + `ParseWindow.captchaVerify`（可见 BrowserWindow，关闭/超时收割会话 Cookie 推给后端 cookie_jar，rule_engine 搜索自动带上）；搜索页验证码源分组提示行 + Kazumi 源弹窗验证码项点击打开，完成后自动重搜。
 - [x] 搜索页源名分隔线与卡片间距（T74）：`.src-group > .vod-grid { margin-top:8px }` 在分隔线与首行卡片间留出清晰间距（曾用 -1px 使线与封面顶部重合，用户反馈后改为 8px）。
 - [x] 卡片标题限行防溢出（T74）：`.vod-name` 固定 2 行（border-box 精确 min/max-height，响应式各档同步），非全屏窄窗也不溢出。
 - [x] 获取 Bangumi Token 跳系统默认浏览器（T74）：主进程 `setWindowOpenHandler` 对 http(s) 外链调 `shell.openExternal` 并 `deny`，不再开应用内新窗。

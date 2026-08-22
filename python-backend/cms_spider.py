@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 import http_client
 
-logger = logging.getLogger('vpc.cms')
+logger = logging.getLogger('yuki.cms')
 
 UA = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 

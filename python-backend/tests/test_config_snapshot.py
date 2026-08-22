@@ -72,10 +72,10 @@ class _FixtureCase(unittest.TestCase):
     def setUpClass(cls):
         # 沙箱隔离：本套件的 `mgr.load(...)` 走到 _validate_and_swap 会写
         # ConfigRepositoryCache（hoststate 缓存目录）与 last_repo.txt。hoststate
-        # 未配置时默认指向真实用户目录 ~/.video-pc——直接 `python -m unittest`
+        # 未配置时默认指向真实用户目录 ~/.yuki——直接 `python -m unittest`
         # 单跑本文件（不经 run_all 的 TEST_ENV）会把用户真实仓库缓存覆盖成
         # 测试夹具（表现为应用重启后磁盘恢复失效、首页停在示例源）。
-        # run_all.py 已注入 VPC_DATA_DIR/VPC_CACHE_DIR；这里再显式钉到
+        # run_all.py 已注入 YUKI_DATA_DIR/YUKI_CACHE_DIR；这里再显式钉到
         # 测试沙箱，双保险。
         import tempfile
 
@@ -116,7 +116,7 @@ class _FixtureCase(unittest.TestCase):
 
         mgr = ConfigManager(SiteManager())
         # 多仓偏好会把「上次成功的条目」置顶并额外重试一次。它是持久化到
-        # VPC_DATA_DIR/last_repo.txt 的，不固定住的话用例之间会通过磁盘互相影响，
+        # YUKI_DATA_DIR/last_repo.txt 的，不固定住的话用例之间会通过磁盘互相影响，
         # 多仓回退顺序的断言就成了「看上一个用例跑了什么」。
         mgr._repo_pref_loaded = True
         mgr.last_repo_name = ''
@@ -832,7 +832,7 @@ class DepotTest(_FixtureCase):
         self.assertTrue(health['depot_good_cms'].healthy)
 
     def test_sub_repo_pointing_at_a_private_address_is_blocked_in_strict_mode(self):
-        """严格 SSRF 模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）：子仓地址来自远端
+        """严格 SSRF 模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）：子仓地址来自远端
         内容，不能借它探测本机/内网服务。
 
         清单本身是从 loopback 取回的，所以这一条同时在验证「同源信任是
@@ -840,7 +840,7 @@ class DepotTest(_FixtureCase):
         （局域网 NAS / 本机服务子仓是合理场景），严格模式仅作为可选项保留。
         """
         mgr = self.manager()
-        with mock.patch.dict(os.environ, {'VPC_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
+        with mock.patch.dict(os.environ, {'YUKI_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
             with self.assertRaises(ValueError) as caught:
                 mgr.load(self.fx.config('depot_private.json'))
         self.assertRegex(str(caught.exception),

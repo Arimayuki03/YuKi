@@ -10,7 +10,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9353);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9353);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -50,8 +50,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-diag-all-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-diag-all-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
         s.wallpaper = ''; s.onboarded = true; s.bangumiToken = '';
@@ -130,7 +130,7 @@ class CDP {
     out.sweepProbedCount = sweepProbed.length;
     out.sweepProbedSample = sweepProbed.slice(0, 8);
     out.sweepProbedHasQzl = sweepProbed.includes('量子资源');
-    const persistedAll = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('vpc_home_empty_classes') || '{}'); return { keys: Object.keys(d).length, hasQzl: !!d['量子资源'] }; } catch (e) { return { err: 1 }; } })()`);
+    const persistedAll = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('yuki_home_empty_classes') || '{}'); return { keys: Object.keys(d).length, hasQzl: !!d['量子资源'] }; } catch (e) { return { err: 1 }; } })()`);
     out.persistedAfterSweep = persistedAll;
 
     // ============ B. 逐个切换源，验证探测 + 隐藏 ============

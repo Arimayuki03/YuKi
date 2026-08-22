@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.join(BASE, 'js-engine'))
 
 PORT = 8322
 TOKEN = 'p3-token'
-os.environ['VPC_PORT'] = str(PORT)
-os.environ['VPC_TOKEN'] = TOKEN
+os.environ['YUKI_PORT'] = str(PORT)
+os.environ['YUKI_TOKEN'] = TOKEN
 
 import hoststate  # noqa: E402
 

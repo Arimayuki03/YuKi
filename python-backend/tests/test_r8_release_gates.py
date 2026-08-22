@@ -20,7 +20,7 @@ from runtime.health import android_worker_enabled, infer_site_health
 
 class R8FeatureGateAndMigrationTest(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix='vpc_r8_test_')
+        self.tmp_dir = tempfile.mkdtemp(prefix='yuki_r8_test_')
         self.orig_flags = hoststate.get_feature_flags()
 
     def tearDown(self):
@@ -61,10 +61,10 @@ class R8FeatureGateAndMigrationTest(unittest.TestCase):
 
     def test_runtime_android_worker_locked_under_c1_ceiling(self):
         """runtime_android_worker 必须受 A4.1 No-Go 政策硬锁定，不能被环境变量或配置绕过。"""
-        old_env = os.environ.get('VPC_ANDROID_WORKER_ENABLED')
+        old_env = os.environ.get('YUKI_ANDROID_WORKER_ENABLED')
         try:
-            os.environ['VPC_ANDROID_WORKER_ENABLED'] = '1'
-            os.environ['VPC_ANDROID_WORKER_READY'] = '1'
+            os.environ['YUKI_ANDROID_WORKER_ENABLED'] = '1'
+            os.environ['YUKI_ANDROID_WORKER_READY'] = '1'
             self.assertFalse(android_worker_enabled(), 'A4.1 政策下禁止开启 Android Worker')
 
             # 无论如何配置，android worker 均不可用
@@ -81,10 +81,10 @@ class R8FeatureGateAndMigrationTest(unittest.TestCase):
             self.assertFalse(health.healthy)
         finally:
             if old_env is not None:
-                os.environ['VPC_ANDROID_WORKER_ENABLED'] = old_env
+                os.environ['YUKI_ANDROID_WORKER_ENABLED'] = old_env
             else:
-                os.environ.pop('VPC_ANDROID_WORKER_ENABLED', None)
-                os.environ.pop('VPC_ANDROID_WORKER_READY', None)
+                os.environ.pop('YUKI_ANDROID_WORKER_ENABLED', None)
+                os.environ.pop('YUKI_ANDROID_WORKER_READY', None)
 
     # -------------------------------------------------------------------------
     # R8.2 数据迁移与向前向后兼容测试

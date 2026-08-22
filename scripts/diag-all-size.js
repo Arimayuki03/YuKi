@@ -5,12 +5,12 @@ const { spawn } = require('child_process');
 const fs = require('fs'); const os = require('os'); const path = require('path'); const http = require('http');
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9360);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9360);
 function getJson(p){return new Promise((res,rej)=>{const r=http.get({host:'127.0.0.1',port:PORT,path:p},x=>{let b='';x.on('data',c=>b+=c);x.on('end',()=>{try{res(JSON.parse(b))}catch(e){rej(e)}})});r.on('error',rej);r.setTimeout(2000,()=>r.destroy(new Error('t')));});}
 class CDP{constructor(u){this.u=u;this.id=0;this.p=new Map();this.h=[];this.errors=[];}async connect(){this.ws=new WebSocket(this.u);await new Promise((r,j)=>{this.ws.onopen=r;this.ws.onerror=()=>j(new Error('ws'));});this.ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(x){return}if(m.id&&this.p.has(m.id)){const {res,rej}=this.p.get(m.id);this.p.delete(m.id);m.error?rej(new Error(m.error.message)):res(m.result);}else if(m.method){this.h.forEach(f=>{try{f(m)}catch(x){}})}};}on(f){this.h.push(f);}send(m,p={}){const id=++this.id;return new Promise((res,rej)=>{this.p.set(id,{res,rej});this.ws.send(JSON.stringify({id,method:m,params:p}));});}async eval(e,a){const r=await this.send('Runtime.evaluate',{expression:e,returnByValue:true,awaitPromise:a});if(r.exceptionDetails)throw new Error('eval: '+((r.exceptionDetails.exception&&r.exceptionDetails.exception.description)||r.exceptionDetails.text));return r.result?r.result.value:undefined;}}
 (async()=>{
-  const tmpUserData=fs.mkdtempSync(path.join(os.tmpdir(),'vpc-allsize-'));
-  const srcSettings=path.join(process.env.APPDATA||'','video-pc','settings.json');
+  const tmpUserData=fs.mkdtempSync(path.join(os.tmpdir(),'yuki-allsize-'));
+  const srcSettings=path.join(process.env.APPDATA||'','yuki','settings.json');
   const PS = Number(process.env.PS || 24); // 测试的每页条数
   try{const s=JSON.parse(fs.readFileSync(srcSettings,'utf8'));s.wallpaper='';s.onboarded=true;s.bangumiToken='';s.pageSizeHome=PS;delete s.listPageSize;fs.writeFileSync(path.join(tmpUserData,'settings.json'),JSON.stringify(s,null,2),'utf8');}catch(e){console.error('settings err',e.message);process.exit(2);}
   const electronArgs=[ROOT,'--remote-debugging-port='+PORT,'--user-data-dir='+tmpUserData,'--no-first-run'];

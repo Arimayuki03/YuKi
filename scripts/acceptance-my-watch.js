@@ -19,7 +19,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9334);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9334);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -65,8 +65,8 @@ class CDP {
 
 (async () => {
     // ---- 准备独立 userData：复制真实设置但清空 auto-reload，预置测试数据 ----
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-my-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-my-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     const seed = {
         lastConfigUrl: '', configHistory: [], wallpaper: '', onboarded: true,
         bangumiToken: '', // 清空真实 token：避免「我的→收藏」合并真实 Bangumi 收藏干扰计数（T74）
@@ -152,7 +152,7 @@ class CDP {
 
     // ============ 1. 观看统计链：断流重连只补增量、次数不重复（渲染层真实链路） ============
     out.watchChain = await cdp.evaluate(`(async () => {
-        const before = ((await window.vpc.settingsGet()) || {}).watchStats || { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {} };
+        const before = ((await window.yuki.settingsGet()) || {}).watchStats || { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {} };
         Player._curMeta = { site: 'site-x', vodId: 'vod-x', title: '链式测试片', subtitle: '第 1 集' };
         Player._rememberSession({ ok: true, sessionId: 9001 });
         Player._recordWatch({ sessionId: 9001, pos: 30, duration: 120 });   // 首次断流退出
@@ -162,7 +162,7 @@ class CDP {
         const chainId = meta2 ? meta2.chainId : null;
         Player._recordWatch({ sessionId: 9002, pos: 60, duration: 120 });   // 重连后播到 60s
         await Player._watchWrite;
-        const after = ((await window.vpc.settingsGet()) || {}).watchStats;
+        const after = ((await window.yuki.settingsGet()) || {}).watchStats;
         return {
             deltaTotalSeconds: after.totalSeconds - before.totalSeconds,    // 应为 60（30 + 增量 30），而非 90
             deltaSessionCount: after.sessionCount - before.sessionCount,    // 应为 1，重连不再 +1
@@ -245,7 +245,7 @@ class CDP {
         cardCount: document.querySelectorAll('#my-favorites-grid .vod-card').length,   // 应为 2
         storedCount: 0, // 下一行异步补
     }))()`);
-    out.fav.storedCount = await cdp.evaluate(`(async () => { const s = (await window.vpc.settingsGet()) || {}; return (s.favorites || []).length; })()`, true); // 应为 2
+    out.fav.storedCount = await cdp.evaluate(`(async () => { const s = (await window.yuki.settingsGet()) || {}; return (s.favorites || []).length; })()`, true); // 应为 2
 
     // ============ 5. 观看统计面板数值（链式测试已写入 60s / 1 次 / 1 部） ============
     await cdp.evaluate(`(() => { document.querySelector('#view-my [data-my-tab="stats"]').click(); return true; })()`);

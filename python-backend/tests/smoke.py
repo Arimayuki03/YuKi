@@ -19,8 +19,8 @@ sys.path.insert(0, BASE)
 PORT = 8321
 TOKEN = 'smoke-token'
 
-os.environ['VPC_PORT'] = str(PORT)
-os.environ['VPC_TOKEN'] = TOKEN
+os.environ['YUKI_PORT'] = str(PORT)
+os.environ['YUKI_TOKEN'] = TOKEN
 
 import hoststate  # noqa: E402
 

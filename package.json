@@ -1,5 +1,5 @@
 {
-  "name": "video-pc",
+  "name": "yuki",
   "version": "0.1.0",
   "description": "YuKi（原影视 PC）：CatVod 影视聚合应用桌面端（Electron + Python 后端）",
   "main": "src/main/index.js",
@@ -22,7 +22,7 @@
     "build": "npm run build:py && node scripts/download-binaries.js misans && electron-builder"
   },
   "build": {
-    "appId": "com.video-pc.app",
+    "appId": "com.yuki.app",
     "productName": "YuKi",
     "directories": {
       "output": "dist"

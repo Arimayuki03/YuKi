@@ -12,7 +12,7 @@ function loadPlayer(parses = [], flags = []) {
         console, Map, Set, Promise, Date, Math, JSON, String, Array, parseInt, parseFloat,
         setTimeout, clearTimeout, URL,
         getJson: async () => ({ parses, flags }),
-        window: { vpc: { settingsGet: async () => ({}) } },
+        window: { yuki: { settingsGet: async () => ({}) } },
     };
     context.$ = jqueryStub;
     context.globalThis = context;

@@ -27,9 +27,9 @@ const ROOT = (() => {
 })();
 const WIN = process.platform === 'win32';
 
-// mpv 原生截图（s 键）文件名模板：video-pc-20260820-153012-000.png
+// mpv 原生截图（s 键）文件名模板：yuki-20260820-153012-000.png
 // 合法转义见 _screenshotArgs 注释（%tX / %0Xn；裸 %w 会让 mpv 判为非法模板并放弃截图）。
-const SHOT_TEMPLATE = 'video-pc-%tY%tm%td-%tH%tM%tS-%03n';
+const SHOT_TEMPLATE = 'yuki-%tY%tm%td-%tH%tM%tS-%03n';
 
 function traceFields(value) {
     const result = {};
@@ -84,9 +84,9 @@ class MpvPlayer extends EventEmitter {
         // IPC 命名管道：pid + 最近一次播放时间戳，杜绝「管道已存在（残留 mpv 仍占用）→
         // IPC 连接失败 → 首次起播无窗口/无控制」的偶发 bug（二次点击因残留退出才成功）。
         this.ipcPath = WIN
-            ? `\\\\.\\pipe\\vpc-mpv-${process.pid}-${Date.now()}`
-            : path.join(os.tmpdir(), `vpc-mpv-${process.pid}-${Date.now()}.sock`);
-        this.assPath = path.join(os.tmpdir(), `vpc-danmaku-${process.pid}.ass`);
+            ? `\\\\.\\pipe\\yuki-mpv-${process.pid}-${Date.now()}`
+            : path.join(os.tmpdir(), `yuki-mpv-${process.pid}-${Date.now()}.sock`);
+        this.assPath = path.join(os.tmpdir(), `yuki-danmaku-${process.pid}.ass`);
         this._reqId = 0;
         this._buf = '';
         this._connected = false;
@@ -134,8 +134,8 @@ class MpvPlayer extends EventEmitter {
     /** 重新生成 IPC 管道路径（每次起播独立，避免残留管道导致首播 IPC 无法连接）。 */
     _refreshIpcPath() {
         this.ipcPath = WIN
-            ? `\\\\.\\pipe\\vpc-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-            : path.join(os.tmpdir(), `vpc-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.sock`);
+            ? `\\\\.\\pipe\\yuki-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+            : path.join(os.tmpdir(), `yuki-mpv-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.sock`);
         // Linux 遗留 socket 文件（上次崩溃未清理）会阻止 mpv 绑定，需预先清理
         if (!WIN) {
             try { if (fs.existsSync(this.ipcPath)) fs.rmSync(this.ipcPath, { force: true }); } catch (e) { /* ignore */ }
@@ -179,7 +179,7 @@ class MpvPlayer extends EventEmitter {
      *
      * 文件名模板只用 mpv 合法转义：`%tX`（strftime 字段）+ `%0Xn`（序号，重名时自增避让）。
      * **不要写裸 `%w`**——mpv 的 `%w` 必须紧跟子格式字符（%wH/%wM/%wS/%ws/%wf…），
-     * 此前模板 `video-pc-%w-%03n` 里 `%w-` 属未知转义，mpv create_fname 判为非法模板后
+     * 此前模板 `yuki-%w-%03n` 里 `%w-` 属未知转义，mpv create_fname 判为非法模板后
      * 直接放弃截图（终端报 "Invalid screenshot filename template"），而 input.conf 的
      * `show-text "已截图"` 照旧弹出 → 表现为「提示截了但目录里没有图」。
      * 格式显式 png：mpv 默认 jpg，与 IPC 通道 screenshot-to-file 的 .png 统一。
@@ -226,7 +226,7 @@ class MpvPlayer extends EventEmitter {
             `--osd-playing-msg=${opts.title || 'YuKi'}`,
             // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
             // 注意 ${media-title} 是 mpv 属性展开，必须用普通字符串避免被 JS 模板插值。
-            '--title=video-pc · ${media-title}',
+            '--title=yuki · ${media-title}',
         ];
         if (WIN) args.push('--osd-font=Microsoft YaHei');
         if (opts.header && typeof opts.header === 'object') {

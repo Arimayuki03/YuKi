@@ -69,7 +69,7 @@ const My = {
         $('#my-stats-clear').on('click', async () => {
             if (!await confirmDialog('清空全部播放统计数据？此操作不可撤销。', { okText: '清空' })) return;
             try {
-                await window.vpc.settingsSet('watchStats', { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {}, bySite: {} });
+                await window.yuki.settingsSet('watchStats', { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {}, bySite: {} });
                 this._renderStats(null, []);
                 warnToast('已清空播放统计');
             } catch (e) { warnToast('清空失败'); }
@@ -154,7 +154,7 @@ const My = {
     },
 
     async render() {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         if (this._tab === 'stats') {
             this._renderStats(s.watchStats || null, Array.isArray(s.history) ? s.history : []);
             // 我的收藏分类部数（本地 favorites + Bangumi 收藏合并计数）：仿 Kazumi _CollectHero
@@ -365,6 +365,6 @@ const My = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.my = My;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.my = My;
 }(typeof window !== 'undefined' ? window : globalThis));

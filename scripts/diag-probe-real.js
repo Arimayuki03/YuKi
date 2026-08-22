@@ -25,7 +25,7 @@ function postJson(url, form) {
     child.stderr.on('data', (d) => { log += d.toString(); });
     let ready = null;
     for (let i = 0; i < 60; i++) {
-        const m = log.match(/VPC_BACKEND_READY port=(\d+) token=(\S+)/);
+        const m = log.match(/YUKI_BACKEND_READY port=(\d+) token=(\S+)/);
         if (m) { ready = { port: m[1], token: m[2] }; break; }
         await new Promise((r) => setTimeout(r, 500));
     }

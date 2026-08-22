@@ -12,19 +12,19 @@ import unittest
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.dirname(BASE_DIR)
 sys.path.insert(0, BACKEND_DIR)
-TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BACKEND_DIR, '.test-runtime')
+TEST_ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BACKEND_DIR, '.test-runtime')
 os.makedirs(TEST_ROOT, exist_ok=True)
 
 
-def test_file(prefix='vpc-test-'):
+def test_file(prefix='yuki-test-'):
     return os.path.join(TEST_ROOT, prefix + uuid.uuid4().hex + '.json')
 
 
-os.environ['VPC_DATA_DIR'] = os.path.join(TEST_ROOT, 'kazumi-data')
-os.makedirs(os.environ['VPC_DATA_DIR'], exist_ok=True)
+os.environ['YUKI_DATA_DIR'] = os.path.join(TEST_ROOT, 'kazumi-data')
+os.makedirs(os.environ['YUKI_DATA_DIR'], exist_ok=True)
 
 import hoststate
-hoststate.configure(data_dir=os.environ['VPC_DATA_DIR'])
+hoststate.configure(data_dir=os.environ['YUKI_DATA_DIR'])
 
 from kazumi.plugin import Plugin
 from kazumi.plugin_manager import PluginManager

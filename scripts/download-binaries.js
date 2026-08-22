@@ -96,7 +96,7 @@ function download(url, dest, { redirects = 0, binary = true } = {}) {
     return new Promise((resolve, reject) => {
         if (redirects > 5) return reject(new Error('too many redirects'));
         log(`GET ${url}`);
-        const req = https.get(url, { headers: { 'User-Agent': 'video-pc' } }, (rsp) => {
+        const req = https.get(url, { headers: { 'User-Agent': 'yuki' } }, (rsp) => {
             if ([301, 302, 303, 307, 308].includes(rsp.statusCode)) {
                 rsp.resume();
                 return resolve(download(rsp.headers.location, dest, { redirects: redirects + 1, binary }));
@@ -167,10 +167,10 @@ async function downloadMpv(vendorDir) {
     log(`release ${tag} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
 
     // 2) 下载、校验、解压
-    const archive = path.join(stage, 'vpc-mpv.7z');
+    const archive = path.join(stage, 'yuki-mpv.7z');
     await download(asset.browser_download_url, archive);
     if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `mpv ${tag}`);
-    const tmp = path.join(stage, 'vpc-mpv-extract');
+    const tmp = path.join(stage, 'yuki-mpv-extract');
     extract(archive, tmp);
     const found = findFile(tmp, 'mpv.exe');
     if (!found) throw new Error('mpv.exe not found in archive');
@@ -215,10 +215,10 @@ async function downloadAria2() {
     if (!asset) throw new Error(`no win-64bit zip asset in release ${meta.tag_name}`);
     log(`release ${meta.tag_name} -> ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)`);
 
-    const archive = path.join(stage, 'vpc-aria2.zip');
+    const archive = path.join(stage, 'yuki-aria2.zip');
     await download(asset.browser_download_url, archive);
     if (pinned && pinned.sha256) await verifyDownload(archive, pinned.sha256, `aria2 ${meta.tag_name}`);
-    const tmp = path.join(stage, 'vpc-aria2-extract');
+    const tmp = path.join(stage, 'yuki-aria2-extract');
     extract(archive, tmp);
     const found = findFile(tmp, 'aria2c.exe');
     if (!found) throw new Error('aria2c.exe not found in archive');
@@ -266,9 +266,9 @@ async function downloadFfmpeg() {
     const stage = path.join(VENDOR, '.tmp');
     ensureDir(stage);
 
-    const archive = path.join(stage, 'vpc-ffmpeg.zip');
+    const archive = path.join(stage, 'yuki-ffmpeg.zip');
     await download(FFMPEG_URL, archive);
-    const tmp = path.join(stage, 'vpc-ffmpeg-extract');
+    const tmp = path.join(stage, 'yuki-ffmpeg-extract');
     extract(archive, tmp);
     const found = findFile(tmp, 'ffmpeg.exe');
     if (!found) throw new Error('ffmpeg.exe not found in archive');

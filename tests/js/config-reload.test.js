@@ -18,7 +18,7 @@ test('配置摘要完成后始终触发首页和直播页刷新', () => {
 
 test('自动重载监听器在等待后端前注册', () => {
     const source = read('src/renderer/js/app.js');
-    const listenerIndex = source.indexOf('window.vpc.onConfigReloaded');
+    const listenerIndex = source.indexOf('window.yuki.onConfigReloaded');
     const waitIndex = source.indexOf('const ok = await waitBackend();');
     assert.ok(listenerIndex >= 0);
     assert.ok(waitIndex >= 0);

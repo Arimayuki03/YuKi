@@ -23,10 +23,10 @@ test('R8.1: 功能开关默认值与 UI 绑定', () => {
     assert.ok(panelsJs.includes('s.legacyParser !== false'));
 
     // 验证 main/index.js 环境变量注入
-    assert.ok(indexJs.includes('VPC_PAN_FAST_PATH'));
-    assert.ok(indexJs.includes('VPC_MEDIA_PROBE'));
-    assert.ok(indexJs.includes('VPC_AUTO_LINE_FALLBACK'));
-    assert.ok(indexJs.includes('VPC_LEGACY_PARSER'));
+    assert.ok(indexJs.includes('YUKI_PAN_FAST_PATH'));
+    assert.ok(indexJs.includes('YUKI_MEDIA_PROBE'));
+    assert.ok(indexJs.includes('YUKI_AUTO_LINE_FALLBACK'));
+    assert.ok(indexJs.includes('YUKI_LEGACY_PARSER'));
 });
 
 test('R8.2: 数据迁移：旧历史、收藏与 Cookie 不丢失', () => {

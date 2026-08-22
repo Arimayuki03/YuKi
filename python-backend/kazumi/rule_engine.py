@@ -13,7 +13,7 @@ from .xpath_strategy import XPathRuleStrategy
 from .api_strategy import ApiRuleStrategy
 from .utils import get_random_ua, SearchErrorException, ChapterErrorException, NoResultException, CaptchaRequiredException
 
-logger = logging.getLogger('vpc.kazumi.engine')
+logger = logging.getLogger('yuki.kazumi.engine')
 
 
 class RuleEngine:

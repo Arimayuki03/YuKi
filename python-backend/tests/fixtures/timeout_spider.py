@@ -27,7 +27,7 @@ class Spider(BaseSpider):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        path = os.environ.get('VPC_COMPAT_CHILD_PID_FILE', '')
+        path = os.environ.get('YUKI_COMPAT_CHILD_PID_FILE', '')
         if path:
             with open(path, 'w', encoding='ascii') as f:
                 f.write(str(self._fixture_child.pid))

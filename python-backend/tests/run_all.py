@@ -12,11 +12,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.dirname(HERE)  # python-backend/
 PY = sys.executable
-TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+TEST_ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
 os.makedirs(TEST_ROOT, exist_ok=True)
-TEST_ENV = {**os.environ, 'VPC_TEST_ROOT': TEST_ROOT,
-            'VPC_DATA_DIR': os.path.join(TEST_ROOT, 'data'),
-            'VPC_CACHE_DIR': os.path.join(TEST_ROOT, 'cache')}
+TEST_ENV = {**os.environ, 'YUKI_TEST_ROOT': TEST_ROOT,
+            'YUKI_DATA_DIR': os.path.join(TEST_ROOT, 'data'),
+            'YUKI_CACHE_DIR': os.path.join(TEST_ROOT, 'cache')}
 
 STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),

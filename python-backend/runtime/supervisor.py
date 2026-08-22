@@ -18,7 +18,7 @@ from .errors import RuntimeError
 from .process_transport import WindowsJob, recv_json, send_json, terminate_process_tree
 from .worker_base import worker_main
 
-logger = logging.getLogger('vpc.runtime.supervisor')
+logger = logging.getLogger('yuki.runtime.supervisor')
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ _MAX_JAR_WORKERS_DEFAULT = 3
 
 
 def _max_workers() -> int:
-    raw = os.environ.get('VPC_MAX_WORKERS') or os.environ.get('VPC_MAX_PYTHON_WORKERS')
+    raw = os.environ.get('YUKI_MAX_WORKERS') or os.environ.get('YUKI_MAX_PYTHON_WORKERS')
     if raw:
         try:
             v = int(str(raw).strip())
@@ -64,7 +64,7 @@ def _max_workers() -> int:
 
 
 def _max_jar_workers() -> int:
-    raw = os.environ.get('VPC_MAX_JAR_WORKERS') or os.environ.get('VPC_MAX_JVM')
+    raw = os.environ.get('YUKI_MAX_JAR_WORKERS') or os.environ.get('YUKI_MAX_JVM')
     if raw:
         try:
             v = int(str(raw).strip())
@@ -270,7 +270,7 @@ class RuntimeSupervisor:
         process = self._ctx.Process(
             target=worker_main,
             args=(child, self.spec, asdict(self.policy)),
-            name='vpc-%s-%s' % (self.runtime, self.site_key or 'worker'),
+            name='yuki-%s-%s' % (self.runtime, self.site_key or 'worker'),
             daemon=False,
         )
         process.start()

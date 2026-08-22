@@ -16,7 +16,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9341);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9341);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -56,8 +56,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-ct-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-ct-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     // 预置历史（25 条测分页）+ 观看统计 + 收藏
     const history = [];
     for (let i = 1; i <= 25; i++) history.push({ site: 'site-a', siteName: '源甲', vodId: 'h-' + i, name: '历史片 ' + i, pic: '', remarks: '第' + i + '集', ts: Date.now() - i * 1000 });

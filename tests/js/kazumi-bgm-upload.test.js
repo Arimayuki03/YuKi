@@ -6,7 +6,7 @@ const path = require('path');
 const vm = require('node:vm');
 
 // 加载 kazumi.js 到隔离 VM，注入上传批量函数所需的全局桩：
-// recGet/recSet（收藏读写）、doAction（后端调用）、warnToast、window.vpc.settingsGet。
+// recGet/recSet（收藏读写）、doAction（后端调用）、warnToast、window.yuki.settingsGet。
 function loadKazumi(extra = {}) {
     const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/kazumi.js'), 'utf8');
     const jqueryStub = () => ({
@@ -28,7 +28,7 @@ function loadKazumi(extra = {}) {
         parseInt, parseFloat, setTimeout, clearTimeout,
         $: jqueryStub,
         warnToast() {},
-        window: { vpc: {} },
+        window: { yuki: {} },
         ...extra,
     };
     context.globalThis = context;
@@ -45,7 +45,7 @@ function makeHarness(favorites, opts = {}) {
     const kazumi = loadKazumi({
         recGet: async () => favorites.map((f) => ({ ...f })),
         recSet: async (key, list) => { saved = list; },
-        window: { vpc: { settingsGet: async () => ({ bangumiToken: 'tok', bangumiImmediateSyncToastEnable: false }) } },
+        window: { yuki: { settingsGet: async () => ({ bangumiToken: 'tok', bangumiImmediateSyncToastEnable: false }) } },
         doAction: async (action, params) => {
             if (action === 'kazumiBangumiSync') {
                 const localFavs = JSON.parse((params && params.favorites) || '[]');
@@ -159,7 +159,7 @@ test('无 Token 返回 null（不上传）', async () => {
     const kazumi = loadKazumi({
         recGet: async () => [],
         recSet: async () => {},
-        window: { vpc: { settingsGet: async () => ({}) } },
+        window: { yuki: { settingsGet: async () => ({}) } },
         doAction: async () => ({ code: 200 }),
     });
     kazumi._getBangumiToken = async () => '';

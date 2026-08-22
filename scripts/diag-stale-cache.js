@@ -9,7 +9,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9358);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9358);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -49,8 +49,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-diag-stale-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-diag-stale-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
         s.wallpaper = ''; s.onboarded = true; s.bangumiToken = '';
@@ -139,7 +139,7 @@ class CDP {
     out.before.pageSize = await cdp.evaluate(`pageSizeOf('pageSizeHome').then(v => v)`, true);
 
     // ===== 场景A：修改每页条数 20→36 =====
-    await cdp.evaluate(`window.vpc.settingsSet('pageSizeHome', 36).then(() => invalidatePageSizeCache())`, true);
+    await cdp.evaluate(`window.yuki.settingsSet('pageSizeHome', 36).then(() => invalidatePageSizeCache())`, true);
     // 立即再开分类（缓存应已失效 → 36 条；否则先用旧缓存 20 条）
     await cdp.evaluate(`Home.loadCategory('6', 1); true`);
     const t0 = Date.now();

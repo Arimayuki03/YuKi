@@ -6,7 +6,7 @@
  *
  * 1. 空分类全隐藏：demo 两个分类均无影片 → 探测后分类栏只剩「全部」
  * 2. 混合保留：CDP 桩 doAction 令 剧集 返回内容、电影 仍空 → 重探测后分类栏为「全部 + 剧集」，
- *    持久化 localStorage['vpc_home_empty_classes'] 的 demo 仅剩 电影
+ *    持久化 localStorage['yuki_home_empty_classes'] 的 demo 仅剩 电影
  * 3. 持久化：探测结果写入 localStorage（重启后首屏即过滤，无闪现）
  * 4. 无 home.js 相关控制台错误
  */
@@ -18,7 +18,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9346);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9346);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -58,8 +58,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-ec-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-ec-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     const seed = { lastConfigUrl: '', configHistory: [], wallpaper: '', onboarded: true, bangumiToken: '' };
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
@@ -144,7 +144,7 @@ class CDP {
     out.tabLabels1 = await cdp.evaluate(`[...document.querySelectorAll('#home-class .class-tab')].map(t => t.textContent.trim())`);
     out.tabs1 = tabs1;
     out.demoSelected = await cdp.evaluate(`document.getElementById('site-select').value`);
-    out.persisted1 = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('vpc_home_empty_classes') || '{}'); return d['demo'] && d['demo'].empty ? [...d['demo'].empty].sort() : null; } catch (e) { return 'ERR'; } })()`);
+    out.persisted1 = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('yuki_home_empty_classes') || '{}'); return d['demo'] && d['demo'].empty ? [...d['demo'].empty].sort() : null; } catch (e) { return 'ERR'; } })()`);
 
     // ============ 2. 混合：桩 doAction 令 剧集 有内容、电影 仍空 → 重探测后「全部 + 剧集」 ============
     await cdp.evaluate(`(() => {
@@ -167,7 +167,7 @@ class CDP {
     }
     out.tabLabels2 = await cdp.evaluate(`[...document.querySelectorAll('#home-class .class-tab')].map(t => t.textContent.trim())`);
     out.tabs2 = tabs2;
-    out.persisted2 = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('vpc_home_empty_classes') || '{}'); return d['demo'] && d['demo'].empty ? [...d['demo'].empty].sort() : null; } catch (e) { return 'ERR'; } })()`);
+    out.persisted2 = await cdp.evaluate(`(() => { try { const d = JSON.parse(localStorage.getItem('yuki_home_empty_classes') || '{}'); return d['demo'] && d['demo'].empty ? [...d['demo'].empty].sort() : null; } catch (e) { return 'ERR'; } })()`);
 
     out.console = { errors: cdp.errors.slice(0, 20), errorCount: cdp.errors.length };
     console.log('\n===== 空分类隐藏验收原始结果 =====');

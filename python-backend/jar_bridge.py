@@ -29,7 +29,7 @@ from runtime.contracts import current_runtime_request
 import http_client
 import java_probe
 
-logger = logging.getLogger('vpc.jar')
+logger = logging.getLogger('yuki.jar')
 
 
 class JarProxyBody:
@@ -266,14 +266,14 @@ _jar_bridges_lock = threading.Lock()
 _jar_lru = OrderedDict()
 
 # 全局 JVM 子进程数量上限：每 JVM 约 1.5GB，配置多仓合并后可能有 10+ 不同 jar，
-# 无上限会 OOM。默认 3，可用 VPC_MAX_JVM / VPC_MAX_JAR_PROCESSES 覆盖，clamp 到 1-8。
+# 无上限会 OOM。默认 3，可用 YUKI_MAX_JVM / YUKI_MAX_JAR_PROCESSES 覆盖，clamp 到 1-8。
 # 注意：dex2jar 的临时 java 进程是 subprocess.run 短暂进程，不受此限制。
 _MAX_JVM_DEFAULT = 3
 
 
 def _max_jvm():
     """懒读环境变量得到 JVM 上限，clamp 到 [1, 8]。无效/未设置回落到默认 3。"""
-    raw = os.environ.get('VPC_MAX_JVM') or os.environ.get('VPC_MAX_JAR_PROCESSES')
+    raw = os.environ.get('YUKI_MAX_JVM') or os.environ.get('YUKI_MAX_JAR_PROCESSES')
     if raw:
         try:
             val = int(str(raw).strip())
@@ -352,7 +352,7 @@ class JarBridge:
 
     @staticmethod
     def get_or_create(jar_path, runner_jar=None):
-        """获取或创建 jar_path 对应的桥实例（全局单例，受 VPC_MAX_JVM 上限约束）。"""
+        """获取或创建 jar_path 对应的桥实例（全局单例，受 YUKI_MAX_JVM 上限约束）。"""
         runner_jar = runner_jar or DEFAULT_RUNNER_JAR
         jar_path = os.path.normpath(os.path.realpath(jar_path))
         victim = None
@@ -365,7 +365,7 @@ class JarBridge:
             victim = _evict_jvm_if_needed_locked()
             # 任务二·机制B：jar 加载期预启动其硬编码的本地代理端口，
             # 避免首次播放才补监听（首连失败）
-            if os.environ.get('VPC_WORKER_CONTROL_ONLY') != '1':
+            if os.environ.get('YUKI_WORKER_CONTROL_ONLY') != '1':
                 try:
                     import go_proxy
                     for p in _scan_jar_ports(jar_path):
@@ -532,15 +532,15 @@ class JarBridge:
             except Exception:
                 port = 9978
         args = [
-            '-Dvpc.proxyHost=127.0.0.1',
-            '-Dvpc.proxyPort=' + str(port),
+            '-Dyuki.proxyHost=127.0.0.1',
+            '-Dyuki.proxyPort=' + str(port),
         ]
         try:
             token = str(hoststate.get_token() or '')
         except Exception:
             token = ''
         if token:
-            args.append('-Dvpc.proxyToken=' + token)
+            args.append('-Dyuki.proxyToken=' + token)
         return args
 
     @staticmethod
@@ -1118,7 +1118,7 @@ class JarBridge:
             except Exception:
                 pass
             return {
-                '__vpc_proxy__': True,
+                '__yuki_proxy__': True,
                 'status': status,
                 'mime': mime,
                 'headers': headers,

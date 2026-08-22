@@ -8,7 +8,7 @@ const path = require('node:path');
 const DlRecordStore = require('../../src/main/dl-record');
 
 function tmpFile() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-dl-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-dl-'));
     return path.join(dir, 'dl-records.json');
 }
 

@@ -15,20 +15,20 @@
 !include "LogicLib.nsh"
 
 ; 复选框状态变量（1=安装内置播放器，0=跳过）；默认安装。
-Var VpcMpvCheckbox
-Var VpcInstallMpv
+Var YukiMpvCheckbox
+Var YukiInstallMpv
 
 ; ---------------------------------------------------------------- 自定义页面
 ; electron-builder 的 assisted 安装器（oneClick:false）在 allowToChangeInstallationDirectory
 ; 为 true 时会有目录选择页，本宏把自定义页插在其后。
 !macro customPageAfterChangeDir
-  Page custom vpcMpvPageCreate vpcMpvPageLeave
+  Page custom yukiMpvPageCreate yukiMpvPageLeave
 !macroend
 
-Function vpcMpvPageCreate
+Function yukiMpvPageCreate
   ; 默认勾选（首次进入页面时初始化为安装）
-  ${If} $VpcInstallMpv == ""
-    StrCpy $VpcInstallMpv "1"
+  ${If} $YukiInstallMpv == ""
+    StrCpy $YukiInstallMpv "1"
   ${EndIf}
 
   nsDialogs::Create 1018
@@ -41,10 +41,10 @@ Function vpcMpvPageCreate
   Pop $0
 
   ${NSD_CreateCheckbox} 0 40u 100% 12u "安装内置播放器 (mpv)"
-  Pop $VpcMpvCheckbox
+  Pop $YukiMpvCheckbox
   ; 依据当前状态回填勾选框
-  ${If} $VpcInstallMpv == "1"
-    ${NSD_Check} $VpcMpvCheckbox
+  ${If} $YukiInstallMpv == "1"
+    ${NSD_Check} $YukiMpvCheckbox
   ${EndIf}
 
   ${NSD_CreateLabel} 0 60u 100% 24u "提示：取消勾选后仍可在应用内「设置 → 扩展」点击「下载内置播放器」一键补装，或指定本机已安装的 mpv.exe 路径。"
@@ -53,13 +53,13 @@ Function vpcMpvPageCreate
   nsDialogs::Show
 FunctionEnd
 
-Function vpcMpvPageLeave
+Function yukiMpvPageLeave
   ; 读取复选框状态存入变量，供 customInstall 判定
-  ${NSD_GetState} $VpcMpvCheckbox $0
+  ${NSD_GetState} $YukiMpvCheckbox $0
   ${If} $0 == ${BST_CHECKED}
-    StrCpy $VpcInstallMpv "1"
+    StrCpy $YukiInstallMpv "1"
   ${Else}
-    StrCpy $VpcInstallMpv "0"
+    StrCpy $YukiInstallMpv "0"
   ${EndIf}
 FunctionEnd
 
@@ -67,7 +67,7 @@ FunctionEnd
 ; extraResources 已把 vendor/ 复制到 $INSTDIR\resources\vendor；
 ; 用户未勾选内置播放器时，删除其中的 mpv 子目录（其余组件保留）。
 !macro customInstall
-  ${If} $VpcInstallMpv == "0"
+  ${If} $YukiInstallMpv == "0"
     DetailPrint "跳过内置播放器：正在移除 mpv..."
     RMDir /r "$INSTDIR\resources\vendor\mpv"
   ${Else}

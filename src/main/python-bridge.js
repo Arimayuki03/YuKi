@@ -5,7 +5,7 @@
  * 崩溃后指数退避重启（1s/2s/4s...上限 60s，就绪后重置）。
  *
  * 打包模式（app.isPackaged）：启动 PyInstaller 单文件 exe
- * （extraResources/python-backend/video-pc-backend.exe），无 venv 依赖。
+ * （extraResources/python-backend/yuki-backend.exe），无 venv 依赖。
  */
 const { app } = require('electron');
 const { spawn, spawnSync } = require('child_process');
@@ -13,7 +13,7 @@ const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
 
-const READY_RE = /VPC_BACKEND_READY port=(\d+) token=(\S+)/;
+const READY_RE = /YUKI_BACKEND_READY port=(\d+) token=(\S+)/;
 const HEALTH_INTERVAL = 15000;
 const MAX_BACKOFF = 60000;
 
@@ -25,7 +25,7 @@ class PythonBridge extends EventEmitter {
         // 开发模式：venv python + server.py；打包模式：PyInstaller 单文件 exe
         if (app.isPackaged) {
             this.backendDir = path.join(this.resourcesRoot, 'python-backend');
-            this.script = path.join(this.backendDir, 'video-pc-backend.exe');
+            this.script = path.join(this.backendDir, 'yuki-backend.exe');
             this._isPackaged = true;
         } else {
             this.backendDir = path.join(this.rootDir, 'python-backend');
@@ -38,7 +38,7 @@ class PythonBridge extends EventEmitter {
         this.backoff = 1000;
         this.healthTimer = null;
         this.readyWaiters = [];
-        this.extraEnv = {};        // 附加环境变量（如自定义缓存目录 VPC_CACHE_DIR）
+        this.extraEnv = {};        // 附加环境变量（如自定义缓存目录 YUKI_CACHE_DIR）
         this.logWriter = opts.logWriter || null;
     }
 

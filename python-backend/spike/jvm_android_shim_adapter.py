@@ -18,7 +18,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-os.environ.setdefault('VPC_WORKER_CONTROL_ONLY', '1')
+os.environ.setdefault('YUKI_WORKER_CONTROL_ONLY', '1')
 
 import hoststate  # noqa: E402
 from jar_bridge import JarBridge  # noqa: E402
@@ -124,7 +124,7 @@ def main():
     class_name = str(probe.get('className') or '')
     if not artifact or not class_name:
         raise ValueError('artifactPath and className are required')
-    test_root = Path(os.environ.get('VPC_TEST_ROOT') or (BASE / '.test-runtime'))
+    test_root = Path(os.environ.get('YUKI_TEST_ROOT') or (BASE / '.test-runtime'))
     hoststate.configure(port=18557, token='a4-1-spike',
                         data_dir=str(test_root / 'data'),
                         cache_dir=str(test_root / 'cache'),

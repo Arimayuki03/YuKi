@@ -411,6 +411,6 @@ const Timeline = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.timeline = Timeline;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.timeline = Timeline;
 }(typeof window !== 'undefined' ? window : globalThis));

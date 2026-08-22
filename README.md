@@ -2,7 +2,7 @@
 
 YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面与系统宿主，使用独立 FastAPI/Python 进程运行 CatVod 与 Kazumi 两套内容引擎，并通过 mpv、aria2c 和 ffmpeg 完成播放与下载。
 
-当前版本为 `0.1.0`，主要开发和验证平台是 Windows。内部包名、数据目录与 IPC 前缀仍为 `video-pc`/`vpc`，仅显示名为 YuKi。
+当前版本为 `0.1.0`，主要开发和验证平台是 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`/`yuki`，仅显示名为 YuKi。
 
 ## 当前状态
 

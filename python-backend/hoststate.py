@@ -5,11 +5,44 @@
 PC 端统一由本模块提供；server.py 启动时调用 configure() 写入。
 """
 import os
+import shutil
 import hmac
 
-_HOME = os.path.join(os.path.expanduser('~'), '.video-pc')
-_ENV_DATA_DIR = os.environ.get('VPC_DATA_DIR', '').strip()
-_ENV_CACHE_DIR = os.environ.get('VPC_CACHE_DIR', '').strip()
+_HOME = os.path.join(os.path.expanduser('~'), '.yuki')
+
+
+def _migrate_legacy_home():
+    """项目改名 video-pc → yuki：旧 ~/.video-pc 整体搬到 ~/.yuki。
+
+    Electron 主进程启动时已做同样迁移（覆盖桌面端路径）；此处兜底保护
+    `npm run backend` 等脱离 Electron 的独立后端运行方式。目标已存在
+    （非空）则不动，失败静默跳过（仅旧数据暂不可见，不阻断启动）。
+    """
+    legacy = os.path.join(os.path.expanduser('~'), '.video-pc')
+    try:
+        if not os.path.isdir(legacy):
+            return
+        if not os.path.exists(_HOME):
+            os.makedirs(_HOME)
+        elif os.listdir(_HOME):
+            return  # 目标已存在且非空：不动，避免覆盖新数据
+        for name in os.listdir(legacy):
+            src = os.path.join(legacy, name)
+            dst = os.path.join(_HOME, name)
+            if os.path.isdir(src) and not os.path.islink(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        # 复制成功后再清掉旧目录；任一步失败保留旧目录原样
+        shutil.rmtree(legacy, ignore_errors=True)
+    except Exception:
+        pass
+
+
+_migrate_legacy_home()
+
+_ENV_DATA_DIR = os.environ.get('YUKI_DATA_DIR', '').strip()
+_ENV_CACHE_DIR = os.environ.get('YUKI_CACHE_DIR', '').strip()
 _DATA_DIR = _ENV_DATA_DIR or _HOME
 _CACHE_DIR = _ENV_CACHE_DIR or os.path.join(_DATA_DIR, 'cache')
 

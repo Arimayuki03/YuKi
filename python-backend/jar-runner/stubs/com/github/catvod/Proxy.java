@@ -5,7 +5,7 @@ package com.github.catvod;
  *
  * FongMi JAR 会调用该类拼出 ``http://127.0.0.1:<port>/proxy`` 播放地址。
  * Android 端的端口由 NanoHTTPD 分配；桌面端由 JarBridge 通过
- * -Dvpc.proxyHost/-Dvpc.proxyPort 注入，默认兼容 9978。
+ * -Dyuki.proxyHost/-Dyuki.proxyPort 注入，默认兼容 9978。
  */
 public final class Proxy {
     private static volatile String host = readHost();
@@ -17,7 +17,7 @@ public final class Proxy {
 
     private static int readPort() {
         try {
-            String value = System.getProperty("vpc.proxyPort", "9978");
+            String value = System.getProperty("yuki.proxyPort", "9978");
             int parsed = Integer.parseInt(value);
             return parsed > 0 && parsed <= 65535 ? parsed : 9978;
         } catch (Throwable ignored) {
@@ -27,7 +27,7 @@ public final class Proxy {
 
     private static String readHost() {
         try {
-            String value = System.getProperty("vpc.proxyHost", "127.0.0.1");
+            String value = System.getProperty("yuki.proxyHost", "127.0.0.1");
             return value == null || value.trim().isEmpty() ? "127.0.0.1" : value.trim();
         } catch (Throwable ignored) {
             return "127.0.0.1";
@@ -35,7 +35,7 @@ public final class Proxy {
     }
 
     private static String readToken() {
-        try { return System.getProperty("vpc.proxyToken", ""); }
+        try { return System.getProperty("yuki.proxyToken", ""); }
         catch (Throwable ignored) { return ""; }
     }
 
@@ -58,7 +58,7 @@ public final class Proxy {
     public static String getUrl(boolean local) {
         String address = local ? "127.0.0.1" : host;
         String url = "http://" + address + ":" + getPort() + "/proxy";
-        // vpc.proxyToken 由宿主生成的 hex token，字符集已是 URL-safe。
+        // yuki.proxyToken 由宿主生成的 hex token，字符集已是 URL-safe。
         return token.isEmpty() ? url : url + "?token=" + token;
     }
 }

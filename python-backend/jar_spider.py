@@ -18,7 +18,7 @@ from base.spider import Spider
 import hoststate
 from proxy_contract import normalize_proxy_url
 
-logger = logging.getLogger('vpc.jarspider')
+logger = logging.getLogger('yuki.jarspider')
 
 
 def _load_pan_cookies():

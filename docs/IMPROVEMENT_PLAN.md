@@ -1,4 +1,4 @@
-# YuKi（video-pc）改进优化任务清单（详细版）
+# YuKi（yuki）改进优化任务清单（详细版）
 
 - **生成日期**: 2026-08-16（同日更新为详细步骤版）
 - **定位**: 承接 `CODE_REVIEW.md`（安全漏洞与功能 bug，9 高危 / 30 中危 / 25 低危，修复路线见其第五节），聚焦其**未覆盖的维度**：测试体系、架构组织、后端资源治理、工程化基建、仓库卫生、打包分发。
@@ -345,7 +345,7 @@
 **步骤**：
 
 1. 在关键节点打时间戳日志（复用现有 logging）：
-   - 主进程：`python-bridge.js` spawn 前/后、解析到 `VPC_BACKEND_READY` 时
+   - 主进程：`python-bridge.js` spawn 前/后、解析到 `YUKI_BACKEND_READY` 时
    - 后端：`server.py main()` 各阶段（load_default_sites 前/后、create_app 前/后）
    - 渲染层：`app.js` 首帧、首个 homeContent 请求发出/返回
 2. 冷启动（重启机器后 `npm start`）记录 5 次取中位数，形成基线数字写进 `docs/ARCHITECTURE.md`
@@ -362,7 +362,7 @@
 
 ### D1. 渲染层模块化（渐进，不引框架）
 
-**本轮进度**：Kazumi 两处 Bangumi 封面 fallback 已移除内联 `onerror`，统一由 `common.js` 捕获阶段处理；`app/about/bangumiSearch/cache/common/detail/downloads/home/kazumi/live/my/panels/player/popular/records/search/timeline` 共 17 个渲染脚本已完成 `VPC.<module>` 导出层，并通过 JS 单元 206/206、语法检查 40/40；全页面手动验收仍待实机完成。
+**本轮进度**：Kazumi 两处 Bangumi 封面 fallback 已移除内联 `onerror`，统一由 `common.js` 捕获阶段处理；`app/about/bangumiSearch/cache/common/detail/downloads/home/kazumi/live/my/panels/player/popular/records/search/timeline` 共 17 个渲染脚本已完成 `YUKI.<module>` 导出层，并通过 JS 单元 206/206、语法检查 40/40；全页面手动验收仍待实机完成。
 
 **现状**：原生 JS + jQuery，`index.html` 固定顺序引 18 个 `<script>`；模块间靠隐式全局函数互调（跨文件调用如 `home.js` 调 `common.js` 的函数全凭加载顺序正确）。
 
@@ -371,8 +371,8 @@
 1. **先做零风险导出层**：每个 `src/renderer/js/*.js` 文件头部加计数注释，文件尾部统一挂命名空间：
    ```js
    // search.js 尾部
-   window.VPC = window.VPC || {};
-   VPC.search = { aggregateSearch, renderResults, switchSite /* 现有的全局函数名 */ };
+   window.YUKI = window.YUKI || {};
+   YUKI.search = { aggregateSearch, renderResults, switchSite /* 现有的全局函数名 */ };
    ```
    文件内部逻辑不动，纯追加——每次一个文件，跑 `npm run test:jsunit`（home-probe 等 vm 加载型测试最能发现破坏）。
 2. **公共层收敛**：`common.js` 保持唯一公共依赖；排查其他文件是否重复定义了工具函数（CODE_REVIEW 已确认 `escHtml` 集中在 common.js:64，顺势审查 toast/分页/请求包装是否有多份拷贝）
@@ -380,10 +380,10 @@
 4. **（可选，收益递减）** 引入 Vite 做打包与 HMR：Electron 渲染层用 `vite-plugin-electron` 或纯静态构建均可，迁移期间新旧两种加载并存（未迁移文件继续 `<script>` 引入）
 5. 每完成一个文件在本文档勾选：`home` `search` `detail` `panels` `kazumi` `player` `records` `downloads` `live` `my` `timeline` `popular` `bangumi-search` `about` `app` `cache` `common`
 
-**本轮完成情况**：上述 17 个渲染层脚本均已挂载 `VPC.<module>`；挂载使用浏览器/VM 双环境安全的根对象，并保留原有全局入口兼容旧调用。
+**本轮完成情况**：上述 17 个渲染层脚本均已挂载 `YUKI.<module>`；挂载使用浏览器/VM 双环境安全的根对象，并保留原有全局入口兼容旧调用。
 
 **验收**：
-- [x] 17 个渲染层脚本均提供 `VPC.<module>` 入口；VM 加载型回归覆盖了导出改动，JS 单元 206/206、语法检查 40/40 通过。存量跨文件全局调用仍保留兼容层，后续迁移时再逐个改为显式模块调用。
+- [x] 17 个渲染层脚本均提供 `YUKI.<module>` 入口；VM 加载型回归覆盖了导出改动，JS 单元 206/206、语法检查 40/40 通过。存量跨文件全局调用仍保留兼容层，后续迁移时再逐个改为显式模块调用。
 - [ ] 全部页面手动走一遍无 console 报错
 - [x] kazumi.js 两处 onerror 内联 JS 消失（配合 CODE_REVIEW H-6 修复）
 
@@ -409,7 +409,7 @@
    // ipc/play.js
    module.exports = function registerPlayIpc(ctx) {
      // ctx = { mpv, bridge, downloader, settings, mainWindow, ... } 由 index.js 装配传入
-     ipcMain.handle('vpc:play', (_e, payload) => { ... });
+     ipcMain.handle('yuki:play', (_e, payload) => { ... });
    };
    ```
    `index.js` 只保留：窗口生命周期、模块装配（构造 ctx 逐个调 register）、`before-quit` 清理（顺带修 CODE_REVIEW M-8——抽公共 `gracefulShutdown()` 供 settings-reset 复用）。
@@ -429,11 +429,11 @@
 
 **本轮进度**：已生成 `docs/DATA_MAP.md`，并确认当前业务数据通过 settings IPC 保存；localStorage 仍保留三个派生缓存键，尚未迁移到统一 cache API。
 
-**现状**：收藏/历史在渲染层，下载记录在主进程 `dl-records.json`，Kazumi 规则与 Cookie 在后端 `~/.video-pc/`——三处存储三套读写与同步逻辑，竞态类 bug（CODE_REVIEW M-30 系列）的根源。
+**现状**：收藏/历史在渲染层，下载记录在主进程 `dl-records.json`，Kazumi 规则与 Cookie 在后端 `~/.yuki/`——三处存储三套读写与同步逻辑，竞态类 bug（CODE_REVIEW M-30 系列）的根源。
 
 **步骤**：
 
-1. **盘点（半天）**：列表化每类数据的存储位置、读写方、迁移路径——产出 `docs/DATA_MAP.md`：渲染层 localStorage 键清单（`grep -rhoE "localStorage\.(get|set)Item\('[^']+'" src/renderer/js | sort -u`）+ 主进程 JSON 文件 + 后端 `~/.video-pc` 文件
+1. **盘点（半天）**：列表化每类数据的存储位置、读写方、迁移路径——产出 `docs/DATA_MAP.md`：渲染层 localStorage 键清单（`grep -rhoE "localStorage\.(get|set)Item\('[^']+'" src/renderer/js | sort -u`）+ 主进程 JSON 文件 + 后端 `~/.yuki` 文件
 2. **后端补齐通用记录 API**（`server.py` 已有 CacheStore 与 token 鉴权，增加 `/records/<type>` GET/POST/DELETE，内部走 CacheStore 或独立 JSON 文件，原子写参照 CODE_REVIEW M-28 的 tmp+replace 方案）
 3. **逐类迁移**（每类一个 PR，保留旧数据一次性导入）：下载记录 → 历史/观看统计 → 收藏；渲染层改为纯 API 视图，localStorage 仅留 UI 偏好（主题、布局）
 4. 迁移完的竞态修复验证：快速连续搜索/切源/收藏，数据不再串（对应 M-30 各条逐一回归）
@@ -524,10 +524,10 @@
 
 ## 附录B：后端现状速览（改进基线）
 
-- **进程模型**：Electron 主进程 spawn Python（dev: `.venv/python.exe -X utf8 server.py` / 打包: PyInstaller exe），stdout 握手 `VPC_BACKEND_READY port=<p> token=<t>`（token 不走命令行）；健康检查 15s；崩溃指数退避重启 1s→60s。go-proxy 三个端口（9978/7944/1314）为兼容不同 jar 硬编码
+- **进程模型**：Electron 主进程 spawn Python（dev: `.venv/python.exe -X utf8 server.py` / 打包: PyInstaller exe），stdout 握手 `YUKI_BACKEND_READY port=<p> token=<t>`（token 不走命令行）；健康检查 15s；崩溃指数退避重启 1s→60s。go-proxy 三个端口（9978/7944/1314）为兼容不同 jar 硬编码
 - **并发**：单进程单事件循环；阻塞 spider 调用落 anyio 默认线程池（~40 线程，**无上限**）；聚合搜索每请求临时 8 线程池；JVM 按 jar 全局单例 + `_call_lock` 串行（60s 超时强杀）；go-proxy `ThreadingHTTPServer` 每连接一线程，≥32MiB 资源走 `_SegStream` 8 段并发（256KiB×24 队列深度背压 ≈ 48MiB/请求内存上限）
 - **缓存**：`CacheStore`（每 key 一 JSON 文件，惰性 TTL，**无上限**）｜`_player_content_cache`（1024 项/60s，无锁）｜`_SHARE_CACHE`（300s，无上限）｜`_SAVE_CACHE`（永久落盘）｜JS 本地 KV（全量重写，无配额）
-- **持久化**：无 sqlite，全部 JSON 文本（`~/.video-pc/`：pan_cookies、kazumi/plugins+cookies+mirror、js_local、cache/kv、cache/jar、cache/dl；Electron userData：settings.json、dl-records.json）
+- **持久化**：无 sqlite，全部 JSON 文本（`~/.yuki/`：pan_cookies、kazumi/plugins+cookies+mirror、js_local、cache/kv、cache/jar、cache/dl；Electron userData：settings.json、dl-records.json）
 - **日志**：RotatingFileHandler 5MiB×5 + 控制台，脱敏 Formatter（token/secret/Authorization/Cookie），sys+threading excepthook 兜底——**体系健康，无需改动**
 - **HTTP**：除夸克专用 `_qses` 外全部无连接池直调；超时六档（5/10/15/30/60s 等）不统一；代理感知三处重复（app.py / go_proxy.py / jar_bridge.py）
 

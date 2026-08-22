@@ -11,7 +11,7 @@
 - 每仓一个子进程（--one）：任意仓库的 jar/JS 是不受信代码，崩溃/泄漏被子进程
   吸收，主进程只做编排与基线对比；
 - 子进程用临时 data_dir/cache_dir/plugins_dir（hoststate.configure），不污染
-  ~/.video-pc；结束时 JarBridge.destroy_all() 优雅关停 JVM；
+  ~/.yuki；结束时 JarBridge.destroy_all() 优雅关停 JVM；
 - 四阶段探测：S1 拉取(fetch_text 真实路径，含伪装/gzip/IDN) → S2 解析建站
   (config_mgr.load) → S3 建站率 → S4 首页冒烟(抽样 ≤12 站，每站 12s 超时)；
 - 基线对比：fetch/parse 必须 100%（配置层回归即硬失败）；建站率/首页成功率
@@ -37,16 +37,16 @@ REPORT = os.path.join(HERE, 'compat_report.txt')
 REPORT_JSON = os.path.join(HERE, 'compat_report.json')
 FIXTURES = os.path.join(HERE, 'fixtures')
 COMPAT_TMP_ROOT = os.path.join(
-    os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime'), 'compat')
+    os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime'), 'compat')
 os.makedirs(COMPAT_TMP_ROOT, exist_ok=True)
 
-REPO_TIMEOUT = float(os.environ.get('VPC_COMPAT_REPO_TIMEOUT', '180'))
+REPO_TIMEOUT = float(os.environ.get('YUKI_COMPAT_REPO_TIMEOUT', '180'))
                          # 单仓子进程硬超时（秒）。原 420s 过长且 jar 密集仓
                          # 在 Windows PIPE 模式下因 pipe 缓冲区满而死锁——
                          # 改用文件重定向后，多数仓 <60s 完成，180s 足够兜底。
 HOME_PROBE_MAX = 12      # 每仓首页冒烟站点数上限
-HOME_PROBE_TIMEOUT = float(os.environ.get('VPC_COMPAT_HOME_TIMEOUT', '12'))
-HOME_PROBE_BUDGET = float(os.environ.get('VPC_COMPAT_HOME_BUDGET', '45'))
+HOME_PROBE_TIMEOUT = float(os.environ.get('YUKI_COMPAT_HOME_TIMEOUT', '12'))
+HOME_PROBE_BUDGET = float(os.environ.get('YUKI_COMPAT_HOME_BUDGET', '45'))
 RATE_TOLERANCE = 0.05    # 聚合率对比容差（±5pp 网络抖动）
 
 
@@ -82,7 +82,7 @@ def _start_fixture_server(repo):
 def _network_exit(repo):
     if repo.get('fixture'):
         return 'loopback'
-    explicit = os.environ.get('VPC_COMPAT_NETWORK_EXIT', '').strip()
+    explicit = os.environ.get('YUKI_COMPAT_NETWORK_EXIT', '').strip()
     if explicit:
         return explicit[:120]
     proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') or ''
@@ -191,9 +191,9 @@ def run_one(repo):
     repo = dict(repo)
     fixture_instance, resolved_url = _start_fixture_server(repo)
     repo['url'] = resolved_url
-    tmp = _compat_temp_path('vpc-compat-', create_dir=True)
-    os.environ['VPC_PORT'] = '0'
-    os.environ['VPC_TOKEN'] = 'compat'
+    tmp = _compat_temp_path('yuki-compat-', create_dir=True)
+    os.environ['YUKI_PORT'] = '0'
+    os.environ['YUKI_TOKEN'] = 'compat'
     sys.path.insert(0, BASE)
     sys.path.insert(0, os.path.join(BASE, 'js-engine'))
 
@@ -609,10 +609,10 @@ def run_corpus(repos, resume=False):
         # 原因：jar spider 初始化会向 stderr 打印大量堆栈（10KB+），
         # Windows 默认 4KB 管道缓冲区塞满后子进程阻塞在 write()，
         # 父进程只在 run() 结束才读 → 死锁，表现为子进程卡到 420s 超时。
-        out_path = _compat_temp_path('vpc-compat-out-')
-        err_path = _compat_temp_path('vpc-compat-err-')
+        out_path = _compat_temp_path('yuki-compat-out-')
+        err_path = _compat_temp_path('yuki-compat-err-')
         p = None
-        child_pid_path = _compat_temp_path('vpc-compat-child-')
+        child_pid_path = _compat_temp_path('yuki-compat-child-')
         recorded_child_pid = None
         forced_termination = False
         try:
@@ -620,10 +620,10 @@ def run_corpus(repos, resume=False):
             # Timeout/infinite fixtures spawn one untrusted Python descendant;
             # the parent records its PID so the test proves tree termination,
             # not merely that the top-level child stopped responding.
-            env['VPC_COMPAT_CHILD_PID_FILE'] = child_pid_path
+            env['YUKI_COMPAT_CHILD_PID_FILE'] = child_pid_path
             if repo.get('fixture'):
-                env.setdefault('VPC_COMPAT_HOME_TIMEOUT', '0.75')
-                env.setdefault('VPC_COMPAT_HOME_BUDGET', '1.5')
+                env.setdefault('YUKI_COMPAT_HOME_TIMEOUT', '0.75')
+                env.setdefault('YUKI_COMPAT_HOME_BUDGET', '1.5')
             with open(out_path, 'w', encoding='utf-8') as out_f, \
                  open(err_path, 'w', encoding='utf-8') as err_f:
                 popen_args = {

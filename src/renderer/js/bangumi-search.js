@@ -576,6 +576,6 @@ const BangumiSearch = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.bangumiSearch = BangumiSearch;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.bangumiSearch = BangumiSearch;
 }(typeof window !== 'undefined' ? window : globalThis));

@@ -36,7 +36,7 @@ function loadKazumi(extra = {}) {
         setTimeout,
         clearTimeout,
         $: jqueryStub,
-        window: { vpc: {} },
+        window: { yuki: {} },
         ...extra,
     };
     context.globalThis = context;

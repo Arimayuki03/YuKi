@@ -96,7 +96,7 @@ Python `Runner` 保持六方法入口；JAR、JS、Python、CMS 统一保留
 透传最终 header；外部播放器不能透传时返回 `headerDropped`，且只报告 launched，不伪造首帧成功。
 
 播放前先 HEAD，结果不确定时 GET `Range: bytes=0-1`；只有 mpv `file-loaded`/ready 后
-`vpc:play` 才返回 `ok=true`。一次性/签名 URL 不长缓存，断流时重新执行原始
+`yuki:play` 才返回 `ok=true`。一次性/签名 URL 不长缓存，断流时重新执行原始
 `playerContent`，最多一次。真实夸克 Cookie 和真实 CDN 首帧仍是外部验收项，不以夹具冒充。
 
 ## 6. lives / liveContent

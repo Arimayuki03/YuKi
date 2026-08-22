@@ -1,8 +1,8 @@
 /**
  * downloads.js — 下载管理视图
  *
- * 全部经主进程 IPC（window.vpc.download）操作 aria2c：
- * - init 惰性拉起 aria2c 并启动主进程 1s 轮询（vpc:dl-list 推送）
+ * 全部经主进程 IPC（window.yuki.download）操作 aria2c：
+ * - init 惰性拉起 aria2c 并启动主进程 1s 轮询（yuki:dl-list 推送）
  * - 下载目录与并发数在「设置 → 下载」卡片维护（本页不再展示目录）
  * - 新增：HTTP/磁力链接（输入框，回车可加）或 .torrent/.metalink 文件
  * - 队列操作：暂停/继续/删除/清除已完成
@@ -37,17 +37,17 @@ const Downloads = {
         $('#dl-uri').on('keydown', (e) => { if (e.key === 'Enter') this.addUri(); });
         $('#dl-list').on('click', (e) => this.onAction(e));
 
-        window.vpc.download.onList((items) => this.render(items));
-        window.vpc.download.onEvent((ev) => {
+        window.yuki.download.onList((items) => this.render(items));
+        window.yuki.download.onEvent((ev) => {
             if (ev.type === 'completed') warnToast(`下载完成：${ev.task.name || ev.task.gid}`);
             if (ev.type === 'error') warnToast(`下载失败：${ev.task.name || ev.task.gid}`);
         });
-        window.vpc.download.onGoto(() => App.showView('downloads'));
+        window.yuki.download.onGoto(() => App.showView('downloads'));
 
-        const r = await window.vpc.download.control('init', {});
+        const r = await window.yuki.download.control('init', {});
         if (!r.ok) {
             if (r.reason === 'aria2-missing') {
-                this._tip('aria2c 未安装：在 video-pc 目录执行 node scripts/download-binaries.js aria2 后重启应用');
+                this._tip('aria2c 未安装：在 yuki 目录执行 node scripts/download-binaries.js aria2 后重启应用');
             } else {
                 this._tip(`下载引擎启动失败：${r.reason}`);
             }
@@ -63,7 +63,7 @@ const Downloads = {
 
     async openDir() {
         try {
-            const r = await window.vpc.download.openDir();
+            const r = await window.yuki.download.openDir();
             if (!r || !r.ok) warnToast(`打开下载目录失败${r && r.reason ? `：${r.reason}` : ''}`);
         } catch (e) {
             warnToast('打开下载目录失败');
@@ -76,7 +76,7 @@ const Downloads = {
         if (!uri) { warnToast('请先在上方输入框粘贴视频链接'); $('#dl-uri').trigger('focus'); return; }
         // m3u8 切片流 aria2 无法处理，走 ffmpeg 合成通道
         const isM3u8 = /\.m3u8(\?|#|$)/i.test(uri.split('?')[0]);
-        const r = await window.vpc.download.control(isM3u8 ? 'addHls' : 'add', { uri });
+        const r = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', { uri });
         if (!r.ok) {
             if (r.reason === 'ffmpeg-downloading') warnToast('ffmpeg 正在后台自动下载（约 90MB），完成后重试即可');
             else if (r.reason === 'aria2-missing' || r.reason === 'ffmpeg-missing') warnToast('下载引擎未就绪（启动时后台准备中，请稍后重试）');
@@ -88,7 +88,7 @@ const Downloads = {
     },
 
     async addFile() {
-        const r = await window.vpc.download.control('addFile', {});
+        const r = await window.yuki.download.control('addFile', {});
         if (!r.ok && r.reason && r.reason !== 'cancelled') warnToast(`新增失败：${r.reason}`);
         else if (r.ok) warnToast('已加入下载队列');
     },
@@ -96,7 +96,7 @@ const Downloads = {
     async clearDone() {
         // 仅从列表移除已完成任务，保留磁盘上已下载的文件
         if (!await confirmDialog('清除所有已完成任务？仅移除下载列表记录，已下载的文件会保留。', { okText: '清除' })) return;
-        const r = await window.vpc.download.control('clear', {});
+        const r = await window.yuki.download.control('clear', {});
         if (!r.ok) warnToast(`清除失败：${r.reason}`);
         else warnToast('已清除完成列表（文件已保留）');
     },
@@ -105,14 +105,14 @@ const Downloads = {
     async clearFailed() {
         const ok = await confirmDialog('删除所有失败任务？其未下载完成的残留文件也会一并删除。', { okText: '删除' });
         if (!ok) return;
-        const r = await window.vpc.download.control('clearFailed', {});
+        const r = await window.yuki.download.control('clearFailed', {});
         if (!r.ok) warnToast(`删除失败：${r.reason}`);
         else warnToast(r.n ? `已删除 ${r.n} 个失败任务` : '当前没有失败任务');
     },
 
     /** 全部暂停（aria2 任务；m3u8 合成任务不支持暂停，保持单任务一致语义）。 */
     async pauseAll() {
-        const r = await window.vpc.download.control('pauseAll', {});
+        const r = await window.yuki.download.control('pauseAll', {});
         if (!r.ok) warnToast(`全部暂停失败：${r.reason}`);
         else if (!r.n) warnToast('当前没有进行中的任务');
         else warnToast(`已暂停 ${r.n} 个任务`);
@@ -120,7 +120,7 @@ const Downloads = {
 
     /** 全部开始（恢复所有已暂停任务）。 */
     async resumeAll() {
-        const r = await window.vpc.download.control('unpauseAll', {});
+        const r = await window.yuki.download.control('unpauseAll', {});
         if (!r.ok) warnToast(`全部开始失败：${r.reason}`);
         else if (!r.n) warnToast('当前没有已暂停的任务');
         else warnToast(`已开始 ${r.n} 个任务`);
@@ -134,7 +134,7 @@ const Downloads = {
         const task = this._tasks.find((t) => t.gid === gid);
         if (act === 'play') return this.play(task);
         if (act === 'remove' && !await confirmDialog('删除该下载任务？已下载的文件也会被删除。', { okText: '删除' })) return;
-        window.vpc.download.control(act, { gid }).then((r) => {
+        window.yuki.download.control(act, { gid }).then((r) => {
             if (!r.ok) warnToast(`操作失败：${r.reason}`);
             else if (r.resumed) warnToast('已恢复下载（任务已重新加入队列）');
         });
@@ -144,7 +144,7 @@ const Downloads = {
         if (!task || !task.files || !task.files.length) { warnToast('找不到输出文件'); return; }
         const video = task.files.find((f) => VIDEO_EXTS.includes('.' + f.split('.').pop().toLowerCase()));
         if (!video) { warnToast('输出文件中没有可播放的视频'); return; }
-        const r = await window.vpc.download.play(video);
+        const r = await window.yuki.download.play(video);
         if (!r) { warnToast('播放失败'); return; }
         if (!r.ok) {
             warnToast(r.reason === 'mpv-missing' ? 'mpv 未安装：node scripts/download-binaries.js mpv' : `播放失败：${r.reason}`);
@@ -247,6 +247,6 @@ const Downloads = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.downloads = Downloads;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.downloads = Downloads;
 }(typeof window !== 'undefined' ? window : globalThis));

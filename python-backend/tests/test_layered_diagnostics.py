@@ -185,7 +185,7 @@ function badSpider() { return {}; }
         engine = JsEngine(site_key='diagnostic-test')
         src = 'export function __jsEvalReturn() { return { homeContent() { return missingHostGlobal; } }; }'
         engine.load_spider(src)
-        with self.assertLogs('vpc.jsengine', level='WARNING') as logs:
+        with self.assertLogs('yuki.jsengine', level='WARNING') as logs:
             engine.call('homeContent')
         self.assertTrue(any('宿主未提供的全局 <missingHostGlobal>' in line for line in logs.output))
 

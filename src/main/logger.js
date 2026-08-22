@@ -1,7 +1,7 @@
 /**
  * logger.js — 主进程 UTF-8 轮转日志与日志读取。
  *
- * 运行日志统一放在 ~/.video-pc/logs；单文件 5 MiB，保留 5 份历史文件。
+ * 运行日志统一放在 ~/.yuki/logs；单文件 5 MiB，保留 5 份历史文件。
  * 写入前会遮盖常见令牌、Cookie、Authorization 与密码字段。
  */
 const fs = require('fs');

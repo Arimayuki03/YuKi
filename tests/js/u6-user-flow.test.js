@@ -55,7 +55,7 @@ function loadPlayerContext(customMethods = {}) {
             }),
         },
         window: {
-            vpc: {
+            yuki: {
                 settingsGet: async () => ({ autoFallbackRoute: true }),
                 playUrl: async () => ({ ok: true }),
                 resolveParse: async () => ({ ok: true, url: 'https://cdn.example.com/live.m3u8' }),

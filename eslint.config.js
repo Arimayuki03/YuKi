@@ -8,7 +8,7 @@
 const globals = require('globals');
 
 // 渲染层跨文件遗留全局（无构建工具、<script> 顺序加载时代的互相调用）。
-// 新代码禁止加入此列表；D1 命名空间化（VPC.<module>.<fn>）迁移后逐个删除。
+// 新代码禁止加入此列表；D1 命名空间化（YUKI.<module>.<fn>）迁移后逐个删除。
 const RENDERER_LEGACY_GLOBALS = [
     // 页面对象/视图控制器
     'App', 'Home', 'Detail', 'Search', 'Timeline', 'Records', 'Kazumi',

@@ -3,7 +3,7 @@
  *
  * 用途：
  * - m3u8 切片流下载合成（hls-downloader.js 调用）
- * - 本地文件视频预览图抓帧（主进程 vpc:file-thumb）
+ * - 本地文件视频预览图抓帧（主进程 yuki:file-thumb）
  *
  * 二进制来源：<repo>/vendor/ffmpeg/ffmpeg.exe → PATH；
  * 缺失时 ensureFfmpeg() 后台下载 gyan.dev essentials 构建（约 90MB，zip 经系统 tar 解压）。
@@ -46,7 +46,7 @@ function findFfmpeg() {
 function downloadFile(url, dest, redirects = 0) {
     return new Promise((resolve, reject) => {
         if (redirects > 5) return reject(new Error('too many redirects'));
-        const req = https.get(url, { headers: { 'User-Agent': 'video-pc' } }, (rsp) => {
+        const req = https.get(url, { headers: { 'User-Agent': 'yuki' } }, (rsp) => {
             if ([301, 302, 303, 307, 308].includes(rsp.statusCode)) {
                 rsp.resume();
                 return resolve(downloadFile(rsp.headers.location, dest, redirects + 1));
@@ -96,9 +96,9 @@ function ensureFfmpeg() {
             fs.mkdirSync(stage, { recursive: true });
             fs.mkdirSync(path.dirname(target), { recursive: true });
             console.log('[ffmpeg] downloading', FFMPEG_URL);
-            const archive = path.join(stage, 'vpc-ffmpeg.zip');
+            const archive = path.join(stage, 'yuki-ffmpeg.zip');
             await downloadFile(FFMPEG_URL, archive);
-            const tmp = path.join(stage, 'vpc-ffmpeg-extract');
+            const tmp = path.join(stage, 'yuki-ffmpeg-extract');
             fs.mkdirSync(tmp, { recursive: true });
             execSync(`tar -xf "${archive}" -C "${tmp}"`, { stdio: 'ignore' });
             const found = findFile(tmp, 'ffmpeg.exe');

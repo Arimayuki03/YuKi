@@ -10,7 +10,7 @@
 本地文件面板（原 /file /upload 等占位）Phase 5 起改走 Electron 主进程
 file-manager IPC，后端不再提供该组端点。
 
-启动时打印：VPC_BACKEND_READY port=<p> token=<t>（供 python-bridge 解析）。
+启动时打印：YUKI_BACKEND_READY port=<p> token=<t>（供 python-bridge 解析）。
 """
 import os
 import sys
@@ -79,7 +79,7 @@ from runtime.errors import (
     redact_sensitive,
 )
 
-logger = logging.getLogger('vpc.server')
+logger = logging.getLogger('yuki.server')
 
 TOKEN_EXEMPT = ('/health', '/cache', '/proxy')
 
@@ -251,13 +251,13 @@ class _RedactingFormatter(logging.Formatter):
 
 def _setup_logging():
     """控制台 + UTF-8 轮转文件；单文件 5 MiB，保留 5 份。"""
-    log_dir = os.environ.get('VPC_LOG_DIR') or hoststate.get_log_dir()
+    log_dir = os.environ.get('YUKI_LOG_DIR') or hoststate.get_log_dir()
     os.makedirs(log_dir, exist_ok=True)
     formatter = _RedactingFormatter('%(asctime)s %(name)s %(levelname)s %(message)s')
     root = logging.getLogger()
     root.handlers.clear()
-    # 级别由 Electron 主进程经 VPC_LOG_LEVEL 注入（设置页“日志级别”），缺省 INFO
-    root.setLevel(getattr(logging, os.environ.get('VPC_LOG_LEVEL', 'INFO').upper(), logging.INFO))
+    # 级别由 Electron 主进程经 YUKI_LOG_LEVEL 注入（设置页“日志级别”），缺省 INFO
+    root.setLevel(getattr(logging, os.environ.get('YUKI_LOG_LEVEL', 'INFO').upper(), logging.INFO))
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     root.addHandler(console)
@@ -1499,7 +1499,7 @@ def create_app():
         finally:
             shutdown_runtime_resources()
 
-    fastapi_app = FastAPI(title='video-pc backend', lifespan=lifespan)
+    fastapi_app = FastAPI(title='yuki backend', lifespan=lifespan)
 
     @fastapi_app.middleware('http')
     async def token_auth(request: Request, call_next):
@@ -2328,13 +2328,13 @@ def pick_free_port():
 
 
 def main():
-    port = int(os.environ.get('VPC_PORT') or pick_free_port())
-    token = os.environ.get('VPC_TOKEN') or secrets.token_hex(16)
-    pan_fast_path = os.environ.get('VPC_PAN_FAST_PATH')
-    runtime_android_worker = os.environ.get('VPC_ANDROID_WORKER_ENABLED')
-    media_probe = os.environ.get('VPC_MEDIA_PROBE')
-    auto_line_fallback = os.environ.get('VPC_AUTO_LINE_FALLBACK')
-    legacy_parser = os.environ.get('VPC_LEGACY_PARSER')
+    port = int(os.environ.get('YUKI_PORT') or pick_free_port())
+    token = os.environ.get('YUKI_TOKEN') or secrets.token_hex(16)
+    pan_fast_path = os.environ.get('YUKI_PAN_FAST_PATH')
+    runtime_android_worker = os.environ.get('YUKI_ANDROID_WORKER_ENABLED')
+    media_probe = os.environ.get('YUKI_MEDIA_PROBE')
+    auto_line_fallback = os.environ.get('YUKI_AUTO_LINE_FALLBACK')
+    legacy_parser = os.environ.get('YUKI_LEGACY_PARSER')
 
     def _env_bool(val, default=True):
         if val is None:
@@ -2350,23 +2350,23 @@ def main():
         auto_line_fallback=_env_bool(auto_line_fallback, True),
         legacy_parser=_env_bool(legacy_parser, True),
     )
-    # 自定义缓存目录（主进程设置页指定，经 VPC_CACHE_DIR 传入）；py 插件目录跟随
-    cache_dir = os.environ.get('VPC_CACHE_DIR')
+    # 自定义缓存目录（主进程设置页指定，经 YUKI_CACHE_DIR 传入）；py 插件目录跟随
+    cache_dir = os.environ.get('YUKI_CACHE_DIR')
     if cache_dir:
         hoststate.configure(cache_dir=cache_dir,
                             plugins_dir=os.path.join(cache_dir, 'py'))
     hoststate.ensure_dirs()
     config_mgr.configure_repository_cache()
     _setup_logging()
-    last_cached_url = os.environ.get('VPC_LAST_CONFIG_URL', '')
+    last_cached_url = os.environ.get('YUKI_LAST_CONFIG_URL', '')
     fastapi_app = create_app()
     # READY 不再等待磁盘缓存恢复：大配置（数百站点）+ 慢镜像 jar 下载会让同步
-    # 恢复耗时数分钟，期间 VPC_BACKEND_READY 迟迟不打印，主进程拿不到端口/token、
+    # 恢复耗时数分钟，期间 YUKI_BACKEND_READY 迟迟不打印，主进程拿不到端口/token、
     # 渲染端 waitBackend 拿不到 backend info——整个窗口在事件绑定前呈「卡死」态。
     # 先以内置示例源兜底就绪，恢复移入后台线程（经 _config_task 上报状态，
     # 主进程 auto-reload 会等它结束再决策是否需要网络重载）。
     load_default_sites()
-    print(f'VPC_BACKEND_READY port={port} token={token}', flush=True)
+    print(f'YUKI_BACKEND_READY port={port} token={token}', flush=True)
     if last_cached_url:
         _start_config_restore_async(last_cached_url)
     import uvicorn

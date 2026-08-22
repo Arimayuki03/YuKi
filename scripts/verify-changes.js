@@ -23,7 +23,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9340);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9340);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -63,9 +63,9 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-verify-'));
-    const tmpCache = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-verify-cache-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-verify-'));
+    const tmpCache = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-verify-cache-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
         s.onboarded = true; s.wallpaper = ''; s.lastSourceMap = {};
@@ -77,7 +77,7 @@ class CDP {
     const electronArgs = [ROOT, '--remote-debugging-port=' + PORT, '--user-data-dir=' + tmpUserData, '--no-first-run'];
     const child = spawn(ELECTRON, electronArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, VPC_CACHE_DIR: tmpCache }, // 隔离后端缓存，避免碰真实 ~/.video-pc/cache
+        env: { ...process.env, YUKI_CACHE_DIR: tmpCache }, // 隔离后端缓存，避免碰真实 ~/.yuki/cache
     });
     let appLog = '';
     child.stdout.on('data', (d) => { appLog += d.toString(); });
@@ -140,7 +140,7 @@ class CDP {
         homeActive: !!document.querySelector('#view-home.active'),
         appReady: !!document.querySelector('.main-nav-item'),
         siteCount: document.querySelectorAll('#site-select option').length,
-        backendBase: (typeof window.vpc !== 'undefined') ? 'ok' : 'missing',
+        backendBase: (typeof window.yuki !== 'undefined') ? 'ok' : 'missing',
     }))()`);
 
     // ============ 2. 新增设置控件齐全 ============
@@ -177,13 +177,13 @@ class CDP {
 
     // ============ 4. 历史记录：注入真实播放退出 → history 记录（1.8） ============
     out.history = await cdp.evaluate(`(async () => {
-        const before = ((await window.vpc.settingsGet()) || {}).history || [];
+        const before = ((await window.yuki.settingsGet()) || {}).history || [];
         const beforeLen = before.length;
         Player._curMeta = { site: 'site-x', vodId: 'vod-x', title: '实测影片', subtitle: '第 1 集' };
         Player._rememberSession({ ok: true, sessionId: 9101 });
         Player._recordWatch({ sessionId: 9101, pos: 60, duration: 120 });
         await Player._watchWrite;
-        const h = ((await window.vpc.settingsGet()) || {}).history || [];
+        const h = ((await window.yuki.settingsGet()) || {}).history || [];
         const it = h.find(x => x.vodId === 'vod-x');
         return {
             added: h.length - beforeLen,
@@ -195,14 +195,14 @@ class CDP {
 
     // ============ 5. 观看统计：pos 缺失回退计次（1.4） ============
     out.watchFallback = await cdp.evaluate(`(async () => {
-        const s0 = ((await window.vpc.settingsGet()) || {});
+        const s0 = ((await window.yuki.settingsGet()) || {});
         const b = (s0.watchStats || { sessionCount: 0, titles: {} });
         const beforeCount = b.sessionCount || 0;
         Player._curMeta = { title: '实测无进度' };
         Player._rememberSession({ ok: true, sessionId: 9102 });
         Player._recordWatch({ sessionId: 9102, pos: null, duration: null });
         await Player._watchWrite;
-        const s1 = ((await window.vpc.settingsGet()) || {}).watchStats || {};
+        const s1 = ((await window.yuki.settingsGet()) || {}).watchStats || {};
         return { deltaCount: (s1.sessionCount || 0) - beforeCount, titleCount: (s1.titles || {})['实测无进度'] || 0 };
     })()`, true);
 

@@ -8,7 +8,7 @@
 
 | 键 | 读写位置 | 用途 | 性质 |
 |---|---|---|---|
-| `vpc_home_empty_classes` | `src/renderer/js/home.js` | 各源空分类探测结果及 TTL | 派生缓存，可清理 |
+| `yuki_home_empty_classes` | `src/renderer/js/home.js` | 各源空分类探测结果及 TTL | 派生缓存，可清理 |
 | `kazumi_bgm_cover` | `src/renderer/js/kazumi.js`、`panels.js` | Bangumi 封面搜索结果缓存 | 派生缓存，可清理 |
 | `popular_cache` | `src/renderer/js/popular.js`、`panels.js` | 首页推荐数据缓存 | 派生缓存，可清理 |
 
@@ -24,7 +24,7 @@
 | `mpv-watch-later/` | `src/main/index.js`、mpv | mpv 续播位置 |
 | `vendor/` | 主进程资产下载器 | 用户级 mpv/ffmpeg/aria2/着色器补装产物 |
 
-## 后端 `~/.video-pc` 或自定义缓存目录
+## 后端 `~/.yuki` 或自定义缓存目录
 
 | 路径 | 读写方 | 内容 |
 |---|---|---|

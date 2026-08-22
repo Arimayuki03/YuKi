@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Kazumi 规则管理器：规则 CRUD、持久化、启�?禁用�?
 
-持久化：~/.video-pc/kazumi/plugins.json（单文件存储全部规则）�?
+持久化：~/.yuki/kazumi/plugins.json（单文件存储全部规则）�?
 线程安全：threading.Lock 保护规则列表读写�?
 """
 import json
@@ -20,7 +20,7 @@ import http_client
 from .plugin import Plugin
 from .utils import NoResultException, CaptchaRequiredException
 
-logger = logging.getLogger('vpc.kazumi.manager')
+logger = logging.getLogger('yuki.kazumi.manager')
 
 # 代理：应用内「代理设置」由主进程注入 HTTP(S)_PROXY 环境变量，
 # http_client.system_proxies 环境变量优先读取（C1 收编后不再依赖 requests trust_env）。
@@ -40,7 +40,7 @@ BANGUMI_MIRROR_API = 'https://api.bangumi.pro'
 BANGUMI_MIRROR_NEXT = 'https://next.bangumi.pro'
 BANGUMI_MIRROR = 'https://api.kazumi.fyi'  # 旧 kazumi 专属镜像（仅部分路径），保留常量向后兼容
 # bangumi 官方 API 的 WAF 会拦截 python-requests 默认 UA（部分端点直接 403），必须带应用 UA
-BANGUMI_UA = 'video-pc/0.1.0 (https://github.com/); kazumi'
+BANGUMI_UA = 'yuki/0.1.0 (https://github.com/); kazumi'
 
 # 弹弹 play API（对齐 Kazumi danmaku_api.dart）
 DANDAN_API = 'https://api.dandanplay.net'

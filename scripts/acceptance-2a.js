@@ -19,7 +19,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9333);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9333);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -65,8 +65,8 @@ class CDP {
 
 (async () => {
     // ---- 准备独立 userData（复制设置但清空 lastConfigUrl / configHistory，禁用壁纸） ----
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
         s.lastConfigUrl = '';
@@ -203,7 +203,7 @@ class CDP {
         if (any) { any.click(); return 'data-cat'; }
         return false;
     })()`);
-    await sleep(1200); // 关于分类可能异步拉 vpc:app-info
+    await sleep(1200); // 关于分类可能异步拉 yuki:app-info
     out.about = await cdp.evaluate(`(() => {
         // 关于分类 = #view-settings 下 data-setcat="about" 的卡片
         const aboutCards = [...document.querySelectorAll('#view-settings .tool-card[data-setcat="about"]')].filter(c => c.offsetParent !== null);

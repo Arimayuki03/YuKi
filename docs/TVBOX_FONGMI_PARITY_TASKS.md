@@ -676,7 +676,7 @@ type=3 拿原始字符串，对齐 `SiteApi.java:73`）、
 
 实现落在 `python-backend/runtime/config_security.py`。默认上限：配置 8 MiB、
 解压后 32 MiB、单站点 `ext` 2 MiB、跳转 5 次、多仓深度 1、`ext` 展开深度 2，
-均可用 `VPC_CONFIG_MAX_*` 覆盖。`file/assets/proxy/data/jar/javascript/ftp/smb`
+均可用 `YUKI_CONFIG_MAX_*` 覆盖。`file/assets/proxy/data/jar/javascript/ftp/smb`
 一律拒绝；磁盘路径在解析 scheme **之前**判掉（`urlsplit('C:\\x\\tv.json')` 会把盘符
 当 scheme，若先分派 scheme，`D:/tv.json` 会被报成「不支持的协议 d://」，诊断页给出的
 原因和真实问题不符）。

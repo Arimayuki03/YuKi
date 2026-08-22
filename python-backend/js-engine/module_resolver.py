@@ -16,7 +16,7 @@ import logging
 import re
 from urllib.parse import urljoin
 
-logger = logging.getLogger('vpc.jsengine.resolver')
+logger = logging.getLogger('yuki.jsengine.resolver')
 
 # 顶层 import 语句（整行，含多行命名列表不常见，按单行处理）
 _RE_IMPORT_FROM = re.compile(r'^\s*import\s+(.+?)\s+from\s+[\'"]([^\'"]+)[\'"]\s*;?', re.M)

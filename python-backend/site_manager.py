@@ -17,7 +17,7 @@ from runner import Runner
 from runtime.health import SiteHealth
 from runtime.supervised_runner import SupervisedRunner
 
-logger = logging.getLogger('vpc.sites')
+logger = logging.getLogger('yuki.sites')
 
 
 class Site:

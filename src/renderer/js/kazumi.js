@@ -28,7 +28,7 @@ const Kazumi = {
         // 启动时按设置自动同步 Bangumi 收藏（开关默认关；后端就绪后异步执行，不阻塞首屏）
         (async () => {
             try {
-                const s = (await window.vpc.settingsGet()) || {};
+                const s = (await window.yuki.settingsGet()) || {};
                 if (s.bangumiAutoSyncOnStart === true) this.syncBangumiNow().catch(() => { /* 启动自动同步失败静默 */ });
             } catch (e) { /* 读设置失败不阻塞 */ }
         })();
@@ -42,7 +42,7 @@ const Kazumi = {
         $('#kazumi_rule_update').on('click', () => this.batchUpdate());
         // 启动时自动检查规则更新（开关默认关）
         $('#set_kazumi_autoupdate').on('change', function () {
-            window.vpc.settingsSet('kazumiAutoUpdateOnStart', this.checked);
+            window.yuki.settingsSet('kazumiAutoUpdateOnStart', this.checked);
             warnToast(this.checked ? '已开启启动时自动检查规则更新' : '已关闭启动时自动检查规则更新');
         });
         $('#kazumi_cookie_view').on('click', () => this.viewCookies());
@@ -51,15 +51,15 @@ const Kazumi = {
         $('#bangumi_token_save').on('click', () => this.saveBangumiToken());
         $('#bangumi_test').on('click', () => this.testBangumi());
         $('#bangumi_sync_now').on('click', () => this.syncBangumiNow());
-        $('#bangumi_sync_priority').on('change', function () { window.vpc.settingsSet('bangumiSyncPriority', this.value); });
-        $('#bangumi_immediate_toast').on('change', function () { window.vpc.settingsSet('bangumiImmediateSyncToastEnable', this.checked); });
+        $('#bangumi_sync_priority').on('change', function () { window.yuki.settingsSet('bangumiSyncPriority', this.value); });
+        $('#bangumi_immediate_toast').on('change', function () { window.yuki.settingsSet('bangumiImmediateSyncToastEnable', this.checked); });
         // Bangumi 自动同步开关：收藏状态变动 / 启动时
         $('#set_bangumi_autosync_status').on('change', function () {
-            window.vpc.settingsSet('bangumiAutoSyncStatus', this.checked);
+            window.yuki.settingsSet('bangumiAutoSyncStatus', this.checked);
             warnToast(this.checked ? '已开启收藏状态自动同步到 Bangumi' : '已关闭收藏状态自动同步');
         });
         $('#set_bangumi_autosync_on_start').on('change', function () {
-            window.vpc.settingsSet('bangumiAutoSyncOnStart', this.checked);
+            window.yuki.settingsSet('bangumiAutoSyncOnStart', this.checked);
             warnToast(this.checked ? '已开启启动时自动同步 Bangumi 收藏' : '已关闭启动时自动同步');
         });
         // 弹幕（弹弹 play）凭据：回填 + 保存（保存后主进程重启后端注入环境变量）
@@ -67,10 +67,10 @@ const Kazumi = {
         $('#set_dandan_save').on('click', async () => {
             const appid = $('#set_dandan_appid').val().trim();
             const secret = $('#set_dandan_secret').val().trim();
-            await window.vpc.settingsSet('dandanAppId', appid);
-            await window.vpc.settingsSet('dandanAppSecret', secret);
+            await window.yuki.settingsSet('dandanAppId', appid);
+            await window.yuki.settingsSet('dandanAppSecret', secret);
             try {
-                if (window.vpc.setDandan) { await window.vpc.setDandan({ appid, secret }); warnToast('弹幕凭据已保存，后端重启中…'); }
+                if (window.yuki.setDandan) { await window.yuki.setDandan({ appid, secret }); warnToast('弹幕凭据已保存，后端重启中…'); }
                 else warnToast('弹幕凭据已保存');
             } catch (e) { warnToast('保存失败'); }
         });
@@ -93,12 +93,12 @@ const Kazumi = {
         // 镜像开关（4.1）：变更即应用并持久化
         $('#set_bangumi_mirror').on('change', function () {
             const on = this.checked;
-            window.vpc.settingsSet('enableBangumiProxy', on);
+            window.yuki.settingsSet('enableBangumiProxy', on);
             doAction('kazumiSetMirror', { bangumi: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
         });
         $('#set_git_mirror').on('change', function () {
             const on = this.checked;
-            window.vpc.settingsSet('enableGitProxy', on);
+            window.yuki.settingsSet('enableGitProxy', on);
             doAction('kazumiSetMirror', { git: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
         });
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
@@ -138,16 +138,16 @@ const Kazumi = {
         $('#webdav_save').on('click', () => this.webdavSaveUI());
         $('#webdav_enable').on('change', function () {
             const on = this.checked;
-            window.vpc.settingsSet('webDavEnable', on);
+            window.yuki.settingsSet('webDavEnable', on);
             if (!on) {
                 $('#webdav_enable_history').prop('checked', false);
                 $('#webdav_enable_collect').prop('checked', false);
-                window.vpc.settingsSet('webDavEnableHistory', false);
-                window.vpc.settingsSet('webDavEnableCollect', false);
+                window.yuki.settingsSet('webDavEnableHistory', false);
+                window.yuki.settingsSet('webDavEnableCollect', false);
             }
         });
-        $('#webdav_enable_history').on('change', function () { window.vpc.settingsSet('webDavEnableHistory', this.checked); });
-        $('#webdav_enable_collect').on('change', function () { window.vpc.settingsSet('webDavEnableCollect', this.checked); });
+        $('#webdav_enable_history').on('change', function () { window.yuki.settingsSet('webDavEnableHistory', this.checked); });
+        $('#webdav_enable_collect').on('change', function () { window.yuki.settingsSet('webDavEnableCollect', this.checked); });
         this.refreshRuleList();
     },
 
@@ -563,7 +563,7 @@ const Kazumi = {
 
     /** 读取设置里的 Bangumi token（自动规范化）。 */
     async _getBangumiToken() {
-        try { const s = (await window.vpc.settingsGet()) || {}; return this._normalizeToken(s.bangumiToken || ''); } catch (e) { return ''; }
+        try { const s = (await window.yuki.settingsGet()) || {}; return this._normalizeToken(s.bangumiToken || ''); } catch (e) { return ''; }
     },
 
     /** 回填 token 输入框（设置已保存过时展示）与同步选项。 */
@@ -571,7 +571,7 @@ const Kazumi = {
         const t = await this._getBangumiToken();
         if (t) $('#bangumi_token').val(t);
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (s.bangumiSyncPriority !== undefined && s.bangumiSyncPriority !== null) $('#bangumi_sync_priority').val(String(s.bangumiSyncPriority));
             $('#bangumi_immediate_toast').prop('checked', s.bangumiImmediateSyncToastEnable !== false);
             $('#set_bangumi_autosync_status').prop('checked', s.bangumiAutoSyncStatus === true);
@@ -582,7 +582,7 @@ const Kazumi = {
     /** 回填弹弹 play 弹幕凭据到设置页。 */
     async _prefillDandan() {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (s.dandanAppId) $('#set_dandan_appid').val(s.dandanAppId);
             if (s.dandanAppSecret) $('#set_dandan_secret').val(s.dandanAppSecret);
         } catch (e) { /* 读取失败不阻塞 */ }
@@ -591,7 +591,7 @@ const Kazumi = {
     /** 回填 WebDAV 配置（地址/账号/密码 + 主/子开关）到设置页。 */
     async _prefillWebdav() {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (s.webDavUrl) $('#webdav_url').val(s.webDavUrl);
             if (s.webDavUsername) $('#webdav_username').val(s.webDavUsername);
             if (s.webDavPassword) $('#webdav_password').val(s.webDavPassword);
@@ -604,7 +604,7 @@ const Kazumi = {
     /** 回填镜像开关，并把已保存的镜像状态应用到后端。 */
     async _prefillMirror() {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             $('#set_bangumi_mirror').prop('checked', !!s.enableBangumiProxy);
             $('#set_git_mirror').prop('checked', !!s.enableGitProxy);
             if (s.enableBangumiProxy || s.enableGitProxy) {
@@ -619,7 +619,7 @@ const Kazumi = {
     /** 回填启动时自动检查规则更新开关，并在开启时启动一次后台批量更新。 */
     async _prefillKazumiAutoUpdate() {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             $('#set_kazumi_autoupdate').prop('checked', s.kazumiAutoUpdateOnStart === true);
             // 启动时自动检查更新（开关开启 + 本次会话尚未执行过）
             if (s.kazumiAutoUpdateOnStart === true && !this._autoUpdateStarted) {
@@ -642,7 +642,7 @@ const Kazumi = {
         if (!token) { warnToast('请输入 Bangumi Access Token'); return; }
         if (token !== raw.trim()) $('#bangumi_token').val(token);
         try {
-            await window.vpc.settingsSet('bangumiToken', token);
+            await window.yuki.settingsSet('bangumiToken', token);
         } catch (e) {
             warnToast('Token 保存失败');
             return;
@@ -698,7 +698,7 @@ const Kazumi = {
                 // 即时同步提示开关（bangumiImmediateSyncToastEnable，默认开）；批量上传内抑制单条提示
                 if (!this._bgmBatchActive) {
                     try {
-                        const st = (await window.vpc.settingsGet()) || {};
+                        const st = (await window.yuki.settingsGet()) || {};
                         if (st.bangumiImmediateSyncToastEnable !== false) warnToast('已同步到 Bangumi');
                     } catch (e) { warnToast('已同步到 Bangumi'); }
                 }
@@ -1562,7 +1562,7 @@ const Kazumi = {
         if (!url) return;
         warnToast('已打开验证码验证窗口，完成后关闭窗口即可');
         try {
-            await window.vpc.captchaVerify(url);
+            await window.yuki.captchaVerify(url);
             warnToast('验证码窗口已关闭，Cookie 已保存');
             if (typeof onDone === 'function') onDone();
         } catch (e) {
@@ -2053,11 +2053,11 @@ const Kazumi = {
             const header = {};
             if (data.userAgent) header['User-Agent'] = data.userAgent;
             if (data.referer) header['Referer'] = data.referer;
-            const legacyEnabled = (await window.vpc.settingsGet().catch(() => ({})))?.legacyParser !== false;
+            const legacyEnabled = (await window.yuki.settingsGet().catch(() => ({})))?.legacyParser !== false;
             const legacy = legacyEnabled && !!data.useLegacyParser;
             let resolved = null;
             try {
-                const cap = await window.vpc.captureDirect(pageUrl, legacy);
+                const cap = await window.yuki.captureDirect(pageUrl, legacy);
                 if (cap && cap.ok) resolved = { url: cap.url, header: { ...header, ...(cap.header || {}) } };
             } catch (e) { /* 抓取异常 */ }
             if (!silent) hideLoading();
@@ -2067,7 +2067,7 @@ const Kazumi = {
             // 无法从 URL 识别扩展名时默认 .mp4（多数流媒体直链无标准后缀）
             const ext = isM3u8 ? '.mp4' : (clean.match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0] || '.mp4';
             const out = `${title || '视频'} - ${name}${ext}`;
-            const res = await window.vpc.download.control(isM3u8 ? 'addHls' : 'add', { uri: resolved.url, out, header: resolved.header });
+            const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', { uri: resolved.url, out, header: resolved.header });
             if (res && res.ok) { if (!silent) warnToast(`已加入下载「${name}」，可在“下载”页查看`); return true; }
             if (!silent) {
                 if (res && res.reason === 'ffmpeg-downloading') warnToast('ffmpeg 正在后台下载，完成后重试即可');
@@ -2106,8 +2106,8 @@ Kazumi.loadDanmaku = async function (title, episode) {
         if (!comments.length) { console.log('[kazumi] danmaku: 0 comments for', title, 'ep', episode); return 0; }
         // 步骤 4：转 ASS 推给 mpv（方案 A：起播后一次性装载整集弹幕）
         let count = 0;
-        if (window.vpc && window.vpc.loadDanmaku) {
-            const r = await window.vpc.loadDanmaku(comments);
+        if (window.yuki && window.yuki.loadDanmaku) {
+            const r = await window.yuki.loadDanmaku(comments);
             count = (r && r.ok) ? (r.count || 0) : 0;
         }
         console.log('[kazumi] danmaku loaded:', count, 'of', comments.length, 'for', title, 'ep', episode);
@@ -2119,8 +2119,8 @@ Kazumi.loadDanmaku = async function (title, episode) {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.kazumi = Kazumi;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.kazumi = Kazumi;
 }(typeof window !== 'undefined' ? window : globalThis));
 
 // ---------------------------------------------------------------- 以图搜番（trace.moe）
@@ -2155,7 +2155,7 @@ Kazumi.imageSearch = async function (imageFile) {
 /** WebDAV 同步：上传收藏/历史/规则到远程；按子开关（收藏/历史）决定包含哪些数据。 */
 Kazumi.webdavSync = async function (url, username, password) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         const data = { kazumiRules: this._rules || [] };
         if (s.webDavEnableCollect !== false) data.favorites = s.favorites || [];
         if (s.webDavEnableHistory !== false) data.history = s.history || [];
@@ -2172,7 +2172,7 @@ Kazumi.webdavSync = async function (url, username, password) {
 /** WebDAV 恢复：从远程下载收藏/历史/规则；仅恢复子开关启用的数据。 */
 Kazumi.webdavRestore = async function (url, username, password) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         const names = ['kazumiRules'];
         if (s.webDavEnableCollect !== false) names.unshift('favorites');
         if (s.webDavEnableHistory !== false) names.unshift('history');
@@ -2181,8 +2181,8 @@ Kazumi.webdavRestore = async function (url, username, password) {
         }, '/kazumi/action');
         if (rsp && rsp.code === 200 && rsp.data) {
             const d = rsp.data;
-            if (d.favorites) await window.vpc.settingsSet('favorites', d.favorites);
-            if (d.history) await window.vpc.settingsSet('history', d.history);
+            if (d.favorites) await window.yuki.settingsSet('favorites', d.favorites);
+            if (d.history) await window.yuki.settingsSet('history', d.history);
             if (d.kazumiRules) {
                 // 规则逐个导入
                 for (const rule of d.kazumiRules) {
@@ -2206,9 +2206,9 @@ Kazumi.webdavSaveUI = async function () {
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
     if (!url) { warnToast('请输入 WebDAV 地址'); return; }
-    window.vpc.settingsSet('webDavUrl', url);
-    window.vpc.settingsSet('webDavUsername', username);
-    window.vpc.settingsSet('webDavPassword', password);
+    window.yuki.settingsSet('webDavUrl', url);
+    window.yuki.settingsSet('webDavUsername', username);
+    window.yuki.settingsSet('webDavPassword', password);
     warnToast('WebDAV 配置已保存');
 };
 

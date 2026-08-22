@@ -20,7 +20,7 @@ import urllib.parse
 
 from pan_cookies import save_pan_cookies
 
-logger = logging.getLogger('vpc.panlogin')
+logger = logging.getLogger('yuki.panlogin')
 
 BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')

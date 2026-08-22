@@ -10,7 +10,7 @@
 
 - Phase A：兼容套件 S1/S2/S4 改为真实 FastAPI `/action` 路径，S1/S2 各重试一次，增加离线 SKIP、结构化 `compat_report.json` 与 `[Lx:*]` skipped 原因聚合。
 - Phase B：新增 `test_port_generalization.py`，覆盖 7777 行为、保护端口、范围、16 个监听上限和 JAR 字节扫描。
-- Phase C：`VPC_PAN_FAST_PATH` 已接线，设置页提供夸克快路径开关；新增 `test_quark_pan.py` 覆盖快路径、JAR 优先和代理降级。
+- Phase C：`YUKI_PAN_FAST_PATH` 已接线，设置页提供夸克快路径开关；新增 `test_quark_pan.py` 覆盖快路径、JAR 优先和代理降级。
 - Phase D：`docs/TVBOX_CONTRACT_GAPS.md` 已落盘，记录 FongMi 对照路径、差距和后续任务。
 - Phase E：L1 fetch/parse、L2/L3 分层 skipped、L4 parse=1 提示、QuickJS 缺失全局警告和前端导入摘要已完成；分层诊断测试已接入 `run_all.py`。
 - `npm run test:py`：全部通过；`npm run test:jsunit`：206/206；`npm run test:js`：40/40；Ruff 通过。
@@ -64,7 +64,7 @@
 
 文件：`python-backend/hoststate.py`、`python-backend/server.py`、新 `python-backend/tests/test_quark_pan.py`
 
-1. **开关入口**：`server.py` 启动段读取 `VPC_PAN_FAST_PATH` 环境变量（`"0"`/`"false"` 关）写入 `hoststate.configure(pan_fast_path=...)`，保留默认 `True`。
+1. **开关入口**：`server.py` 启动段读取 `YUKI_PAN_FAST_PATH` 环境变量（`"0"`/`"false"` 关）写入 `hoststate.configure(pan_fast_path=...)`，保留默认 `True`。
 2. **验收测试**（不依赖 JVM，直接测 `JarSpider.playerContentRaw`）：
    - jar 返回正常结果 → 保留 jar 结果，不覆盖
    - jar 退化（`{'url':id}` / 空）→ 兜底产出 go-proxy `do=pan` URL

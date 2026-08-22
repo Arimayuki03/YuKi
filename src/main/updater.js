@@ -20,7 +20,7 @@ function setupAutoUpdater(getWindow) {
         const payload = { state, ...extra };
         console.log('[updater]', state, extra.message || '');
         const win = typeof getWindow === 'function' ? getWindow() : null;
-        if (win && !win.isDestroyed()) win.webContents.send('vpc:update-state', payload);
+        if (win && !win.isDestroyed()) win.webContents.send('yuki:update-state', payload);
     };
     autoUpdater.on('checking-for-update', () => publish('checking'));
     autoUpdater.on('update-available', (info) => publish('available', { version: info.version }));

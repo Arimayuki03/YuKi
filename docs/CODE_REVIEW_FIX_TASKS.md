@@ -47,7 +47,7 @@ H-1、H-5、H-2(go_proxy 11 处 + server 2 处)、H-8、M-11、M-20、M-21、M-2
 - **M-9** 边下边播扩展名补点号
 - **M-10** hls 文件名 basename 校验 + `_segsDir` 带 gid
 - **H-9** python-bridge / downloader exit 回调闭包守卫 + `_spawn` 前重置 `info`
-- **L-1** vpc:play 协议白名单 + vpc:dl-play 路径限制
+- **L-1** yuki:play 协议白名单 + yuki:dl-play 路径限制
 - **L-5** 敏感键 safeStorage 透明加解密
 - **L-6** parse/capture-direct 超时取消传播(parse-window.js 支持 abort)
 - **L-3** DLNA SOAP XML 转义 + controlUrl 限定为 SSDP 已发现设备
@@ -361,7 +361,7 @@ box.on('click.kbd', '.kazumi-tag', (e) => { ... });           // 原 1691
 
 ### 2.9 L-27 openEditorDialog 裸 await
 
-**定位**:`kazumi.js:253-268`(`openEditorDialog`),及 `_editor_save` 内 `await window.vpc.settingsSet`(628 附近)。
+**定位**:`kazumi.js:253-268`(`openEditorDialog`),及 `_editor_save` 内 `await window.yuki.settingsSet`(628 附近)。
 
 **修改步骤**:
 ```js
@@ -613,13 +613,13 @@ def last_error(self, v):
 
 ### 3.10 L-10 cookie 明文落共享临时目录
 
-**定位**:`SpiderRunner.java:181-201` `seedCookieFiles`(写 `%TMP%/vpc-jar-cache/TVBox/*`)。
+**定位**:`SpiderRunner.java:181-201` `seedCookieFiles`(写 `%TMP%/yuki-jar-cache/TVBox/*`)。
 
 **修改步骤**(先探明消费方):
-1. `grep -rn "vpc-jar-cache\|quark_cookie" python-backend/jar-runner/ --include=*.java`,确认这些文件由谁读取(stubs/SharedPreferencesImpl 或 SpiderRunner 自身)。
+1. `grep -rn "yuki-jar-cache\|quark_cookie" python-backend/jar-runner/ --include=*.java`,确认这些文件由谁读取(stubs/SharedPreferencesImpl 或 SpiderRunner 自身)。
 2. **若路径仅 SpiderRunner/stubs 内部使用**(自包含):根目录改为用户私有:
    ```java
-   File root = new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-cache");
+   File root = new File(System.getProperty("user.home"), ".yuki" + File.separator + "jar-cache");
    ```
    同步修改所有引用该根路径的读取点。
 3. **若 jar 内第三方代码也按旧路径读**(不自包含):保守加固——写完每个文件后:
@@ -898,7 +898,7 @@ if not name or not re.match(r'^[\w\u4e00-\u9fa5.-]+$', name):
 
 ### 5.6 L-25 logger 重复 + weekdays 越界
 
-**定位**:`plugin_manager.py:23 与 29`(两行相同的 `logger = logging.getLogger('vpc.kazumi.manager')`)、`548`(weekdays 解析,位于 571 的 try 之外)。
+**定位**:`plugin_manager.py:23 与 29`(两行相同的 `logger = logging.getLogger('yuki.kazumi.manager')`)、`548`(weekdays 解析,位于 571 的 try 之外)。
 
 **修改**:
 1. 删除其中一个重复 logger 定义(保留 23 行处)。

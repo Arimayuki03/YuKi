@@ -5,7 +5,7 @@ import java.io.File;
 /** Minimal android.content.Context stub — 仅提供 spider init 可能用到的极少方法。 */
 public class Context {
     public Context getApplicationContext() { return this; }
-    public String getPackageName() { return "video-pc"; }
+    public String getPackageName() { return "yuki"; }
     public android.content.pm.PackageManager getPackageManager() { return null; }
 
     private static final java.util.concurrent.ConcurrentHashMap<String, SharedPreferences> PREFS =
@@ -18,10 +18,10 @@ public class Context {
 
     /**
      * 可写缓存目录（TVBox 蜘蛛静态初始化常调用，如 DexNative → getCacheDir()）。
-     * PC 端返回用户主目录 ~/.video-pc/jar-cache（L-10：不落共享临时目录）。
+     * PC 端返回用户主目录 ~/.yuki/jar-cache（L-10：不落共享临时目录）。
      */
     public File getCacheDir() {
-        File f = new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-cache");
+        File f = new File(System.getProperty("user.home"), ".yuki" + File.separator + "jar-cache");
         if (!f.exists()) {
             f.mkdirs();
         }
@@ -30,7 +30,7 @@ public class Context {
 
     /** 可写数据目录（蜘蛛落盘临时资源用），与缓存同语义。 */
     public File getFilesDir() {
-        File f = new File(System.getProperty("user.home"), ".video-pc" + File.separator + "jar-files");
+        File f = new File(System.getProperty("user.home"), ".yuki" + File.separator + "jar-files");
         if (!f.exists()) {
             f.mkdirs();
         }

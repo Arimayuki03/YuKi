@@ -49,7 +49,7 @@ const cmd = [
     `"${VENV_PYTHON}" -m PyInstaller`,
     '--onefile',
     '--windowed',
-    '--name', 'video-pc-backend',
+    '--name', 'yuki-backend',
     '--distpath', `"${distDir}"`,
     '--workpath', `"${workDir}"`,
     '--add-data', `"js-engine${DATA_SEPARATOR}js-engine"`,
@@ -81,7 +81,7 @@ for (const dir of dataDirs) {
 console.log('[build-python] 清理临时文件…');
 try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 // PyInstaller 生成的 .spec 文件
-const specFile = path.join(BACKEND, 'video-pc-backend.spec');
+const specFile = path.join(BACKEND, 'yuki-backend.spec');
 try { fs.unlinkSync(specFile); } catch (e) { /* ignore */ }
 
 console.log('[build-python] 完成！产物在 python-dist/');

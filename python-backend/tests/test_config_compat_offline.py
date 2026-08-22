@@ -29,9 +29,9 @@ class OfflineCompatibilityTest(unittest.TestCase):
             # the suite must send exact request cancellation and wait for the
             # Supervisor hard stop; a client-side requests timeout cannot hide
             # broken cancellation semantics.
-            'VPC_COMPAT_HOME_TIMEOUT': '5',
-            'VPC_COMPAT_HOME_BUDGET': '0.5',
-            'VPC_COMPAT_REPO_TIMEOUT': '6',
+            'YUKI_COMPAT_HOME_TIMEOUT': '5',
+            'YUKI_COMPAT_HOME_BUDGET': '0.5',
+            'YUKI_COMPAT_REPO_TIMEOUT': '6',
         }
         started = time.monotonic()
         result = subprocess.run(

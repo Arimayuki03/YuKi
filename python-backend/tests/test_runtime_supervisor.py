@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
 

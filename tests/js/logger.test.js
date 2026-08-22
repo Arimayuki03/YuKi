@@ -14,7 +14,7 @@ test('logger redacts common secrets', () => {
 });
 
 test('rotating writer keeps UTF-8 logs readable and newest first', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-log-test-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-log-test-'));
     try {
         const file = path.join(dir, 'electron-main.log');
         const writer = new RotatingLogWriter(file, { maxBytes: 90, backups: 2 });
@@ -32,7 +32,7 @@ test('rotating writer keeps UTF-8 logs readable and newest first', () => {
 });
 
 test('clearLogs 只清日志文件，保留其它文件', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-log-clear-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-log-clear-'));
     try {
         fs.writeFileSync(path.join(dir, 'electron-main.log'), 'hello');
         fs.writeFileSync(path.join(dir, 'electron-main.log.1'), 'old');
@@ -49,7 +49,7 @@ test('clearLogs 只清日志文件，保留其它文件', () => {
 });
 
 test('setLogLevel 过滤低于当前级别的日志（级别设置有效）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-log-level-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-log-level-'));
     try {
         setLogLevel('WARN');
         assert.equal(require('../../src/main/logger').getLogLevel(), 'WARN');
@@ -69,7 +69,7 @@ test('setLogLevel 过滤低于当前级别的日志（级别设置有效）', ()
 });
 
 test('定时清理：已逾期时启动立即补清并持久化时间戳（跨重启周期生效）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-log-sched-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-log-sched-'));
     try {
         fs.writeFileSync(path.join(dir, 'electron-main.log'), 'stale');
         let last = Date.now() - 8 * 24 * 3600 * 1000; // 上次清理在 8 天前，周期 7 天 → 已逾期
@@ -87,7 +87,7 @@ test('定时清理：已逾期时启动立即补清并持久化时间戳（跨�
 });
 
 test('定时清理：长周期(90天>24.8天计时器上限)不被钳位成 1ms 立即触发', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-log-sched2-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-log-sched2-'));
     try {
         fs.writeFileSync(path.join(dir, 'a.log'), 'x');
         let calls = 0;

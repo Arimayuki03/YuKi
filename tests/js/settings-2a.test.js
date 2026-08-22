@@ -18,7 +18,7 @@ test('2A: about is a settings category and legacy UI is removed', () => {
     assert.match(html, /set_use_misans/);
 });
 
-test('2A/T61: MiSans font bundled via vpc:font-css (no runtime-download/PiP hooks)', () => {
+test('2A/T61: MiSans font bundled via yuki:font-css (no runtime-download/PiP hooks)', () => {
     const sources = [
         read('src/renderer/js/app.js'),
         read('src/renderer/js/panels.js'),
@@ -26,12 +26,12 @@ test('2A/T61: MiSans font bundled via vpc:font-css (no runtime-download/PiP hook
         read('src/main/index.js'),
     ].join('\n');
 
-    // T61：内置 MiSans 经 vpc:font-css 注入 <link>（打包内置、无运行时下载），主进程 require misans
-    assert.match(sources, /vpc:font-css/);
+    // T61：内置 MiSans 经 yuki:font-css 注入 <link>（打包内置、无运行时下载），主进程 require misans
+    assert.match(sources, /yuki:font-css/);
     assert.match(sources, /require\(['"]\.\/misans['"]\)/);
     // 无运行时下载就绪事件（内置无需异步 ready）；画中画钩子仍保持移除
-    assert.doesNotMatch(sources, /onFontReady|vpc:font-ready/);
-    assert.doesNotMatch(sources, /pipOpen|pipClose|vpc:pip-open|vpc:pip-close|set_pip_/);
+    assert.doesNotMatch(sources, /onFontReady|yuki:font-ready/);
+    assert.doesNotMatch(sources, /pipOpen|pipClose|yuki:pip-open|yuki:pip-close|set_pip_/);
 });
 
 test('2A/T61: MiSans-first font stack and navigation order are explicit', () => {

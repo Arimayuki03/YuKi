@@ -32,7 +32,7 @@ if ENGINE_DIR not in sys.path:
 from esm_transform import esm_to_script  # noqa: E402
 from module_resolver import ModuleBundle, binding_statements  # noqa: E402
 
-logger = logging.getLogger('vpc.jsengine')
+logger = logging.getLogger('yuki.jsengine')
 
 BOOTSTRAP_JS = os.path.join(ENGINE_DIR, 'host_bootstrap.js')
 LOADER_JS = os.path.join(ENGINE_DIR, 'spider-loader.js')
@@ -362,7 +362,7 @@ class JsEngine:
             logger.warning('js call %s timeout waiting for lock', method)
             return None
         try:
-            fn = self.ctx.get('__VPC_CALL__')
+            fn = self.ctx.get('__YUKI_CALL__')
             args_json = json.dumps(list(args), ensure_ascii=False)
             try:
                 ret = fn(method, args_json)
@@ -375,9 +375,9 @@ class JsEngine:
                 return None
             try:
                 parsed = json.loads(ret)
-                if isinstance(parsed, dict) and '__vpc_err__' in parsed:
-                    self._warn_missing_global(parsed['__vpc_err__'], method)
-                    logger.warning('js %s error: %s', method, parsed['__vpc_err__'])
+                if isinstance(parsed, dict) and '__yuki_err__' in parsed:
+                    self._warn_missing_global(parsed['__yuki_err__'], method)
+                    logger.warning('js %s error: %s', method, parsed['__yuki_err__'])
                     return None
             except ValueError:
                 pass
@@ -391,9 +391,9 @@ class JsEngine:
         for _ in range(5000):
             if time.time() > deadline:
                 break
-            if not self.ctx.eval('!!globalThis.__VPC_PENDING__'):
+            if not self.ctx.eval('!!globalThis.__YUKI_PENDING__'):
                 break
             if not self.ctx.execute_pending_job():
                 break
-        fn = self.ctx.get('__VPC_FETCH_RESULT__')
+        fn = self.ctx.get('__YUKI_FETCH_RESULT__')
         return fn()

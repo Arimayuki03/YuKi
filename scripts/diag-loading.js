@@ -11,7 +11,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9345);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9345);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -46,12 +46,12 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-diag-'));
-    const tmpCache = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-diag-cache-'));
-    const src = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-diag-'));
+    const tmpCache = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-diag-cache-'));
+    const src = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try { const s = JSON.parse(fs.readFileSync(src, 'utf8')); s.onboarded = true; s.wallpaper = ''; fs.writeFileSync(path.join(tmpUserData, 'settings.json'), JSON.stringify(s, null, 2), 'utf8'); } catch (e) { fs.writeFileSync(path.join(tmpUserData, 'settings.json'), JSON.stringify({ onboarded: true }, null, 2), 'utf8'); }
 
-    const child = spawn(ELECTRON, [ROOT, '--remote-debugging-port=' + PORT, '--user-data-dir=' + tmpUserData, '--no-first-run'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, VPC_CACHE_DIR: tmpCache } });
+    const child = spawn(ELECTRON, [ROOT, '--remote-debugging-port=' + PORT, '--user-data-dir=' + tmpUserData, '--no-first-run'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, YUKI_CACHE_DIR: tmpCache } });
     let appLog = '';
     child.stdout.on('data', (d) => { appLog += d.toString(); });
     child.stderr.on('data', (d) => { appLog += d.toString(); });

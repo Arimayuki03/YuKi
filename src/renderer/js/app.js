@@ -106,7 +106,7 @@ const App = {
         for (let i = 0; i < 15; i++) {
             let busy = false;
             try {
-                const st = await window.vpc.configState();
+                const st = await window.yuki.configState();
                 busy = !!(st && st.reloading);
             } catch (e) { /* IPC 异常忽略 */ }
             let t = null;
@@ -165,7 +165,7 @@ const App = {
         // 侧栏收缩/展开（只显示图标），状态持久化
         $('#nav-collapse').on('click', () => {
             const collapsed = document.body.classList.toggle('nav-collapsed');
-            window.vpc.settingsSet('navCollapsed', collapsed);
+            window.yuki.settingsSet('navCollapsed', collapsed);
         });
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') dispatchEsc();
@@ -191,7 +191,7 @@ $(async function bootstrap() {
     // 渲染端未捕获错误落盘：转发到主进程 electron-main.log（脱敏由主进程 writer 负责）。
     // 尽早注册，晚于此的启动错误也能被记录。
     const _forwardRendererError = (level, message) => {
-        try { if (window.vpc && window.vpc.logRenderer) window.vpc.logRenderer(level, String(message || '').slice(0, 4000)); } catch (e) { /* 上报失败不影响运行 */ }
+        try { if (window.yuki && window.yuki.logRenderer) window.yuki.logRenderer(level, String(message || '').slice(0, 4000)); } catch (e) { /* 上报失败不影响运行 */ }
     };
     window.addEventListener('error', (e) => {
         const msg = e && e.error && e.error.stack ? e.error.stack : `${e && e.message} @ ${e && e.filename}:${e && e.lineno}:${e && e.colno}`;
@@ -205,7 +205,7 @@ $(async function bootstrap() {
 
     // 尽早读取本地设置（主题/启动页/字体开关，无需等后端）
     let s = {};
-    try { s = (await window.vpc.settingsGet()) || {}; } catch (e) { /* 首次运行无 settings */ }
+    try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { /* 首次运行无 settings */ }
 
     // 载入内置 MiSans 字体（打包内置、无运行时下载；开关关闭时回退系统字体，T61 / 2.11）
     await applyMisansFont(s.useMisansFont !== false);
@@ -233,11 +233,11 @@ $(async function bootstrap() {
     } catch (e) { /* 首次运行无 settings */ }
 
     // 后端重启（如更换缓存目录）后更新连接信息
-    if (window.vpc.onBackendReady) window.vpc.onBackendReady((info) => setBackendInfo(info));
+    if (window.yuki.onBackendReady) window.yuki.onBackendReady((info) => setBackendInfo(info));
 
     // 配置自动重载完成事件必须在等待后端前注册；主进程可能在后端就绪后立即完成重载。
-    if (window.vpc.onConfigReloaded) {
-        window.vpc.onConfigReloaded((info) => {
+    if (window.yuki.onConfigReloaded) {
+        window.yuki.onConfigReloaded((info) => {
             if (!info || !info.ok) return;
             if (typeof Player !== 'undefined' && Player.resetVipFlags) Player.resetVipFlags();
             if (typeof Home !== 'undefined' && Home._inited && Home.loadSites) {
@@ -256,17 +256,17 @@ $(async function bootstrap() {
     App.initNav();
     App.initBackTop();
     // 鼠标侧键前进/后退：主进程 app-command 转发 + 渲染层 mousedown 兜底（双通道去重）
-    if (window.vpc.onMouseNav) window.vpc.onMouseNav((p) => App.mouseNav(p && p.dir));
+    if (window.yuki.onMouseNav) window.yuki.onMouseNav((p) => App.mouseNav(p && p.dir));
     App.initMouseButtons();
     // 无边框模式：窗口控制按钮 + body 标记
     (async () => {
         try {
-            const s = await window.vpc.settingsGet();
+            const s = await window.yuki.settingsGet();
             if (s && s.systemTitleBar !== true) document.body.classList.add('frameless');
         } catch (e) { /* 默认无边框 */ document.body.classList.add('frameless'); }
-        if (window.vpc.winMinimize) $('#win-min').on('click', () => window.vpc.winMinimize());
-        if (window.vpc.winMaximize) $('#win-max').on('click', () => window.vpc.winMaximize());
-        if (window.vpc.winClose) $('#win-close').on('click', () => window.vpc.winClose());
+        if (window.yuki.winMinimize) $('#win-min').on('click', () => window.yuki.winMinimize());
+        if (window.yuki.winMaximize) $('#win-max').on('click', () => window.yuki.winMaximize());
+        if (window.yuki.winClose) $('#win-close').on('click', () => window.yuki.winClose());
     })();
 
     showLoading('正在启动后端服务…');
@@ -303,6 +303,6 @@ $(async function bootstrap() {
 });
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.app = App;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.app = App;
 }(typeof window !== 'undefined' ? window : globalThis));

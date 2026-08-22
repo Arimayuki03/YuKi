@@ -12,7 +12,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUBS_DIR = os.path.join(HERE, 'stubs')
-JAR = os.path.expanduser('~/.video-pc/cache/jar/fm-jvm.jar')
+JAR = os.path.expanduser('~/.yuki/cache/jar/fm-jvm.jar')
 
 # 已存在的 stubs（包名.类名）
 existing = set()

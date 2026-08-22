@@ -46,7 +46,7 @@
 | 全新 venv 按锁文件安装后 `npm run test:py` 通过 | 仍需在全新环境复核 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
 | push 后 Actions 两个 job 全绿、故意引入语法错误时 CI 能红 | 尚需真实推送/破坏验证 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
 | `docs/ARCHITECTURE.md` 增加冷启动耗时表并落地至少一个优化 | 未完成 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
-| 渲染层 `VPC.<module>` 导出、页面无 console 报错、`kazumi.js` 去掉两处 onerror 内联 JS | 导出层已完成并通过 JS 回归；页面 console 手动验收仍待完成，onerror 已移除 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
+| 渲染层 `YUKI.<module>` 导出、页面无 console 报错、`kazumi.js` 去掉两处 onerror 内联 JS | 导出层已完成并通过 JS 回归；页面 console 手动验收仍待完成，onerror 已移除 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
 | `src/main/index.js` 拆分到 < 600 行且不再堆积 `ipcMain.handle` | 未完成 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
 | `docs/DATA_MAP.md`、渲染层 `localStorage` 范围、M-30 竞态场景复测 | 未完成 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |
 | 测试内复制源码逻辑的用例改为真实模块引用，`acceptance-*.js` 选入 CI 冒烟 | 未完成 | [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) |

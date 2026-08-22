@@ -82,7 +82,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     """
 
     protocol_version = 'HTTP/1.1'
-    server_version = 'vpc-fixture/1.0'
+    server_version = 'yuki-fixture/1.0'
 
     def log_message(self, *_args):        # 保持测试输出干净
         return
@@ -299,7 +299,7 @@ class FixtureServer:
         self.httpd.counters = {}
         self.httpd.base_url = 'http://127.0.0.1:%d' % self.httpd.server_port
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True,
-                                       name='vpc-config-fixture')
+                                       name='yuki-config-fixture')
         self._saved_env = {}
         self._saved_wininet = None
 

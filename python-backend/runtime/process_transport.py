@@ -10,7 +10,7 @@ import subprocess
 
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
-_BYTES_MARKER = '__vpc_bytes__'
+_BYTES_MARKER = '__yuki_bytes__'
 
 
 class WindowsJob:

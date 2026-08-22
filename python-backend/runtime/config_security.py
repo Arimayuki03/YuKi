@@ -17,7 +17,7 @@ URL 也都是不可信输入。本模块把「允许从哪里取、最多取多�
    默认允许配置引用本机/内网地址——TVBox 生态大量仓指向局域网 NAS 与本机服务，
    用户自己的机器上这是合理诉求。同源信任仍然成立（用户亲手输入的根地址的同源
    子资源永远继承信任）；需要恢复严格 SSRF 防护（跨源私网引用默认拒绝）时设
-   环境变量 `VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1`。
+   环境变量 `YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1`。
 4. **下载物指纹**：JAR/JS/Python 落盘时登记 sha256，内容变化必须重新评估能力与
    权限，不能沿用上一次的分级结论。
 
@@ -186,7 +186,7 @@ class ConfigSecurityPolicy:
     max_local_config_bytes: int = MAX_LOCAL_CONFIG_BYTES
     allow_local_file: bool = False
     # 桌面端默认放开本机/内网引用（局域网 NAS / 本机服务是 TVBox 生态常态）；
-    # 需要严格 SSRF 防护时由 from_env 的 VPC_CONFIG_BLOCK_PRIVATE_NETWORK 关回。
+    # 需要严格 SSRF 防护时由 from_env 的 YUKI_CONFIG_BLOCK_PRIVATE_NETWORK 关回。
     allow_private_network: bool = True
     resolve_hostnames: bool = True
 
@@ -203,18 +203,18 @@ class ConfigSecurityPolicy:
             return value if value > 0 else default
 
         base = cls(
-            max_config_bytes=size('VPC_CONFIG_MAX_BYTES', MAX_CONFIG_BYTES),
-            max_decompressed_bytes=size('VPC_CONFIG_MAX_DECOMPRESSED_BYTES',
+            max_config_bytes=size('YUKI_CONFIG_MAX_BYTES', MAX_CONFIG_BYTES),
+            max_decompressed_bytes=size('YUKI_CONFIG_MAX_DECOMPRESSED_BYTES',
                                         MAX_DECOMPRESSED_BYTES),
-            max_ext_bytes=size('VPC_CONFIG_MAX_EXT_BYTES', MAX_EXT_BYTES),
-            max_redirects=size('VPC_CONFIG_MAX_REDIRECTS', MAX_REDIRECTS),
-            max_depot_depth=size('VPC_CONFIG_MAX_DEPOT_DEPTH', MAX_DEPOT_DEPTH),
-            max_ext_depth=size('VPC_CONFIG_MAX_EXT_DEPTH', MAX_EXT_DEPTH),
-            allow_local_file=flag('VPC_CONFIG_ALLOW_LOCAL_FILE'),
-            # 默认放行本机/内网地址；设 VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1 可恢复
+            max_ext_bytes=size('YUKI_CONFIG_MAX_EXT_BYTES', MAX_EXT_BYTES),
+            max_redirects=size('YUKI_CONFIG_MAX_REDIRECTS', MAX_REDIRECTS),
+            max_depot_depth=size('YUKI_CONFIG_MAX_DEPOT_DEPTH', MAX_DEPOT_DEPTH),
+            max_ext_depth=size('YUKI_CONFIG_MAX_EXT_DEPTH', MAX_EXT_DEPTH),
+            allow_local_file=flag('YUKI_CONFIG_ALLOW_LOCAL_FILE'),
+            # 默认放行本机/内网地址；设 YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1 可恢复
             # 「远端配置不能静默访问本地服务」的严格 SSRF 防护。
-            allow_private_network=not flag('VPC_CONFIG_BLOCK_PRIVATE_NETWORK'),
-            resolve_hostnames=not flag('VPC_CONFIG_SKIP_DNS_SCOPE'),
+            allow_private_network=not flag('YUKI_CONFIG_BLOCK_PRIVATE_NETWORK'),
+            resolve_hostnames=not flag('YUKI_CONFIG_SKIP_DNS_SCOPE'),
         )
         return replace(base, **overrides) if overrides else base
 
@@ -238,7 +238,7 @@ class SourceTrust:
     `origin` 是根地址的 scheme://host:port；`scope` 是它的主机分级。用户输入
     `http://127.0.0.1:8000/tv.json` 时 scope='loopback'，该 origin 下的子资源继承
     信任；scope='public' 的根配置引用 loopback/private 地址属于跨源提权，仅在严格
-    SSRF 防护模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下拒绝。
+    SSRF 防护模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）下拒绝。
     """
 
     root: str = ''
@@ -338,7 +338,7 @@ def guard_url(url, *, policy, trust, kind='config', base_url='', site_key=''):
             raise ConfigSecurityError(
                 'private_network_blocked',
                 '配置引用了本机/内网地址（%s，%s）。当前为严格 SSRF 防护模式'
-                '（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1），远端配置不能静默访问本地'
+                '（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1），远端配置不能静默访问本地'
                 '服务；取消该环境变量即可放开。' % (host, kind),
                 code=code, url=raw, scope=scope)
     return urlunsplit((scheme, parts.netloc, parts.path, parts.query, ''))

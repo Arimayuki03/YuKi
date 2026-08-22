@@ -2,7 +2,7 @@
 """Kazumi Cookie 持久化（对齐 Kazumi PluginCookieManager）。
 
 解析/验证过程中浏览器会话（Electron 隐藏窗口 partition session）拿到的 Cookie，
-由主进程经 kazumiCookieSet 推送落盘到 ~/.video-pc/kazumi/cookies.json，
+由主进程经 kazumiCookieSet 推送落盘到 ~/.yuki/kazumi/cookies.json，
 规则引擎发请求时经 cookie_header() 自动带上，避免重启后需重新验证。
 
 数据格式：{ domain: [{'name','value'}, ...] }（domain 小写，含父域匹配）。
@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import hoststate
 
-logger = logging.getLogger('vpc.kazumi.cookie')
+logger = logging.getLogger('yuki.kazumi.cookie')
 
 
 class CookieJar:

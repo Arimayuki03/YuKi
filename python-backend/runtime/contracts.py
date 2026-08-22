@@ -28,7 +28,7 @@ DEFAULT_DEADLINES_MS = {
 }
 MAX_DEADLINE_MS = 120000
 _ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$')
-_current_request = ContextVar('vpc_runtime_request', default=None)
+_current_request = ContextVar('yuki_runtime_request', default=None)
 
 
 def normalize_request_id(value: Any = '') -> str:

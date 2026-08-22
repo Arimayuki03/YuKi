@@ -16,8 +16,8 @@ def android_worker_enabled() -> bool:
     both environment variables are set.  This prevents environment flags from
     silently widening the formal C1 support ceiling.
     """
-    enabled = str(os.environ.get('VPC_ANDROID_WORKER_ENABLED', '')).lower() in ('1', 'true', 'yes')
-    ready = str(os.environ.get('VPC_ANDROID_WORKER_READY', '')).lower() in ('1', 'true', 'yes')
+    enabled = str(os.environ.get('YUKI_ANDROID_WORKER_ENABLED', '')).lower() in ('1', 'true', 'yes')
+    ready = str(os.environ.get('YUKI_ANDROID_WORKER_READY', '')).lower() in ('1', 'true', 'yes')
     return android_worker_available(enabled=enabled, ready=ready)
 
 

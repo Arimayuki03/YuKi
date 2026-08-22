@@ -19,7 +19,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from runtime.contracts import RuntimeRequest, RuntimeError as VpcRuntimeError
+from runtime.contracts import RuntimeRequest, RuntimeError as YukiRuntimeError
 from runtime.supervisor import RuntimeSupervisor, RuntimePolicy
 from cache_store import CacheStore
 from tests.fixtures.q7_offline_fixtures import Q7OfflineFixtureServer
@@ -45,7 +45,7 @@ class TestQ7FaultInjectionAndResilience(unittest.TestCase):
             'behavior': 'infinite'
         }, policy=policy)
         req = RuntimeRequest.create(site_key='fault_inf', method='homeContent', deadline_ms=120)
-        with self.assertRaises(VpcRuntimeError) as ctx:
+        with self.assertRaises(YukiRuntimeError) as ctx:
             sp.call('homeContent', [False], request=req)
         self.assertEqual(ctx.exception.code, 'L3_RUNTIME_TIMEOUT')
         self.assertIsNone(sp.pid)

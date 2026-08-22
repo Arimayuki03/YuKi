@@ -6,7 +6,7 @@ import os, sys, glob, zipfile, re, struct
 from collections import defaultdict
 
 HOME = os.path.expanduser('~')
-JAR_DIR = os.path.join(HOME, '.video-pc', 'cache', 'jar')
+JAR_DIR = os.path.join(HOME, '.yuki', 'cache', 'jar')
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUBS_DIR = os.path.join(HERE, 'stubs')
 

@@ -447,7 +447,7 @@ def inventory_execution_options(env=None):
     adb = shutil.which('adb')
     emulator = shutil.which('emulator')
     java = shutil.which('java')
-    remote = str(env.get('VPC_ANDROID_WORKER_URL') or '')
+    remote = str(env.get('YUKI_ANDROID_WORKER_URL') or '')
     return {
         'packagedGuestOrEmulator': {
             'available': bool(adb and emulator), 'adb': adb or '',

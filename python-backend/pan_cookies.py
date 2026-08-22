@@ -18,7 +18,7 @@ import time
 
 import hoststate
 
-logger = logging.getLogger('vpc.pan-cookies')
+logger = logging.getLogger('yuki.pan-cookies')
 
 PAN_COOKIE_KEYS = ('quark', 'uc', 'tianyi', 'baidu', 'p123', 'xunlei')
 _PROVIDER_NAMES = {

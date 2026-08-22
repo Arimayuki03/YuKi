@@ -26,7 +26,7 @@ from runtime.capability_router import (  # noqa: E402
     looks_like_jar, refine_with_jar, route_site)
 from runtime.health import android_worker_enabled, infer_site_health  # noqa: E402
 
-TEST_ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+TEST_ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
 
 
 def site(**kw):
@@ -265,7 +265,7 @@ class RouterMatchesLoaderTest(unittest.TestCase):
 
     def test_no_go_policy_cannot_be_enabled_by_handshake_flags(self):
         saved = {k: os.environ.get(k)
-                 for k in ('VPC_ANDROID_WORKER_ENABLED', 'VPC_ANDROID_WORKER_READY')}
+                 for k in ('YUKI_ANDROID_WORKER_ENABLED', 'YUKI_ANDROID_WORKER_READY')}
 
         def restore():
             for key, value in saved.items():
@@ -277,8 +277,8 @@ class RouterMatchesLoaderTest(unittest.TestCase):
         self.addCleanup(restore)
         for enabled, ready, expected in (('1', None, False), (None, '1', False),
                                          ('1', '1', False), ('0', '1', False)):
-            for key, value in (('VPC_ANDROID_WORKER_ENABLED', enabled),
-                               ('VPC_ANDROID_WORKER_READY', ready)):
+            for key, value in (('YUKI_ANDROID_WORKER_ENABLED', enabled),
+                               ('YUKI_ANDROID_WORKER_READY', ready)):
                 if value is None:
                     os.environ.pop(key, None)
                 else:

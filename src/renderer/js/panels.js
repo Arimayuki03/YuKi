@@ -195,7 +195,7 @@ function applyConfigResult(sm, text) {
     if (diagnostics.length) parts.push(`诊断：${diagnostics.join('、')}`);
 
     if (/^https?:\/\//i.test(text.trim())) {
-        window.vpc.settingsSet('lastConfigUrl', text.trim());
+        window.yuki.settingsSet('lastConfigUrl', text.trim());
         addConfigHistory(text.trim());
     }
     refreshConfigViews();
@@ -267,12 +267,12 @@ function renderConfigDiagnostics(data) {
 /** 历史源：成功后记入 settings.configHistory（最新在前，去重，上限 10 条）。 */
 async function addConfigHistory(url) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         let list = Array.isArray(s.configHistory) ? s.configHistory : [];
         list = list.filter((x) => x !== url);
         list.unshift(url);
         if (list.length > 10) list = list.slice(0, 10);
-        await window.vpc.settingsSet('configHistory', list);
+        await window.yuki.settingsSet('configHistory', list);
         window._cfgHistoryCache = list;
         renderConfigHistory(list);
     } catch (e) { /* 历史保存失败不影响主流程 */ }
@@ -303,12 +303,12 @@ async function useHistoryConfig(url) {
 }
 async function removeConfigHistory(idx) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         const list = Array.isArray(s.configHistory) ? s.configHistory : [];
         // T33：删除类操作统一二次确认
         if (!await confirmDialog('删除该历史源记录？（仅移除记录，不影响已载入的配置）', { okText: '删除' })) return;
         list.splice(idx, 1);
-        await window.vpc.settingsSet('configHistory', list);
+        await window.yuki.settingsSet('configHistory', list);
         window._cfgHistoryCache = list;
         renderConfigHistory(list);
     } catch (e) { warnToast('删除失败'); }
@@ -331,8 +331,8 @@ async function refreshCacheSize(force) {
     _cacheSizeLastTs = now;
     try {
         // 主进程 app 缓存大小接口可能未暴露（主进程任务补齐前）：容错为 null，不强依赖。
-        const appSizeP = (window.vpc && typeof window.vpc.getAppCacheSize === 'function')
-            ? window.vpc.getAppCacheSize().catch(() => null)
+        const appSizeP = (window.yuki && typeof window.yuki.getAppCacheSize === 'function')
+            ? window.yuki.getAppCacheSize().catch(() => null)
             : Promise.resolve(null);
         const [backendR, appR] = await Promise.all([
             doAction('cacheSize', {}, null, 8000).catch(() => null),
@@ -386,22 +386,22 @@ async function clearCache() {
 
     try {
         // 并行清理后端与主进程侧缓存（互不依赖）；本地持久化缓存同步执行（不阻塞网络）。
-        const appClearP = (window.vpc && typeof window.vpc.clearAppCaches === 'function')
-            ? window.vpc.clearAppCaches()
+        const appClearP = (window.yuki && typeof window.yuki.clearAppCaches === 'function')
+            ? window.yuki.clearAppCaches()
             : Promise.resolve(null);
         const [backendRes, appRes] = await Promise.allSettled([
             doAction('clearCache', {}, null, 8000),
             appClearP,
         ]);
 
-        // 任务十一：清理渲染层本地持久化缓存（vpc_cache:: 命名空间：推荐榜单/时间表等），
+        // 任务十一：清理渲染层本地持久化缓存（yuki_cache:: 命名空间：推荐榜单/时间表等），
         // 先 prune 过期再全清（同步、不阻塞网络）。
         try { if (typeof localCachePrune === 'function') localCachePrune(); } catch (e) { /* ignore */ }
         try { if (typeof localCacheClearAll === 'function') localCacheClearAll(); } catch (e) { /* ignore */ }
         // 顺带清理旧版独立缓存键（Bangumi 封面匹配 / 首页空分类探测 / 旧推荐缓存）
         try {
             localStorage.removeItem('kazumi_bgm_cover');
-            localStorage.removeItem('vpc_home_empty_classes');
+            localStorage.removeItem('yuki_home_empty_classes');
             localStorage.removeItem('popular_cache');
         } catch (e) { /* ignore */ }
 
@@ -481,13 +481,13 @@ async function addLiveSource() {
     }
     // 普通 txt / m3u 直播源
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         let list = Array.isArray(s.customLives) ? s.customLives : [];
         const dup = list.some((x) => (typeof x === 'string' ? x : x.url) === url);
         if (dup) { warnToast('该直播源已添加'); return; }
         list.unshift({ name: url, url });
         if (list.length > 30) list = list.slice(0, 30);
-        await window.vpc.settingsSet('customLives', list);
+        await window.yuki.settingsSet('customLives', list);
         $('#live_src_url').val('');
         renderLiveSources(list);
         warnToast('直播源已添加，到直播页下拉切换即可');
@@ -510,7 +510,7 @@ async function importTvboxLives(cfg) {
     });
     const norm = flat.map((l) => Live.normalizeLive(l)).filter(Boolean);
     if (!norm.length) return 0;
-    const s = (await window.vpc.settingsGet()) || {};
+    const s = (await window.yuki.settingsGet()) || {};
     let list = Array.isArray(s.customLives) ? s.customLives : [];
     let added = 0;
     norm.forEach((n) => {
@@ -519,7 +519,7 @@ async function importTvboxLives(cfg) {
     });
     if (!added) { warnToast('该配置里的直播源都已添加'); return norm.length; }
     if (list.length > 30) list = list.slice(0, 30);
-    await window.vpc.settingsSet('customLives', list);
+    await window.yuki.settingsSet('customLives', list);
     $('#live_src_url').val('');
     renderLiveSources(list);
     warnToast(`已从 TVBox 配置导入 ${added} 个直播源`);
@@ -548,12 +548,12 @@ function renderLiveSources(list) {
 
 async function removeLiveSource(idx) {
     try {
-        const s = (await window.vpc.settingsGet()) || {};
+        const s = (await window.yuki.settingsGet()) || {};
         const list = Array.isArray(s.customLives) ? s.customLives : [];
         // T33：删除类操作统一二次确认
         if (!await confirmDialog('删除该直播源？', { okText: '删除' })) return;
         list.splice(idx, 1);
-        await window.vpc.settingsSet('customLives', list);
+        await window.yuki.settingsSet('customLives', list);
         renderLiveSources(list);
         if (typeof Live !== 'undefined') { Live._dirty = true; if (Live._inited && Live.load) Live.load(); }
     } catch (e) { warnToast('删除失败'); }
@@ -625,7 +625,7 @@ function loadLocalThumbs() {
         const el = this;
         const rel = el.getAttribute('data-thumb-rel');
         if (!rel) return;
-        window.vpc.fileThumb(rel).then((r) => {
+        window.yuki.fileThumb(rel).then((r) => {
             // 目录已切换则丢弃结果；仍同卡片才回填
             if (!r || !r.ok || !el.isConnected || el.getAttribute('data-thumb-rel') !== rel) return;
             const ph = el.querySelector('.local-thumb.ph');
@@ -653,7 +653,7 @@ function goParent() {
     }
 }
 
-/** 选中文件：展示路径信息确认框（确认后经 vpc:file-push 交 mpv 播放）。 */
+/** 选中文件：展示路径信息确认框（确认后经 yuki:file-push 交 mpv 播放）。 */
 function selectFile(path) {
     currentFile = path;
     $("#fileUrl").text("file:/" + path);
@@ -667,7 +667,7 @@ function pushFile(yes) {
     const target = String(currentFile || '').trim();
     if (!target) { warnToast('未选中文件'); return; }
     // 本地媒体直接交给主进程 mpv 播放；首播冷启动可能因 IPC 竞态短暂失败，自动重试一次
-    const doPush = (rel, isRetry) => window.vpc.filePush(rel).then((r) => {
+    const doPush = (rel, isRetry) => window.yuki.filePush(rel).then((r) => {
         if (r && r.ok) {
             warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
             // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
@@ -767,7 +767,7 @@ function renderLocalPage() {
 
 /** 弹系统目录选择框设定白名单根目录，成功后刷新列表。 */
 function pickRoot() {
-    window.vpc.filePickRoot().then((r) => {
+    window.yuki.filePickRoot().then((r) => {
         if (r && r.ok) {
             dirNavStack = [];
             listFile('');
@@ -790,7 +790,7 @@ function listFile(relPath, silent) {
     const seq = ++_listSeq;
     const prevFp = silent && _localPage && _localPageNo === 1 ? _localFp(_localPage) : '';
     const loadingTimer = setTimeout(() => showLoading(), 200);
-    window.vpc.fileList(relPath || '').then((info) => {
+    window.yuki.fileList(relPath || '').then((info) => {
         clearTimeout(loadingTimer);
         hideLoading();
         if (seq !== _listSeq) return; // M-30d：旧目录迟到响应丢弃，防覆盖新目录/导航栈错位
@@ -821,7 +821,7 @@ function listFile(relPath, silent) {
 
 // 上传由主进程系统文件对话框选择 + 复制（无需经渲染层 FormData）
 function uploadFile() {
-    window.vpc.fileUpload(currentRoot || '').then((r) => {
+    window.yuki.fileUpload(currentRoot || '').then((r) => {
         if (r && r.ok) {
             warnToast(`已复制 ${r.copied} 个文件`);
             listFile(currentRoot);
@@ -841,7 +841,7 @@ function confirmNewFolder(yes) {
     $('#newFolderContent').val('');
     if (yes !== 1 || name.length === 0) return;
     showLoading();
-    window.vpc.fileNewFolder(currentRoot, name).then((r) => {
+    window.yuki.fileNewFolder(currentRoot, name).then((r) => {
         hideLoading();
         if (r && r.ok) listFile(currentRoot);
         else warnToast('新增失败');
@@ -863,7 +863,7 @@ function confirmDelFolder(yes) {
     const { path, refreshPath } = pendingDelFolder;
     pendingDelFolder = null;
     showLoading();
-    window.vpc.fileDelFolder(path).then((r) => {
+    window.yuki.fileDelFolder(path).then((r) => {
         hideLoading();
         if (r && r.ok) listFile(refreshPath);
         else warnToast('删除失败');
@@ -883,7 +883,7 @@ function confirmDelFile(yes) {
     closeDialog('delFile');
     if (yes !== 1) return;
     showLoading();
-    window.vpc.fileDelFile(currentFile).then((r) => {
+    window.yuki.fileDelFile(currentFile).then((r) => {
         hideLoading();
         if (r && r.ok) listFile(currentRoot);
         else warnToast('删除失败');
@@ -1021,8 +1021,8 @@ async function saveHotkeys() {
     $('#set_hotkey_seek').val(hk.seek);
     $('#set_hotkey_vol').val(hk.vol);
     $('#set_hotkey_speed').val(hk.speed);
-    await window.vpc.settingsSet('playerHotkeys', hk);
-    if (window.vpc.updateHotkeys) window.vpc.updateHotkeys();
+    await window.yuki.settingsSet('playerHotkeys', hk);
+    if (window.yuki.updateHotkeys) window.yuki.updateHotkeys();
 }
 
 // ---------------------------------------------------------------- 网盘 Cookie（JAR 网盘源播放，T-jar-cookie）
@@ -1135,12 +1135,12 @@ function initPanCookiePanel() {
     $('#pan_qr_refresh').on('click', () => {
         // 取消/失败后重试：关闭旧窗口（如有）并重新打开
         _panQrClosed = true;
-        try { window.vpc.panQrCancel(); } catch (e) { /* ignore */ }
+        try { window.yuki.panQrCancel(); } catch (e) { /* ignore */ }
         setTimeout(() => openQuarkQrLogin(), 200);
     });
     $('#pan_qr_close').on('click', () => {
         _panQrClosed = true;
-        try { window.vpc.panQrCancel(); } catch (e) { /* ignore */ }
+        try { window.yuki.panQrCancel(); } catch (e) { /* ignore */ }
         closeDialog('panQrDialog');
     });
 }
@@ -1160,7 +1160,7 @@ async function openQuarkQrLogin() {
     let res = null;
     try {
         // 官方页面方案：主进程开官方落地页窗口，官方 JS 完成登录后收割完整 Cookie
-        res = await window.vpc.panQrLogin();
+        res = await window.yuki.panQrLogin();
     } catch (e) { /* 下方统一处理 */ }
     if (_panQrClosed) return;
     if (res && res.ok && res.cookies) {
@@ -1199,10 +1199,10 @@ function initSettingsPanel() {
     $('#settings-nav').on('click', '.settings-nav-item', function () {
         const cat = String($(this).data('cat'));
         showSetCat(cat);
-        window.vpc.settingsSet('settingsCat', cat);
+        window.yuki.settingsSet('settingsCat', cat);
     });
     // 播放设置：载入持久化值，改动即存
-    window.vpc.settingsGet().then((s) => {
+    window.yuki.settingsGet().then((s) => {
         s = s || {};
         // 分类重新划分后旧记忆值（cache/asset）可能失效：仅在分类仍存在时恢复，否则回退外观
         if (s.settingsCat && $(`#view-settings .tool-card[data-setcat="${String(s.settingsCat).replace(/"/g, '')}"]`).length) showSetCat(s.settingsCat);
@@ -1299,7 +1299,7 @@ function initSettingsPanel() {
     $('#set_volume').on('change', function () {
         const v = Math.max(0, Math.min(100, parseInt(this.value, 10) || 0));
         this.value = v;
-        window.vpc.settingsSet('playerVolume', v);
+        window.yuki.settingsSet('playerVolume', v);
     });
     // 直播源：添加 / 删除
     $('#live_src_add').on('click', addLiveSource);
@@ -1313,42 +1313,42 @@ function initSettingsPanel() {
     // 外观：主题/明暗/缩放/壁纸遮罩即时生效并持久化
     // 主题：选内置预设时清自定义色；取色器选色时清预设（两者互斥）
     $('#set_theme').on('change', function () {
-        window.vpc.settingsSet('theme', this.value);
-        window.vpc.settingsSet('customTheme', '');
+        window.yuki.settingsSet('theme', this.value);
+        window.yuki.settingsSet('customTheme', '');
         applySkin({ theme: this.value, customColor: '' });
     });
     $('#set_theme_pick').on('change', function () {
-        window.vpc.settingsSet('customTheme', this.value);
+        window.yuki.settingsSet('customTheme', this.value);
         $('#set_theme').val('');
-        window.vpc.settingsSet('theme', '');
+        window.yuki.settingsSet('theme', '');
         applySkin({ customColor: this.value });
     });
     $('#set_theme_clear').on('click', async () => {
         // T40：恢复默认主题前二次确认
         if (!await confirmDialog('恢复默认主题？自定义主题色会一并清除。', { okText: '恢复' })) return;
         $('#set_theme').val('');
-        window.vpc.settingsSet('theme', '');
-        window.vpc.settingsSet('customTheme', '');
+        window.yuki.settingsSet('theme', '');
+        window.yuki.settingsSet('customTheme', '');
         applySkin({ theme: '', customColor: '' });
     });
     $('#set_colormode').on('change', function () {
-        window.vpc.settingsSet('colorMode', this.value);
+        window.yuki.settingsSet('colorMode', this.value);
         applySkin({ colorMode: this.value });
     });
     $('#set_fontsize').on('change', function () {
         // 明确档位下拉（T12）：选中即生效，100 为标准
         const v = parseInt(this.value, 10) || 100;
-        window.vpc.settingsSet('fontSize', v === 100 ? '' : v);
+        window.yuki.settingsSet('fontSize', v === 100 ? '' : v);
         applySkin({ fontSize: v });
     });
     // 字体大小（仅文字）与字体颜色
     $('#set_textsize').on('change', function () {
         const v = parseInt(this.value, 10) || 100;
-        window.vpc.settingsSet('textSize', v === 100 ? '' : v);
+        window.yuki.settingsSet('textSize', v === 100 ? '' : v);
         applySkin({ textSize: v });
     });
     const applyTextColor = (c) => {
-        window.vpc.settingsSet('textColor', c);
+        window.yuki.settingsSet('textColor', c);
         applySkin({ textColor: c });
     };
     $('#set_textcolor').on('change', function () {
@@ -1404,63 +1404,63 @@ function initSettingsPanel() {
     });
     // 打开截图目录（T46：mpv 截图功能）
     $('#hotkey_screenshot_dir').on('click', async () => {
-        const r = await window.vpc.mpvScreenshotDir();
+        const r = await window.yuki.mpvScreenshotDir();
         if (!r || !r.ok) warnToast('打开截图目录失败：' + ((r && r.reason) || '未知错误'));
     });
     // 默认倍速：持久化并通知主进程（下次起播生效）
     $('#set_speed').on('change', function () {
-        window.vpc.settingsSet('playerSpeed', parseFloat(this.value) || 1);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('playerSpeed', parseFloat(this.value) || 1);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast('默认倍速已保存，下次起播生效');
     });
     // mpv 语言偏好（音轨/字幕）：持久化并通知主进程，下次起播注入 --alang/--slang
     $('#set_alang').on('change', function () {
-        window.vpc.settingsSet('playerAlang', this.value);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('playerAlang', this.value);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast('音轨语言偏好已保存，下次起播生效');
     });
     $('#set_slang').on('change', function () {
-        window.vpc.settingsSet('playerSlang', this.value);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('playerSlang', this.value);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast('字幕语言偏好已保存，下次起播生效');
     });
     // 自动连播 / 记忆位置 / 后台播放开关
     $('#set_autonext').on('change', function () {
-        window.vpc.settingsSet('autoNext', this.checked);
+        window.yuki.settingsSet('autoNext', this.checked);
         warnToast(this.checked ? '已开启自动连播' : '已关闭自动连播（只播当前集）');
     });
     $('#set_resumepos').on('change', function () {
-        window.vpc.settingsSet('resumePos', this.checked);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('resumePos', this.checked);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast(this.checked ? '已开启记忆播放位置' : '已关闭记忆播放位置');
     });
     $('#set_bgplay').on('change', function () {
-        window.vpc.settingsSet('bgPlay', this.checked);
+        window.yuki.settingsSet('bgPlay', this.checked);
     });
     $('#set_watchstats').on('change', function () {
-        window.vpc.settingsSet('watchStatsEnabled', this.checked);
+        window.yuki.settingsSet('watchStatsEnabled', this.checked);
         warnToast(this.checked ? '已开启观看统计' : '已关闭观看统计（已有数据保留）');
     });
     // 边下边播：仅持久化，主进程起播时读取（无需通知，下次起播即生效）
     $('#set_simuldl').on('change', function () {
-        window.vpc.settingsSet('simulDownload', this.checked);
+        window.yuki.settingsSet('simulDownload', this.checked);
         warnToast(this.checked ? '已开启边下边播（下次起播生效）' : '已关闭边下边播');
     });
     // 自动加载弹幕：仅持久化，播放时 player.js 读取（下次起播生效）
     $('#set_danmaku').on('change', function () {
-        window.vpc.settingsSet('danmakuEnable', this.checked);
+        window.yuki.settingsSet('danmakuEnable', this.checked);
         warnToast(this.checked ? '已开启自动加载弹幕（下次起播生效）' : '已关闭自动加载弹幕');
     });
     // m3u8 广告过滤：仅持久化，addHls 时主进程读取（下一个任务生效）
     $('#set_hls_adfilter').on('change', function () {
-        window.vpc.settingsSet('hlsAdFilter', this.checked);
+        window.yuki.settingsSet('hlsAdFilter', this.checked);
         warnToast(this.checked ? '已开启 m3u8 广告过滤（实验性）' : '已关闭 m3u8 广告过滤');
     });
     $('#set_pan_fast_path').on('change', async function () {
         const enabled = this.checked;
-        await window.vpc.settingsSet('panFastPath', enabled);
+        await window.yuki.settingsSet('panFastPath', enabled);
         try {
-            const result = await window.vpc.setPanFastPath(enabled);
+            const result = await window.yuki.setPanFastPath(enabled);
             warnToast(result && result.ok
                 ? `已${enabled ? '开启' : '关闭'}夸克网盘快路径，后端正在重启`
                 : `设置已保存，但后端重启失败：${(result && result.reason) || '未知错误'}`);
@@ -1470,17 +1470,17 @@ function initSettingsPanel() {
     });
     $('#set_media_probe').on('change', async function () {
         const enabled = this.checked;
-        await window.vpc.settingsSet('mediaProbe', enabled);
+        await window.yuki.settingsSet('mediaProbe', enabled);
         warnToast(enabled ? '已开启起播前媒体流探测' : '已关闭起播探测（直接交由播放器处理）');
     });
     $('#set_auto_line_fallback').on('change', async function () {
         const enabled = this.checked;
-        await window.vpc.settingsSet('autoLineFallback', enabled);
+        await window.yuki.settingsSet('autoLineFallback', enabled);
         warnToast(enabled ? '已开启同影片备用线路自动回退' : '已关闭备用线路自动回退');
     });
     $('#set_legacy_parser').on('change', async function () {
         const enabled = this.checked;
-        await window.vpc.settingsSet('legacyParser', enabled);
+        await window.yuki.settingsSet('legacyParser', enabled);
         warnToast(enabled ? '已开启简易解析器与 iframe 跟随' : '已关闭简易解析器与 iframe 跟随');
     });
     // 源自动检测：关闭后停止后台探测，并恢复展示历史上被自动屏蔽的源
@@ -1489,9 +1489,9 @@ function initSettingsPanel() {
         let saved = false;
         try {
             if (typeof Home !== 'undefined' && Home.setAutoProbeEnabled) Home.setAutoProbeEnabled(enabled);
-            await window.vpc.settingsSet('sourceAutoDetect', enabled);
+            await window.yuki.settingsSet('sourceAutoDetect', enabled);
             saved = true;
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             s.sourceAutoDetect = enabled;
             updateBlockedLine(s);
             if (typeof Home !== 'undefined' && Home._inited) await Home.loadSites();
@@ -1511,8 +1511,8 @@ function initSettingsPanel() {
     // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）
     $('#set_anime4k').on('change', function () {
-        window.vpc.settingsSet('anime4k', this.checked);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('anime4k', this.checked);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         if (this.checked) {
             const a4k = _assetStatus && _assetStatus.anime4k;
             if (a4k && !a4k.ready) {
@@ -1526,20 +1526,20 @@ function initSettingsPanel() {
     });
     // Anime4K 档位：持久化并通知主进程（下次起播注入对应着色器链）
     $('#set_anime4k_mode').on('change', function () {
-        window.vpc.settingsSet('anime4kMode', this.value);
-        if (window.vpc.updatePlayerPrefs) window.vpc.updatePlayerPrefs();
+        window.yuki.settingsSet('anime4kMode', this.value);
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast('Anime4K 档位已保存，下次起播生效');
     });
     // 界面动画开关（T73：由下拉改为与 MiSans 一致的开关）
     $('#set_anim').on('change', function () {
         const on = this.checked;
-        window.vpc.settingsSet('animEnabled', on);
+        window.yuki.settingsSet('animEnabled', on);
         applySkin({ animEnabled: on });
     });
     // 毛玻璃效果开关：卡片/面板背景启用 backdrop-filter 模糊，透出下层内容
     $('#set_glass').on('change', function () {
         const on = this.checked;
-        window.vpc.settingsSet('glass', on);
+        window.yuki.settingsSet('glass', on);
         applySkin({ glass: on });
     });
     // 每页影片数量（T39：首页/搜索/收藏/历史各自持久化，作废渲染层缓存，下次进列表页生效）
@@ -1547,33 +1547,33 @@ function initSettingsPanel() {
      ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory'],
      ['#set_pagesize_live', 'pageSizeLive'], ['#set_pagesize_popular', 'pageSizePopular']].forEach(([sel, key]) => {
         $(sel).on('change', function () {
-            window.vpc.settingsSet(key, this.value);
+            window.yuki.settingsSet(key, this.value);
             if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
             warnToast('每页条数已保存，下次进入对应页面生效');
         });
     });
     // 关闭主窗口行为
     $('#set_closeaction').on('change', function () {
-        window.vpc.settingsSet('closeAction', this.value);
+        window.yuki.settingsSet('closeAction', this.value);
     });
     // 启动进入页面
     $('#set_startup_view').on('change', function () {
-        window.vpc.settingsSet('startupView', this.value);
+        window.yuki.settingsSet('startupView', this.value);
     });
     // 应用内错误提示开关
     $('#set_error_toast').on('change', function () {
-        window.vpc.settingsSet('errorToast', this.checked);
+        window.yuki.settingsSet('errorToast', this.checked);
         if (typeof setErrorToastEnabled === 'function') setErrorToastEnabled(this.checked);
     });
     // MiSans 界面字体开关（即时生效：注入/卸载字体 <link>，不整页 reload——
     // reload 会重启渲染层并把用户从设置页踢回首页）
     $('#set_use_misans').on('change', async function () {
-        window.vpc.settingsSet('useMisansFont', this.checked);
+        window.yuki.settingsSet('useMisansFont', this.checked);
         await applyMisansFont(this.checked);
     });
     // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
     $('#set_catvod_bgm_match').on('change', function () {
-        window.vpc.settingsSet('catvodBgmMatch', this.checked);
+        window.yuki.settingsSet('catvodBgmMatch', this.checked);
     });
     // 网络代理：保存并应用（先连通性测试，通过才启用 —— 仿 Kazumi proxyConfigured 门；重启后端使 Python requests 生效）
     $('#set_proxy_save').on('click', async () => {
@@ -1585,7 +1585,7 @@ function initSettingsPanel() {
             const testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
             $('#set_proxy_test_result').text('测试中…').css('color', 'var(--md-on-surface-variant)');
             let r;
-            try { r = await window.vpc.testProxy({ proxyUrl: url, url: testUrl }); } catch (e) { r = null; }
+            try { r = await window.yuki.testProxy({ proxyUrl: url, url: testUrl }); } catch (e) { r = null; }
             if (!r || !r.ok) {
                 $('#set_proxy_test_result').text('启用失败：' + ((r && r.reason) || '连通性测试未通过')).css('color', 'var(--md-error)');
                 $('#set_proxy_enable').prop('checked', false);
@@ -1595,7 +1595,7 @@ function initSettingsPanel() {
             $('#set_proxy_test_result').text(`✓ 连通 · ${r.elapsedMs}ms`).css('color', 'var(--md-primary)');
         }
         try {
-            const r = await window.vpc.setProxy({ url, enable });
+            const r = await window.yuki.setProxy({ url, enable });
             warnToast(r && r.ok ? '代理已保存并应用（后端已重启）' : (r && r.reason ? `保存失败：${r.reason}` : '保存失败'));
         } catch (e) { warnToast('保存失败'); }
     });
@@ -1605,9 +1605,9 @@ function initSettingsPanel() {
         let testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
         if (!proxyUrl) { warnToast('请先填写代理地址'); return; }
         $('#set_proxy_test_result').text('测试中…');
-        window.vpc.settingsSet('proxyTestUrl', testUrl);
+        window.yuki.settingsSet('proxyTestUrl', testUrl);
         try {
-            const r = await window.vpc.testProxy({ proxyUrl, url: testUrl });
+            const r = await window.yuki.testProxy({ proxyUrl, url: testUrl });
             if (r && r.ok) {
                 const sc = r.statusCode || 0;
                 const via = r.viaSocks ? 'SOCKS5 隧道' : (r.viaTunnel ? 'HTTPS 隧道' : 'HTTP 转发');
@@ -1626,7 +1626,7 @@ function initSettingsPanel() {
     });
     // 隐身模式（不记历史）
     $('#set_incognito').on('change', function () {
-        window.vpc.settingsSet('incognito', this.checked);
+        window.yuki.settingsSet('incognito', this.checked);
         window._incognito = this.checked;
         warnToast(this.checked ? '隐身模式已开启：不再记录播放历史' : '隐身模式已关闭');
     });
@@ -1635,7 +1635,7 @@ function initSettingsPanel() {
     // 缓存位置：恢复默认
     $('#cache_dir_reset').on('click', async () => {
         try {
-            const r = await window.vpc.pickCacheDir('__default__');
+            const r = await window.yuki.pickCacheDir('__default__');
             if (r && r.ok) {
                 $('#cache_dir_line').text('缓存位置：默认');
                 warnToast('已恢复默认缓存位置（后端已重启）');
@@ -1647,7 +1647,7 @@ function initSettingsPanel() {
     // 下载目录：主进程弹目录选择框，持久化并重启下载引擎
     $('#set_dl_dir_pick').on('click', async () => {
         let r;
-        try { r = await window.vpc.download.pickDir(); } catch (e) { return; }
+        try { r = await window.yuki.download.pickDir(); } catch (e) { return; }
         if (r && r.ok) {
             refreshDlDirLine(r.dir);
             warnToast('已更换下载目录（进行中任务已中断，重新继续即可续传）');
@@ -1658,19 +1658,19 @@ function initSettingsPanel() {
     // 打开下载目录：直接拉起资源管理器（未更换过则打开系统默认下载目录）
     $('#set_dl_open').on('click', async () => {
         try {
-            const r = await window.vpc.download.openDir();
+            const r = await window.yuki.download.openDir();
             if (!r || !r.ok) warnToast('打开下载目录失败');
         } catch (e) { warnToast('打开下载目录失败'); }
     });
     // 并发任务数：即时生效（aria2 changeGlobalOption）并持久化；引擎未启动时仅持久化
     $('#set_dl_concurrency').on('change', async function () {
-        const r = await window.vpc.download.control('setConcurrency', { n: parseInt(this.value, 10) || 3 });
+        const r = await window.yuki.download.control('setConcurrency', { n: parseInt(this.value, 10) || 3 });
         if (r && r.ok) warnToast(`并发任务数已设为 ${r.n}`);
         else warnToast('已保存，将在下载引擎启动后生效');
     });
     // 分片并发数（单文件分片/每服务器连接数）：即时生效并持久化
     $('#set_dl_split').on('change', async function () {
-        const r = await window.vpc.download.control('setSplit', { n: parseInt(this.value, 10) || 5 });
+        const r = await window.yuki.download.control('setSplit', { n: parseInt(this.value, 10) || 5 });
         if (r && r.ok) warnToast(`分片并发数已设为 ${r.n}`);
         else warnToast('已保存，将在下载引擎启动后生效');
     });
@@ -1678,10 +1678,10 @@ function initSettingsPanel() {
     $('#set_reset').on('click', async () => {
         if (!await confirmDialog('将恢复外观/播放等偏好设置为默认值。\n不会删除收藏、历史与已载入的源。继续？')) return;
         if (!await confirmDialog('最终确认：立即恢复默认设置？应用将自动重启。', { okText: '立即重启' })) return;
-        try { await window.vpc.settingsReset(); } catch (e) { /* 重启即断开 IPC */ }
+        try { await window.yuki.settingsReset(); } catch (e) { /* 重启即断开 IPC */ }
     });
     $('#set_walldim').on('change', function () {
-        window.vpc.settingsSet('wallpaperDim', this.value);
+        window.yuki.settingsSet('wallpaperDim', this.value);
         applySkin({ dim: this.value });
     });
     $('#set_wallpaper').on('click', chooseWallpaper);
@@ -1690,13 +1690,13 @@ function initSettingsPanel() {
     initPanCookiePanel();
     // 系统标题栏开关：保存设置后提示重启
     $('#set_system_titlebar').on('change', async function () {
-        await window.vpc.settingsSet('systemTitleBar', this.checked);
+        await window.yuki.settingsSet('systemTitleBar', this.checked);
         warnToast(this.checked ? '已开启系统标题栏，重启后生效' : '已关闭系统标题栏（无边框模式），重启后生效');
     });
     // 屏蔽源：查看列表（key 映射为可读源名，取不到时回退 key；标注屏蔽原因）
     $('#blocked_view').on('click', async () => {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             const keys = Array.isArray(s.blockedSites) ? s.blockedSites : [];
             const reason = (s.blockedReason && typeof s.blockedReason === 'object' && !Array.isArray(s.blockedReason)) ? s.blockedReason : {};
             const box = $('#blocked_list').empty();
@@ -1717,12 +1717,12 @@ function initSettingsPanel() {
     $('#blocked_restore').on('click', async () => {
         if (!await confirmDialog('确定恢复全部被屏蔽的源？恢复后这些源会重新加入源列表；若开启自动检测，之后会再次探测。', { okText: '恢复' })) return;
         try {
-            await window.vpc.settingsSet('blockedSites', []);
-            await window.vpc.settingsSet('blockedReason', {});
-            await window.vpc.settingsSet('probedSites', []);
-            await window.vpc.settingsSet('probedAt', {});
-            await window.vpc.settingsSet('probeFailStreak', {});
-            const s = (await window.vpc.settingsGet()) || {};
+            await window.yuki.settingsSet('blockedSites', []);
+            await window.yuki.settingsSet('blockedReason', {});
+            await window.yuki.settingsSet('probedSites', []);
+            await window.yuki.settingsSet('probedAt', {});
+            await window.yuki.settingsSet('probeFailStreak', {});
+            const s = (await window.yuki.settingsGet()) || {};
             updateBlockedLine(s);
             if (typeof Home !== 'undefined' && Home._inited) Home.loadSites();
             warnToast(s.sourceAutoDetect === false ? '已恢复全部源（自动检测已关闭）' : '已恢复全部源，将重新探测');
@@ -1736,7 +1736,7 @@ function initSettingsPanel() {
     // 统一播放器指定：mpv → 内置全功能；VLC/PotPlayer → 作为主播放器（无 mpv 也能播）
     refreshPlayerLine();
     $('#pick_player').on('click', async () => {
-        const r = await window.vpc.pickPlayer();
+        const r = await window.yuki.pickPlayer();
         if (r && r.ok) {
             if (r.mode === 'internal-mpv') warnToast('已指定 mpv（内置全功能：弹幕/连播/统计）');
             else warnToast(`已指定 ${r.kind || '外部'} 播放器作主播放器（无弹幕/连播/统计）`);
@@ -1747,7 +1747,7 @@ function initSettingsPanel() {
         }
     });
     $('#clear_player').on('click', async () => {
-        const r = await window.vpc.clearPlayer();
+        const r = await window.yuki.clearPlayer();
         if (r && r.ok) {
             warnToast(r.available ? '已恢复为自动发现 mpv' : '已恢复默认，但未检测到 mpv（可点「下载内置播放器」或重新指定）');
             refreshPlayerLine();
@@ -1761,7 +1761,7 @@ function initSettingsPanel() {
         btn.prop('disabled', true).text('下载中…');
         warnToast('正在下载内置播放器（mpv），首次约需数十兆流量，请稍候…');
         try {
-            const r = await window.vpc.downloadMpv();
+            const r = await window.yuki.downloadMpv();
             if (r && r.ok) {
                 warnToast(r.already ? '内置播放器已就绪' : '内置播放器安装完成，现在可以播放视频了');
                 refreshPlayerLine();
@@ -1778,19 +1778,19 @@ function initSettingsPanel() {
         }
     });
     // mpv 异步启动失败（安装时取消内置播放器后文件缺失、损坏、无权限）：友好提示而非静默
-    window.vpc.onPlayerSpawnError(() => {
+    window.yuki.onPlayerSpawnError(() => {
         warnToast('未检测到播放器，请在 设置 → 组件状态 指定 mpv.exe，或点「下载内置播放器」');
         refreshAssetStatus();
         refreshPlayerLine();
     });
     // 局域网推送到达 → 提示（mpv 已由主进程直接接管播放）
-    window.vpc.onPushReceived((info) => {
+    window.yuki.onPushReceived((info) => {
         warnToast(`收到推送，已开始播放：${(info.url || '').slice(0, 60)}`);
     });
     // 定时关机：设定 N 分钟后关机
     $('#set_shutdown_set').on('click', async () => {
         const minutes = parseInt($('#set_shutdown_minutes').val(), 10) || 0;
-        const r = await window.vpc.shutdownTimer(minutes);
+        const r = await window.yuki.shutdownTimer(minutes);
         if (r && r.ok) warnToast(r.msg || (minutes > 0 ? `已设定 ${minutes} 分钟后关机` : '已取消定时关机'));
     });
     // 日志查看器：打开 + 翻页 + 按文件筛选
@@ -1816,7 +1816,7 @@ function initSettingsPanel() {
     $('#log-clear').on('click', async () => {
         if (!await confirmDialog('清空全部应用日志？此操作不可撤销。', { okText: '清空' })) return;
         try {
-            const r = await window.vpc.clearLogs();
+            const r = await window.yuki.clearLogs();
             if (r && r.ok) {
                 const failed = (r.failed && r.failed.length) ? `，${r.failed.length} 个文件占用未删除（${r.failed.join('、')}）` : '';
                 warnToast(`已清空 ${r.removed || 0} 个日志文件${failed}`);
@@ -1831,7 +1831,7 @@ function initSettingsPanel() {
     $('#set_log_level').on('change', async function () {
         const level = String(this.value || 'INFO').toUpperCase();
         try {
-            const r = await window.vpc.setLogLevel(level);
+            const r = await window.yuki.setLogLevel(level);
             warnToast(`日志级别已设为 ${(r && r.level) || level}（新日志立即按此级别过滤）`);
         } catch (e) { warnToast('保存日志级别失败'); }
     });
@@ -1841,7 +1841,7 @@ function initSettingsPanel() {
         let days = parseInt($('#set_log_cleanup_days').val(), 10) || 0;
         if (enabled && days <= 0) { days = 7; $('#set_log_cleanup_days').val('7'); }
         try {
-            await window.vpc.setLogCleanup({ enabled, days });
+            await window.yuki.setLogCleanup({ enabled, days });
             warnToast(enabled ? `已开启定时清空日志（每 ${days} 天一次）` : '已关闭定时清空日志');
         } catch (e) { warnToast('保存定时清空设置失败'); }
     });
@@ -1850,7 +1850,7 @@ function initSettingsPanel() {
         this.value = String(days);
         const enabled = $('#set_log_autocleanup').prop('checked');
         try {
-            await window.vpc.setLogCleanup({ enabled, days });
+            await window.yuki.setLogCleanup({ enabled, days });
             if (enabled) warnToast(`清理周期已设为 ${days} 天`);
         } catch (e) { warnToast('保存清理周期失败'); }
     });
@@ -1858,7 +1858,7 @@ function initSettingsPanel() {
         // 切换来源/翻页不先清空，避免闪一次「载入中…」空白（仅首次为空时占位）
         if (!$('#log-viewer-body .log-line').length) $('#log-viewer-body').html('<div class="tip-line">载入中…</div>');
         try {
-            const r = await window.vpc.getLogs(_logPage, 50, _logSource);
+            const r = await window.yuki.getLogs(_logPage, 50, _logSource);
             if (!r || !r.ok) { $('#log-viewer-body').html('<div class="tip-line">无日志</div>'); return; }
             const total = r.total || 0;
             const ps = r.pageSize || 50;
@@ -1881,12 +1881,12 @@ function initSettingsPanel() {
     // 首次引导：首次启动显示，确认后不再弹出
     (async () => {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (!s.onboarded) {
                 openDialog('onboardingDialog');
                 $('#onboarding-confirm').off('click').on('click', () => {
                     closeDialog('onboardingDialog');
-                    window.vpc.onboardingDone();
+                    window.yuki.onboardingDone();
                 });
             }
         } catch (e) { /* 首次运行无 settings */ }
@@ -1911,7 +1911,7 @@ async function playDirectLink() {
     };
     // rtmp/rtsp 与媒体直链无需解析
     if (/^(rtmp:|rtsp:)/i.test(url) || /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i.test(url.split('?')[0])) {
-        const r = await window.vpc.playUrl(url, { title: '直链播放' });
+        const r = await window.yuki.playUrl(url, { title: '直链播放' });
         if (r && r.ok) {
             if (r.viaExternal) warnToast('已交外部播放器播放');
             else { regSession(r); warnToast('已在 mpv 窗口播放'); }
@@ -1921,16 +1921,16 @@ async function playDirectLink() {
     showLoading();
     warnToast('正在后台解析播放地址…');
     let resolved = null;
-    try { resolved = await window.vpc.resolveParse(url); } catch (e) { /* 无解析接口 */ }
+    try { resolved = await window.yuki.resolveParse(url); } catch (e) { /* 无解析接口 */ }
     if (!(resolved && resolved.ok)) {
         try {
-            const cap = await window.vpc.captureDirect(url);
+            const cap = await window.yuki.captureDirect(url);
             if (cap && cap.ok) resolved = cap;
         } catch (e) { /* 抓取异常 */ }
     }
     hideLoading();
     if (resolved && resolved.ok) {
-        const r = await window.vpc.playUrl(resolved.url, { title: '直链播放', header: resolved.header });
+        const r = await window.yuki.playUrl(resolved.url, { title: '直链播放', header: resolved.header });
         if (r && r.ok) {
             if (r.viaExternal) warnToast('已交外部播放器播放');
             else { regSession(r); warnToast('已在 mpv 窗口播放'); }
@@ -1943,9 +1943,9 @@ async function playDirectLink() {
 /** 选择本地图片作壁纸（主进程文件对话框），路径持久化。 */
 async function chooseWallpaper() {
     let r;
-    try { r = await window.vpc.pickWallpaper(); } catch (e) { return; }
+    try { r = await window.yuki.pickWallpaper(); } catch (e) { return; }
     if (!r || !r.ok || !r.path) return;
-    window.vpc.settingsSet('wallpaper', r.path);
+    window.yuki.settingsSet('wallpaper', r.path);
     window._wallpaperUrl = toFileUrl(r.path);
     applySkin({ wallpaperUrl: window._wallpaperUrl });
     warnToast('壁纸已设置');
@@ -1954,7 +1954,7 @@ async function chooseWallpaper() {
 /** 移除壁纸（T40：二次确认）。 */
 async function clearWallpaper() {
     if (!await confirmDialog('移除当前背景壁纸？', { okText: '移除' })) return;
-    window.vpc.settingsSet('wallpaper', '');
+    window.yuki.settingsSet('wallpaper', '');
     window._wallpaperUrl = '';
     applySkin({ wallpaperUrl: '' });
     warnToast('壁纸已移除');
@@ -1964,7 +1964,7 @@ async function clearWallpaper() {
 function refreshCacheDirLine(dir) {
     const el = $('#cache_dir_line');
     if (dir) el.text(`缓存位置：${dir}`).attr('title', dir);
-    else el.text('缓存位置：默认（用户目录下 .video-pc）').attr('title', '');
+    else el.text('缓存位置：默认（用户目录下 .yuki）').attr('title', '');
 }
 
 /** 下载目录展示行（设置页「下载」卡片）。 */
@@ -1977,12 +1977,12 @@ function refreshDlDirLine(dir) {
 /** 更换缓存目录：主进程弹目录选择框，确认后重启后端生效。 */
 async function pickCacheDir() {
     let r;
-    try { r = await window.vpc.pickCacheDir(''); } catch (e) { return; }
+    try { r = await window.yuki.pickCacheDir(''); } catch (e) { return; }
     if (!r || r.reason === 'cancelled') return;
     if (r.reason === 'need-restart' && r.path) {
         if (!await confirmDialog(`将缓存目录改为：\n${r.path}\n\n后端将重启以生效，继续？`)) return;
         try {
-            const r2 = await window.vpc.pickCacheDir(r.path);
+            const r2 = await window.yuki.pickCacheDir(r.path);
             if (r2 && r2.ok) {
                 refreshCacheDirLine(r2.path);
                 warnToast('缓存位置已更换，后端重启中…');
@@ -2015,7 +2015,7 @@ async function refreshAssetStatus(silent) {
     if (!box.children().length) box.html('<div class="tip-line">查询中…</div>');
     let status;
     try {
-        status = await window.vpc.assetStatus();
+        status = await window.yuki.assetStatus();
     } catch (e) {
         box.html('<div class="tip-line" style="color:var(--md-error)">查询失败</div>');
         warnToast('扩展状态查询失败');
@@ -2071,7 +2071,7 @@ async function refreshPlayerLine() {
     if (!line.length) return;
     const kindLabel = { vlc: 'VLC', potplayer: 'PotPlayer', mpv: 'mpv', other: '其他' };
     try {
-        const cfg = await window.vpc.playerConfig();
+        const cfg = await window.yuki.playerConfig();
         if (cfg.mode === 'external') {
             const label = kindLabel[cfg.kind] || '外部';
             line.text(`${label} · ${cfg.path}（外部模式，无弹幕/连播/统计）`);
@@ -2093,6 +2093,6 @@ async function refreshPlayerLine() {
 }
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.panels = { applyConfigResult, initAuxPanels, initSettingsPanel };
+    root.YUKI = root.YUKI || {};
+    root.YUKI.panels = { applyConfigResult, initAuxPanels, initSettingsPanel };
 }(typeof window !== 'undefined' ? window : globalThis));

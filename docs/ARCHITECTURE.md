@@ -26,7 +26,7 @@ FastAPI Python 后端
 ## 2. 进程与鉴权
 
 - Electron 主进程启动 Python 子进程。
-- 后端通过标准输出发送 `VPC_BACKEND_READY port=<p> token=<t>`。
+- 后端通过标准输出发送 `YUKI_BACKEND_READY port=<p> token=<t>`。
 - 服务只监听 `127.0.0.1` 和随机端口。
 - 除 `/health`、`/cache`、`/proxy` 外，端点需要查询参数 `token` 或请求头 `X-Token`。
 - 配置自动重载由主进程维护权威状态，渲染层同时监听事件和轮询状态，避免启动竞态。
@@ -72,7 +72,7 @@ FastAPI Python 后端
 
 - mpv 每次只播放一集，不使用播放列表承担业务连播。
 - 每次播放分配会话号，旧会话退出不能影响当前会话。
-- `vpc:play` 只有在 mpv 报告 `file-loaded`/ready 后才返回 `ok=true`；首帧超时会停止对应进程。
+- `yuki:play` 只有在 mpv 报告 `file-loaded`/ready 后才返回 `ok=true`；首帧超时会停止对应进程。
 - 断流自动重连只允许每条观看链尝试一次，并重新调用原始 `playerContent`，不复用旧 CDN URL。
 - `ended` 事件携带会话号，渲染层「看完」兜底判定按会话匹配，避免旧集 ended 误判新集。
 - 观看统计按「观看链」累计：断流重连经 `player-session` 复用旧链元信息，重连退出只补增量、不重复计次数/部数。
@@ -107,9 +107,9 @@ FastAPI Python 后端
 
 | 数据 | 位置 |
 |---|---|
-| Python 缓存、Spider 与日志 | `~/.video-pc/` |
-| Kazumi 规则 | `~/.video-pc/kazumi/plugins.json` |
-| Kazumi Cookie | `~/.video-pc/kazumi/cookies.json` |
+| Python 缓存、Spider 与日志 | `~/.yuki/` |
+| Kazumi 规则 | `~/.yuki/kazumi/plugins.json` |
+| Kazumi Cookie | `~/.yuki/kazumi/cookies.json` |
 | Electron 设置 | `<userData>/settings.json` |
 | 文件管理根目录 | `<userData>/file-manager.json` |
 | 下载记录 | `<userData>/dl-records.json` |
@@ -167,7 +167,7 @@ FastAPI Python 后端
 
 安全边界（`python-backend/runtime/config_security.py`）：仅 `http`/`https`；本地文件需用户
 显式选择；响应 8 MiB、解压后 32 MiB、`ext` 2 MiB、跳转 5 次、多仓深度 1、`ext` 展开深度 2
-（均可用 `VPC_CONFIG_MAX_*` 覆盖）；声明的 `Content-Length` 在读正文前就判上限，流式读取与
+（均可用 `YUKI_CONFIG_MAX_*` 覆盖）；声明的 `Content-Length` 在读正文前就判上限，流式读取与
 增量解压各自设限，避免“小包大解压”。此外磁盘路径在解析 scheme **之前**判掉——`urlsplit`
 会把 `C:\...` 的盘符当成 scheme，若先按 scheme 分派，`D:/tv.json` 会被报成“不支持的协议
 d://”，诊断页给出的原因和真实问题（引用了本地磁盘路径）就不一致。

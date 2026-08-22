@@ -23,7 +23,7 @@ from runtime.errors import RuntimeError as ContractError  # noqa: E402
 
 HELPER = Path(__file__).with_name('fixtures') / 'android_worker_probe.py'
 MANIFEST = BASE / 'spike' / 'android_worker_samples.json'
-TEST_ROOT = Path(os.environ.get('VPC_TEST_ROOT') or (BASE / '.test-runtime'))
+TEST_ROOT = Path(os.environ.get('YUKI_TEST_ROOT') or (BASE / '.test-runtime'))
 
 
 class AndroidWorkerSpikeTest(unittest.TestCase):

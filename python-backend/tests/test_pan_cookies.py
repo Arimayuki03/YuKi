@@ -10,7 +10,7 @@ import sys
 import unittest
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-ROOT = os.environ.get('VPC_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
+ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtime')
 DATA_DIR = os.path.join(ROOT, 'pan-cookies')
 if BASE not in sys.path:
     sys.path.insert(0, BASE)

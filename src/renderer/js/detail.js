@@ -278,7 +278,7 @@ const Detail = {
     /** CatVod 详情页自动匹配 Bangumi 数据开关（T74：设置 → 源设置，默认关）。 */
     async _catvodBgmMatchEnabled() {
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             return s.catvodBgmMatch === true;
         } catch (e) { return false; }
     },
@@ -1366,17 +1366,17 @@ const Detail = {
     async _saveLastSource() {
         if (!this.site || !this.vodId) return;
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             const map = (s.lastSourceMap && typeof s.lastSourceMap === 'object') ? s.lastSourceMap : {};
             map[`${this.site}|${this.vodId}`] = this.activeSource;
-            await window.vpc.settingsSet('lastSourceMap', map);
+            await window.yuki.settingsSet('lastSourceMap', map);
         } catch (e) { /* 保存失败不影响主流程 */ }
     },
 
     async _restoreLastSource() {
         if (!this.site || !this.vodId) return;
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             const map = (s.lastSourceMap && typeof s.lastSourceMap === 'object') ? s.lastSourceMap : {};
             const idx = map[`${this.site}|${this.vodId}`];
             if (typeof idx === 'number' && idx >= 0 && idx < this.sources.length) {
@@ -1458,7 +1458,7 @@ const Detail = {
         if (!eps.length) { warnToast('当前线路没有对应剧集'); return; }
         const first = eps[0];
         let autoNext = true;
-        try { autoNext = ((await window.vpc.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
+        try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读失败默认连播 */ }
         if (eps.length > 1) {
             warnToast(autoNext ? `已加入播放列表 ${eps.length} 集，将自动连播` : '自动连播已关闭，仅播放勾选的第一集');
         }
@@ -1489,7 +1489,7 @@ const Detail = {
             const ext = isM3u8 ? '.mp4' : (r.url.split('?')[0].match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0] || '.mp4';
             const out = `${this.vodName || '视频'} - ${ep.name}${ext}`;
             try {
-                const res = await window.vpc.download.control(isM3u8 ? 'addHls' : 'add', { uri: r.url, out, header: r.header });
+                const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', { uri: r.url, out, header: r.header });
                 if (res && res.ok) added++;
                 else if (res && res.reason === 'ffmpeg-downloading') ffmpegDownloading = true;
                 else if (res && res.reason === 'ffmpeg-missing') ffmpegMissing = true;
@@ -1517,7 +1517,7 @@ const Detail = {
             const header = (data.header && typeof data.header === 'object') ? data.header : {};
             if (parseInt(data.parse, 10) !== 1) return { url: u, header };
             if (/\.(mp4|flv|mov|mkv|webm|ts|m3u8)(\?|#|$)/i.test(u.split('?')[0])) return { url: u, header };
-            const r = await window.vpc.resolveParse(u);
+            const r = await window.yuki.resolveParse(u);
             if (r && r.ok) return { url: r.url, header: { ...header, ...(r.header || {}) } };
         } catch (e) { /* 单集失败不阻断批量 */ }
         return null;
@@ -1525,6 +1525,6 @@ const Detail = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.detail = Detail;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.detail = Detail;
 }(typeof window !== 'undefined' ? window : globalThis));

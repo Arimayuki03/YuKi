@@ -254,13 +254,13 @@ const Home = {
             this._clsProbed = {};
             this._clsBusy = {};
             try {
-                await window.vpc.settingsSet('probeSourceUrl', cfgUrl);
-                await window.vpc.settingsSet('blockedSites', []);
-                await window.vpc.settingsSet('blockedReason', {});
-                await window.vpc.settingsSet('probedSites', []);
-                await window.vpc.settingsSet('probedAt', {});
-                await window.vpc.settingsSet('probeFailStreak', {});
-                await window.vpc.settingsSet('probeFp', {});
+                await window.yuki.settingsSet('probeSourceUrl', cfgUrl);
+                await window.yuki.settingsSet('blockedSites', []);
+                await window.yuki.settingsSet('blockedReason', {});
+                await window.yuki.settingsSet('probedSites', []);
+                await window.yuki.settingsSet('probedAt', {});
+                await window.yuki.settingsSet('probeFailStreak', {});
+                await window.yuki.settingsSet('probeFp', {});
             } catch (e) { /* 持久化失败不影响本次展示过滤 */ }
             // 空分类结果同样按 site key 复用：清内存镜像 + localStorage，新仓重新探测分类
             this._emptyCls = {};
@@ -397,7 +397,7 @@ const Home = {
     },
 
     async _getSourceSettings() {
-        try { return (await window.vpc.settingsGet()) || {}; } catch (e) { return {}; }
+        try { return (await window.yuki.settingsGet()) || {}; } catch (e) { return {}; }
     },
 
     /** 配置恢复/导入进行中的提示文案（空串 = 后端就绪）。
@@ -424,10 +424,10 @@ const Home = {
      */
     async _resetSessionEvidence() {
         try {
-            const s = await window.vpc.settingsGet();
+            const s = await window.yuki.settingsGet();
             const streak = s && s.probeFailStreak;
             if (streak && typeof streak === 'object' && !Array.isArray(streak) && Object.keys(streak).length) {
-                await window.vpc.settingsSet('probeFailStreak', {});
+                await window.yuki.settingsSet('probeFailStreak', {});
             }
         } catch (e) { /* 读取失败不影响启动 */ }
     },
@@ -566,7 +566,7 @@ const Home = {
         const token = this._probeToken; // 写入前校验：期间配置重载换源则丢弃本轮结果
         let started = false; // 进度条是否计入本轮（T81）
         try {
-            const s = (await window.vpc.settingsGet()) || {};
+            const s = (await window.yuki.settingsGet()) || {};
             if (s.sourceAutoDetect === false || !this._autoProbeEnabled) return;
             const probed = {};
             (Array.isArray(s.probedSites) ? s.probedSites : []).forEach((k) => { probed[k] = 1; });
@@ -606,7 +606,7 @@ const Home = {
             const pending = this._allSites.filter((x) =>
                 ((!probed[x.key] || isStale(x.key)) && wanted(x.key)));
             if (!pending.length) {
-                if (dirty) await window.vpc.settingsSet('probedAt', probedAt);
+                if (dirty) await window.yuki.settingsSet('probedAt', probedAt);
                 return;
             }
             if (!onlySite && pending.length > 1 && this.site) {
@@ -717,14 +717,14 @@ const Home = {
                     Object.keys(m).forEach((k) => { if (liveKeys.has(k)) out[k] = m[k]; });
                     return out;
                 };
-                await window.vpc.settingsSet('probedSites', Object.keys(probed).filter((k) => liveKeys.has(k)));
-                await window.vpc.settingsSet('probedAt', pick(probedAt));
-                await window.vpc.settingsSet('probeFailStreak', pick(streak));
-                await window.vpc.settingsSet('blockedReason', pick(reason));
-                await window.vpc.settingsSet('probeFp', pick(fpMap));
+                await window.yuki.settingsSet('probedSites', Object.keys(probed).filter((k) => liveKeys.has(k)));
+                await window.yuki.settingsSet('probedAt', pick(probedAt));
+                await window.yuki.settingsSet('probeFailStreak', pick(streak));
+                await window.yuki.settingsSet('blockedReason', pick(reason));
+                await window.yuki.settingsSet('probeFp', pick(fpMap));
             }
             if (changed) {
-                await window.vpc.settingsSet('blockedSites', Array.from(blocked));
+                await window.yuki.settingsSet('blockedSites', Array.from(blocked));
                 // 刷新下拉（不打断当前选中源）；当前源被屏蔽则切到第一个可用源
                 // 复用 loadSites 的健康过滤，避免探后把 Android 等隐藏源重新放出
                 const cur = this.site;
@@ -1342,7 +1342,7 @@ const Home = {
      * 加固：①结果不随 token/换源丢弃——按 site 键隔离记录，中断/换源不丢进度，
      * 任一轮完整探测即全部分类；unclassified===0 才标记完成，出错留待下次载入重试
      * ②首次全量探测（含上次持久化判空的分类，内容可能已恢复），重试只探测未知状态分类
-     * ③结果持久化 localStorage（vpc_home_empty_classes），再次载入该源首屏即过滤、无闪现
+     * ③结果持久化 localStorage（yuki_home_empty_classes），再次载入该源首屏即过滤、无闪现
      * ④仅在仍停留在该源时重渲分类栏，避免覆盖其他源的栏。
      */
     async _probeClassesFor(site, cls) {
@@ -1447,7 +1447,7 @@ const Home = {
      *  过期/缺失则重新全量探测。兼容旧格式 { site: [tids] }（视为过期）。 */
     _loadPersistedEmptyClasses() {
         try {
-            const raw = localStorage.getItem('vpc_home_empty_classes');
+            const raw = localStorage.getItem('yuki_home_empty_classes');
             if (!raw) return;
             const data = JSON.parse(raw);
             for (const site of Object.keys(data)) {
@@ -1473,13 +1473,13 @@ const Home = {
                 const ok = this._okCls[site] ? Array.from(this._okCls[site]) : [];
                 if (empty.length || ok.length) out[site] = { ts: Date.now(), empty, ok };
             }
-            localStorage.setItem('vpc_home_empty_classes', JSON.stringify(out));
+            localStorage.setItem('yuki_home_empty_classes', JSON.stringify(out));
         } catch (e) { /* 持久化失败不影响主流程 */ }
     },
 
     /** 空分类探测结果持久化：清空（源集合变更时调用）。 */
     _clearPersistedEmptyClasses() {
-        try { localStorage.removeItem('vpc_home_empty_classes'); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem('yuki_home_empty_classes'); } catch (e) { /* ignore */ }
     },
 
     renderGrid(list, error) {
@@ -1522,6 +1522,6 @@ function vodCard(v, src, eager) {
 }
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.home = Home;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.home = Home;
 }(typeof window !== 'undefined' ? window : globalThis));

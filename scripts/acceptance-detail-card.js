@@ -12,7 +12,7 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9340);
+const PORT = Number(process.env.YUKI_CDP_PORT || 9340);
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -52,8 +52,8 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-accept-dc-'));
-    const srcSettings = path.join(process.env.APPDATA || '', 'video-pc', 'settings.json');
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-accept-dc-'));
+    const srcSettings = path.join(process.env.APPDATA || '', 'yuki', 'settings.json');
     try {
         const s = JSON.parse(fs.readFileSync(srcSettings, 'utf8'));
         s.lastConfigUrl = ''; s.configHistory = []; s.wallpaper = ''; s.onboarded = true;

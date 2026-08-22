@@ -497,6 +497,6 @@ const Search = {
 };
 
 (function (root) {
-    root.VPC = root.VPC || {};
-    root.VPC.search = Search;
+    root.YUKI = root.YUKI || {};
+    root.YUKI.search = Search;
 }(typeof window !== 'undefined' ? window : globalThis));

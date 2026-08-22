@@ -130,13 +130,13 @@ const JS_POLL_VIDEO = `(() => {
 })()`;
 
 /** 旧解析器（useLegacyParser）注入脚本：MutationObserver 监听 iframe src，
- *  记录到 window.__vpc_iframe_src（最后一次生效）。跨文档导航会重置 window，守卫防 SPA 重复挂载。 */
+ *  记录到 window.__yuki_iframe_src（最后一次生效）。跨文档导航会重置 window，守卫防 SPA 重复挂载。 */
 const JS_LEGACY_IFRAME = `(() => {
-  if (window.__vpc_legacy_ready) return;
-  window.__vpc_legacy_ready = true;
-  window.__vpc_iframe_src = '';
+  if (window.__yuki_legacy_ready) return;
+  window.__yuki_legacy_ready = true;
+  window.__yuki_iframe_src = '';
   const capture = (f) => {
-    try { const s = f && f.getAttribute && f.getAttribute('src'); if (s) window.__vpc_iframe_src = s; } catch (e) {}
+    try { const s = f && f.getAttribute && f.getAttribute('src'); if (s) window.__yuki_iframe_src = s; } catch (e) {}
   };
   try {
     document.querySelectorAll('iframe').forEach(capture);
@@ -153,7 +153,7 @@ const JS_LEGACY_IFRAME = `(() => {
       { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
   } catch (e) {}
 })()`;
-const JS_GET_IFRAME_SRC = `(() => { try { return window.__vpc_iframe_src || ''; } catch (e) { return ''; } })()`;
+const JS_GET_IFRAME_SRC = `(() => { try { return window.__yuki_iframe_src || ''; } catch (e) { return ''; } })()`;
 
 class ParseWindow {
     /** @param getInfo 返回 { base, token } 的后端信息提供函数 */

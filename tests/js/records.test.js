@@ -27,7 +27,7 @@ function loadRecords(settings) {
         setTimeout, clearTimeout,
         $: () => makeJq(),
         window: {
-            vpc: {
+            yuki: {
                 settingsGet: async () => JSON.parse(JSON.stringify(settings)),
                 settingsSet: async (key, value) => { settings[key] = JSON.parse(JSON.stringify(value)); },
             },

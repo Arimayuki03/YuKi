@@ -8,7 +8,7 @@ const PORT = 9363;
 function getJson(p){return new Promise((res,rej)=>{const r=http.get({host:'127.0.0.1',port:PORT,path:p},x=>{let b='';x.on('data',c=>b+=c);x.on('end',()=>{try{res(JSON.parse(b))}catch(e){rej(e)}})});r.on('error',rej);r.setTimeout(2000,()=>r.destroy(new Error('t')));});}
 class CDP{constructor(u){this.u=u;this.id=0;this.p=new Map();this.h=[];}async connect(){this.ws=new WebSocket(this.u);await new Promise((r,j)=>{this.ws.onopen=r;this.ws.onerror=()=>j(new Error('ws'));});this.ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(x){return}if(m.id&&this.p.has(m.id)){const {res,rej}=this.p.get(m.id);this.p.delete(m.id);m.error?rej(new Error(m.error.message)):res(m.result);}else if(m.method){this.h.forEach(f=>{try{f(m)}catch(x){}})}};}on(f){this.h.push(f);}send(m,p={}){const id=++this.id;return new Promise((res,rej)=>{this.p.set(id,{res,rej});this.ws.send(JSON.stringify({id,method:m,params:p}));});}async eval(e,a){const r=await this.send('Runtime.evaluate',{expression:e,returnByValue:true,awaitPromise:a});if(r.exceptionDetails)throw new Error('eval: '+((r.exceptionDetails.exception&&r.exceptionDetails.exception.description)||r.exceptionDetails.text));return r.result?r.result.value:undefined;}}
 (async()=>{
-  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'vpc-pgdirty-'));
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'yuki-pgdirty-'));
   fs.writeFileSync(path.join(tmp,'settings.json'),JSON.stringify({lastConfigUrl:'',onboarded:true,pageSizeHome:20},null,2));
   const ch=spawn(ELECTRON,[ROOT,'--remote-debugging-port='+PORT,'--user-data-dir='+tmp,'--no-first-run'],{stdio:['ignore','pipe','pipe']});let appLog='';
   ch.stdout.on('data',d=>appLog+=d);ch.stderr.on('data',d=>appLog+=d);
@@ -29,7 +29,7 @@ class CDP{constructor(u){this.u=u;this.id=0;this.p=new Map();this.h=[];}async co
   for(let i=0;i<20;i++){const n=await c.eval(`Home._homeList.length`);if(n>0)break;await sleep(200);}
   await sleep(500);
   // 模拟改每页条数：settingsSet + invalidatePageSizeCache（真实设置页 handler 的行为）
-  await c.eval(`window.vpc.settingsSet('pageSizeHome', 36).then(() => invalidatePageSizeCache())`, true);
+  await c.eval(`window.yuki.settingsSet('pageSizeHome', 36).then(() => invalidatePageSizeCache())`, true);
   out.dirtyAfterChange = await c.eval(`Home._pageSizeDirty`);
   const tokBefore = await c.eval(`Home._loadToken`);
   // 切到设置视图，再切回首页

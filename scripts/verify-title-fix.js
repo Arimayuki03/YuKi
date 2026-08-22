@@ -16,8 +16,8 @@ const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const ELECTRON = require(path.join(ROOT, 'node_modules', 'electron'));
-const PORT = Number(process.env.VPC_CDP_PORT || 9340);
-const SHOT_DIR = path.join(os.tmpdir(), 'vpc-title-fix-shots');
+const PORT = Number(process.env.YUKI_CDP_PORT || 9340);
+const SHOT_DIR = path.join(os.tmpdir(), 'yuki-title-fix-shots');
 
 function getJson(p) {
     return new Promise((resolve, reject) => {
@@ -62,7 +62,7 @@ class CDP {
 }
 
 (async () => {
-    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'vpc-title-fix-'));
+    const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-title-fix-'));
     try {
         fs.writeFileSync(path.join(tmpUserData, 'settings.json'), JSON.stringify({ lastConfigUrl: '', onboarded: true }, null, 2), 'utf8');
     } catch (e) { }

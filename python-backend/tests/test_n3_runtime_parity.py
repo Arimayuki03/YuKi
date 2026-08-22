@@ -47,9 +47,9 @@ class TestN32QuickJSEnhancements(unittest.TestCase):
 
     def test_security_guard_applied_to_http(self):
         from quickjs_host import _native_http
-        # 严格 SSRF 模式（VPC_CONFIG_BLOCK_PRIVATE_NETWORK=1）下私网地址仍被拒；
+        # 严格 SSRF 模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）下私网地址仍被拒；
         # 桌面端默认已放开本机/内网引用（局域网 NAS / 本机服务是合理场景）。
-        with patch.dict(os.environ, {'VPC_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
+        with patch.dict(os.environ, {'YUKI_CONFIG_BLOCK_PRIVATE_NETWORK': '1'}):
             res_json = _native_http('http://192.168.1.1/admin', '{}')
         res = json.loads(res_json)
         self.assertEqual(res['status'], 403)

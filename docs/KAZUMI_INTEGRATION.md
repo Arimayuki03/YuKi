@@ -58,7 +58,7 @@
 
 关键决策：
 - 独立端点：Kazumi 所有操作走 /kazumi/action，与 CatVod 的 /action 物理隔离，避免 do 参数冲突。
-- 独立存储：Kazumi 规则存 ~/.video-pc/kazumi/plugins.json，与 CatVod 的 cache/py 插件目录分离。
+- 独立存储：Kazumi 规则存 ~/.yuki/kazumi/plugins.json，与 CatVod 的 cache/py 插件目录分离。
 - 无 Runner 复用：Kazumi 规则不继承 base.spider.Spider，不进入 SiteManager，避免单例污染。
 
 ---
@@ -111,7 +111,7 @@ python-backend/
 ```
 
 ### 4.2 PluginManager 规则管理
-- 持久化：~/.video-pc/kazumi/plugins.json，单文件存储全部规则。
+- 持久化：~/.yuki/kazumi/plugins.json，单文件存储全部规则。
 - 加载时机：server.py create_app 时初始化，与 SiteManager 并列。
 - 线程安全：threading.Lock 保护规则列表读写。
 - 导入校验：api 小于等于 8；name 非空唯一；模式必须为 xpath 或 api；XPath 模式五件套非空；API 模式 URL 非空且 JSONPath 合法。
@@ -184,7 +184,7 @@ python-backend/
 - 点结果行 → 显示「获取中」→ kazumiChapters 解析 → 选集视图（含「← 返回选源」）。
 - 点剧集 → 关闭弹窗，调 Player.play(site='kazumi:规则名', flag='线路名', id='播放页 URL', ...)。
 - 每源补救操作：重试 / 进行验证（可见窗口，完成后自动重查该源）/ 手动检索（关键词重查该源）/ 浏览器打开。
-- Player.play 检测到 site 以 kazumi: 开头时，先调 kazumiResolve 取 pageUrl 与 headers，再调 vpc:captureDirect 抓真实流，最后交 mpv。
+- Player.play 检测到 site 以 kazumi: 开头时，先调 kazumiResolve 取 pageUrl 与 headers，再调 yuki:captureDirect 抓真实流，最后交 mpv。
 
 ### 5.5 搜索页聚合
 - 现有 CatVod 聚合搜索走 SSE /search/stream；Kazumi 源页签走 SSE `/search/kazumi-stream`（每源完成即推一条，含状态字段）。
@@ -197,12 +197,12 @@ python-backend/
 ### 6.1 渲染层 Player.play 改造
 - 入参 site 为 kazumi:规则名 时，进入 Kazumi 播放分支。
 - 先调 /kazumi/action do=kazumiResolve 取 pageUrl 与 headers。
-- 再调 window.vpc.captureDirect(pageUrl) 抓真实视频流（主进程隐藏 BrowserWindow 拦截 m3u8/mp4）。
+- 再调 window.yuki.captureDirect(pageUrl) 抓真实视频流（主进程隐藏 BrowserWindow 拦截 m3u8/mp4）。
 - 抓到直链后，与规则 headers 合并，交 mpv 播放。
 - 连播：Kazumi 源同样支持渲染层驱动连播，episodes 列表由 kazumiChapters 返回的 data 与 identifier 组装。
 
 ### 6.2 主进程改造
-- 无需新增 IPC，复用现有 vpc:capture-direct。
+- 无需新增 IPC，复用现有 yuki:capture-direct。
 - 可选优化：captureDirect 增加自定义 UA/Referer 传入（当前版本从页面请求头抓 Referer）。
 
 ---

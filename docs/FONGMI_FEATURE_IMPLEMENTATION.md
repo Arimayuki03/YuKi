@@ -437,8 +437,8 @@ public final class Proxy {
 端口由 JVM 参数或环境变量注入：
 
 ```text
--Dvpc.proxyHost=127.0.0.1
--Dvpc.proxyPort=9978
+-Dyuki.proxyHost=127.0.0.1
+-Dyuki.proxyPort=9978
 ```
 
 不能让 JAR 自己硬编码 PC 后端随机端口。
