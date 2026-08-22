@@ -428,3 +428,33 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **修复**：①第 47 行拆开——`#search-filters, #search-results` 仍按页签显隐，`#search-status` 改为 `$('#search-status').toggle(!isImage && this._statusShown)`（只在有进行中的搜索状态时才随页签显示）；②`_setStatus` 显示路径（recv>0 立即显示 / 1s 定时器）加 `_stab !== 'image'` 守卫——切到「以图搜番」页签时搜索仍在后台跑，但进度条不显示。
 - **实测**（离线 demo + CDP）：无搜索时切聚合/Kazumi 进度条隐藏（修复前会显示并常驻）；有搜索（`_statusShown=true`）按页签显隐——聚合/Kazumi 显示、以图搜番隐藏、切回聚合显示；以图搜番页签下 `_setStatus(recv>0)` 不把状态显示出来。
 - 回归验证：`npm run test:jsunit`、`test:js`、`scripts/acceptance-empty-class.js` 全部通过（JS 唯一失败为既有 `#popular-tags` 断言）。
+
+---
+
+## 9. 2026-08-22 开源发布准备与文档整合
+
+### 9.1 敏感信息与历史清理（G01/G02）
+
+- 全历史扫描曾跟踪 `TV-fongmi/` 上游源码（729 路径）与 `*-error.zip` 运行残留（约 56MB），已用 `git filter-repo` 清除并重扫零命中（`.git` 39MB→3.6MB）。
+
+### 9.2 开源合规（G03/G04/G10）
+
+- 许可证：`LICENSE` MIT → GPLv3（`package.json` `GPL-3.0-only`），`README`/`THIRD_PARTY` 同步。
+- 第三方许可：`THIRD_PARTY.md` 逐项核实（mpv GPLv2+ / ffmpeg GPLv3 / aria2c GPLv2 / Anime4K MIT / MiSans 免费商用）。
+- 审计：首轮基线 `npm audit` 0 漏洞、`pip-audit` 零漏洞；门槛收紧按观察期执行。
+
+### 9.3 协议桥回归修复（R16）
+
+- 243afd9 重命名 VPC→YuKi 时漏改 `spider-loader.js`，致 `__YUKI_CALL__` 取空。已对齐 `__YUKI_*`/`__yuki_err__`，复测 `test_phase3` 30/30。
+
+### 9.4 文档激进精简（26 → 8）
+
+- `KAZUMI_INTEGRATION`+`GAP` → `KAZUMI.md`（637 行）；`github.md`/`RELEASE_NOTES` 已归档入 `CHANGELOG`；`archive/`/`adr/` 15 项历史报告直接清理（Git 历史可追溯）。
+- 顶层保留 8 核心：`README`/`ARCHITECTURE`/`KAZUMI`/`RUNTIME_ISSUES`/`TEST_REPORT`/`DEVELOPMENT_HISTORY`/`THIRD_PARTY`/`PARITY_TASKS`。
+- 同步重命名 `影视 PC`/`video-pc` → `YuKi`（11 处），脱敏 `RUNTIME_ISSUES` 中 8 个影视源示例 URL。
+
+### 9.5 发布流水线（G05/G11）
+
+- 新增 `release.yml`（tag `v*` → NSIS 构建 → Draft Release），`v0.1.0` 标签已就绪（未推送）。
+
+验证：`npm run test:all` 全量 **ALL PASS**（36 阶段 / 100 py 文件 / 313 JS tests / ESLint 0 error）。
