@@ -76,15 +76,16 @@ const Search = {
                 }
                 if (name && typeof Kazumi.bangumiSearch === 'function') {
                     Kazumi.bangumiSearch(name).then((bgmResults) => {
-                        if (bgmResults && bgmResults.length && bgmResults[0].id) {
+                        // 与 getBangumiMatch 同款挑选：首个带 images 的结果。直接取 [0] 时
+                        // 首条无图会回填 {id, cover:''} 残缺条目（id 还可能与补拉路径不同部）
+                        const r0 = (bgmResults || []).find((r) => r && r.id && r.images
+                            && (r.images.large || r.images.common || r.images.medium));
+                        if (r0) {
                             // 回填缓存（补 id 后下次免搜）
                             if (typeof Kazumi.cacheBangumiMatch === 'function') {
-                                const r0 = bgmResults[0];
-                                const cv = bangumiCover(r0.images, 'card');   // 网格卡封面缓存（T75）
-                                Kazumi.cacheBangumiMatch(name, r0.id, cv);
+                                Kazumi.cacheBangumiMatch(name, r0.id, bangumiCover(r0.images, 'card'));
                             }
-                            const id = bgmResults[0].id;
-                            if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(id);
+                            if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(r0.id);
                             else fallback();
                         } else {
                             fallback();
@@ -128,7 +129,7 @@ const Search = {
                 Object.keys(this._grpLists).forEach((gid) => {
                     const grp = this._grpLists[gid];
                     if (grp && (!cur || grp.src === cur)) fillMissingCovers(`#${gid}-grid`, null, {
-                        concurrency: this.es ? 3 : 6, eager: !this.es, poolKey: 'search',
+                        concurrency: this.es ? 3 : 6, eager: !this.es, poolKey: 'search', retryDelay: 65000,
                     });
                 });
             }
@@ -137,6 +138,29 @@ const Search = {
 
     focus() {
         $('#search-keyword').trigger('focus');
+    },
+
+    /** 进入搜索页（app.js showView 调用）：重读「每页影片数量-搜索」设置，
+     *  条数变化且页面上已有结果时立即按新条数重绘各分组（T39 补遗——搜索结果
+     *  常驻不随视图切换销毁，此前改完设置要重新搜索一次才生效）。
+     *  条数未变时对可见分组续拉一次缺位封面：Kazumi/Bangumi 负缓存 60s 过期后，
+     *  这里是「离开再进搜索页」场景下唯一的重试触发点，否则一直停在占位图。 */
+    async onViewShown() {
+        const size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
+        const sizeChanged = this._size && size !== this._size;
+        this._size = size;
+        if (!Object.keys(this._grpLists).length) return;
+        if (sizeChanged) {
+            // 单源视图回第 1 页按新条数切片；封面均有缓存（_coverCache/Bangumi 匹配缓存），重绘无闪烁
+            Object.keys(this._grpLists).forEach((gid) => this._paintGrp(gid, 1));
+            return;
+        }
+        Object.keys(this._grpLists).forEach((gid) => {
+            const grp = this._grpLists[gid];
+            if (grp && (!this._curSrc || grp.src === this._curSrc)) fillMissingCovers(`#${gid}-grid`, null, {
+                concurrency: this.es ? 3 : 6, eager: !this.es, poolKey: 'search', retryDelay: 65000,
+            });
+        });
     },
 
     stop() {
@@ -211,6 +235,9 @@ const Search = {
         this._grpSeq = 0;
         this._curSrc = '';
         this._grpRendered = {}; // 新搜索：重置分组渲染状态
+        // 新搜索从顶部开始浏览：清掉视图级滚动记忆并立即滚顶（app.js 返回时不再恢复旧位置）
+        if (typeof App !== 'undefined' && App._scrollPos) App._scrollPos.search = 0;
+        $('#view-search').scrollTop(0);
         // 重置来源筛选栏（默认「全部」）
         $('#search-filters').html('<span class="class-tab active" data-src="">全部</span>').show();
         // T74：立即显示带 spinner 的进度提示（首个源到达前无空档）
@@ -286,7 +313,7 @@ const Search = {
     /** 搜索结束后提高并发并补完整个当前页面；可见卡仍优先。 */
     _fillAllCovers() {
         Object.keys(this._grpLists).forEach((gid) => fillMissingCovers(
-            `#${gid}-grid`, null, { concurrency: 6, eager: true, poolKey: 'search' }));
+            `#${gid}-grid`, null, { concurrency: 6, eager: true, poolKey: 'search', retryDelay: 65000 }));
     },
 
     /** Kazumi 源专属搜索（2.3，T73 边搜边加载）：走 SSE 流式端点，每个规则源完成即推一条 data 渲染刷新，
@@ -488,6 +515,7 @@ const Search = {
             concurrency: this.es ? 3 : 6,
             eager: !this.es,
             poolKey: 'search',
+            retryDelay: 65000,
         });
         $(`#${gid}-hint`).text(`仅显示前 ${size} 条 · 点上方来源标签分页看全部`).toggle(!focused && grp.list.length > size);
         renderPagerBox($(`#${gid}-pager`), focused

@@ -9,7 +9,7 @@
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId,
-          applyMisansFont */
+          applyMisansFont, localPlayToast */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -669,7 +669,7 @@ function pushFile(yes) {
     // 本地媒体直接交给主进程 mpv 播放；首播冷启动可能因 IPC 竞态短暂失败，自动重试一次
     const doPush = (rel, isRetry) => window.yuki.filePush(rel).then((r) => {
         if (r && r.ok) {
-            warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
+            localPlayToast(r);
             // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
             try {
                 const rel2 = String(currentFile || '');
@@ -1644,16 +1644,32 @@ function initSettingsPanel() {
             }
         } catch (e) { warnToast('恢复失败'); }
     });
-    // 下载目录：主进程弹目录选择框，持久化并重启下载引擎
+    // 下载目录：主进程弹目录选择框，持久化并重启下载引擎（在途任务文件自动迁移并续传）
     $('#set_dl_dir_pick').on('click', async () => {
         let r;
         try { r = await window.yuki.download.pickDir(); } catch (e) { return; }
         if (r && r.ok) {
             refreshDlDirLine(r.dir);
-            warnToast('已更换下载目录（进行中任务已中断，重新继续即可续传）');
+            const extra = [r.migrated ? `已迁移 ${r.migrated} 个文件` : '', r.resumed ? `${r.resumed} 个任务断点续传` : ''].filter(Boolean);
+            warnToast(extra.length ? `已更换下载目录（${extra.join('，')}）` : '已更换下载目录');
         } else if (r && r.reason && r.reason !== 'cancelled') {
             warnToast(`更换目录失败：${r.reason}`);
         }
+    });
+    // 恢复默认下载位置：先确认再执行——该操作会迁移文件并重启下载引擎，误触代价较高
+    $('#set_dl_dir_reset').on('click', async () => {
+        const ok = await confirmDialog('恢复为系统默认下载目录？\n自定义目录里的下载文件会自动迁移过去，进行中的任务将断点续传。', { okText: '恢复' });
+        if (!ok) return;
+        let r;
+        try { r = await window.yuki.download.control('resetDir', {}); } catch (e) { r = null; }
+        if (r && r.ok) {
+            refreshDlDirLine(undefined);
+            if (!r.hadCustom) { warnToast('当前已是默认下载目录'); return; }
+            const extra = [r.migrated ? `已迁移 ${r.migrated} 个文件` : '', r.resumed ? `${r.resumed} 个任务断点续传` : ''].filter(Boolean);
+            warnToast(extra.length ? `已恢复默认下载位置（${extra.join('，')}）` : '已恢复默认下载位置');
+        } else if (r && r.reason) {
+            warnToast(`恢复失败：${r.reason}`);
+        } else { warnToast('恢复失败'); }
     });
     // 打开下载目录：直接拉起资源管理器（未更换过则打开系统默认下载目录）
     $('#set_dl_open').on('click', async () => {
@@ -1902,19 +1918,27 @@ async function playDirectLink() {
     const url = $('#direct_play_url').val().trim();
     if (!url) { warnToast('请先粘贴视频链接'); return; }
     if (!/^(https?:|rtmp:|rtsp:)/i.test(url)) { warnToast('链接格式不支持（http/https/rtmp/rtsp）'); return; }
-    // T70：直链播放也注册 Player 会话，退出时计入观看统计（此前绕过 _rememberSession 导致不统计）
-    const regSession = (r) => {
+    // 标题取 URL 文件名（历史记录/播放器窗口标题用，好过恒定「直链播放」无法区分）
+    let playTitle = '直链播放';
+    try {
+        const base = decodeURIComponent(url.split('?')[0].split('#')[0].split('/').filter(Boolean).pop() || '');
+        if (base) playTitle = base;
+    } catch (e) { /* 保留默认标题 */ }
+    // T70：直链播放也注册 Player 会话，退出时计入观看统计（此前绕过 _rememberSession 导致不统计）。
+    // site='direct' + vodId=播放地址：历史卡据此异步截帧封面（fillLocalCovers → yuki:file-thumb
+    // 的 URL 分支）并支持点击重播（records.js direct 分支）
+    const regSession = (r, playedUrl) => {
         if (r && r.ok && typeof Player !== 'undefined' && Player._rememberSession) {
-            Player._curMeta = { site: '', siteName: '直链', title: '直链播放', subtitle: '', vodId: '' };
+            Player._curMeta = { site: 'direct', siteName: '直链', title: playTitle, subtitle: '', vodId: String(playedUrl || url) };
             Player._rememberSession(r);
         }
     };
     // rtmp/rtsp 与媒体直链无需解析
     if (/^(rtmp:|rtsp:)/i.test(url) || /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i.test(url.split('?')[0])) {
-        const r = await window.yuki.playUrl(url, { title: '直链播放' });
+        const r = await window.yuki.playUrl(url, { title: playTitle });
         if (r && r.ok) {
             if (r.viaExternal) warnToast('已交外部播放器播放');
-            else { regSession(r); warnToast('已在 mpv 窗口播放'); }
+            else { regSession(r, url); warnToast('已在 mpv 窗口播放'); }
         } else warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
         return;
     }
@@ -1930,10 +1954,10 @@ async function playDirectLink() {
     }
     hideLoading();
     if (resolved && resolved.ok) {
-        const r = await window.yuki.playUrl(resolved.url, { title: '直链播放', header: resolved.header });
+        const r = await window.yuki.playUrl(resolved.url, { title: playTitle, header: resolved.header });
         if (r && r.ok) {
             if (r.viaExternal) warnToast('已交外部播放器播放');
-            else { regSession(r); warnToast('已在 mpv 窗口播放'); }
+            else { regSession(r, resolved.url); warnToast('已在 mpv 窗口播放'); }
             return;
         }
     }

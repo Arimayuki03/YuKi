@@ -131,13 +131,26 @@ class CmsSpider:
     # ------------------------------------------------------------ 工具
 
     def _fetch(self, params):
-        try:
-            rsp = http_client.fetch_follow_redirects(self.api, params=params, headers=UA, timeout=15)
-            # 自动探测并支持 GBK / GB2312 / UTF-8 等常见编码
-            rsp.encoding = rsp.apparent_encoding or 'utf-8'
-            text = rsp.text.strip()
-        except Exception as e:
-            raise ValueError(f'[L3:cms] cms fetch failed: {e}') from e
+        # 连接类瞬时错误（连接重置/SSL EOF/上游限流断连）退避 800ms 重试一次：
+        # 前端切分类的请求风暴过后上游通常立即可恢复，一次重试即可救回大量
+        # 「暂无内容（L3_RUNTIME_CALL_FAILED）」；JSON/XML 解析错误不重试（非瞬时）
+        last = None
+        text = ''
+        for attempt in range(2):
+            try:
+                rsp = http_client.fetch_follow_redirects(self.api, params=params, headers=UA, timeout=15)
+                # 自动探测并支持 GBK / GB2312 / UTF-8 等常见编码
+                rsp.encoding = rsp.apparent_encoding or 'utf-8'
+                text = rsp.text.strip()
+                last = None
+                break
+            except Exception as e:
+                last = e
+                if attempt == 0:
+                    import time
+                    time.sleep(0.8)
+        if last is not None:
+            raise ValueError(f'[L3:cms] cms fetch failed: {last}') from last
 
         if text.startswith('{') or text.startswith('['):
             try:
@@ -149,6 +162,7 @@ class CmsSpider:
                 return self._parse_xml(text)
             except Exception as e:
                 raise ValueError(f'[L3:cms] cms xml parse error: {e}') from e
+        # 非空非 JSON/XML 文本：多为限流/CC 挑战页，随上层 L3 兜底与前端重试恢复
         raise ValueError('[L3:cms] unexpected response: (%s...)' % text[:30])
 
     def _parse_xml(self, text):

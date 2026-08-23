@@ -1835,6 +1835,50 @@ def create_app():
                                  media_type='application/json; charset=utf-8',
                                  headers=headers)
 
+    # Bangumi 封面代理转发（host 白名单，防 SSRF）：渲染层 <img> 直连 lain.bgm.tv
+    # 被墙/慢时封面拉不出（历史/搜索页 kazumi 卡全是该图床），改经本地后端转发
+    # （http_client 走应用代理/系统代理配置），官方域名失败自动换镜像 lain.bangumi.pro
+    # 重试。响应带长缓存头，重复渲染由浏览器缓存兜住不再回源。
+    _bangumi_cover_hosts = frozenset(('lain.bgm.tv', 'lain.bangumi.tv', 'lain.bangumi.pro'))
+
+    @fastapi_app.get('/kazumi/cover')
+    async def kazumi_cover(url: str = ''):
+        import http_client
+
+        def _fetch(target):
+            rsp = http_client.get(target, timeout=(5, 20), verify=True)
+            if rsp.status_code != 200:
+                raise RuntimeError(f'HTTP {rsp.status_code}')
+            body = rsp.content or b''
+            if not body or len(body) > 8 * 1024 * 1024:
+                raise RuntimeError('empty or oversized cover')
+            ctype = (rsp.headers.get('content-type') or '').split(';')[0].strip()
+            if ctype and not ctype.startswith('image/'):
+                raise RuntimeError(f'not an image: {ctype}')
+            return body, (ctype or 'image/jpeg')
+
+        try:
+            parts = urllib.parse.urlsplit(url)
+            if parts.scheme not in ('http', 'https') or parts.hostname not in _bangumi_cover_hosts:
+                return JSONResponse({'code': 403, 'msg': 'host not allowed'}, status_code=403)
+            candidates = [url]
+            if parts.hostname != 'lain.bangumi.pro':
+                candidates.append(urllib.parse.urlunsplit(
+                    parts._replace(scheme='https', netloc='lain.bangumi.pro')))
+            last_err = None
+            for target in candidates:
+                try:
+                    body, ctype = await run_in_threadpool(_fetch, target)
+                    return Response(content=body, media_type=ctype,
+                                    headers={'Cache-Control': 'private, max-age=604800'})
+                except Exception as e:
+                    last_err = e
+            logger.warning('[kazumi] cover proxy failed for %s: %s', url, last_err)
+            return JSONResponse({'code': 502, 'msg': 'cover fetch failed'}, status_code=502)
+        except Exception as e:
+            logger.warning('[kazumi] cover proxy bad request: %s', e)
+            return JSONResponse({'code': 400, 'msg': 'bad url'}, status_code=400)
+
     return fastapi_app
 
 
@@ -2327,7 +2371,12 @@ def dispatch_kazumi_action(form):
             except Exception:
                 names = []
             result = kazumi_mgr.webdav_restore(url, username, password, names)
-            return 200, json.dumps({'code': 200, 'data': result}, ensure_ascii=False)
+            # 失败（连接错误/无数据）返回 500 + 原因：此前恒 200 空数据，渲染层把
+            # 空对象当成功提示「恢复完成」，网址输错时误导用户（同步端点早有对齐语义）
+            if not result.get('ok'):
+                msg = str(result.get('error') or 'restore failed')
+                return 500, json.dumps({'code': 500, 'msg': msg}, ensure_ascii=False)
+            return 200, json.dumps({'code': 200, 'data': result.get('files') or {}}, ensure_ascii=False)
 
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:

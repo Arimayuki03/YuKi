@@ -8,7 +8,7 @@
  * - 队列操作：暂停/继续/删除/清除已完成
  * - 一键播放：取任务产出中第一个视频文件 → mpv
  */
-/* global $, warnToast, fmtSize, App, confirmDialog */
+/* global $, warnToast, fmtSize, App, confirmDialog, openDialog, closeDialog, localPlayToast */
 
 const STATUS_ZH = {
     active: '下载中', waiting: '等待中', paused: '已暂停',
@@ -20,6 +20,9 @@ const VIDEO_EXTS = ['.mp4', '.mkv', '.ts', '.flv', '.avi', '.mov', '.wmv', '.mpg
 const Downloads = {
     _inited: false,
     _tasks: [],
+    _order: new Map(),   // gid → 首次出现序号（稳定显示顺序，见 render）
+    _addedAt: new Map(), // gid → 首次出现/记录时间（按时间排序用）
+    _sort: 'default',    // default 队列顺序 | name 名称 | time 最新在前
 
     async enter() {
         if (!this._inited) await this.init();
@@ -36,6 +39,14 @@ const Downloads = {
         $('#dl-resume-all').on('click', () => this.resumeAll());
         $('#dl-uri').on('keydown', (e) => { if (e.key === 'Enter') this.addUri(); });
         $('#dl-list').on('click', (e) => this.onAction(e));
+        // 排序：默认（引擎队列序）/ 名称 / 最新添加；选择持久化，切换即按当前列表重排
+        try { this._sort = localStorage.getItem('dl_sort') || 'default'; } catch (e) { /* ignore */ }
+        $('#dl-sort').val(this._sort);
+        $('#dl-sort').on('change', (e) => {
+            this._sort = String(e.currentTarget.value || 'default');
+            try { localStorage.setItem('dl_sort', this._sort); } catch (e2) { /* ignore */ }
+            this.render(this._tasks);
+        });
 
         window.yuki.download.onList((items) => this.render(items));
         window.yuki.download.onEvent((ev) => {
@@ -110,7 +121,7 @@ const Downloads = {
         else warnToast(r.n ? `已删除 ${r.n} 个失败任务` : '当前没有失败任务');
     },
 
-    /** 全部暂停（aria2 任务；m3u8 合成任务不支持暂停，保持单任务一致语义）。 */
+    /** 全部暂停（aria2 任务与 m3u8 合成任务均支持）。 */
     async pauseAll() {
         const r = await window.yuki.download.control('pauseAll', {});
         if (!r.ok) warnToast(`全部暂停失败：${r.reason}`);
@@ -133,16 +144,51 @@ const Downloads = {
         const act = btn.getAttribute('data-act');
         const task = this._tasks.find((t) => t.gid === gid);
         if (act === 'play') return this.play(task);
-        if (act === 'remove' && !await confirmDialog('删除该下载任务？已下载的文件也会被删除。', { okText: '删除' })) return;
+        if (act === 'remove') return this.removeTask(task);
         window.yuki.download.control(act, { gid }).then((r) => {
             if (!r.ok) warnToast(`操作失败：${r.reason}`);
             else if (r.resumed) warnToast('已恢复下载（任务已重新加入队列）');
         });
     },
 
+    /** 删除任务：弹窗让用户选「仅移除任务（保留文件）」还是「连文件一起删除」。
+     *  此前固定删文件且无选择；且进行中任务的分片临时目录/.aria2 控制文件有残留。 */
+    async removeTask(task) {
+        if (!task) return;
+        const choice = await this._confirmRemove(task);
+        if (!choice) return;
+        const r = await window.yuki.download.control('remove', {
+            gid: task.gid,
+            deleteFiles: choice === 'files',
+        });
+        if (!r) { warnToast('删除失败'); return; }
+        if (!r.ok) warnToast(`删除失败：${r.reason}`);
+        else if (choice === 'files') warnToast('已删除任务及文件');
+        else warnToast('已移除任务（文件保留在下载目录）');
+    },
+
+    /** 删除确认弹窗（三键：连文件删除 / 仅移除任务 / 取消）。返回 'files' | 'task' | null。
+     *  resolve 挂 window 供 closeDialog 的 Esc 兜底按取消处理（同 confirmDialog 模式）。 */
+    _confirmRemove(task) {
+        return new Promise((resolve) => {
+            const name = String((task && task.name) || (task && task.gid) || '');
+            $('#dl_remove_name').text(name.length > 60 ? name.slice(0, 60) + '…' : name);
+            window._dlRemoveResolve = (v) => {
+                window._dlRemoveResolve = null;
+                closeDialog('dlRemoveDialog');
+                resolve(v);
+            };
+            openDialog('dlRemoveDialog');
+        });
+    },
+
     async play(task) {
         if (!task || !task.files || !task.files.length) { warnToast('找不到输出文件'); return; }
-        const video = task.files.find((f) => VIDEO_EXTS.includes('.' + f.split('.').pop().toLowerCase()));
+        let video = task.files.find((f) => VIDEO_EXTS.includes('.' + f.split('.').pop().toLowerCase()));
+        // 无扩展名文件兜底：修复前的存量任务可能存出无后缀文件（新任务在主进程完成时
+        // 已自动补 .mp4）——取唯一/首个无后缀文件交给 mpv 实际探测，不再直接拒绝
+        if (!video) video = (task.files.length === 1) ? task.files[0]
+            : task.files.find((f) => !/\.[a-z0-9]{1,5}$/i.test(f));
         if (!video) { warnToast('输出文件中没有可播放的视频'); return; }
         const r = await window.yuki.download.play(video);
         if (!r) { warnToast('播放失败'); return; }
@@ -150,7 +196,7 @@ const Downloads = {
             warnToast(r.reason === 'mpv-missing' ? 'mpv 未安装：node scripts/download-binaries.js mpv' : `播放失败：${r.reason}`);
             return;
         }
-        warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
+        localPlayToast(r);
         // 记入历史记录（下载文件播放）：site='download' 保持「下载文件」身份，vodId 存绝对文件路径，
         // 历史卡据此异步抓帧封面（recCard 对 site='local'/'download' 打 data-local-path → fillLocalCovers）
         try {
@@ -175,6 +221,32 @@ const Downloads = {
 
     render(items) {
         this._tasks = items || [];
+        // 登记首次出现序号/时间：aria2 列表按 [active, waiting, stopped] 分组拼接，
+        // 全部开始/暂停的 RPC 过渡期任务在分组间迁移，推送顺序短暂变化——
+        // 卡片按「首次出现顺序」稳定排列，不再跟着跳动后再跳回
+        const now = Date.now();
+        for (const t of this._tasks) {
+            if (!t || !t.gid) continue;
+            if (!this._order.has(t.gid)) {
+                this._order.set(t.gid, this._order.size);
+                this._addedAt.set(t.gid, t.addedAt || now);
+            }
+        }
+        // 清理已消失任务的登记（防 Map 无限增长；相对顺序不变）
+        if (this._order.size > this._tasks.length * 2 + 50) {
+            const live = new Set(this._tasks.map((t) => t.gid));
+            for (const k of [...this._order.keys()]) {
+                if (!live.has(k)) { this._order.delete(k); this._addedAt.delete(k); }
+            }
+        }
+        // 排序：default 队列序（首次出现序）| name 名称 | time 最新在前
+        if (this._sort === 'name') {
+            this._tasks.sort((a, b) => String(a.name || a.gid).localeCompare(String(b.name || b.gid), 'zh-Hans-CN'));
+        } else if (this._sort === 'time') {
+            this._tasks.sort((a, b) => (this._addedAt.get(b.gid) || 0) - (this._addedAt.get(a.gid) || 0));
+        } else {
+            this._tasks.sort((a, b) => (this._order.get(a.gid) || 0) - (this._order.get(b.gid) || 0));
+        }
         // 总网速（T15）：汇总进行中任务速度，空闲时也显示 0 B/s；必须早于下方提前返回
         const speed = this._tasks.reduce((a, t) => a + (t.status === 'active' ? (t.speed || 0) : 0), 0);
         $('#dl-speed').text(`总速度 ${fmtSize(speed)}/s`).show();
@@ -219,17 +291,16 @@ const Downloads = {
             // ffmpeg 按播放列表时长折算百分比，并用输出 size 差分显示实时速度
             info = t.status === 'active'
                 ? `${t.percent ? `切片合成中 ${t.percent}%` : '切片合成中…'} · ${fmtSize(t.speed || 0)}/s`
-                : (t.status === 'complete' ? '已完成' : '等待中');
+                : (t.status === 'complete' ? '已完成' : (t.status === 'paused' ? `已暂停（${t.percent || 0}%，继续时断点续传）` : '等待中'));
         } else {
             info = `${fmtSize(t.done)} / ${fmtSize(t.total)}${t.total ? ` · ${t.percent}%` : ''}` +
               (t.status === 'active' ? ` · ${fmtSize(t.speed)}/s${t.connections ? ` · 连线 ${t.connections}` : ''}` : '');
         }
         let btns = '';
         if (t.status === 'active' || t.status === 'waiting') {
-            // ffmpeg 合成任务不支持暂停
-            btns = isHls ? '' : `<button class="md-btn md-btn-tonal" data-act="pause" data-gid="${t.gid}">暂停</button>`;
+            btns = `<button class="md-btn md-btn-tonal" data-act="pause" data-gid="${t.gid}">暂停</button>`;
         } else if (t.status === 'paused') {
-            btns = isHls ? '' : `<button class="md-btn md-btn-tonal" data-act="unpause" data-gid="${t.gid}">继续</button>`;
+            btns = `<button class="md-btn md-btn-tonal" data-act="unpause" data-gid="${t.gid}">继续</button>`;
         } else if (t.status === 'complete') {
             btns = `<button class="md-btn md-btn-tonal" data-act="play" data-gid="${t.gid}">▶ 播放</button>`;
         }
@@ -245,6 +316,11 @@ const Downloads = {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     },
 };
+
+// 删除确认弹窗按钮（index.html 内联 onclick 调用；resolve 由 _confirmRemove 挂到 window）
+function dlRemoveFiles() { if (window._dlRemoveResolve) window._dlRemoveResolve('files'); }
+function dlRemoveTaskOnly() { if (window._dlRemoveResolve) window._dlRemoveResolve('task'); }
+function dlRemoveCancel() { if (window._dlRemoveResolve) window._dlRemoveResolve(null); }
 
 (function (root) {
     root.YUKI = root.YUKI || {};

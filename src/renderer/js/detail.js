@@ -1519,6 +1519,15 @@ const Detail = {
             if (/\.(mp4|flv|mov|mkv|webm|ts|m3u8)(\?|#|$)/i.test(u.split('?')[0])) return { url: u, header };
             const r = await window.yuki.resolveParse(u);
             if (r && r.ok) return { url: r.url, header: { ...header, ...(r.header || {}) } };
+            // page 型地址兜底：与播放链（player.js parse=1 分支）对齐——解析接口失败后
+            // 用隐藏窗口嗅探页面自身播放器的媒体请求。此前手动下载缺这层兜底，page 源
+            // 「播放可以、手动下载不了」（边下边播复用的是播放链已解析出的直链）。
+            try {
+                const cap = await window.yuki.captureDirect(u, false);
+                if (cap && cap.ok && cap.url) {
+                    return { url: cap.url, header: { ...header, ...(cap.header || {}) } };
+                }
+            } catch (e) { /* 嗅探失败按取不到地址 */ }
         } catch (e) { /* 单集失败不阻断批量 */ }
         return null;
     },

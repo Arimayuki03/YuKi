@@ -1623,9 +1623,15 @@ class PluginManager:
             return False
 
     def webdav_restore(self, webdav_url, username, password, names):
-        """WebDAV 恢复（从远程下载收藏/历史/规则）。"""
+        """WebDAV 恢复（从远程下载收藏/历史/规则）。
+
+        返回 {'files': {name: data}, 'ok': bool, 'error': str}：
+        - 单个文件 404 视为「云端没有该数据」（从未同步过对应项），不算失败；
+        - 连接失败/DNS 错误/非 404 的 HTTP 错误 → ok=False + error 原因。
+        此前逐文件吞异常、空结果也当成功返回，网址输错时渲染层提示「恢复完成」。
+        """
         from requests.auth import HTTPBasicAuth
-        result = {}
+        result = {'files': {}, 'ok': False, 'error': ''}
         try:
             auth = HTTPBasicAuth(username, password) if username else None
             sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
@@ -1633,14 +1639,34 @@ class PluginManager:
                 file_url = f'{sync_dir}/{name}.json'
                 try:
                     rsp = http_client.get(file_url, auth=auth, timeout=15, verify=True)
-                    if rsp.status_code == 200:
-                        result[name] = rsp.json()
-                except Exception:
-                    pass
-            logger.info('[kazumi] webdav restore ok: %d files', len(result))
+                except Exception as e:
+                    result['error'] = f'{name}: {e}'
+                    logger.warning('[kazumi] webdav restore failed: %s', result['error'])
+                    return result
+                if rsp.status_code == 200:
+                    try:
+                        result['files'][name] = rsp.json()
+                    except Exception as e:
+                        result['error'] = f'{name}: 响应不是有效 JSON ({e})'
+                        logger.warning('[kazumi] webdav restore failed: %s', result['error'])
+                        return result
+                elif rsp.status_code == 404:
+                    continue  # 云端没有该数据，跳过（其余文件仍可恢复）
+                else:
+                    result['error'] = f'{name}: HTTP {rsp.status_code}'
+                    logger.warning('[kazumi] webdav restore failed: %s', result['error'])
+                    return result
+            if not result['files']:
+                result['error'] = '云端没有找到任何可恢复的数据（请先「同步到云端」）'
+                logger.warning('[kazumi] webdav restore: nothing to restore')
+                return result
+            result['ok'] = True
+            logger.info('[kazumi] webdav restore ok: %d files', len(result['files']))
+            return result
         except Exception as e:
+            result['error'] = str(e)
             logger.warning('[kazumi] webdav restore failed: %s', e)
-        return result
+            return result
 
     # ---------------------------------------------------------------- 在线规则商店
 

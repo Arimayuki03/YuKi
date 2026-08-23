@@ -27,7 +27,7 @@ const FileManager = require('./file-manager');
 const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
-const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb } = require('./ffmpeg');
+const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb, urlThumb: ffmpegUrlThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
@@ -121,6 +121,19 @@ function buildAnime4kChain(mode) {
 function anime4kChainFromSettings() {
     if (!(settings && settings.get('anime4k'))) return '';
     return buildAnime4kChain(String(settings.get('anime4kMode') || 'a'));
+}
+
+/** Anime4K 三档位的展示名（起播 toast / mpv OSD 提示共用）。 */
+const ANIME4K_MODE_LABELS = { a: '均衡', aa: '细节增强', restore: '仅修复' };
+
+/** 起播响应附 Anime4K 状态：是否生效 + 档位名（渲染层 toast 提示用；三条起播路径统一走这里）。 */
+function attachAnime4kInfo(r) {
+    if (!r || !r.ok) return r;
+    r.anime4k = !!mpv.anime4kShaders;
+    if (r.anime4k) {
+        r.anime4kModeLabel = ANIME4K_MODE_LABELS[String(settings.get('anime4kMode') || 'a')] || '均衡';
+    }
+    return r;
 }
 
 // Anime4K 着色器源（bloc97/Anime4K v4.1，仓库按功能分子目录）：启动时自动补齐缺失文件，免手动下载。
@@ -429,6 +442,7 @@ function createWindow() {
         titleBarStyle: useSystemTitleBar ? 'default' : 'hidden',
         backgroundColor: '#121212',
         title: 'YuKi',
+        icon: require('./app-icon').windowIcon(), // 预缩多表示图标（exe 图标插值缩会糊/残缺）
         webPreferences: {
             preload: path.join(__dirname, '..', 'preload', 'preload.js'),
             contextIsolation: true,
@@ -618,6 +632,9 @@ app.whenReady().then(() => {
     // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
     ipcMain.handle('yuki:asset-status', () => {
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
+        // binary 可能被起播拦截清空（文件丢失/spawn 失败），查询资产状态时重探一次，
+        // 避免一次失败后设置页永远显示「未安装」（findMpv 现含 userData\vendor 候选）
+        if (!mpv.binary) mpv.resetBinary();
         const mpvAvail = mpv.isAvailable();
         const aria2exe = process.platform === 'win32' ? 'aria2c.exe' : 'aria2c';
         const aria2Path = (() => {
@@ -625,7 +642,7 @@ app.whenReady().then(() => {
             if (fs.existsSync(vendorAria2)) return vendorAria2;
             try {
                 if (process.platform === 'win32') {
-                    const out = require('child_process').execSync('where aria2c', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                    const out = require('child_process').execSync('where aria2c', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
                     return out.split(/\r?\n/)[0] || '';
                 }
             } catch (e) { /* not in PATH */ }
@@ -639,7 +656,7 @@ app.whenReady().then(() => {
         const hasJava = (() => {
             try {
                 const execSync = require('child_process').execSync;
-                const out = execSync('java -version 2>&1', { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+                const out = execSync('java -version 2>&1', { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', windowsHide: true });
                 return /version\s+"[^"]+"/.test(String(out || ''));
             } catch (e) { return false; }
         })();
@@ -726,9 +743,8 @@ app.whenReady().then(() => {
                 }
             }
             const a4kChain = anime4kChainFromSettings();
-            const a4kLabels = { a: '均衡', aa: '细节增强', restore: '仅修复' };
             const a4kHint = a4kChain
-                ? ` | Anime4K 超分: 开（${a4kLabels[String(settings.get('anime4kMode') || 'a')] || '均衡'}）`
+                ? ` | Anime4K 超分: 开（${ANIME4K_MODE_LABELS[String(settings.get('anime4kMode') || 'a')] || '均衡'}）`
                 : '';
             const scriptDir = path.join(app.getPath('userData'), 'mpv-scripts');
             fs.mkdirSync(scriptDir, { recursive: true });
@@ -961,7 +977,7 @@ app.whenReady().then(() => {
             // 非连播会话（本地文件/推送）：sessionId 取负，渲染层据此不触碰连播链
             if (meta.noSeq) r.sessionId = -Math.abs(r.sessionId);
             afterPlay();
-            r.anime4k = !!mpv.anime4kShaders; // 渲染层 toast 提示 Anime4K 是否生效
+            attachAnime4kInfo(r); // 渲染层 toast 提示 Anime4K 是否生效及档位
             // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
             // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放。
             // 直播（meta.source==='live'）是无限流，无法下载，跳过
@@ -1070,6 +1086,12 @@ app.whenReady().then(() => {
     // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
     fileIpc('yuki:file-thumb', async (rel) => {
         let abs;
+        // 直链 URL（直链播放历史卡截帧）：ffmpeg 原生支持 http(s)/m3u8 输入，直接抓帧；
+        // 远程地址不经本地路径白名单（无本地文件系统边界问题），缓存 key 用 md5(url)
+        const raw = String(rel || '');
+        if (/^(https?|rtmps?):\/\//i.test(raw)) {
+            return ffmpegUrlThumb(raw, path.join(app.getPath('userData'), 'local-thumbs'));
+        }
         const inside = (root, target) => {
             if (!root || !target) return false; // 缺 target（误用漏参）返回 false，而非抛 TypeError
             const r = path.relative(path.resolve(String(root)), target);
@@ -1092,7 +1114,9 @@ app.whenReady().then(() => {
                 } else return { ok: false };
             }
         }
-        if (!fileMgr.isVideo(abs)) return { ok: false };
+        // 无扩展名文件放行（与 yuki:download-play 一致）：让 ffmpeg 实际探测容器格式，
+        // 旧版无后缀存量下载文件也能抓帧；带扩展名但不在视频白名单的仍拒绝
+        if (!fileMgr.isVideo(abs) && path.extname(abs)) return { ok: false };
         return ffmpegThumb(abs, path.join(app.getPath('userData'), 'local-thumbs'));
     });
 
@@ -1137,6 +1161,9 @@ app.whenReady().then(() => {
             const r = launchExternalPlayer(extPrimary, playUrl);
             return r.ok ? { ...r, viaExternal: true } : r;
         }
+        // 与 yuki:play 对齐：起播前刷新 Anime4K 着色器链（开关/档位实时生效）。
+        // 缺此刷新时本地文件用的可能是空/旧链——典型表现为「网络流生效、本地文件不生效」。
+        mpv.anime4kShaders = anime4kChainFromSettings();
         const r = mpv.play([{ url: playUrl, title }], { title, noSeq: true });
         if (!r.ok) return r;
         const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
@@ -1151,13 +1178,13 @@ app.whenReady().then(() => {
                 if (!retried.ok) return retried;
                 retried.sessionId = -Math.abs(retried.sessionId);
                 afterPlay();
-                return retried;
+                return attachAnime4kInfo(retried);
             }
             return started;
         }
         started.sessionId = -Math.abs(started.sessionId);
         afterPlay();
-        return started;
+        return attachAnime4kInfo(started);
     });
 
     // ---- Phase 7 推送 / 解析 / 设置 ----
@@ -1848,6 +1875,7 @@ app.whenReady().then(() => {
                         files: r.files || [], total: r.size || 0, done: r.done || 0,
                         percent: r.percent || 0, speed: 0, connections: '',
                         errorMessage: '', uri: r.uri || '',
+                        addedAt: r.completedAt || 0, // 下载列表按时间排序用（最后状态变更时间近似）
                     };
                 }
                 // 已完成/失败任务：与原逻辑一致
@@ -1856,6 +1884,7 @@ app.whenReady().then(() => {
                     kind: r.kind, name: r.name, files: r.files || [],
                     total: r.size || 0, done: r.size || 0, percent: 100, speed: 0,
                     connections: '', errorMessage: r.status === 'error' ? (r.errorMessage || '') : '',
+                    addedAt: r.completedAt || 0,
                 };
             });
         return [...live, ...restored];
@@ -1915,6 +1944,95 @@ app.whenReady().then(() => {
         if (dir) hls.setDir(dir);
     }
 
+    /** 跨卷移动兜底：同卷 rename，EXDEV（如 C: → D:）退化为复制后删除。目录递归。 */
+    function movePathSync(src, dest) {
+        try {
+            fs.renameSync(src, dest);
+            return true;
+        } catch (e) {
+            try {
+                if (fs.statSync(src).isDirectory()) {
+                    fs.cpSync(src, dest, { recursive: true });
+                    fs.rmSync(src, { recursive: true, force: true });
+                } else {
+                    fs.copyFileSync(src, dest);
+                    fs.rmSync(src, { force: true });
+                }
+                return true;
+            } catch (e2) { return false; }
+        }
+    }
+
+    /** 尽力删除一批文件/目录：aria2c/ffmpeg 释放句柄可能滞后于 RPC 返回，Windows 上
+     *  rmSync 会因句柄未关（EBUSY/EPERM）失败——这正是「删除运行中任务后残留 .aria2」
+     *  的根因。失败项间隔递增重试（共 5 次尝试），仍失败则留待下次（不阻塞 IPC）。 */
+    function rmFilesBestEffort(files, isDir, attempt = 0) {
+        const list = (files || []).filter(Boolean);
+        if (!list.length) return;
+        const left = [];
+        for (const f of list) {
+            try { fs.rmSync(f, { recursive: !!isDir, force: true }); } catch (e) { left.push(f); }
+        }
+        const remaining = left.filter((f) => {
+            try { return fs.existsSync(f); } catch (e) { return false; }
+        });
+        if (remaining.length && attempt < 4) {
+            setTimeout(() => rmFilesBestEffort(remaining, isDir, attempt + 1), 500 * (attempt + 1));
+        }
+    }
+
+    /** 更换下载目录第一步：暂停在途任务并把产物（含 .aria2 断点控制文件）迁到新目录。
+     *  aria2c 进程无会话持久化，stop 后任务即丢，返回快照供引擎重启后重新入队
+     *  （.aria2 控制文件随迁 + continue=true ⇒ 断点续传）。HLS 任务由 hls.migrateDir
+     *  处理（分片目录随迁 + 已存在分片跳过）。requeue 条目带旧 gid：重新入队后
+     *  新任务拿到新 gid，需据此清除旧 gid 的持久化记录，否则 buildDlList 把旧记录
+     *  恢复成「已暂停」幽灵卡片——同一下载出现两张卡，点继续还会真实重复下载。 */
+    async function migrateDlFiles(newDir) {
+        const result = { moved: 0, requeue: [] };
+        if (!dl.isAvailable()) return result;
+        let tasks = [];
+        try { tasks = await dl.listAll(); } catch (e) { return result; }
+        const inProgress = tasks.filter((t) => ['active', 'waiting', 'paused'].includes(t.status) && t.uri);
+        try { await dl.pauseAll(); } catch (e) { /* 无活跃任务 */ }
+        try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { /* ignore */ }
+        for (const t of inProgress) {
+            try {
+                const files = (t.files || []).filter((f) => f && f !== '.');
+                for (const f of files) {
+                    const base = path.basename(f);
+                    if (movePathSync(f, path.join(newDir, base))) result.moved++;
+                    movePathSync(f + '.aria2', path.join(newDir, base + '.aria2'));
+                }
+                result.requeue.push({ gid: t.gid, uri: t.uri, name: t.name, header: t.header || null });
+            } catch (e) { /* 单任务失败不影响其余 */ }
+        }
+        try { hls.migrateDir(newDir); } catch (e) { /* HLS 迁移失败不阻断引擎重启 */ }
+        return result;
+    }
+
+    /** 更换下载目录第二步：引擎已按新目录重启，把快照里的在途任务重新入队（断点续传）。
+     *  重新入队后任务拿到新 gid：成功入队即清除旧 gid 的持久化记录（persistInProgress
+     *  在迁移期间已把旧 gid 落盘），否则旧记录被恢复成幽灵「已暂停」卡片造成列表
+     *  重复 + 重复下载。入队失败的保留记录，用户仍可手动继续。 */
+    async function requeueDlTasks(requeue) {
+        let n = 0;
+        for (const it of requeue || []) {
+            try {
+                if (!it || !it.uri) continue;
+                const isMagnet = /^magnet:/i.test(it.uri);
+                const opts = { continue: 'true' };
+                // 磁链不带 out（会干扰多文件种子）；HTTP 带原文件名恢复
+                if (!isMagnet && it.name && /\.[a-z0-9]{1,5}$/i.test(path.basename(it.name))) {
+                    opts.out = path.basename(it.name);
+                }
+                await dl.addUri(it.uri, opts);
+                if (it.gid) dlRecords.remove(it.gid);
+                n++;
+            } catch (e) { /* 单任务失败不影响其余 */ }
+        }
+        return n;
+    }
+
     /** 按持久化设置拉起 aria2 引擎：并发任务数/分片并发数随 CLI 参数一并生效。
      *  统一入口——此前 add/addFile/pickDir 路径首次拉起时不带持久化值，
      *  用户改过的并发表会被默认值覆盖。 */
@@ -1941,7 +2059,8 @@ app.whenReady().then(() => {
                     return { ok: true, dir: dl.dir };
                 }
                 case 'pickDir': {
-                    // 更换下载目录：持久化并重启 aria2c（进行中任务中断，可断点续传）
+                    // 更换下载目录：在途任务先暂停并把文件（含 .aria2 断点控制文件）迁到新目录，
+                    // 重启引擎后重新入队续传；已完成文件同样随迁
                     const r = await dialog.showOpenDialog(win, {
                         title: '选择下载目录',
                         properties: ['openDirectory', 'createDirectory'],
@@ -1950,12 +2069,35 @@ app.whenReady().then(() => {
                     const dir = r.filePaths[0];
                     settings.set('dlDir', dir);
                     syncDlDir(dir);
+                    let migrated = 0;
+                    let resumed = 0;
                     if (dl.isAvailable()) {
+                        const mig = await migrateDlFiles(dir);
+                        migrated = mig.moved;
                         dl.stop();
                         await startDlEngine(dir);
+                        resumed = await requeueDlTasks(mig.requeue);
                     }
                     startDlPoll();
-                    return { ok: true, dir };
+                    return { ok: true, dir, migrated, resumed };
+                }
+                case 'resetDir': {
+                    // 恢复默认下载位置：清掉自定义 dlDir，迁文件 + 重启引擎到系统下载目录
+                    const dir = app.getPath('downloads');
+                    const hadCustom = !!settings.get('dlDir');
+                    settings.delete('dlDir');
+                    syncDlDir(dir);
+                    let migrated = 0;
+                    let resumed = 0;
+                    if (dl.isAvailable()) {
+                        const mig = await migrateDlFiles(dir);
+                        migrated = mig.moved;
+                        dl.stop();
+                        await startDlEngine(dir);
+                        resumed = await requeueDlTasks(mig.requeue);
+                    }
+                    startDlPoll();
+                    return { ok: true, dir, migrated, resumed, hadCustom };
                 }
                 case 'add': {
                     if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
@@ -1965,7 +2107,18 @@ app.whenReady().then(() => {
                     await startDlEngine(dl.dir || app.getPath('downloads'));
                     // 详情页批量下载可带文件名与请求头（部分源校验 Referer）
                     const opts = {};
-                    const out = String(payload.out || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+                    let out = String(payload.out || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+                    // 兜底合成文件名：不带 out 的直链下载（下载页「新建」）若放任 aria2
+                    // 用 URL 最后一段命名，query 形式/无后缀的直链（…/video?sign=…）
+                    // 存出来没有扩展名，播放器无法识别。仿 detail.js：URL 猜扩展，猜不到补 .mp4
+                    if (!out && /^https?:\/\//i.test(uri)) {
+                        const clean = uri.split('?')[0].split('#')[0];
+                        let name = decodeURIComponent(clean.split('/').filter(Boolean).pop() || 'video');
+                        name = name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'video';
+                        const ext = (clean.match(/\.(mp4|flv|mov|mkv|webm|avi|ts|m4a|mp3|flac|ass|srt|zip|rar|7z)$/i) || [''])[0];
+                        if (!/\.\w{1,5}$/.test(name)) name += ext || '.mp4';
+                        out = name;
+                    }
                     if (out) opts.out = out.slice(0, 150);
                     if (payload.header && typeof payload.header === 'object') {
                         const pairs = Object.entries(payload.header)
@@ -2040,22 +2193,33 @@ app.whenReady().then(() => {
                     hls.setConcurrency(n); // 即时更新 HLS 分片并发数（后续新增任务生效）
                     return applied ? { ok: true, n } : { ok: false, n, reason: 'engine-restart-needed' };
                 }
-                case 'pause':
-                    if (String(payload.gid).startsWith('hls-')) return { ok: false, reason: 'm3u8 合成任务不支持暂停，可直接删除' };
+                case 'pause': {
+                    // HLS（m3u8/page 源）任务已支持暂停：杀进程保留分片，继续时断点续传
+                    if (String(payload.gid).startsWith('hls-')) {
+                        return hls.pause(String(payload.gid))
+                            ? { ok: true }
+                            : { ok: false, reason: '任务不存在或不在进行中' };
+                    }
                     await dl.pause(payload.gid); return { ok: true };
+                }
                 case 'pauseAll': {
-                    // 全部暂停：仅作用于 aria2 任务（m3u8 合成任务无暂停能力，保持单任务一致语义）
-                    if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
-                    let gids = [];
-                    try { gids = (await dl.pauseAll()) || []; } catch (e) { /* 无活跃任务时 aria2 可能返回空，忽略 */ }
+                    // 全部暂停：aria2 任务 + HLS 任务（此前 m3u8 任务无暂停能力被跳过）
+                    let n = 0;
+                    if (dl.isAvailable()) {
+                        try { n += ((await dl.pauseAll()) || []).length; } catch (e) { /* 无活跃任务时 aria2 可能返回空，忽略 */ }
+                    }
+                    n += hls.pauseAll();
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
-                    return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
+                    return { ok: true, n };
                 }
                 case 'unpauseAll': {
-                    if (!dl.isAvailable()) return { ok: false, reason: 'aria2-missing' };
                     let gids = [];
-                    try { gids = (await dl.unpauseAll()) || []; } catch (e) { /* 引擎异常按 0 处理，仍继续恢复持久化记录 */ }
+                    if (dl.isAvailable()) {
+                        try { gids = (await dl.unpauseAll()) || []; } catch (e) { /* 引擎异常按 0 处理，仍继续恢复持久化记录 */ }
+                    }
+                    // 会话内暂停的 HLS 任务原地唤醒（保留分片续传）
+                    const hlsN = hls.unpauseAll();
                     // 重启后仅存于持久化记录的进行中任务（aria2 已无此任务，列表显示为暂停卡片）：
                     // 与单个「继续」一致地重新入队，否则全部开始会误报「没有已暂停的任务」。
                     const liveGids = new Set([
@@ -2088,10 +2252,17 @@ app.whenReady().then(() => {
                     }
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
-                    return { ok: true, n: Array.isArray(gids) ? gids.length : 0 };
+                    return { ok: true, n: hlsN + (Array.isArray(gids) ? gids.length : 0) };
                 }
                 case 'unpause':
                     if (String(payload.gid).startsWith('hls-')) {
+                        // 会话内暂停的 HLS 任务原地唤醒（保留分片断点续传）；引擎重启后
+                        // 任务对象已丢（卡片来自持久化记录），按原 URL 重新入队
+                        if (hls.unpause(String(payload.gid))) {
+                            startDlPoll();
+                            try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
+                            return { ok: true };
+                        }
                         // HLS 任务：尝试从持久化记录恢复原始 URL
                         const rec = dlRecords.all().find((r) => r.gid === payload.gid);
                         if (rec && rec.uri) {
@@ -2135,8 +2306,14 @@ app.whenReady().then(() => {
                         return { ok: false, reason: 'task not found and cannot resume' };
                     }
                 case 'remove': {
-                    // 收集文件路径（在移除任务/记录之前取，避免取不到）
+                    // 收集文件路径（在移除任务/记录之前取，避免取不到）。
+                    // delFiles=内容文件（仅 deleteFiles=true 时删除）；ctrlFiles=断点控制文件与
+                    // 临时产物（.aria2/.incomplete/.part/.adfilter）——任务已删则它们无所依附，
+                    // 「仅移除（保留文件）」也一并清掉，否则磁盘上残留孤儿 .aria2/分片临时文件。
+                    const deleteFiles = payload.deleteFiles !== false;
                     const delFiles = new Set();
+                    const ctrlFiles = new Set();
+                    const hlsSegsDirs = [];
                     if (String(payload.gid).startsWith('hls-')) {
                         const t = hls._tasks.get(payload.gid);
                         if (t && t.files) t.files.forEach((f) => delFiles.add(f));
@@ -2149,7 +2326,7 @@ app.whenReady().then(() => {
                                     if (f && f.path && f.path !== '.') {
                                         delFiles.add(f.path);
                                         // 同时收集 .aria2 控制文件和临时文件（进行中的任务路径可能为空）
-                                        delFiles.add(f.path + '.aria2');
+                                        ctrlFiles.add(f.path + '.aria2');
                                     }
                                 }
                                 // 进行中的任务 tellStatus 可能不返回完整路径：
@@ -2164,7 +2341,7 @@ app.whenReady().then(() => {
                                                 if (name) {
                                                     const full = path.join(st.dir, name);
                                                     delFiles.add(full);
-                                                    delFiles.add(full + '.aria2');
+                                                    ctrlFiles.add(full + '.aria2');
                                                 }
                                             } catch (e) { /* URL 解析失败忽略 */ }
                                         }
@@ -2176,17 +2353,33 @@ app.whenReady().then(() => {
                     // 兜底：从持久化记录取文件路径
                     const rec = dlRecords.all().find((r) => r.gid === payload.gid);
                     if (rec && rec.files) rec.files.forEach((f) => { if (f && f !== '.') delFiles.add(f); });
+                    // HLS 残留补齐：引擎重启后 hls._tasks 里没有该任务（卡片来自持久化记录），
+                    // 此前分片临时目录与 .incomplete 部分文件不收集 → 删除任务后残留。
+                    // 无论 live/恢复态，统一按成品路径推导全部临时产物。
+                    if (String(payload.gid).startsWith('hls-')) {
+                        const dest = [...delFiles][0] || '';
+                        if (dest) {
+                            const ext = path.extname(dest);
+                            ctrlFiles.add(dest + '.incomplete' + ext);
+                            ctrlFiles.add(dest + '.part'); // 历史版本临时名
+                            ctrlFiles.add(dest + '.adfilter.m3u8');
+                            hlsSegsDirs.push(`${dest}.${payload.gid}.segs`);
+                        }
+                    } else {
+                        // aria2 控制文件对持久化记录里的路径同样补一份
+                        for (const f of [...delFiles]) ctrlFiles.add(f + '.aria2');
+                    }
                     // 先移除任务（停止写入），再删除文件
                     dlRecords.remove(payload.gid);
                     if (String(payload.gid).startsWith('hls-')) { hls.remove(payload.gid); }
                     else { await dl.remove(payload.gid); }
-                    for (const f of delFiles) {
-                        try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ }
-                    }
+                    if (deleteFiles) rmFilesBestEffort([...delFiles, ...ctrlFiles]);
+                    else rmFilesBestEffort([...ctrlFiles]);
+                    for (const d of hlsSegsDirs) rmFilesBestEffort([d], true);
                     // 删除后立即推送刷新列表 + 重启轮询（可能有剩余活跃任务）
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
-                    return { ok: true };
+                    return { ok: true, deletedFiles: deleteFiles };
                 }
                 case 'clearFailed': {
                     // 删失败任务及其未完成产物（aria2 --continue 会残留部分下载的文件）
@@ -2257,7 +2450,8 @@ app.whenReady().then(() => {
             // 此时不再依赖内置 mpv（未装内置 mpv 也能用指定播放器起播）
             const extPrimary = primaryExternalPlayer();
             if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
-            const abs = path.resolve(String(filePath || ''));
+            const abs0 = path.resolve(String(filePath || ''));
+            let abs = abs0;
             // L-1：路径限制在下载目录或本地媒体根目录内（path.relative 无 '..' 前缀且非绝对），
             // 防页面脚本传任意本地路径借 mpv 播放窥探磁盘
             const inside = (root) => {
@@ -2266,19 +2460,44 @@ app.whenReady().then(() => {
                 return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
             };
             const dlRoot = dl.dir || settings.get('dlDir') || app.getPath('downloads');
+            // 间歇性「文件未找到」兜底：完成时的自动补 .mp4 改名只有当次推送看到新路径，
+            // aria2 后续 tellStatus 仍报旧路径（引擎不知道磁盘改名）——按旧路径找不到时
+            // 依次尝试补 .mp4 / 下载根目录同 basename / 持久化记录里的新路径
+            if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+                const bn = path.basename(abs0);
+                const cands = [abs0 + '.mp4'];
+                if (dlRoot) {
+                    cands.push(path.join(dlRoot, bn));
+                    if (!/\.[a-z0-9]{1,5}$/i.test(bn)) cands.push(path.join(dlRoot, bn + '.mp4'));
+                }
+                try {
+                    const rec = dlRecords.all().find((r) => r.files && r.files.length === 1
+                        && path.resolve(String(r.files[0])) === abs0);
+                    if (rec) cands.push(path.resolve(String(rec.files[0])));
+                } catch (e) { /* ignore */ }
+                for (const c of cands) {
+                    try {
+                        if (c && fs.existsSync(c) && fs.statSync(c).isFile()) { abs = path.resolve(c); break; }
+                    } catch (e) { /* ignore */ }
+                }
+            }
             if (!inside(dlRoot) && !inside(fileMgr.root)) return { ok: false, reason: 'path-denied' };
             if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return { ok: false, reason: 'file-not-found' };
-            if (!fileMgr.isVideo(abs)) return { ok: false, reason: 'not-video' };
+            // 无扩展名文件放行：让 mpv 实际探测容器格式（修复前下载的无后缀存量文件可播；
+            // 带扩展名但不在视频白名单的仍拒绝，保留 not-video 防线）
+            if (!fileMgr.isVideo(abs) && path.extname(abs)) return { ok: false, reason: 'not-video' };
             const title = path.basename(abs);
             if (extPrimary) {
                 // 本地文件无鉴权头；Windows 反斜杠路径转正斜杠，规避个别播放器解析问题
                 const r = launchExternalPlayer(extPrimary, abs.replace(/\\/g, '/'));
                 return r.ok ? { ...r, viaExternal: true } : r;
             }
+            // 与 yuki:play 对齐：起播前刷新 Anime4K 着色器链，下载文件同样实时生效
+            mpv.anime4kShaders = anime4kChainFromSettings();
             const r = mpv.play([{ url: abs, title }], { title });
             if (!r.ok) return r;
             const started = await verifyMpvStart(r, MPV_START_TIMEOUT_MS);
-            if (started.ok) afterPlay();
+            if (started.ok) { afterPlay(); attachAnime4kInfo(started); }
             return started;
         } catch (err) { return { ok: false, reason: err.message }; }
     });
@@ -2286,6 +2505,22 @@ app.whenReady().then(() => {
     // ---- Phase 6 下载管理（aria2c JSON-RPC） ----
 
     dl.on('completed', (task) => {
+        // 无后缀产物兜底补 .mp4（视频应用语境）：旧版任务/特殊直链可能存出无扩展名文件，
+        // 下载页与播放均按扩展名识别导致「下载完播不了」。只动单文件任务且仅缺扩展名时重命名。
+        try {
+            if (task.files && task.files.length === 1) {
+                const f0 = String(task.files[0]);
+                if (f0 && !/\.[a-z0-9]{1,5}$/i.test(path.basename(f0)) && fs.existsSync(f0)) {
+                    const renamed = f0 + '.mp4';
+                    fs.renameSync(f0, renamed);
+                    task.files = [renamed];
+                    if (task.name && path.basename(task.name) === path.basename(f0)) {
+                        task.name = path.basename(renamed);
+                    }
+                    console.log(`[dl] 无后缀产物已补扩展名：${path.basename(f0)} -> ${path.basename(renamed)}`);
+                }
+            }
+        } catch (e) { console.warn(`[dl] 补扩展名失败：${e && e.message}`); }
         if (Notification.isSupported()) {
             const n = new Notification({ title: '下载完成', body: task.name || task.gid });
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
@@ -2526,7 +2761,9 @@ app.whenReady().then(() => {
     // 已手动关闭过（值 false）保持关闭；文件不全时链为空静默降级
     ensureAnime4k().catch(() => { }).finally(() => {
         if (settings.get('anime4k') === undefined && buildAnime4kChain()) settings.set('anime4k', true);
-        if (settings.get('anime4k')) mpv.anime4kShaders = buildAnime4kChain();
+        // 用 anime4kChainFromSettings 带上档位（buildAnime4kChain 无参回退 Mode A，
+        // 会忽略用户设置的 anime4kMode）
+        if (settings.get('anime4k')) mpv.anime4kShaders = anime4kChainFromSettings();
     });
     bridge.start();
     parseWin = new ParseWindow(() => bridge.info, probeMedia);
@@ -2627,10 +2864,10 @@ app.whenReady().then(() => {
         try {
             const { execSync } = require('child_process');
             if (process.platform === 'win32') {
-                const out = execSync('where vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                const out = execSync('where vlc', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
                 extPlayer = out.split(/\r?\n/)[0] || '';
             } else {
-                const out = execSync('which vlc', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                const out = execSync('which vlc', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
                 extPlayer = out || '';
             }
         } catch (e) { /* PATH 中无 VLC */ }
@@ -2645,7 +2882,7 @@ app.whenReady().then(() => {
         const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {});
         try {
             const { spawn } = require('child_process');
-            spawn(execPath, args, { detached: true, stdio: 'ignore' }).unref();
+            spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
             return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported };
         } catch (e) { return { ok: false, reason: e.message }; }
     }
@@ -2736,11 +2973,11 @@ app.whenReady().then(() => {
             setTimeout(() => {
                 const { exec } = require('child_process');
                 if (process.platform === 'win32') {
-                    exec('shutdown /s /t 60 /c "YuKi 定时关机"');
+                    exec('shutdown /s /t 60 /c "YuKi 定时关机"', { windowsHide: true });
                 } else if (process.platform === 'darwin') {
-                    exec('osascript -e \'tell app "System Events" to shut down\'');
+                    exec('osascript -e \'tell app "System Events" to shut down\'', { windowsHide: true });
                 } else {
-                    exec('shutdown -h +1');
+                    exec('shutdown -h +1', { windowsHide: true });
                 }
             }, 2000);
         }, minutes * 60 * 1000);

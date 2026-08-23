@@ -400,10 +400,21 @@ const Live = {
     },
 
     /** 视图切入时惰性加载（首次进入或直播源有变更才拉取）。 */
-    enter() {
+    async enter() {
         if (this._dirty || !this.lives.length) {
             this._dirty = false;
             this.load();
+            return;
+        }
+        // 每页数量设置变更（invalidatePageSizeCache 已作废 pageSizeOf 缓存）：
+        // 与当前列表不一致时只重排分页，不重新探测频道
+        if (this.channels && this.channels.length) {
+            const size = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
+            if (size !== this._pageSize) {
+                this._pageSize = size;
+                this._page = 1;
+                this.renderList();
+            }
         }
     },
 };

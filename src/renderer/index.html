@@ -316,11 +316,16 @@
                         <!-- 队列操作工具栏 -->
                         <div class="dl-toolbar">
                             <div class="dl-toolbar-left">
-                                <button id="dl-open-dir" class="md-btn md-btn-tonal">打开下载目录</button>
+                                <select id="dl-sort" class="md-select" title="下载列表排序方式">
+                                    <option value="default">队列顺序</option>
+                                    <option value="name">按名称</option>
+                                    <option value="time">按时间（新→旧）</option>
+                                </select>
                                 <span id="dl-speed" class="dl-speed" style="display:none"></span>
                             </div>
                             <div class="dl-toolbar-right">
                                 <div class="dl-btn-group">
+                                    <button id="dl-open-dir" class="md-btn md-btn-tonal">打开下载目录</button>
                                     <button id="dl-resume-all" class="md-btn md-btn-tonal" title="继续所有暂停的任务">全部开始</button>
                                     <button id="dl-pause-all" class="md-btn md-btn-tonal" title="暂停所有进行中的任务">全部暂停</button>
                                 </div>
@@ -629,13 +634,14 @@
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">更换目录会重启下载引擎</div>
-                                <div class="info-detail">进行中任务会中断，但支持断点续传。</div>
-                                <div class="info-detail">下载目录：默认（系统下载目录）</div>
+                                <div class="info-detail">进行中任务的文件（含断点控制文件）会自动迁移到新目录并断点续传。</div>
+                                <div class="info-detail"><div class="tip-line pad0" id="set_dl_dir_line" style="margin-top:12px;">下载目录：默认（系统下载目录）</div></div>
                             </div>
                         </div>
                         <div class="wall-row">
                             <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
                             <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
+                            <button id="set_dl_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认下载目录（文件一并迁移）">恢复默认位置</button>
                         </div>
                         <div class="tip-line pad0" >并发任务数</div>
                         <select id="set_dl_concurrency" class="md-select">
@@ -1381,6 +1387,22 @@
             <div class="md-dialog-actions">
                 <button id="confirm_cancel" class="md-dialog-btn">取消</button>
                 <button id="confirm_ok" class="md-dialog-btn">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 删除下载任务（三选：连文件删 / 仅移除任务 / 取消） -->
+    <div id="dlRemoveDialog" class="md-dialog-overlay">
+        <div class="md-dialog">
+            <div class="md-dialog-title">删除下载任务</div>
+            <div class="md-dialog-body">
+                <div class="tip-line pad0" id="dl_remove_name" style="white-space:pre-line;word-break:break-all;"></div>
+                <div class="tip-line pad0" style="margin-top:8px;">「删除任务和文件」会移除已下载的部分与临时分片；「仅移除任务」保留磁盘文件。</div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="dl_remove_cancel" class="md-dialog-btn" onclick="dlRemoveCancel()">取消</button>
+                <button id="dl_remove_task" class="md-dialog-btn" onclick="dlRemoveTaskOnly()">仅移除任务</button>
+                <button id="dl_remove_files" class="md-dialog-btn" onclick="dlRemoveFiles()">删除任务和文件</button>
             </div>
         </div>
     </div>

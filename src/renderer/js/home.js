@@ -102,6 +102,7 @@ const Home = {
     _homeCacheBooted: false, // 首页 feed 持久化缓存只引导一次（网络返回后以最新覆盖）
     _feedCacheBooted: false, // 本次 loadHome 是否已用持久化 feed 缓存即时上屏（上屏后提前撤全局遮罩）
     _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
+    _loadAbort: null,      // 与 _loadToken 同代的 AbortController：切分类/切源真正中止在途请求
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
     _sitesLoadToken: 0, // 配置刷新令牌：旧的站点列表请求不得覆盖新配置
     _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
@@ -229,7 +230,7 @@ const Home = {
         const sitesLoadToken = ++this._sitesLoadToken;
         const isCurrentSitesLoad = () => sitesLoadToken === this._sitesLoadToken;
         // 配置切换时让正在进行的旧首页请求立即失效，避免旧内容回写。
-        this._loadToken++;
+        this._nextLoadToken();
         // 先读取开关，再拉取源列表：即使 /sites 瞬时失败，也要保证关闭自动检测时
         // 不会继续使用历史 blockedSites 过滤源。
         const settings = await this._getSourceSettings();
@@ -850,7 +851,7 @@ const Home = {
         this._userRefresh = !!(opts && opts.userRefresh); // 刷新按钮触发：失败保留内容时提示
         this._pageSizeDirty = false; // 完整重载后清除脏标记
         $('#home-search').val(''); // 退出搜索态
-        const token = ++this._loadToken;
+        const token = this._nextLoadToken();
         const size = await this._pageSize();
         if (token !== this._loadToken) return;
         $('#home-pager').empty();
@@ -1056,6 +1057,23 @@ const Home = {
     },
 
     /**
+     * 新一代加载令牌：作废旧世代。此前令牌只是「渲染层丢弃旧结果」，在途请求
+     * 仍会打满站点 worker 的串行队列（每站并发 1、队列 8），快速切分类时请求
+     * 风暴把上游打到限流/超时，切完分类反而报「暂无内容（L3_RUNTIME_CALL_FAILED）」。
+     * 现在同代 AbortController 一并重建，doAction 的 signal 真正中止在途网络请求
+     * 并通知后端协作取消。
+     */
+    _nextLoadToken() {
+        if (typeof AbortController === 'function') {
+            if (this._loadAbort) {
+                try { this._loadAbort.abort('superseded'); } catch (e) { /* ignore */ }
+            }
+            this._loadAbort = new AbortController();
+        }
+        return ++this._loadToken;
+    },
+
+    /**
      * 分类分页（T6 重设计）：一页一次请求，截断到每页条数后渲染标准分页器。
      * 缓存命中立即渲染并后台静默重拉；force（刷新按钮）绕过缓存。
      */
@@ -1067,7 +1085,7 @@ const Home = {
         this.tid = tid;
         this.page = pg || 1;
         $('#home-search').val(''); // 切分类退出搜索态
-        const token = ++this._loadToken;
+        const token = this._nextLoadToken();
         const size = await this._pageSize();
         if (token !== this._loadToken) return;
         if (force) {
@@ -1088,13 +1106,26 @@ const Home = {
         showLoading();
         try {
             await this._fetchCat(tid, this.page, size);
+            // 瞬时故障自动重试一次：站点限流/连接抖动（L3_RUNTIME_CALL_FAILED）在
+            // 800ms 后基本可恢复，直接把页面翻成「暂无内容」体验太差
+            if (token === this._loadToken && !this._catItems.length && this._catError) {
+                const errObj = this._catError;
+                const errText = (typeof errObj === 'string' ? errObj : String((errObj && errObj.code) || '')) || '';
+                if (/L3_RUNTIME_(CALL_FAILED|TIMEOUT|CIRCUIT_OPEN)/.test(errText)) {
+                    await new Promise((r) => setTimeout(r, 800));
+                    if (token !== this._loadToken) return;
+                    this._catWinDelete(this.site, tid); // 丢弃半程窗口重新拉取
+                    await this._fetchCat(tid, this.page, size);
+                }
+            }
             if (token !== this._loadToken) return;
             this.renderGrid(this._catItems, this._catError);
             this.renderPager();
             // 切页后回到顶部
             $('#view-home').scrollTop(0);
         } catch (e) {
-            warnToast('分类载入失败');
+            // 被新一代中止（切分类/切源）不是失败，不弹提示
+            if (token === this._loadToken) warnToast('分类载入失败');
         } finally {
             hideLoading();
         }
@@ -1114,6 +1145,7 @@ const Home = {
     async _fetchCat(tid, pg, size) {
         const site = this.site;          // M-30b：快照本次加载的源与令牌
         const token = this._loadToken;
+        const ac = this._loadAbort;      // 与令牌同代的 AbortController（切分类中止在途请求）
         const win = this._catWinGet(site, tid);
         const need = pg * size; // 累计需覆盖到的条数
         let guard = 0;
@@ -1121,7 +1153,7 @@ const Home = {
         while (win.items.length < need && guard++ < 200) {
             const data = await doAction('categoryContent', {
                 site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
-            });
+            }, undefined, { signal: ac ? ac.signal : undefined });
             if (token !== this._loadToken || site !== this.site) return; // M-30b：切源即中止，旧窗口作废
             const list = (data && data.list) || [];
             if (data && data.error) this._catError = data.error; // jar 蜘蛛调用失败原因（后端附加）
@@ -1266,11 +1298,12 @@ const Home = {
         this.mode = 'search';
         this.searchWord = wd;
         this.page = pg || 1;
-        const token = ++this._loadToken;
+        const token = this._nextLoadToken();
         showLoading();
         try {
             const size = await this._pageSize();
-            const data = await doAction('searchContent', { site: this.site, word: wd, quick: '0', pg: String(this.page) });
+            const data = await doAction('searchContent', { site: this.site, word: wd, quick: '0', pg: String(this.page) },
+                undefined, { signal: this._loadAbort ? this._loadAbort.signal : undefined });
             if (token !== this._loadToken) return;
             if (actionResponseFailed(data)) {
                 // 失败包络（源故障/超时）≠「未找到」：不能把页面翻成误导性的空结果

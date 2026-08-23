@@ -41,7 +41,7 @@ function traceFields(value) {
 /** 校验 mpv 二进制真实可用：spawnSync --version（规避损坏/占位 exe），返回版本首行或 null。 */
 function mpvVersion(p) {
     try {
-        const r = spawnSync(p, ['--version'], { timeout: 8000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const r = spawnSync(p, ['--version'], { timeout: 8000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
         if (r.error || r.status !== 0) return null;
         const line = String(r.stdout || '').split(/\r?\n/)[0].trim();
         return line || null;
@@ -53,12 +53,20 @@ function findMpv() {
     const candidates = [];
     const vendor = path.join(ROOT, 'vendor', 'mpv', exe);
     if (fs.existsSync(vendor)) candidates.push(vendor);
+    // 「下载内置播放器」装到 userData\vendor\mpv（index.js yuki:download-mpv）。
+    // 自动发现必须覆盖该位置，否则用户没装 mpv 组件时点过一次下载、再「恢复默认」，
+    // mpvPath 被清空后这份 mpv 就失联，设置页显示未安装（只能再点下载找回）。
+    try {
+        const { app } = require('electron');
+        const ud = path.join(app.getPath('userData'), 'vendor', 'mpv', exe);
+        if (fs.existsSync(ud)) candidates.push(ud);
+    } catch (e) { /* 非 Electron 环境（单测）忽略 */ }
     try {
         if (WIN) {
-            const out = execSync('where mpv', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync('where mpv', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             for (const p of out.split(/\r?\n/)) if (p) candidates.push(p);
         } else {
-            const out = execSync(`command -v ${exe}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync(`command -v ${exe}`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             if (out) candidates.push(out);
         }
     } catch (e) { /* 不在 PATH */ }
@@ -301,7 +309,7 @@ class MpvPlayer extends EventEmitter {
         try {
             // stderr 不能再丢弃：网络地址/解码失败时 mpv 会把唯一可读原因
             // 写到 stderr；同时持续消费 pipe，避免缓冲区塞满后卡住进程。
-            proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+            proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
         } catch (err) {
             console.error(`[mpv] spawn 异常：${err && err.message || err}`);
             return {
@@ -503,7 +511,7 @@ class MpvPlayer extends EventEmitter {
             // 追加 taskkill 杀整棵进程树确保残留被清；非 Windows 用 SIGKILL 兜底。
             try {
                 if (WIN) {
-                    exec(`taskkill /pid ${proc.pid} /T /F`, () => { /* 进程可能已退出，忽略 */ });
+                    exec(`taskkill /pid ${proc.pid} /T /F`, { windowsHide: true }, () => { /* 进程可能已退出，忽略 */ });
                 } else {
                     proc.kill('SIGKILL');
                 }

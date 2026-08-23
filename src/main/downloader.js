@@ -55,11 +55,11 @@ function findAria2() {
     if (fs.existsSync(vendor)) return vendor;
     try {
         if (WIN) {
-            const out = execSync('where aria2c', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync('where aria2c', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             const first = out.split(/\r?\n/)[0];
             if (first) return first;
         } else {
-            const out = execSync(`command -v ${exe}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync(`command -v ${exe}`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             if (out) return out;
         }
     } catch (e) { /* 不在 PATH */ }
@@ -146,7 +146,7 @@ class Downloader extends EventEmitter {
         // 任务级注入（见 _proxyOpts），添加时取实时值，代理失效不影响新任务。
         // stdio 设为 pipe 以捕获 stderr：aria2c 启动失败（端口占用/参数错/损坏）
         // 时 stderr 含真实原因，原 'ignore' 会丢失导致只报笼统的 rpc not ready。
-        const proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        const proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
         this.proc = proc;
         // 重置上次启动的残留诊断信息（exit code / spawn error / stderr）
         this._exitCode = null;

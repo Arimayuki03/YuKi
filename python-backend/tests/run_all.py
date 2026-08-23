@@ -22,6 +22,8 @@ STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
+    ('kazumi-cover-proxy', [PY, os.path.join(HERE, 'test_kazumi_cover_proxy.py')]),
+    ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('cache', [PY, os.path.join(HERE, 'test_cache_store.py')]),
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
     ('runtime-contract', [PY, os.path.join(HERE, 'test_runtime_contract.py')]),

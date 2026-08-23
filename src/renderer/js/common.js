@@ -236,6 +236,13 @@ function coverChainNext(img) {
     img.classList.add('loaded');
 }
 
+/** 本地/下载文件起播成功 toast（四条播放入口共用）：外部播放器模式 | mpv 模式附 Anime4K 状态与档位。 */
+function localPlayToast(r) {
+    if (r && r.viaExternal) { warnToast('已交由指定播放器播放'); return; }
+    const extra = (r && r.anime4k) ? `（Anime4K 超分已生效：${r.anime4kModeLabel || '均衡'}）` : '';
+    warnToast(`已在 mpv 窗口播放${extra}`);
+}
+
 // Bangumi/Kazumi 动态卡片使用 data-fb-src 声明单级镜像兜底；统一在捕获阶段
 // 处理 error，避免模板字符串继续拼接内联 JS（也兼容后续 CSP 收紧）。
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
@@ -275,7 +282,7 @@ function vodCoverChain(pics, eager) {
  * （历史上存的是 large URL）——字符串走 lain.bgm.tv 路径段替换降级，优雅迁移旧缓存。
  * size：'detail'（大图，取 large）| 'card' | 'grid'（网格卡，取 common/medium）。
  */
-const _BGM_SIZE_SEG = { large: 'l', common: 'c', medium: 'm', small: 's', grid: 'g' };
+const _BGM_SIZE_SEG = { large: 'l', common: 'c', medium: 'm', small: 's', grid: 'g', card: 'c' };
 
 /** 把 lain.bgm.tv 封面 URL 的尺寸路径段（/pic/cover/{l,c,m,g,s}/）替换为目标变体；非该格式原样返回。 */
 function bangumiResizeUrl(url, variant) {
@@ -288,16 +295,30 @@ function bangumiResizeUrl(url, variant) {
 /** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.pro）；
  *  非官方域名原样返回（第三图床不换）。 */
 function bangumiMirrorUrl(url) {
-    return String(url || '').replace(/^https?:\/\/lain\.bgm\.tv\//i, 'https://lain.bangumi.pro/');
+    return String(url || '').replace(/^https?:\/\/lain\.(bgm|bangumi)\.tv\//i, 'https://lain.bangumi.pro/');
 }
 
-/** 生成 Bangumi 封面 img：官方 lain.bgm.tv 优先，加载失败自动切镜像 lain.bangumi.pro，再失败落占位图。
- *  （历史 Kazumi 源封面补拉复用 —— 官方图床被墙/慢时镜像兜底，不留空框。） */
+/** Bangumi 官方/镜像封面域名（lain.bgm.tv / lain.bangumi.tv / lain.bangumi.pro）。
+ *  历史记录持久化的 pic 可能是任一域名，渲染与补拉重渲染共用同一判定，
+ *  否则镜像域封面会漏走 bangumiCoverImg 的代理/镜像兜底链。 */
+function isBangumiCoverUrl(pic) {
+    return /(^|\/)lain\.(bgm\.tv|bangumi\.tv|bangumi\.pro)\//i.test(String(pic || ''));
+}
+
+/** 生成 Bangumi 封面 img：优先经本地后端代理（/kazumi/cover，host 白名单 + 镜像重试），
+ *  后端不可达/代理失败再退直连官方 lain.bgm.tv → 直连镜像 lain.bangumi.pro → 占位图。
+ *  （渲染层 <img> 直连 lain.bgm.tv 被墙/慢时历史页 kazumi 封面整页拉不出，T73/T76。） */
 function bangumiCoverImg(pic, eager) {
     const first = normalizePic(bangumiResizeUrl(pic, 'card') || pic);
     if (!first) return vodCoverImg('', eager);
+    const chain = [];
+    if (backend.base) {
+        chain.push(`${backend.base}/kazumi/cover?token=${encodeURIComponent(backend.token)}&url=${encodeURIComponent(first)}`);
+    }
+    chain.push(first);
     const mirror = bangumiMirrorUrl(first);
-    return vodCoverChain(mirror && mirror !== first ? [first, mirror] : [first], eager);
+    if (mirror && mirror !== first) chain.push(mirror);
+    return vodCoverChain(chain, eager);
 }
 
 function bangumiCover(imagesOrUrl, size) {
@@ -512,6 +533,24 @@ function _coverFillPump(pool) {
     }
 }
 
+/** 补拉失败收尾：解除 seen 锁；按片名匹配 Bangumi 的卡（kazumi 源/Bangumi 收藏）
+ *  失败多为命中 60s 负缓存或瞬时网络错误，此前除用户重进页面外再无触发点，
+ *  表现为「封面一直是占位图、重新搜索也不拉取」。这里在负缓存过期后自动重试
+ *  （options.retryDelay，调用方传 65s），每张卡最多补试 2 次，仍失败保持占位图。 */
+function _coverFillRetryLater(pool, item, isBgmCard) {
+    pool.seen.delete(item.el);
+    const delay = parseInt(pool.opts && pool.opts.retryDelay, 10) || 0;
+    const tries = (item.tries || 0) + 1;
+    if (!isBgmCard || !delay || tries >= 3) return;
+    const el = item.el;
+    const alive = item.alive;
+    setTimeout(() => {
+        if (!alive() || !document.contains(el)) return;
+        pool.queue.unshift({ el, alive, tries });
+        _coverFillPump(pool);
+    }, delay);
+}
+
 async function _coverFillOne(pool, item) {
     const el = $(item.el);
     if (!item.alive() || !document.contains(item.el)) { pool.seen.delete(item.el); return; }
@@ -519,12 +558,16 @@ async function _coverFillOne(pool, item) {
     const id = String(el.data('id') || '');
     const name = String(el.data('name') || '');
     const isKazumi = site.startsWith('kazumi:');
-    // Kazumi 源无 id、按片名拉 Bangumi 封面；其余源需 site+id 走 detailContent。
-    if ((!isKazumi && (!site || !id)) || (isKazumi && !name)) { pool.seen.delete(item.el); return; }
+    // Bangumi 账号收藏卡（site='bangumi'）：detailContent 无此站点必失败（L2_SITE_NOT_FOUND），
+    // 此前缺图条目永远补不回；改按片名走 Bangumi 匹配（与 kazumi 卡同一管线，含缓存）
+    const isBgmCard = isKazumi || site === 'bangumi';
+    // Kazumi/Bangumi 源按片名拉封面；其余源需 site+id 走 detailContent。
+    if ((!isBgmCard && (!site || !id)) || (isBgmCard && !name)) { pool.seen.delete(item.el); return; }
     let pic = '';
     try {
-        if (isKazumi && typeof Kazumi !== 'undefined' && Kazumi.getBangumiCover) {
-            // Kazumi 源列表无源封面：按片名从 Bangumi 拉取（内存 + localStorage 缓存去重，T73）
+        if (isBgmCard && typeof Kazumi !== 'undefined' && Kazumi.getBangumiCover) {
+            // Kazumi 源列表无源封面 / Bangumi 收藏条目缺 images：按片名从 Bangumi 拉取
+            // （内存 + localStorage 缓存去重，T73）
             pic = normalizePic(await Kazumi.getBangumiCover(name));
         } else {
             const d = await doAction('detailContent', { site, ids: JSON.stringify([id]) });
@@ -532,11 +575,11 @@ async function _coverFillOne(pool, item) {
             pic = normalizePic(vod && vod.vod_pic);
         }
     } catch (e) {
-        pool.seen.delete(item.el);
+        _coverFillRetryLater(pool, item, isBgmCard);
         return;
     }
     if (!pic || !item.alive() || !document.contains(item.el)) {
-        pool.seen.delete(item.el);
+        _coverFillRetryLater(pool, item, isBgmCard);
         return;
     }
     // 缓存补拉结果：列表重绘（如搜索切源）可直接复用，避免重复 detailContent
@@ -548,13 +591,13 @@ async function _coverFillOne(pool, item) {
     }
     el.removeAttr('data-cover-missing');
     // eager：补上的封面立即加载（此前 lazy 在隐藏/折叠区不触发，切源后看着「加载不出」）
-    // Bangumi 封面（lain.bgm.tv）官方优先、镜像兜底；其余源普通 img
-    const html = isKazumi && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic)
+    // Bangumi 封面（lain 三域名，含镜像）走代理/镜像兜底链；其余源普通 img
+    const html = isBgmCard && isBangumiCoverUrl(pic)
         ? bangumiCoverImg(pic, true)
         : vodCoverImg(pic, true);
     el.find('.vod-cover').html(html);
     // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）
-    if (String(site).startsWith('kazumi:')) {
+    if (isKazumi) {
         el.find('.vod-cover').prepend(`<div class="kazumi-badge">${escHtml(String(site).slice(7))}</div>`);
     }
     // 补拉完成回调：调用方（如历史页）可借此把封面回写记录并持久化
@@ -599,6 +642,12 @@ async function pageSizeOf(key) {
 function invalidatePageSizeCache() {
     _pageSizeCache = {};
     if (typeof Home !== 'undefined' && Home.invalidatePageCaches) Home.invalidatePageCaches(); // T77
+    // App 页级缓存 TTL 一并作废：否则 60 秒内切回首页/推荐时 skipEnter 会短路
+    // onViewShown/Popular.enter，每页数量的脏标记重载不执行，表现为「改完不立即生效」
+    if (typeof App !== 'undefined' && App._viewLoadedAt) {
+        App._viewLoadedAt.home = 0;
+        App._viewLoadedAt.popular = 0;
+    }
 }
 
 /**
@@ -673,6 +722,10 @@ function closeDialog(id) {
     // 确认框被 Esc/其他方式关闭时按取消处理，避免 Promise 挂死
     if (id === 'confirmDialog' && _confirmResolve) {
         const r = _confirmResolve; _confirmResolve = null; r(false);
+    }
+    // 下载删除三选弹窗同理：被 Esc 关闭时按取消处理（resolve 由 downloads.js 挂到 window）
+    if (id === 'dlRemoveDialog' && window._dlRemoveResolve) {
+        const r = window._dlRemoveResolve; window._dlRemoveResolve = null; r(null);
     }
 }
 
@@ -910,7 +963,10 @@ const _TEXT_SCALE_BASE = [
     ['.detail-meta, .detail-sub', 13], ['.detail-desc', 14],
 ];
 let _textScaleEl = null;
+let _textScalePct = 0;
 function _applyTextScale(pct) {
+    if (pct === _textScalePct) return; // 同值重复注入会重建样式表引发布局抖动
+    _textScalePct = pct;
     if (_textScaleEl) { _textScaleEl.remove(); _textScaleEl = null; }
     if (!pct || pct === 100) return;
     const rules = _TEXT_SCALE_BASE
@@ -943,13 +999,42 @@ async function applyMisansFont(enabled) {
     } catch (e) { /* 注入失败回退系统字体，不影响使用 */ }
 }
 
+/**
+ * 毛玻璃两段式应用：一步到位（同帧切半透明背景 + backdrop-filter）时，Chromium 要为
+ * 几十个元素重建模糊合成层，与背景过渡相互扰动会来回闪（表现为「闪烁约一秒才出现」）。
+ * 拆成两步：先落半透明背景（普通重绘），下一帧再挂模糊层；切换期间用 .glass-switching
+ * 临时禁掉全部 transition/animation，让层重建静默完成（CSS 见 ui.css 毛玻璃段）。
+ */
+let _glassBlurTimer = 0;
+let _glassSwitchTimer = null;
+let _lastZoomPct = 0;   // 上次下发的界面缩放（同值跳过，见 applySkin）
+let _layoutSig = '';    // 影响标题截断的排版签名（界面缩放:文字缩放）
+function applyGlass(on) {
+    const el = document.documentElement;
+    const want = on === true;
+    if (want === el.classList.contains('glass-on')) return; // 状态未变（改其他皮肤项触发 applySkin）
+    el.classList.add('glass-switching');
+    if (want) {
+        el.classList.add('glass-on');                      // 第一步：半透明背景
+        cancelAnimationFrame(_glassBlurTimer);
+        _glassBlurTimer = requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (el.classList.contains('glass-on')) el.classList.add('glass-blur');
+        }));
+    } else {
+        el.classList.remove('glass-blur');
+        el.classList.remove('glass-on');
+    }
+    clearTimeout(_glassSwitchTimer);
+    _glassSwitchTimer = setTimeout(() => el.classList.remove('glass-switching'), 450);
+}
+
 function applySkin(opts) {
     Object.assign(_skin, opts || {});
     const el = document.documentElement;
     // 禁用动画：全局关掉 transition/animation
     el.classList.toggle('no-anim', _skin.animEnabled === false);
     // 毛玻璃效果：卡片/面板/侧栏启用 backdrop-filter 模糊，透出下层内容
-    el.classList.toggle('glass-on', _skin.glass === true);
+    applyGlass(_skin.glass === true);
     // 自定义主题色优先于内置预设；无自定义时才落 data-color
     if (_skin.customColor) {
         delete el.dataset.color;
@@ -963,11 +1048,17 @@ function applySkin(opts) {
     // 根因：CSS zoom 施加在 <html> 上会破坏 unicode-range 子集化 webfont 的 @font-face
     // 匹配，导致 MiSans 回退系统字体（"设置字体大小后 MiSans 失效"的 bug）。
     // 页面级缩放在 CSS 字体匹配之上生效，等比缩放整个 UI 且不影响字体匹配。
+    // 同值重复设置仍会触发整页重栅格化（改主题色/毛玻璃开关时表现为「页面刷新了一下」），
+    // 记住上次值，仅在缩放真正变化时下发。
     const fsPct = _fontSizePct(_skin.fontSize);
     el.style.zoom = ''; // 清除历史遗留的 CSS zoom
-    if (window.yuki && window.yuki.setZoomFactor) window.yuki.setZoomFactor(fsPct / 100);
+    if (window.yuki && window.yuki.setZoomFactor && _lastZoomPct !== fsPct) {
+        _lastZoomPct = fsPct;
+        window.yuki.setZoomFactor(fsPct / 100);
+    }
     // 字体大小：数值百分比仅缩放文字
-    _applyTextScale(_fontSizePct(_skin.textSize));
+    const tsPct = _fontSizePct(_skin.textSize);
+    _applyTextScale(tsPct);
     // 自定义文字颜色：覆写主文字变量；恢复默认时移除行内覆写
     if (_skin.textColor) {
         el.style.setProperty('--md-on-surface', _skin.textColor);
@@ -987,8 +1078,14 @@ function applySkin(opts) {
         delete document.body.dataset.dim;
     }
     _applyColorMode();
-    // 字号/界面缩放变化会改变卡片列宽与文字宽度：按新布局重新精确截断标题（T74 收尾）
-    refitVodTitles();
+    // 字号/界面缩放变化会改变卡片列宽与文字宽度：按新布局重新精确截断标题（T74 收尾）。
+    // 其余皮肤项（主题色/毛玻璃/壁纸）不影响文字测量——跳过全量重截，避免无关开关
+    // 触发几十上百张卡的布局抖动（毛玻璃开关「卡一下」的来源之一）。
+    const sig = `${fsPct}:${tsPct}`;
+    if (sig !== _layoutSig) {
+        _layoutSig = sig;
+        refitVodTitles();
+    }
 }
 
 /** 明暗模式落到 html.dark 类（CSS 里深浅两套变量均挂在此类上）。 */

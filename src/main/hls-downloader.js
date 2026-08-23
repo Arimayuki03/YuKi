@@ -122,11 +122,129 @@ class HlsDownloader extends EventEmitter {
     }
 
     setDir(dir) { this.dir = dir || path.join(os.homedir(), 'Downloads'); }
+
+    /** 更换下载目录时迁移在途任务：杀掉活跃进程 → 成品/临时分片目录随迁 →
+     *  更新任务路径并重新排队。分片并发模式重跑时跳过已存在分片（断点续传）；
+     *  ffmpeg 顺序拉流模式无法续传，从头重下（分片模式是默认，concurrency>1）。
+     *  已结束（complete/error）任务的成品文件同样随迁。 */
+    migrateDir(newDir) {
+        if (!newDir) return 0;
+        this.dir = newDir;
+        try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { /* ignore */ }
+        const move = (src, dest) => {
+            try {
+                if (!fs.existsSync(src)) return false;
+                fs.renameSync(src, dest);
+                return true;
+            } catch (e) {
+                try {
+                    if (fs.statSync(src).isDirectory()) {
+                        fs.cpSync(src, dest, { recursive: true });
+                        fs.rmSync(src, { recursive: true, force: true });
+                    } else {
+                        fs.copyFileSync(src, dest);
+                        fs.rmSync(src, { force: true });
+                    }
+                    return true;
+                } catch (e2) { return false; }
+            }
+        };
+        let moved = 0;
+        for (const t of this._tasks.values()) {
+            const name = path.basename(t._dest);
+            const newDest = path.join(newDir, name);
+            const oldDest = t._dest;
+            const finished = ['complete', 'error', 'removed'].includes(t.status);
+            if (finished) {
+                if (move(oldDest, newDest)) moved++;
+                t._dest = newDest;
+                t.files = [newDest];
+                continue;
+            }
+            // 在途：杀进程、停速度采样，移完文件再重新排队。代数 +1 让在飞的
+            // 异步续体（ffmpeg exit 重试/分片 worker）自弃，不会回写旧目录
+            t._gen = (t._gen || 0) + 1;
+            if (t._proc) { try { t._proc.kill(); } catch (e) { /* ignore */ } t._proc = null; }
+            if (t._speedTimer) { clearInterval(t._speedTimer); t._speedTimer = null; }
+            if (move(oldDest, newDest)) moved++;
+            move(oldDest + '.incomplete' + path.extname(oldDest), newDest + '.incomplete' + path.extname(newDest));
+            // 广告过滤临时播放列表重启后会重新生成，直接清理
+            if (t._adTemp) { try { fs.rmSync(t._adTemp, { force: true }); } catch (e) { /* ignore */ } }
+            const newSegs = `${newDest}.${t.gid}.segs`;
+            if (move(t._segsDir, newSegs)) moved++;
+            t._dest = newDest;
+            t._segsDir = newSegs;
+            t.files = [newDest];
+            t._adTemp = null;
+            t._input = null;
+            t._retried = false;       // 重启后 copy/转码兜底重试额度复位
+            t._transcodeRetried = false;
+            t.speed = 0;
+            // 暂停状态保持不动（分片已随迁，继续时断点续传）；active/waiting 重新排队
+            if (t.status === 'paused') continue;
+            t.status = 'waiting';
+            if (!this._pending.includes(t)) this._pending.push(t);
+        }
+        this._pump();
+        return moved;
+    }
     setConcurrency(n) { this.concurrency = Math.max(1, Math.min(32, n | 0)); }
     /** 调整同时进行的任务数上限（设置页「并发任务数」）；调大后立即补位启动排队任务。 */
     setMaxActive(n) {
         this.maxActive = Math.max(1, Math.min(10, n | 0));
         this._pump();
+    }
+
+    /** 暂停任务（page 源/m3u8 走此通道，此前无暂停能力导致「暂停不了」）：
+     *  活跃任务杀进程并代数 +1 让在飞续体（分片 worker/ffmpeg exit 回调）自弃，
+     *  分片目录与 .incomplete 保留供继续时断点续传；排队任务直接出队。
+     *  返回是否暂停成功（任务存在且处于 active/waiting）。 */
+    pause(gid) {
+        const t = this._tasks.get(gid);
+        if (!t || !['active', 'waiting'].includes(t.status)) return false;
+        t._gen = (t._gen || 0) + 1;
+        if (t._proc) { try { t._proc.kill(); } catch (e) { /* ignore */ } t._proc = null; }
+        if (t._speedTimer) { clearInterval(t._speedTimer); t._speedTimer = null; }
+        this._pending = this._pending.filter((x) => x !== t);
+        t.status = 'paused';
+        t.speed = 0;
+        console.log(`[hls] ${t.name}: 已暂停（分片保留，可断点续传）`);
+        this._pump(); // 释放的活跃槽位立即补位
+        return true;
+    }
+
+    /** 继续暂停的任务：重新排队等待调度。分片并发模式复用已存在分片（断点续传）；
+     *  ffmpeg 顺序拉流模式无法续传，从头重下（与 migrateDir 语义一致）。
+     *  返回是否唤醒成功（任务存在且处于 paused）。 */
+    unpause(gid) {
+        const t = this._tasks.get(gid);
+        if (!t || t.status !== 'paused') return false;
+        t.status = 'waiting';
+        t._retried = false;       // copy/转码兜底重试额度复位（同 migrateDir）
+        t._transcodeRetried = false;
+        t._adTemp = null;         // 广告过滤临时播放列表重新生成
+        t._input = null;
+        if (!this._pending.includes(t)) this._pending.push(t);
+        this._pump();
+        return true;
+    }
+
+    /** 暂停全部活跃/排队任务，返回暂停数量。 */
+    pauseAll() {
+        let n = 0;
+        for (const t of [...this._tasks.values()]) {
+            if (this.pause(t.gid)) n++;
+        }
+        return n;
+    }
+
+    /** 继续全部暂停中的任务（超并发的重新排队），返回唤醒数量。 */
+    unpauseAll() {
+        let n = 0;
+        for (const t of [...this._tasks.values()]) {
+            if (this.unpause(t.gid)) n++;
+        }
+        return n;
     }
 
     _activeCount() {
@@ -178,6 +296,7 @@ class HlsDownloader extends EventEmitter {
             _segsDir: `${dest}.${gid}.segs`, // 分片临时目录（M-10：带 gid，同名任务并发互不覆盖）
             _segments: null, _totalSegs: 0, _downloaded: 0, _segBytes: 0,
             _speedTimer: null, _speedLastBytes: 0, _speedLastTs: 0,
+            _gen: 0, // 任务代数：目录迁移杀进程时 +1，旧的异步续体（ffmpeg exit 回调/分片 worker）据此自弃
         };
         this._tasks.set(gid, task);
         if (queued) {
@@ -193,10 +312,11 @@ class HlsDownloader extends EventEmitter {
     }
 
     async _run(task) {
+        const gen = task._gen || 0;
         task.duration = await probeDuration(task.url, task.header);
-        if (task.status === 'removed') return;
+        if (task.status === 'removed' || task._gen !== gen) return;
         if (task.adFilter) await this._applyAdFilter(task); // 过滤广告（失败静默走原地址）
-        if (task.status === 'removed') return;
+        if (task.status === 'removed' || task._gen !== gen) return;
         this._spawn(task, true);
     }
 
@@ -305,6 +425,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 并发池下载分片到临时目录。单分片失败重试 2 次。 */
     async _downloadSegments(task, segments, concurrency) {
+        const gen = task._gen || 0;
         const segsDir = task._segsDir;
         fs.mkdirSync(segsDir, { recursive: true });
         task._totalSegs = segments.length;
@@ -328,17 +449,26 @@ class HlsDownloader extends EventEmitter {
         let failed = false; // 任一 worker 失败即置位，其余 worker 检测后退出
         const downloadOne = async () => {
             while (idx < segments.length) {
-                if (task.status === 'removed' || failed) return;
+                if (task.status === 'removed' || task._gen !== gen || failed) return;
                 const seg = segments[idx++];
                 const segFile = path.join(segsDir, `seg-${String(seg.index).padStart(6, '0')}.ts`);
+                // 断点续传（目录迁移/进程重启恢复）：已存在且非空的分片直接计入进度，
+                // 不再重复拉取（分片文件按序号命名，playlist 未变时可安全复用）
+                try {
+                    if (fs.existsSync(segFile) && fs.statSync(segFile).size > 0) {
+                        task._downloaded++;
+                        task.percent = Math.min(99, Math.round(task._downloaded / task._totalSegs * 1000) / 10);
+                        continue;
+                    }
+                } catch (e) { /* stat 失败按未下载处理 */ }
                 let ok = false;
                 for (let retry = 0; retry < 3 && !ok; retry++) {
-                    if (task.status === 'removed' || failed) return;
+                    if (task.status === 'removed' || task._gen !== gen || failed) return;
                     try {
                         const resp = await proxyFetch(seg.url, { headers, signal: AbortSignal.timeout(30000), redirect: 'follow' });
                         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                         const buf = Buffer.from(await resp.arrayBuffer());
-                        if (task.status === 'removed' || failed) return; // 下载期间被取消
+                        if (task.status === 'removed' || task._gen !== gen || failed) return; // 下载期间被取消/迁移
                         fs.writeFileSync(segFile, buf);
                         task._segBytes += buf.length;
                         ok = true;
@@ -361,6 +491,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 用 ffmpeg concat demuxer 合并分片为最终文件。withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */
     async _concatSegments(task, segments, withBsf = true) {
+        const gen = task._gen || 0;
         const segsDir = task._segsDir;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
         // 生成 concat 列表文件（ffmpeg concat demuxer 要求正斜杠路径，Windows 反斜杠会被当转义符）
@@ -376,12 +507,13 @@ class HlsDownloader extends EventEmitter {
             const args = ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy'];
             if (withBsf) args.push('-bsf:a', 'aac_adtstoasc');
             args.push(part);
-            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
             task._proc = proc;
             let errBuf = '';
             proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
             proc.on('exit', (code) => {
                 task._proc = null;
+                if (task._gen !== gen) return reject(new Error('migrating')); // 目录迁移杀进程：不自弃会按旧路径重试/报错
                 if (code === 0 && fs.existsSync(part)) {
                     try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
                     fs.renameSync(part, task._dest);
@@ -400,17 +532,19 @@ class HlsDownloader extends EventEmitter {
 
     /** 转码兜底合并（copy 失败后以重编码方式重试） */
     _concatTranscode(task, segments) {
+        const gen = task._gen || 0;
         const segsDir = task._segsDir;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
         const listFile = path.join(segsDir, 'concat.txt');
         return new Promise((resolve, reject) => {
             const args = ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', part];
-            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+            const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
             task._proc = proc;
             let errBuf = '';
             proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
             proc.on('exit', (code) => {
                 task._proc = null;
+                if (task._gen !== gen) return reject(new Error('migrating')); // 目录迁移杀进程：旧续体自弃
                 if (code === 0 && fs.existsSync(part)) {
                     try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
                     fs.renameSync(part, task._dest);
@@ -425,10 +559,14 @@ class HlsDownloader extends EventEmitter {
 
     /** 分片并发模式主流程：解析 → 下载 → 合并 → 清理。加密流/解析失败时回退 ffmpeg 模式。 */
     async _runConcurrent(task, concurrency) {
+        const gen = task._gen || 0;
+        // 迁移（gen 变化）后旧续体直接退出且不清理分片目录（随迁续传的载体）；
+        // removed 则按原语义清理临时产物
+        const dead = () => task.status === 'removed' || task._gen !== gen;
         try {
             // 1. 解析播放列表
             const { segments, isEncrypted, totalDuration } = await this._parsePlaylist(task.url, task.header, task.adFilter);
-            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            if (dead()) { if (task.status === 'removed') this._cleanSegsDir(task); return; }
             // 加密流回退 ffmpeg 模式（JS 层解密复杂且易出错，ffmpeg 自动解密）
             if (isEncrypted) {
                 console.log(`[hls] ${task.name}: 加密流，回退 ffmpeg 模式`);
@@ -443,10 +581,10 @@ class HlsDownloader extends EventEmitter {
             console.log(`[hls] ${task.name}: 分片并发模式，${segments.length} 个分片，并发 ${concurrency}`);
             // 2. 并发下载分片
             await this._downloadSegments(task, segments, concurrency);
-            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            if (dead()) { if (task.status === 'removed') this._cleanSegsDir(task); return; }
             // 3. 合并分片
             await this._concatSegments(task, segments);
-            if (task.status === 'removed') { this._cleanSegsDir(task); this._cleanAdTemp(task); return; }
+            if (dead()) { if (task.status === 'removed') { this._cleanSegsDir(task); this._cleanAdTemp(task); } return; }
             // 4. 成功
             task.status = 'complete';
             task.percent = 100;
@@ -455,7 +593,7 @@ class HlsDownloader extends EventEmitter {
             this._cleanAdTemp(task);
             this.emit('completed', this._flatten(task));
         } catch (e) {
-            if (task.status === 'removed') { this._cleanSegsDir(task); return; }
+            if (dead()) { if (task.status === 'removed') this._cleanSegsDir(task); return; }
             console.warn(`[hls] ${task.name}: 分片并发失败，回退 ffmpeg 模式: ${e.message}`);
             // 清理分片临时目录
             this._cleanSegsDir(task);
@@ -468,6 +606,7 @@ class HlsDownloader extends EventEmitter {
 
     /** spawn ffmpeg 合成；withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */
     _spawn(task, withBsf) {
+        const gen = task._gen || 0;
         // 临时名保留真实扩展名：ffmpeg 按扩展名推断容器格式，.part 后缀会导致
         // 「Unable to choose an output format」直接失败；完成后 rename 为终名
         const part = task._dest + '.incomplete' + path.extname(task._dest);
@@ -482,7 +621,7 @@ class HlsDownloader extends EventEmitter {
         task._lastProgressBytes = null;
         task._progressBuffer = '';
         // ffmpeg 不读系统代理：经环境变量注入（直连不可达的环境下必需）
-        const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+        const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
         task._proc = proc;
         proc.stderr.on('data', (chunk) => {
             // ffmpeg 进度行 "size=123kB time=00:12:34.56" → 按时间差分估算速度
@@ -524,6 +663,8 @@ class HlsDownloader extends EventEmitter {
         });
         proc.on('exit', (code) => {
             task._proc = null;
+            // 目录迁移杀进程：旧续体自弃，不按旧路径重试/报错（新代数续体已由 _pump 重启）
+            if (task._gen !== gen) return;
             if (task.status === 'removed') return;
             if (code === 0 && fs.existsSync(part)) {
                 try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
@@ -548,6 +689,7 @@ class HlsDownloader extends EventEmitter {
             this.emit('error', this._flatten(task));
         });
         proc.on('error', () => {
+            if (task._gen !== gen) return;
             task.status = 'error';
             task.errorMessage = 'ffmpeg 启动失败';
             this._cleanAdTemp(task);
@@ -557,6 +699,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 转码兜底：copy 失败时以重编码方式重试，兼容封装/编码异常的源 */
     _spawnTranscode(task) {
+        const gen = task._gen || 0;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
         const args = ['-hide_banner', '-y'];
         const hs = ffmpegHeaders(task.header);
@@ -567,7 +710,7 @@ class HlsDownloader extends EventEmitter {
         task._lastProgressTime = null;
         task._lastProgressBytes = null;
         task._progressBuffer = '';
-        const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() } });
+        const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
         task._proc = proc;
         let errBuf = '';
         proc.stderr.on('data', (chunk) => {
@@ -585,7 +728,7 @@ class HlsDownloader extends EventEmitter {
         });
         proc.on('exit', (code) => {
             task._proc = null;
-            if (task.status === 'removed') return;
+            if (task.status === 'removed' || task._gen !== gen) return;
             if (code === 0 && fs.existsSync(part)) {
                 try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
                 fs.renameSync(part, task._dest);
@@ -604,6 +747,7 @@ class HlsDownloader extends EventEmitter {
             this.emit('error', this._flatten(task));
         });
         proc.on('error', () => {
+            if (task._gen !== gen) return;
             task.status = 'error';
             task.errorMessage = 'ffmpeg 启动失败';
             this._cleanAdTemp(task);

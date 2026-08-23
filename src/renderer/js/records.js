@@ -6,7 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle */
+/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast */
 
 async function recGet(key) {
     try {
@@ -258,15 +258,18 @@ function recCard(v, editable, withTags, playCountByName) {
         : '';
     // 封面：Kazumi 源历史卡无源封面，先复用 Bangumi 封面缓存（T73 补拉成功的结果）
     const fileSite = String(v.site || '');
-    const isFileRecord = fileSite === 'local' || fileSite === 'download';
+    // 直链（site='direct'）与本地/下载文件同待遇：vodId 存播放 URL，异步截帧作封面
+    const isFileRecord = fileSite === 'local' || fileSite === 'download' || fileSite === 'direct';
     let pic = isFileRecord ? '' : (v.pic || '');
     if (!pic && String(v.site || '').startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
         pic = Kazumi.getCachedBangumiCover(v.name) || '';
     }
     // T76：Bangumi 封面（官方 lain.bgm.tv）官方优先、镜像 lain.bangumi.pro 兜底；其余源普通 img
-    const isBgmCover2 = pic && /(^|\/)lain\.(bgm\.tv|bangumi\.tv)\//i.test(pic);
+    // （正则同样接纳 lain.bangumi.tv 与镜像 lain.bangumi.pro：历史记录持久化的 pic 可能是任一域名）
+    const isBgmCover2 = pic && isBangumiCoverUrl(pic);
     const coverHtml = isBgmCover2 ? bangumiCoverImg(pic) : vodCoverImg(pic);
-    // 本地文件（site='local'）与下载文件（site='download'）：vodId 存的是本地路径，异步抓帧后替换占位图
+    // 本地文件（site='local'）与下载文件（site='download'）：vodId 存的是本地路径，异步抓帧后替换占位图；
+    // 直链（site='direct'）：vodId 存播放 URL，fillLocalCovers → yuki:file-thumb 的 URL 分支截帧
     const isLocal = isFileRecord;
     // 历史卡播放信息（T73）：播放卡显示 集名 · 时长 · 播放时间；浏览卡只显示打开时间
     const isPlay = v.kind === 'play' || (v.playCount || 0) > 0;
@@ -495,7 +498,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     const site = String(el.data('site') || '');
                     if (site === 'local' && window.yuki && window.yuki.filePush) {
                         window.yuki.filePush(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
+                            if (r && r.ok) localPlayToast(r);
                             else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
                             else warnToast('播放失败');
@@ -504,11 +507,23 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     }
                     if (site === 'download' && window.yuki && window.yuki.download && window.yuki.download.play) {
                         window.yuki.download.play(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) warnToast(r.viaExternal ? '已交由指定播放器播放' : '已在 mpv 窗口播放');
+                            if (r && r.ok) localPlayToast(r);
                             else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
                             else warnToast('播放失败');
                         }).catch(() => warnToast('播放失败'));
                         return;
+                    }
+                    // 直链记录：vodId 存播放 URL，重新交给播放链路（无本地文件可 filePush）
+                    if (site === 'direct' && window.yuki && window.yuki.playUrl) {
+                        const directUrl = String(el.data('id') || '');
+                        if (directUrl) {
+                            window.yuki.playUrl(directUrl, { title: String(el.data('name') || '直链播放') }).then((r) => {
+                                if (r && r.ok) localPlayToast(r);
+                                else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
+                                else warnToast('播放失败');
+                            }).catch(() => warnToast('播放失败'));
+                            return;
+                        }
                     }
                     Detail.open(site, String(el.data('id')), String(el.data('name')));
                 });
@@ -629,6 +644,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             if (typeof fillMissingCovers === 'function') {
                 fillMissingCovers(`#${viewName}-grid`, null, {
                     concurrency: 4, poolKey: 'rec-' + storeKey,
+                    // Kazumi/Bangumi 卡补拉失败多为 60s 负缓存或瞬时错误：到期后自动重试（共 3 次尝试）
+                    retryDelay: 65000,
                     onOne: (site, name, pic) => {
                         if (!String(site).startsWith('kazumi:') || !name || !pic) return;
                         // L-30：回写前重读当前记录再合并——list 是 render 开始时的快照，

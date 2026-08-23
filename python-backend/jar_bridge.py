@@ -647,7 +647,9 @@ class JarBridge:
                 pass
         cmd = [java_bin, '-cp', classpath, main_class, '-o', tmp_jvm_path, jar_path]
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=120)
+            # creationflags：GUI 宿主下隐藏 java 子进程的控制台窗口（闪黑窗）
+            r = subprocess.run(cmd, capture_output=True, timeout=120,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             if r.returncode != 0:
                 err_msg = r.stderr.decode('utf-8', 'replace')[:300]
                 logger.error('dex2jar failed for %s (exit code %d): %s', jar_path, r.returncode, err_msg)

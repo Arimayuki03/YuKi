@@ -1652,17 +1652,17 @@ body.has-wallpaper .md-select-sm { background-position:right 10px center; backgr
 
 /* ===== 毛玻璃效果（html.glass-on）：卡片/面板/侧栏背景半透明 + backdrop-filter 模糊 =====
    开启后各层用 color-mix 掺入透明度，再叠加 backdrop-filter 模糊透出下层内容。
+   两段式开关（common.js applyGlass）：glass-on 先落半透明背景，下一帧再补 glass-blur
+   挂模糊层——一步到位时几十个元素的模糊合成层重建与背景过渡同帧相互扰动，
+   表现为开启瞬间闪烁约一秒；切换期间 glass-switching 临时禁全部过渡/动画兜底。
    T54 注记：仅对静态容器加 backdrop-filter，避开会触发 opacity/transform 动画的祖先
-   （#view-detail 视图入场动画已排除；本地文件动画由 html.glass-on 全局禁用规则兜底，见下方），
-   防止 Chromium 合成层模糊采样闪烁。 */
+   （#view-detail 视图入场动画已排除），防止 Chromium 合成层模糊采样闪烁。 */
 html.glass-on {
     --glass-veil: 72%;   /* 容器保留的不透明度：越低越通透 */
     --glass-blur: 14px;
 }
 html.glass-on #main-nav {
     background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil), transparent);
-    backdrop-filter:blur(var(--glass-blur));
-    -webkit-backdrop-filter:blur(var(--glass-blur));
 }
 html.glass-on .tool-card,
 html.glass-on .vod-card,
@@ -1673,6 +1673,17 @@ html.glass-on .bangumi-info-card,
 html.glass-on .detail-overview-card,
 html.glass-on .detail-episodes-panel {
     background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil), transparent);
+}
+/* 模糊层独立成 glass-blur 类（applyGlass 第二步再挂；见上方两段式注释） */
+html.glass-on.glass-blur #main-nav,
+html.glass-on.glass-blur .tool-card,
+html.glass-on.glass-blur .vod-card,
+html.glass-on.glass-blur .live-item,
+html.glass-on.glass-blur .history-item,
+html.glass-on.glass-blur .dl-item,
+html.glass-on.glass-blur .bangumi-info-card,
+html.glass-on.glass-blur .detail-overview-card,
+html.glass-on.glass-blur .detail-episodes-panel {
     backdrop-filter:blur(var(--glass-blur));
     -webkit-backdrop-filter:blur(var(--glass-blur));
 }
@@ -1680,21 +1691,33 @@ html.glass-on .detail-episodes-panel {
 html.glass-on .md-dialog,
 html.glass-on .char-float-panel {
     background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil), transparent);
+}
+html.glass-on.glass-blur .md-dialog,
+html.glass-on.glass-blur .char-float-panel {
     backdrop-filter:blur(var(--glass-blur));
     -webkit-backdrop-filter:blur(var(--glass-blur));
 }
 /* 壁纸模式与毛玻璃同时开启时：壁纸遮罩已把容器降透明度，此处只补模糊即可 */
-html.glass-on body.has-wallpaper .tool-card,
-html.glass-on body.has-wallpaper .vod-card,
-html.glass-on body.has-wallpaper .live-item,
-html.glass-on body.has-wallpaper .history-item,
-html.glass-on body.has-wallpaper #main-nav {
+html.glass-on.glass-blur body.has-wallpaper .tool-card,
+html.glass-on.glass-blur body.has-wallpaper .vod-card,
+html.glass-on.glass-blur body.has-wallpaper .live-item,
+html.glass-on.glass-blur body.has-wallpaper .history-item,
+html.glass-on.glass-blur body.has-wallpaper #main-nav {
     backdrop-filter:blur(var(--glass-blur));
     -webkit-backdrop-filter:blur(var(--glass-blur));
 }
-/* 毛玻璃开启时关闭视图/卡片入场动画：opacity/transform 动画与自身 backdrop-filter
-   合成会致 Chromium 模糊采样抖动闪烁（同 T54，只是模糊此时覆盖全部视图与卡片）。
-   仅停用带模糊层的入场动画，其余过渡（悬停、对话框）保持不变。 */
+/* 毛玻璃切换瞬间：层重建期间禁掉一切过渡/动画，避免与模糊合成层重建叠加闪烁 */
+html.glass-switching,
+html.glass-switching *,
+html.glass-switching *::before,
+html.glass-switching *::after {
+    transition:none !important;
+    animation:none !important;
+}
+/* 毛玻璃与入场动画：视图切换/卡片入场动画的 opacity/transform 会让 Chromium 在动画
+   期间反复重建各卡 backdrop-filter 的采样层，配合壁纸表现为「遮罩闪烁约一秒、模糊
+   才补上」（安装包实测复现）。仅禁用这两个携带/包裹模糊层的入场动画，对话框、
+   toast、悬浮过渡等其余动画保持不变。 */
 html.glass-on .view.active,
 html.glass-on .vod-card {
     animation:none !important;

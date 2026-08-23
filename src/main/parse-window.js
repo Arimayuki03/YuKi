@@ -635,6 +635,7 @@ class ParseWindow {
                     show: true, width: 900, height: 700,   // 可见窗口，用户可交互过验证
                     title: '验证码验证',
                     autoHideMenuBar: true,
+                    icon: require('./app-icon').windowIcon(), // 预缩多表示图标（exe 图标插值缩会糊/残缺）
                     webPreferences: {
                         partition: `parse-${slot}`, // 独立槽位会话：与解析互不冲突
                         contextIsolation: true,

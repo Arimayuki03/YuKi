@@ -94,10 +94,10 @@ function getProxyUrl() {
             try {
                 const reg = 'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"';
                 const en = /ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i.exec(
-                    execSync(`${reg} /v ProxyEnable`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString());
+                    execSync(`${reg} /v ProxyEnable`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString());
                 if (en && parseInt(en[1], 16) === 1) {
                     const sv = /ProxyServer\s+REG_SZ\s+(\S+)/i.exec(
-                        execSync(`${reg} /v ProxyServer`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString());
+                        execSync(`${reg} /v ProxyServer`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString());
                     if (sv) {
                         let s = sv[1];
                         // 「http=host:port;https=host:port」分协议形式：取 https 段

@@ -93,8 +93,10 @@ const My = {
         try {
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
             if (!token) {
+                // 无 Token 只置空内存缓存（本会话不再展示账号收藏），不写持久缓存——
+                // 此前 _saveBgmCol([]) 会把空列表永久落盘，用户后配 Token 时收藏页
+                // 命中空持久缓存显示「暂无收藏」，需再手动同步一次才恢复。
                 this._bgmCache = []; this._bgmCacheTs = Date.now();
-                this._saveBgmCol([]);
                 return [];
             }
             const rsp = await doAction('kazumiBangumiCollections', { token, all: 1 }, '/kazumi/action');
@@ -135,6 +137,17 @@ const My = {
     _saveBgmCol(list) {
         if (typeof localCacheSet !== 'function' || !Array.isArray(list)) return;
         try { localCacheSet(MY_BGMCOL_KEY, list, 0); } catch (e) { /* 缓存失败忽略 */ }
+    },
+
+    /** 作废 Bangumi 收藏缓存（内存 + 持久）并强制重拉，返回最新条目。
+     *  设置页「Bangumi 同步」成功后调用——此前该入口只清内存缓存，_extra() 渲染
+     *  时仍命中 localStorage 旧持久缓存，表现为「设置页同步后收藏页不刷新」。 */
+    async refreshBangumi() {
+        this._bgmCache = null;
+        if (typeof localCacheDel === 'function') { try { localCacheDel(MY_BGMCOL_KEY); } catch (e) { /* ignore */ } }
+        // 同步改变了账号收藏：时间表的收藏过滤集合一并作废
+        if (typeof Timeline !== 'undefined' && Timeline.invalidateColCache) Timeline.invalidateColCache();
+        return this._getBangumiItems(true);
     },
 
     async enter(tab) {

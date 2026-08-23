@@ -231,6 +231,9 @@ const Player = {
         try {
             s = (await window.yuki.settingsGet()) || {};
             if (s.watchStatsEnabled === false) return;
+            // 隐身模式：不写观看统计/最近观看/播放历史（本地文件与下载播放路径均有此判断，
+            // 此前唯独主播放链路漏掉，导致隐身模式下历史照常累积）
+            if (window._incognito) return;
         } catch (e) { /* 默认统计 */ }
         const title = meta.title || '未知影片';
         // 封面/来源尽量从详情页取（无则留空，最近观看卡片走占位图）
@@ -459,6 +462,11 @@ const Player = {
         // 历史/最近观看卡重启后仍能显示封面（Bangumi 缓存本身就是 localStorage 持久化的）。
         if (String(site).startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
             this._curMeta.pic = Kazumi.getCachedBangumiCover(title) || '';
+            // 同步缓存未命中（规则站片名与 Bangumi 官方名不一致等）→ 异步补拉一次：
+            // 播放结束时 _writeWatch 再读缓存即可拿到封面，历史卡不再存空 pic
+            if (!this._curMeta.pic && Kazumi.getBangumiCover) {
+                Kazumi.getBangumiCover(title).catch(() => { /* 失败不影响播放 */ });
+            }
         }
 
         // Kazumi 源分支（kimi UI）：site 为 kazumi:规则名 时走规则引擎解析
@@ -918,7 +926,7 @@ const Player = {
             return;
         }
         const extra = [];
-        if (r && r.anime4k) extra.push('Anime4K 超分已生效');
+        if (r && r.anime4k) extra.push(`Anime4K 超分已生效（${r.anime4kModeLabel || '均衡'}）`);
         if (r && r.simulDl) extra.push('已同步加入后台下载');
         warnToast(extra.length ? `${msg}（${extra.join('，')}）` : msg);
     },

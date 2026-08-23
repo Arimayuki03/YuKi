@@ -18,6 +18,7 @@ const App = {
     // 仅收录只读视图（home/popular/timeline/my-统计）；history/收藏/下载等反映用户操作的视图绝不缓存。
     _cacheableViews: { home: 60000, popular: 60000, timeline: 60000 },
     _viewLoadedAt: {}, // name → 上次 enter 完成时间戳
+    _scrollPos: {},    // name → 离开视图时的 scrollTop（返回时恢复浏览位置）
 
     /** 该视图是否在 TTL 内已加载过（可跳过 enter 重拉）。 */
     _viewFresh(name) {
@@ -33,16 +34,33 @@ const App = {
         // 旧收藏路由并入「我的」收藏页签（左侧独立收藏入口已移除）
         let myTab = null;
         if (name === 'favorites') { name = 'my'; myTab = 'favorites'; }
+        // 切走前保存当前视图滚动位置：.view 靠 display:none 切换，Chromium 会把
+        // 隐藏滚动容器的 scrollTop 归零——详情页返回搜索页等场景将回不到原浏览位置
+        if (name !== this.currentView) {
+            const curEl = document.getElementById('view-' + this.currentView);
+            if (curEl) this._scrollPos[this.currentView] = curEl.scrollTop;
+        }
         this.currentView = name;
         $('.main-nav-item').removeClass('active');
         $(`.main-nav-item[data-view="${name}"]`).addClass('active');
         $('.view').removeClass('active');
         $(`#view-${name}`).addClass('active');
+        // 恢复目标视图上次离开时的浏览位置。display:block 后需等两帧布局建立，
+        // 同步赋值会被重置；详情页每次进入都是新内容，固定回顶部
+        const backTop = (name === 'detail') ? 0 : (this._scrollPos[name] || 0);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            const el = document.getElementById('view-' + name);
+            if (el) el.scrollTop = backTop;
+        }));
         // 页级缓存：可缓存的只读视图在 TTL 内再次切入 → 跳过 enter 网络重拉（refresh=true 强制刷新）
         const forceRefresh = !!(opts && opts.refresh);
         const skipEnter = !forceRefresh && this._cacheableViews[name] && this._viewFresh(name);
         if (name === 'home' && typeof Home !== 'undefined' && Home.onViewShown && !skipEnter) { Home.onViewShown(); this._viewLoadedAt.home = Date.now(); } // T80：设置里改过每页条数，回来自动按新条数重载
-        if (name === 'search') Search.focus();
+        if (name === 'search') {
+            Search.focus();
+            // 改过「每页影片数量-搜索」后回来：按新条数立即重绘现有结果（无需重新搜索）
+            if (Search.onViewShown) Search.onViewShown();
+        }
         if (name === 'downloads') Downloads.enter();
         if (name === 'live') Live.enter();
         if (name === 'history') HistoryView.enter();

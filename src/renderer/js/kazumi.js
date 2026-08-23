@@ -874,8 +874,12 @@ const Kazumi = {
             if (typeof My !== 'undefined' && My._updateSyncProgress) My._updateSyncProgress(0, 0, '拉取 Bangumi 收藏');
             const rsp = await doAction('kazumiBangumiCollections', { token, all: 1 }, '/kazumi/action');
             const n = ((rsp && rsp.items) || []).length;
+            // 与收藏页同步按钮同款语义：作废「我的收藏」持久缓存并强制重拉，再重渲染。
+            // 此前只清内存缓存就 render()，_extra() 非 force 命中 localStorage 旧缓存，
+            // 设置页同步后收藏页永远显示旧数据，必须去收藏页再点一次同步。
             if (typeof My !== 'undefined' && My) {
-                My._bgmCache = null;
+                if (My.refreshBangumi) await My.refreshBangumi();
+                else My._bgmCache = null;
                 if (My._favorites) await My._favorites.render();
             }
             if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
@@ -1032,7 +1036,9 @@ const Kazumi = {
                     // 旧版仅封面格式 [name, url] 迁移：无 id，点击时仍会补搜一次并回填。
                     // 旧缓存存的是 large URL，网格卡用会在 1080p 降采样锯齿（T75）→ 迁移到 card 变体。
                     if (v) this._bgmMatchCache.set(kv[0], { id: 0, cover: this._migrateCover(v) });
-                } else if (v && (v.id || v.cover)) {
+                } else if (v && v.id && v.cover) {
+                    // 只接纳完整条目：id 无封面的残缺条目（搜索点击回填产生）不加载，
+                    // 让 getBangumiMatch 按 id 拉详情自愈，不再被旧缓存永久卡死
                     this._bgmMatchCache.set(kv[0], { id: Number(v.id) || 0, cover: this._migrateCover(v.cover || '') });
                 }
             });
@@ -1045,12 +1051,14 @@ const Kazumi = {
         return (typeof bangumiCover === 'function') ? bangumiCover(String(url || ''), 'card') : String(url || '');
     },
 
-    /** 持久化匹配缓存（无 id 且无封面的空结果不落盘：下次会话可重试；只留最近 500 条防无限增长）。 */
+    /** 持久化匹配缓存（无 id 且无封面的空结果不落盘：下次会话可重试；只留最近 500 条防无限增长）。
+     *  只持久化 id+封面齐全的完整条目——缺封面的残缺条目（点击回填时首条结果无 images）
+     *  落盘会在重启后继续占位且 60s 负缓存救不了它，历史上这正是「封面永久丢失」的根源。 */
     _saveBgmMatchCache() {
         try {
             const entries = [];
             for (const [k, v] of this._bgmMatchCache) {
-                if (v && (v.id || v.cover)) entries.push([k, v]);
+                if (v && v.id && v.cover) entries.push([k, v]);
             }
             localStorage.setItem('kazumi_bgm_cover', JSON.stringify(entries.slice(-500)));
         } catch (e) { /* quota 溢出忽略 */ }
@@ -1087,29 +1095,50 @@ const Kazumi = {
 
     /**
      * 按片名从 Bangumi 拉取首个匹配 {id, cover} 并缓存（搜索页 Kazumi 结果补封面用）。
-     * 命中缓存直接返回；同片名在途搜索只发一次请求；无匹配缓存空对象，
-     * 会话内重绘/切源/点击不再反复打 API。
+     * 命中缓存直接返回；同片名在途搜索只发一次请求。id+封面齐全的匹配长期缓存；
+     * 空匹配/缺封面条目只做 60s 短期负缓存——此前空对象在整个会话内不再重试，且
+     * 搜索页点击回填的 {id, cover:''} 残缺条目（首条结果无 images 时产生）被当成
+     * 完整命中永久短路，历史页 kazumi 封面一次失败后只能去设置清缓存。现改为：
+     * 完整命中要求 id 与 cover 都有；缺封面但带 id 的条目先按 id 拉详情补图，
+     * 失败再按片名重搜。
      */
     async getBangumiMatch(name) {
         const key = String(name || '').trim();
         if (!key) return null;
-        if (this._bgmMatchCache.has(key)) return this._bgmMatchCache.get(key);
+        const cached = this._bgmMatchCache.get(key);
+        if (cached && cached.id && cached.cover) return cached;
+        if (cached && cached.negAt && (Date.now() - cached.negAt) < 60000) return cached;
+        if (cached) this._bgmMatchCache.delete(key); // 过期负缓存/残缺条目：删除后重新拉取
         if (this._bgmMatchInflight.has(key)) return this._bgmMatchInflight.get(key);
         const p = (async () => {
             let match = { id: 0, cover: '' };
             try {
-                const results = await this.bangumiSearch(key, 5);
-                const first = (results || []).find((r) => r && r.images
-                    && (r.images.large || r.images.common || r.images.medium));
-                if (first) {
-                    match = {
-                        // 缓存供卡片补封面用（records/search/补拉均为网格卡）→ 存 card 尺寸变体，
-                        // 避免 1080p 用 large 大幅降采样出现锯齿（T75）。
-                        id: Number(first.id) || 0,
-                        cover: bangumiCover(first.images, 'card'),
-                    };
+                // 残缺条目自愈：旧缓存有 id 无封面时按 id 拉详情取 images，
+                // 免按片名重搜（两次搜索首条可能不同部，导致封面与详情错位）
+                if (cached && cached.id) {
+                    try {
+                        const info = await this.bangumiInfo(cached.id);
+                        if (info && info.id) {
+                            const cv = bangumiCover(info.images, 'card');
+                            if (cv) match = { id: Number(info.id) || 0, cover: cv };
+                        }
+                    } catch (e) { /* 详情失败回退按名重搜 */ }
+                }
+                if (!(match.id && match.cover)) {
+                    const results = await this.bangumiSearch(key, 5);
+                    const first = (results || []).find((r) => r && r.images
+                        && (r.images.large || r.images.common || r.images.medium));
+                    if (first) {
+                        match = {
+                            // 缓存供卡片补封面用（records/search/补拉均为网格卡）→ 存 card 尺寸变体，
+                            // 避免 1080p 用 large 大幅降采样出现锯齿（T75）。
+                            id: Number(first.id) || 0,
+                            cover: bangumiCover(first.images, 'card'),
+                        };
+                    }
                 }
             } catch (e) { /* 搜索失败按空匹配 */ }
+            if (!(match.id && match.cover)) match = { id: 0, cover: '', negAt: Date.now() };
             this._bgmMatchCache.set(key, match);
             this._saveBgmMatchCache();
             this._bgmMatchInflight.delete(key);
@@ -1119,7 +1148,9 @@ const Kazumi = {
         return p;
     },
 
-    /** 记录一次 Bangumi 匹配（点击搜索结果回填缓存，补 id 或封面后下次免搜；幂等）。 */
+    /** 记录一次 Bangumi 匹配（点击搜索结果回填缓存，补 id 或封面后下次免搜；幂等）。
+     *  cover 允许为空（首条结果无 images）：条目只在内存中，getBangumiMatch 会按
+     *  id 拉详情自愈补图，且不会被 _saveBgmMatchCache 持久化成毒缓存。 */
     cacheBangumiMatch(name, id, cover) {
         const key = String(name || '').trim();
         if (!key || !id) return;
@@ -2179,8 +2210,11 @@ Kazumi.webdavRestore = async function (url, username, password) {
         const rsp = await doAction('kazumiWebdavRestore', {
             url, username, password, names: JSON.stringify(names),
         }, '/kazumi/action');
-        if (rsp && rsp.code === 200 && rsp.data) {
-            const d = rsp.data;
+        const d = (rsp && typeof rsp === 'object') ? rsp.data : null;
+        // 空数据/失败都必须走失败提示：后端失败返回 {code:500,msg}，此前空对象 {} 是
+        // truthy 被当成功——网址输错时提示「恢复完成」实际什么都没恢复
+        const gotAny = d && (d.favorites || d.history || d.kazumiRules);
+        if (rsp && rsp.code === 200 && gotAny) {
             if (d.favorites) await window.yuki.settingsSet('favorites', d.favorites);
             if (d.history) await window.yuki.settingsSet('history', d.history);
             if (d.kazumiRules) {
@@ -2193,9 +2227,10 @@ Kazumi.webdavRestore = async function (url, username, password) {
             warnToast('WebDAV 恢复完成');
             return true;
         }
+        warnToast(`WebDAV 恢复失败${rsp && rsp.msg ? `：${rsp.msg}` : '（云端无数据或地址/账号有误）'}`);
         return false;
     } catch (e) {
-        warnToast('WebDAV 恢复失败');
+        warnToast(`WebDAV 恢复失败${e && e.message ? `：${e.message}` : ''}`);
         return false;
     }
 };

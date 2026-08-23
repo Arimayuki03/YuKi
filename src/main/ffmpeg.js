@@ -31,11 +31,11 @@ function findFfmpeg() {
     if (fs.existsSync(vendor)) return vendor;
     try {
         if (WIN) {
-            const out = execSync('where ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync('where ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             const first = out.split(/\r?\n/)[0];
             if (first) return first;
         } else {
-            const out = execSync('command -v ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+            const out = execSync('command -v ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             if (out) return out;
         }
     } catch (e) { /* 不在 PATH */ }
@@ -100,7 +100,7 @@ function ensureFfmpeg() {
             await downloadFile(FFMPEG_URL, archive);
             const tmp = path.join(stage, 'yuki-ffmpeg-extract');
             fs.mkdirSync(tmp, { recursive: true });
-            execSync(`tar -xf "${archive}" -C "${tmp}"`, { stdio: 'ignore' });
+            execSync(`tar -xf "${archive}" -C "${tmp}"`, { stdio: 'ignore', windowsHide: true });
             const found = findFile(tmp, 'ffmpeg.exe');
             if (!found) throw new Error('ffmpeg.exe not found in archive');
             fs.copyFileSync(found, target);
@@ -136,11 +136,11 @@ function makeThumb(videoPath, outJpg) {
         const bin = findFfmpeg();
         if (!bin) return resolve(false);
         const args = ['-y', '-ss', '5', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg];
-        const proc = spawn(bin, args, { stdio: 'ignore' });
+        const proc = spawn(bin, args, { stdio: 'ignore', windowsHide: true });
         proc.on('exit', (code) => {
             if (code === 0 && fs.existsSync(outJpg)) return resolve(true);
             // 短视频 5s 处无帧：从头抓一帧再试一次
-            const retry = spawn(bin, ['-y', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg], { stdio: 'ignore' });
+            const retry = spawn(bin, ['-y', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg], { stdio: 'ignore', windowsHide: true });
             retry.on('exit', (c2) => resolve(c2 === 0 && fs.existsSync(outJpg)));
             retry.on('error', () => resolve(false));
         });
@@ -150,9 +150,61 @@ function makeThumb(videoPath, outJpg) {
 
 function thumb(videoPath, cacheDir) {
     return new Promise((resolve) => {
-        if (!THUMB_EXT.has(path.extname(videoPath).toLowerCase())) return resolve({ ok: false });
+        // 无扩展名（旧版无后缀存量下载文件）放行给 ffmpeg 实际探测；带已知非视频扩展名才拒绝
+        const ext = path.extname(videoPath).toLowerCase();
+        if (ext && !THUMB_EXT.has(ext)) return resolve({ ok: false });
         _thumbQueue.push({ videoPath, cacheDir, resolve });
         _pumpThumb();
+    });
+}
+
+/** 直链 URL 抓帧：ffmpeg 原生支持 http(s)（含 m3u8 走 hls demuxer）输入。
+ *  与本地文件共用并发队列；30s 总超时杀进程，死链/慢站不长期占用额度。 */
+function urlThumb(url, cacheDir) {
+    return new Promise((resolve) => {
+        const u = String(url || '');
+        if (!/^(https?|rtmps?):\/\//i.test(u)) return resolve({ ok: false });
+        _thumbQueue.push({ url: u, cacheDir, resolve });
+        _pumpThumb();
+    });
+}
+
+const URL_THUMB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 YuKi';
+
+function makeUrlThumb(url, outJpg) {
+    return new Promise((resolve) => {
+        const bin = findFfmpeg();
+        if (!bin) return resolve(false);
+        let done = false;
+        let timer = null;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(ok);
+        };
+        const armTimeout = (proc) => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { try { proc.kill(); } catch (e) { /* ignore */ } finish(false); }, 30000);
+        };
+        // 远程流 -ss 预 seek 部分服务不支持（403/无帧）：失败再从头抓一帧
+        const proc = spawn(bin, ['-y', '-hide_banner', '-user_agent', URL_THUMB_UA,
+            '-ss', '5', '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
+        { stdio: 'ignore', windowsHide: true });
+        armTimeout(proc);
+        proc.on('exit', () => {
+            if (done) return;
+            if (fs.existsSync(outJpg)) {
+                try { if (fs.statSync(outJpg).size > 0) return finish(true); } catch (e) { /* ignore */ }
+            }
+            const retry = spawn(bin, ['-y', '-hide_banner', '-user_agent', URL_THUMB_UA,
+                '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
+            { stdio: 'ignore', windowsHide: true });
+            armTimeout(retry);
+            retry.on('exit', () => finish(fs.existsSync(outJpg)));
+            retry.on('error', () => finish(false));
+        });
+        proc.on('error', () => finish(false));
     });
 }
 
@@ -162,12 +214,22 @@ async function _pumpThumb() {
         _thumbRunning++;
         (async () => {
             try {
+                fs.mkdirSync(job.cacheDir, { recursive: true });
+                let out;
+                if (job.url) {
+                    // 远程 URL 无 mtime/size：缓存 key 直接用 md5(url)
+                    const key = crypto.createHash('md5').update(String(job.url)).digest('hex');
+                    out = path.join(job.cacheDir, key + '.jpg');
+                    if (fs.existsSync(out)) return job.resolve({ ok: true, path: out });
+                    const ok = await makeUrlThumb(job.url, out);
+                    job.resolve(ok ? { ok: true, path: out } : { ok: false });
+                    return;
+                }
                 let st = null;
                 try { st = fs.statSync(job.videoPath); } catch (e) { return job.resolve({ ok: false }); }
-                fs.mkdirSync(job.cacheDir, { recursive: true });
                 const key = crypto.createHash('md5')
                     .update(`${job.videoPath}|${st.mtimeMs}|${st.size}`).digest('hex');
-                const out = path.join(job.cacheDir, key + '.jpg');
+                out = path.join(job.cacheDir, key + '.jpg');
                 if (fs.existsSync(out)) return job.resolve({ ok: true, path: out });
                 const ok = await makeThumb(job.videoPath, out);
                 job.resolve(ok ? { ok: true, path: out } : { ok: false });
@@ -177,4 +239,4 @@ async function _pumpThumb() {
     }
 }
 
-module.exports = { findFfmpeg, ensureFfmpeg, isEnsuring, thumb };
+module.exports = { findFfmpeg, ensureFfmpeg, isEnsuring, thumb, urlThumb };

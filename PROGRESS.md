@@ -169,6 +169,41 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
 
+2026-08-23 打包版用户问题批次（14 项，4 个并行侦查代理定位根因后分簇修复）：
+
+- **封面簇**：①历史页 kazumi 封面拉取失败根因是搜索点击回填的 `{id, cover:''}` 毒条目被
+  `getBangumiMatch` 当完整命中永久短路且持久化跨重启——改为完整命中要求 id+cover 齐全、残缺条目
+  按 id 拉详情自愈、`_saveBgmMatchCache`/`_loadBgmMatchCache` 过滤 id-only 条目、点击路径改选首个
+  带 images 的结果；②「每页数量-搜索」重绘不丢封面（`grp.src` 键名本就正确），补 onViewShown
+  条数未变时对可见分组续拉（负缓存 60s 过期后的重试触发点）；③设置页 Bangumi 同步改走
+  `My.refreshBangumi()`（作废 localStorage 持久缓存 + 强制重拉 + Timeline 失效），无 Token 不再
+  写空列表毒缓存；`_coverFillOne` 对 site='bangumi' 收藏卡改走 Bangumi 匹配管线（原 detailContent
+  必 L2 失败，缺图条目永远补不回）。
+- **滚动位置**：`App.showView` 集中保存/恢复各视图 scrollTop（display:none 切换会归零滚动位置），
+  双 rAF 等布局建立后恢复；详情页固定回顶；新搜索重置滚动记忆。
+- **直链截帧**：直链播放记录 site='direct'、vodId=播放 URL、标题取 URL 文件名；历史卡与本地/下载
+  文件同待遇异步截帧（ffmpeg 原生支持 http/m3u8 输入，`urlThumb` md5(url) 缓存 + 30s 超时），
+  点击直链卡可重播。
+- **下载簇**：①全部开始/暂停卡片跳动——render 按 gid 首次出现顺序稳定排列（aria2 分组拼接序在
+  RPC 过渡期会抖动）；②完成播放间歇「文件未找到」——`yuki:dl-play` 按旧路径找不到时依次兜底
+  `+.mp4`/下载根目录同 basename/持久化记录新路径（完成时自动补 .mp4 改名后 aria2 仍报旧路径）；
+  ③新增排序下拉（队列/名称/时间，localStorage 持久化）；④删除任务改三选弹窗（连文件删/仅移除/
+  取消），残留收集补齐 HLS `.incomplete`/`.part`/`.adfilter.m3u8`/`.segs` 目录与 aria2 `.aria2`；
+  ⑤设置-下载新增「恢复默认位置」（清 dlDir + 迁移 + 重启引擎），`#set_dl_dir_line` 目录展示行
+  接通；⑥更换/恢复目录时迁移在途任务：aria2 侧 pauseAll→移文件+.aria2→重启→`continue:true` 重入队，
+  HLS 侧 `migrateDir`（代数机制让杀进程后的旧异步续体自弃）+ 分片已存在跳过=断点续传；
+  ⑦page 源手动下载对齐播放链——`_resolveDownloadUrl` 解析失败后补 captureDirect 隐藏窗口嗅探兜底。
+- **WebDAV 恢复假成功**：后端逐文件吞异常/HTTP 200 空数据恒当成功——`webdav_restore` 改返回
+  `{files, ok, error}`（连接错/非 404 HTTP 错/全 404 均判失败，单文件 404 跳过），端点失败回 500+msg，
+  前端空数据判失败并透出原因。
+- **切分类 L3_RUNTIME_CALL_FAILED**：双管齐下——前端 `_nextLoadToken()` 同代 AbortController
+  真正中止在途分类/搜索请求（原令牌只丢弃渲染结果，请求风暴打满站点 worker 串行队列致上游限流），
+  失败包络（CALL_FAILED/TIMEOUT/CIRCUIT_OPEN）800ms 后自动重试一次；后端 `CmsSpider._fetch` 对
+  连接类瞬时错误退避 800ms 重试一次。
+- 验证：`npm run test:all` 全绿——run_all.py 全阶段 ALL PASS（新增 webdav-restore 阶段 5 例）、
+  编译 98 文件 0 error、JS 单元 326/326（新增 kazumi-bgmcache-heal 5 例 + downloads-order 5 例）、
+  ESLint 0 error（73 条既有 warning）、Ruff 全过。打包/实机 QA 待用户验证。
+
 2026-08-22 开源发布准备（G01–G12，任务书见 git 历史 docs/github.md）：**G01** 敏感扫描——全历史曾跟踪
 `TV-fongmi/` 上游源码（729 路径）与 3 个 `*-error.zip` 运行残留，已用 git-filter-repo 清除并重扫零命中
 （`.git` 约 39MB→3.6MB；清洗前备份 bundle 留存于临时目录）；当前跟踪的 cookie/token 命名文件均为测试

@@ -103,6 +103,7 @@ function openLoginWindow() {
             title: '夸克网盘扫码登录',
             backgroundColor: '#f3f6fe',
             autoHideMenuBar: true,
+            icon: require('./app-icon').windowIcon(), // 预缩多表示图标（exe 图标插值缩会糊/残缺）
             webPreferences: {
                 partition: PARTITION,
                 // M-4：加载的是远程官方页面，无 preload/无 node 依赖（登录判定靠主进程轮询
