@@ -1010,6 +1010,13 @@ class ConfigManager:
         # 例外：salvage_partial（磁盘缓存恢复）在**预算耗尽**且已有建成站点时
         # 保留部分结果继续 swap——恢复要快，被慢镜像 ext 卡住的少数站点记跳过即可，
         # 整体失败回退网络重载反而让用户长时间停留在示例源。取消仍然立即上抛。
+        # Windows 定时器粒度下 Condition.wait 可能提前 1-2ms 抛出 TimeoutError，
+        # 此时墙上时钟还没越过截止线：fut.result 的「等待超时」本身就是预算耗尽的
+        # 权威证据。把 deadline 钳到当前时刻，让下方 ctx.check() 的既有分支统一裁决
+        # （取消优先 / salvage 保留已建成站点 / 其余整体上抛），避免慢机器上因时钟
+        # 竞态把本应 L1_CONFIG_TIMEOUT 的加载漏判成成功（CI 曾偶发此失败）。
+        if budget_exhausted and ctx.deadline is not None:
+            ctx.deadline = min(ctx.deadline, time.monotonic())
         try:
             ctx.check()
         except RuntimeContractError as error:

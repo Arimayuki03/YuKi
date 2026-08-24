@@ -61,17 +61,30 @@ function pendingFetch(_url, options) {
 
 test('RuntimeRequest 超时：deadline signal 会终止 fetch', async () => {
     const ctx = loadCommon(pendingFetch);
-    await assert.rejects(
-        ctx.__doAction('homeContent', {}, null, { timeoutMs: 5 }),
-        (error) => error && error.name === 'AbortError');
+    // Node 20 的 --test 等待用例期间不再持有活跃句柄，事件循环会先于
+    // AbortSignal.timeout 的内部定时器耗尽（Node 24 无此问题），用例被误报为
+    // cancelled。显式挂一个存活句柄，保证 deadline 定时器有机会触发。
+    const keepalive = setTimeout(() => {}, 30_000);
+    try {
+        await assert.rejects(
+            ctx.__doAction('homeContent', {}, null, { timeoutMs: 5 }),
+            (error) => error && error.name === 'AbortError');
+    } finally {
+        clearTimeout(keepalive);
+    }
 });
 
 test('RuntimeRequest 取消：上一播放动作 AbortController 可立即取消', async () => {
     const ctx = loadCommon(pendingFetch);
     const controller = new AbortController();
-    const pending = ctx.__doAction('playerContent', {}, null, {
-        requestId: 'play-cancel-0001', signal: controller.signal, timeoutMs: 1000,
-    });
-    controller.abort();
-    await assert.rejects(pending, (error) => error && error.name === 'AbortError');
+    const keepalive = setTimeout(() => {}, 30_000);
+    try {
+        const pending = ctx.__doAction('playerContent', {}, null, {
+            requestId: 'play-cancel-0001', signal: controller.signal, timeoutMs: 1000,
+        });
+        controller.abort();
+        await assert.rejects(pending, (error) => error && error.name === 'AbortError');
+    } finally {
+        clearTimeout(keepalive);
+    }
 });

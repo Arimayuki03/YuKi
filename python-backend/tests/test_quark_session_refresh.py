@@ -2,7 +2,6 @@
 """夸克会话自动刷新：Set-Cookie 轮换捕获/合并落盘/保活标记 回归。"""
 import os
 import sys
-import threading
 import time
 import unittest
 from unittest.mock import patch

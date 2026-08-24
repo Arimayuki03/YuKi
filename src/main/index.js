@@ -838,6 +838,17 @@ app.whenReady().then(() => {
             const a4kInitial = anime4kMenuModeFromSettings();
             const scriptDir = path.join(app.getPath('userData'), 'mpv-scripts');
             fs.mkdirSync(scriptDir, { recursive: true });
+            // 清理全部遗留的临时清单/抓流产物（启动时尚无播放会话，可无条件删除）。
+            // 不保留、不复用——残留文件一旦被当作清单展开，会导致集数虚增与匹配错位。
+            try {
+                const tmpDir = os.tmpdir();
+                for (const f of fs.readdirSync(tmpDir)) {
+                    if (/^yuki-playlist-\d+-\d+\.m3u8$/.test(f)
+                        || /^kazumi_stream_\d+\.m3u8$/.test(f)) {
+                        try { fs.rmSync(path.join(tmpDir, f), { force: true }); } catch (e) { /* 单个失败跳过 */ }
+                    }
+                }
+            } catch (e) { /* 清扫失败不影响播放 */ }
             const lua = [
                 // 文件名即 script-binding 命名空间：mpv 对脚本名做非字母数字→_ 归一化，
                 // hints.lua → hints/，与 mpv-menu-conf.js 的 hints/a4k-<mode> 引用严格对应
@@ -1082,7 +1093,8 @@ app.whenReady().then(() => {
             if (!/^(https?|rtmp|rtsp):\/\//i.test(firstUrl)) {
                 return withPlayerTrace({ ok: false, reason: 'bad url', via: 'external' }, meta);
             }
-            const r = launchExternalPlayer(extPrimary, firstUrl, meta.header);
+            const extLabel = [meta.title, meta.subtitle].filter(Boolean).join(' · ');
+            const r = launchExternalPlayer(extPrimary, firstUrl, meta.header, extLabel);
             // A detached external process has no file-loaded/first-frame
             // acknowledgement. Report launched separately; ok=true remains
             // reserved for a verified mpv session.
@@ -3306,7 +3318,7 @@ app.whenReady().then(() => {
      *  - mpv：--http-header-fields=Referer: x, User-Agent: y（逗号+空格，与内置 mpv-player.js 一致）
      *  - PotPlayer：/referer="x" /user_agent="y"（斜杠开关，各参数独立，需带引号）
      *  - 其他：无通用 header 传参，仅 URL（带鉴权直链可能 403） */
-    function buildExternalPlayerArgs(kind, url, header) {
+    function buildExternalPlayerArgs(kind, url, header, label) {
         const referer = header && (header.Referer || header.referer);
         const ua = header && (header['User-Agent'] || header.ua);
         if (kind === 'vlc') {
@@ -3324,6 +3336,12 @@ app.whenReady().then(() => {
             if (referer) pairs.push(`Referer: ${referer}`);
             if (ua) pairs.push(`User-Agent: ${ua}`);
             if (pairs.length) args.push(`--http-header-fields=${pairs.join(', ')}`);
+            // 标题：Kazumi 抓流产物是本地临时文件（kazumi_stream_*.m3u8），
+            // 不传标题时 mpv 窗口/播放列表会显示该文件名——强制覆盖为集名
+            if (label) {
+                const t = String(label).replace(/["$]/g, '');
+                args.push(`--title=yuki · ${t}`, `--force-media-title=yuki · ${t}`);
+            }
             return { args, headerSupported: true };
         }
         if (kind === 'potplayer') {
@@ -3357,11 +3375,11 @@ app.whenReady().then(() => {
     }
 
     /** 用指定外部播放器起播：拼对应 header 参数后 spawn。返回 { ok, via, kind, headerDropped } 或 { ok:false, reason }。 */
-    function launchExternalPlayer(execPath, url, header) {
+    function launchExternalPlayer(execPath, url, header, label) {
         const kind = externalPlayerKind(execPath);
         const hasHeader = !!(header && Object.keys(header).some((key) =>
             ['user-agent', 'referer', 'origin', 'cookie', 'authorization'].includes(String(key).toLowerCase())));
-        const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {});
+        const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {}, label);
         try {
             const { spawn } = require('child_process');
             spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();

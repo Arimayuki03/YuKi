@@ -18,6 +18,7 @@
  *   Referer/UA 头暂不透传（同站各集通常一致，起播时全局 --http-header-fields 生效）。
  */
 const http = require('http');
+const fs = require('fs');
 const { EventEmitter } = require('events');
 
 const TOKEN_RE = /^\/pl\/([A-Za-z0-9_-]{8,64})\/(\d{1,4})$/;
@@ -136,10 +137,12 @@ class PlaylistProxy extends EventEmitter {
         // 预热命中的集直接 302；其余按需解析后缓存。会话级规则头已提升为全局
         // --http-header-fields（register 预热产出），清单与分片都带规则头，
         // 因此所有条目统一轻量 302，代理不占数据面带宽。
+        // 预热命中的集直接 302；其余按需解析后缓存。会话级规则头已提升为全局
+        // --http-header-fields（register 预热产出），清单与分片都带规则头，
+        // 因此所有条目统一轻量 302，代理不占数据面带宽。
         if (sess.cache.has(index)) {
             this._notifyResolved(sess, index, sess.cache.get(index));
-            res.writeHead(302, { Location: sess.cache.get(index) });
-            res.end();
+            await this._serveResolved(sess, index, sess.cache.get(index), req, res);
             return;
         }
         const resolved = (sess.kind === 'kazumi')
@@ -158,8 +161,56 @@ class PlaylistProxy extends EventEmitter {
         }
         sess.cache.set(index, resolved.url);
         this._notifyResolved(sess, index, resolved.url);
-        res.writeHead(302, { Location: resolved.url });
-        res.end();
+        await this._serveResolved(sess, index, resolved.url, req, res);
+    }
+
+    /**
+     * 按解析结果回给 mpv：
+     * - 本地文件（Kazumi 抓流产物 kazumi_stream_*.m3u8 等）：直接流式回传。
+     *   302 会让 mpv 把本地 m3u8 当成「播放列表」二次展开——分片变条目、
+     *   标题全是文件名；以 HLS Content-Type 回传则按直播流正常播放，
+     *   分片地址仍是上游 CDN 绝对地址，不占数据面带宽。Range 透传保证 seek。
+     * - 远程地址：302 跳转，mpv 直连 CDN。
+     */
+    async _serveResolved(sess, index, url, req, res) {
+        const isLocal = /^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(url);
+        if (!isLocal) {
+            res.writeHead(302, { Location: url });
+            res.end();
+            return;
+        }
+        const localPath = url.replace(/^file:\/\//i, '').replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\');
+        let stat = null;
+        try { stat = fs.statSync(localPath); } catch (e) { /* 不存在的本地路径按 502 处理 */ }
+        if (!stat || !stat.isFile()) {
+            if (this.onEntryError) {
+                try { this.onEntryError({ index, reason: '抓流产物已失效', sess }); } catch (e) { /* ignore */ }
+            }
+            res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('抓流产物已失效');
+            return;
+        }
+        const type = /\.mp4$/i.test(localPath) ? 'video/mp4'
+            : 'application/vnd.apple.mpegurl'; // .m3u8 → HLS 流
+        const range = String(req.headers.range || '');
+        const headers = {
+            'Content-Type': type,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'no-store',
+        };
+        if (range && /^bytes=(\d*)-(\d*)/.test(range)) {
+            const total = stat.size;
+            const start = parseInt(RegExp.$1, 10) || 0;
+            const end = RegExp.$2 ? Math.min(parseInt(RegExp.$2, 10), total - 1) : total - 1;
+            headers['Content-Range'] = `bytes ${start}-${end}/${total}`;
+            headers['Content-Length'] = String(end - start + 1);
+            res.writeHead(206, headers);
+            fs.createReadStream(localPath, { start, end }).pipe(res);
+            return;
+        }
+        headers['Content-Length'] = String(stat.size);
+        res.writeHead(200, headers);
+        fs.createReadStream(localPath).pipe(res);
     }
 
     /** 单集解析成功通知（边下边播入队等订阅方使用）。 */

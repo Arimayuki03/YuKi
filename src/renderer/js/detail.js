@@ -742,11 +742,15 @@ const Detail = {
 
     /** Bangumi 分集播放勾选集：Bangumi-only 无直链，打开 Kazumi 选源弹窗选源播放。 */
     _playBgmSelected() {
-        const n = $('#bgm-ep-list .ep-check.checked').length;
-        if (!n) { warnToast('请先勾选要播放的集'); return; }
+        const idxs = $('#bgm-ep-list .ep-check.checked')
+            .map(function () { return parseInt($(this).data('idx'), 10); })
+            .get().sort((a, b) => a - b);
+        if (!idxs.length) { warnToast('请先勾选要播放的集'); return; }
         const title = this.vodName || '';
         if (title && typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
-            Kazumi.openSourceDialog(title, 'kazumi', '');
+            // 携带勾选下标：选源弹窗内选定源+线路后，播放器队列只包含勾选的子集
+            Kazumi.openSourceDialog(title, 'kazumi', '', { playIndexes: idxs });
+            warnToast(`选择 Kazumi 源与线路后将播放勾选的 ${idxs.length} 集`);
         }
     },
 

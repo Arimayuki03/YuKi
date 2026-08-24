@@ -628,7 +628,7 @@ const Player = {
                             eps: list
                                 .filter((ep) => ep && (ep.type == null || ep.type === 0))
                                 .map((ep) => ({
-                                    no: String(ep.sort || ep.ep || ''),
+                                    no: String(ep.ep || ep.sort || ''),
                                     name: String(ep.name_cn || ep.name || ''),
                                 })),
                         };
@@ -644,7 +644,9 @@ const Player = {
                 && Kazumi._bgmEpsCache && Array.isArray(Kazumi._bgmEpsCache.eps))
                 ? Kazumi._bgmEpsCache.eps : null;
             const qEps = episodes.map((e, i) => {
-                const orig = String((e && e.name) || '');
+                let orig = String((e && e.name) || '');
+                // 净化：规则/抓流链路把临时文件名当集名时回落「第N集」
+                if (/\.(m3u8?|mp4|mkv|ts|flv)$/i.test(orig.trim())) orig = '';
                 const b = bgmList && bgmList[i];
                 let nm = orig || `第${i + 1}集`;
                 if (b && (b.no || b.name)) {

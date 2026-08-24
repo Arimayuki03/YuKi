@@ -72,10 +72,15 @@ function supportsContextMenu(versionLine) {
  */
 function buildM3u(episodes) {
     const lines = ['#EXTM3U'];
+    let n = 0;
     for (const ep of (Array.isArray(episodes) ? episodes : [])) {
         if (!ep || !ep.url) continue;
-        // EXTINF 的集名在首个逗号后，换行/Tab 会破坏行结构，压成空格
-        const name = String(ep.title || '').replace(/[\r\n\t]+/g, ' ').trim();
+        n += 1;
+        // EXTINF 集名净化：换行/Tab 破坏行结构压成空格；抓流产物/清单的临时
+        // 文件名（kazumi_stream_*.m3u8、yuki-playlist-*.m3u8 等）一旦混入集名，
+        // 会原样出现在 mpv 标题与播放列表——统一回落「第N集」。
+        let name = String(ep.title || '').replace(/[\r\n\t]+/g, ' ').trim();
+        if (!name || /\.(m3u8?|mp4|mkv|ts|flv)$/i.test(name)) name = `第${n}集`;
         lines.push(`#EXTINF:-1,${name}`);
         lines.push(String(ep.url));
     }
@@ -145,6 +150,7 @@ class MpvPlayer extends EventEmitter {
         this._queueTitles = null;  // 原生队列逐集集名表（index.js 注入；file-loaded 时设置窗口标题用）
         this._queueSeriesTitle = ''; // 原生队列片名（标题 = yuki · 片名 · 集名）
         this.supportsContextMenu = false; // 所选二进制支持 context-menu（mpv 0.41+）；决定右键菜单绑定与 menu.conf 是否注入
+        this.externalStyle = false; // 手动指定的自定义 mpv：不注入 YuKi OSD/外观资源，用其自身配置样式
         this.logFilePath = null;  // 可选 mpv 运行日志（--log-file，主进程指定，见 index.js）
         this.watchLaterDir = null; // 续播位置记录目录（--save-position-on-quit）
         this.defaultSpeed = 1;     // 默认倍速（≠1 时起播注入 --speed）
@@ -171,6 +177,7 @@ class MpvPlayer extends EventEmitter {
             console.log(`[mpv] 自定义路径生效：${v}（${p}）`);
             this.binary = p;
             this.supportsContextMenu = supportsContextMenu(v); // 自定义二进制同样按版本门控
+            this.externalStyle = true; // 用户手动指定的 mpv：原生配置模式（不注入 hints/input.conf/menu.conf）
             return true;
         }
         return false;
@@ -181,6 +188,7 @@ class MpvPlayer extends EventEmitter {
         const probe = {};
         this.binary = findMpv(probe);
         this.supportsContextMenu = supportsContextMenu(probe.version);
+        this.externalStyle = false; // 回到自动发现：恢复 YuKi 引擎样式
     }
 
     get playing() { return !!this.proc; }
@@ -308,7 +316,7 @@ class MpvPlayer extends EventEmitter {
             const epTitle = String(opts.title || 'YuKi').replace(/["$]/g, '');
             args.push(`--title=yuki · ${epTitle}`);
         }
-        if (WIN) args.push('--osd-font=Microsoft YaHei');
+        if (WIN && !this.externalStyle) args.push('--osd-font=Microsoft YaHei');
         const headerFields = MpvPlayer.headerFieldsValue(opts.header);
         if (headerFields) args.push(`--http-header-fields=${headerFields}`);
         // 直链媒体（m3u8/mp4/ts 等）永远不需要 ytdl 解析：显式排除 ytdl_hook。
@@ -325,9 +333,15 @@ class MpvPlayer extends EventEmitter {
         }
         // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
         // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
-        if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
-        if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
-        args.push(...this._contextMenuArgs());
+        // 原生配置模式（手动指定的自定义 mpv，如 mpv.lite）：不注入 YuKi OSD/外观
+        // 资源（hints.lua / 生成 input.conf / 中文 menu.conf / 雅黑字体），完全使用
+        // 该播放器自身的 portable_config 或 %APPDATA%\mpv 配置与脚本。功能类参数
+        // （IPC/续播/缓存/截图目录）仍保留，连播与统计不受影响。
+        if (!this.externalStyle) {
+            if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
+            if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
+            args.push(...this._contextMenuArgs());
+        }
         // mpv 运行日志落盘（每次启动覆盖）：--no-terminal 会吞掉全部终端输出，
         // 起播失败时 stderr 为空、用户只能看到无信息量的 'error'；落盘日志让
         // HTTP 4xx/5xx、TLS、超时等真实原因可以在退出时回读（见 exit 处理）。
@@ -389,6 +403,15 @@ class MpvPlayer extends EventEmitter {
         args.push(...this._screenshotArgs());
         // 原生队列：m3u（#EXTINF 集名进 mpv 原生列表，右键菜单/F8 可见可切）+ 起始集下标
         if (nativeQueue) {
+            // 不保留历史清单：残留的旧 m3u 一旦被当作列表展开，会导致集数虚增与
+            // 匹配错位。写入新清单前先清掉全部同类临时文件（此时旧进程已被 stop）。
+            try {
+                for (const f of fs.readdirSync(os.tmpdir())) {
+                    if (/^yuki-playlist-\d+-\d+\.m3u8$/.test(f)) {
+                        try { fs.rmSync(path.join(os.tmpdir(), f), { force: true }); } catch (e) { /* ignore */ }
+                    }
+                }
+            } catch (e) { /* ignore */ }
             playlistPath = path.join(os.tmpdir(), `yuki-playlist-${process.pid}-${Date.now()}.m3u8`);
             fs.writeFileSync(playlistPath, buildM3u(episodes), 'utf8');
             const startIndex = Number.isFinite(Number(opts.startIndex))

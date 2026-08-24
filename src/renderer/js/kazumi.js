@@ -1340,6 +1340,11 @@ const Kazumi = {
         this._dlDownloadMode = (opts && Array.isArray(opts.downloadEpisodes) && opts.downloadEpisodes.length)
             ? { episodes: opts.downloadEpisodes.map(String), indexes: Array.isArray(opts.downloadIndexes) ? opts.downloadIndexes.slice() : null, title: opts.downloadTitle || title }
             : null;
+        // 勾选集播放模式（Bangumi 分集页签勾选播放而来）：选定源+线路后，
+        // 播放器队列只包含勾选下标的子集（按线路集数下标过滤）
+        this._playSubset = (opts && Array.isArray(opts.playIndexes) && opts.playIndexes.length)
+            ? { indexes: opts.playIndexes.slice() }
+            : null;
         $('#kazumi-dialog-title').text(this._dlDownloadMode ? '选择下载源' : '选择播放源');
         openDialog('kazumiSourceDialog');
 
@@ -1869,7 +1874,7 @@ const Kazumi = {
                     eps: list
                         .filter((ep) => ep && (ep.type == null || ep.type === 0))
                         .map((ep) => ({
-                            no: String(ep.sort || ep.ep || ''),
+                            no: String(ep.ep || ep.sort || ''),
                             name: String(ep.name_cn || ep.name || ''),
                         })),
                 };
@@ -2086,8 +2091,21 @@ const Kazumi = {
                 return { name: nm, url: u };
             }) : [{ name, url }];
             const epIndex = episodes.findIndex((ep) => ep.url === url);
+            // 勾选集播放：把整条线路过滤成勾选子集（保持原顺序），点击的集必须
+            // 在子集内——从它的子集位置开始连播；队列/标题随之只含勾选集。
+            let playEpisodes = episodes;
+            let playIdx = Math.max(0, epIndex);
+            if (this._playSubset && Array.isArray(this._playSubset.indexes) && road) {
+                const want = new Set(this._playSubset.indexes);
+                const subset = episodes.filter((_, i) => want.has(i));
+                if (subset.length) {
+                    playEpisodes = subset;
+                    const hit = subset.findIndex((ep) => ep.url === url);
+                    playIdx = hit >= 0 ? hit : 0;
+                }
+            }
             closeDialog('kazumiSourceDialog');
-            Player.play('kazumi:' + pluginName, flag, url, title, name, episodes, Math.max(0, epIndex), src || '');
+            Player.play('kazumi:' + pluginName, flag, url, title, name, playEpisodes, Math.max(0, playIdx), src || '');
         });
         // 弹幕入口（kimi UI）：播放时自动加载弹幕
         box.find('.kazumi-ep-btn').on('contextmenu', (e) => {
