@@ -23,6 +23,9 @@
 | R14 | `detect_text` 只剥一层 BOM，双 BOM 配置被 `json.loads` 报成第 1 列语法错误 | ✅ 已修复并验证：`test_ext_semantics.py::test_bom_and_declared_and_fallback` |
 | R15 | 多仓合并/主仓漂移后同名 key 的可用源被旧探测屏蔽记录误隐藏 | ✅ 已修复并验证：探测结论附带内容指纹 probeFp；home-probe 78 例、JS 单元 312/312、run_all.py 全阶段 PASS |
 | R16 | `spider-loader.js` 协议桥命名与宿主断裂：243afd9 全局重命名 VPC→YuKi 时漏改 loader，宿主 `ctx.get('__YUKI_CALL__')` 取到 None，所有 JS 源方法调用报 `'NoneType' object is not callable` | ✅ 已修复并验证：loader 对齐 `__YUKI_CALL__/__YUKI_PENDING__/__YUKI_RESULT__/__YUKI_FETCH_RESULT__/__yuki_err__`；test_phase3 30/30 PASS（修复前必现 KeyError）、test_jar_proxy 4/4 OK、全量回归见 PROGRESS 同日记录 |
+| R17 | WebDAV 恢复假成功：后端逐文件吞异常、HTTP 200 空数据恒当成功，用户看到「恢复成功」但数据没回来 | ✅ 已修复并验证：`webdav_restore` 返回 `{files, ok, error}`（连接错/非 404 HTTP 错/全 404 均判失败，单文件 404 跳过），端点失败回 500+msg；test_webdav_conn 新阶段接入 run_all.py |
+| R18 | 历史页 Kazumi 封面拉取失败：搜索点击回填的 `{id, cover:''}` 毒条目被当完整命中永久短路且跨重启持久化 | ✅ 已修复并验证：完整命中要求 id+cover 齐全、残缺条目按 id 拉详情自愈、缓存读写双向过滤 id-only 条目；kazumi-bgmcache-heal 5 例 + test_kazumi_cover_proxy |
+| R19 | 切换分类报 L3_RUNTIME_CALL_FAILED：旧加载令牌只丢弃渲染结果不中止请求，快速切分类时请求风暴打满站点 Worker 串行队列触发上游限流 | ✅ 已修复并验证：前端同代 AbortController 真正中止在途分类/搜索请求 + 失败包络 800ms 自动重试一次；后端 `CmsSpider._fetch` 连接类瞬时错误退避重试一次 |
 
 ---
 
@@ -284,4 +287,28 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **修复**：探测结论附带内容指纹 `probeFp`（key → `api|spiderType`，后端 `/sites` 增量暴露 `api` 字段）。读取时指纹不符或缺失（旧版数据无法证明内容未变）即作废旧结论、当场恢复展示并重探一次；指纹一致的同仓重启照常复用零请求。升级后首轮全量重探一次即可自愈历史误屏蔽，之后稳定无额外开销。换仓整库重置逻辑保持不变，作为粗粒度兜底。
 - **回归修正（2026-08-22 同日）**：首版修复的迁移性全量重探暴露出两个误杀放大器——① `probeFailStreak` 跨会话累积：上次冷启动慢留下的连败欠账让本次一轮失败就越过 `PROBE_FAIL_LIMIT` 按死源屏蔽；② `empty` 判定零阈值：单轮确认空即屏蔽，软限流/预热期的空响应会误杀有影片的源。修正为：连败计数只在当前会话内累加（`init` 时 `_resetSessionEvidence` 清空遗留欠账），死源/空源收敛由同会话补探第二轮保证；确认空与失败包络同阈值，连续两轮确认全空才按无内容屏蔽。
 - **状态**：✅ 已验证（`tests/js/home-probe.test.js` 79 例全绿，含指纹迁移自愈/匹配复用/变更失效、`_validBlocked` 矩阵与会话证据重置用例；JS 单元 313/313、语法 41 文件 0 错、ESLint 0 error、Ruff PASS、`run_all.py` 全部阶段 PASS + 100 文件编译 0 error）。
+
+### R17 · WebDAV 恢复假成功（2026-08-23）
+
+- **发现时间**：2026-08-23（打包版用户报告）
+- **现象**：WebDAV 恢复提示成功，但收藏/设置等数据实际没有恢复。
+- **根因**：后端逐文件 try/except 吞掉异常、HTTP 200 空数据恒当成功——任何一层失败都被包装成「恢复完成」。
+- **修复**：`webdav_restore` 返回 `{files, ok, error}` 结构化结果——连接错误、非 404 HTTP 错误、全部文件 404 均判失败；单文件 404 视为远端无备份跳过；端点级失败回 500 + msg；前端空数据判失败并向用户透出真实原因。
+- **状态**：✅ 已修复并验证（`test_webdav_conn.py` 新阶段 5 例接入 `run_all.py`；全量回归见 PROGRESS §7 同日记录）。
+
+### R18 · 历史页 Kazumi 封面拉取失败（毒缓存短路）（2026-08-23）
+
+- **发现时间**：2026-08-23（打包版用户报告）
+- **现象**：历史页中 Kazumi 源条目封面永远拉不到，重启也不自愈。
+- **根因**：搜索点击回填的 `{id, cover:''}` 残缺条目被 `getBangumiMatch` 当作完整命中永久短路且持久化跨重启——后续补拉逻辑看到「已有匹配」直接跳过，残缺条目永远无法自愈。
+- **修复**：完整命中要求 id+cover 齐全；残缺条目按 id 拉 Bangumi 详情自愈补图；`_saveBgmMatchCache`/`_loadBgmMatchCache` 双向过滤 id-only 条目；点击路径改选首个带 images 的搜索结果。设置页 Bangumi 同步改走 `My.refreshBangumi()`（作废 localStorage 持久缓存 + 强制重拉），无 Token 不再写空列表毒缓存。
+- **状态**：✅ 已修复并验证（kazumi-bgmcache-heal 5 例 + `test_kazumi_cover_proxy.py`；全量回归见 PROGRESS §7 同日记录）。
+
+### R19 · 切换分类报 L3_RUNTIME_CALL_FAILED（请求风暴限流）（2026-08-23）
+
+- **发现时间**：2026-08-23（打包版用户报告）
+- **现象**：快速切换分类时报 L3 运行时错误，稍后才能恢复浏览。
+- **根因**：前端 `_loadToken` 切换只丢弃过期渲染结果，不中止在途 HTTP 请求——快速切分类时旧请求继续打满站点 Worker 串行队列，触发上游限流，新请求反而排队超时。
+- **修复**：双管齐下——前端同代 AbortController 真正中止在途分类/搜索请求，失败包络（CALL_FAILED/TIMEOUT/CIRCUIT_OPEN）800ms 后自动重试一次；后端 `CmsSpider._fetch` 对连接类瞬时错误退避 800ms 重试一次。
+- **状态**：✅ 已修复并验证（全量回归见 PROGRESS §7 同日记录；打包实机 QA 待用户验证）。
 

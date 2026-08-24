@@ -13,7 +13,7 @@ YuKi/
 ├── build/                  electron-builder 额外资源
 │   ├── icon.png            安装包图标
 │   └── installer.nsh       NSIS 自定义安装页
-├── docs/                   项目文档（本文所在目录，共 8 核心文档）
+├── docs/                   项目文档（本文所在目录，共 9 份）
 ├── python-backend/         FastAPI 独立后端（CatVod + Kazumi 双引擎）
 ├── scripts/                构建、下载、验收与诊断脚本
 ├── src/                    Electron 主进程与渲染进程
@@ -36,12 +36,16 @@ YuKi/
 
 ```
 src/
-├── main/                   主进程（22 文件）
+├── main/                   主进程（26 文件）
 │   ├── index.js            入口：窗口/托盘/Python 生命周期/mpv/aria2c/ffmpeg/解析窗口
+│   │                       （含 writeMpvAssets：hints.lua/input.conf/menu.conf 注入、Anime4K 档位消费）
 │   ├── async-session.js    AsyncSingleFlight / AsyncSerialQueue
+│   ├── dl-dedupe.js        同源同集下载去重登记（站点|剧名|集名 稳定 key）
 │   ├── hls-downloader.js   HLS 下载与广告过滤
-│   ├── mpv-player.js       mpv 进程管理与播放会话
+│   ├── mpv-menu-conf.js    mpv 右键菜单中文定义（menu.conf 译制）
+│   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键）
 │   ├── parse-window.js     隐藏 BrowserWindow 真实流提取
+│   ├── playlist-proxy.js   在线整季原生播放列表本地按需解析代理
 │   └── ...                 downloads.js, cache.js, downloader.js 等
 ├── preload/
 │   └── preload.js          渲染层 IPC 桥（yuki:*）
@@ -66,11 +70,11 @@ src/
 python-backend/
 ├── server.py               FastAPI 入口（/action, /kazumi/action, /cache, /proxy, /health）
 ├── config.py               配置管理
-├── hoststate.py            宿主状态与端口
+├── hoststate.py            宿主运行时状态（端口/缓存目录/代理地址，~/.video-pc 迁移兜底）
 ├── runner.py / app.py / trigger.py  CatVod 契约（恢复源码语义）
 ├── site_manager.py         站点管理
 ├── http_client.py          统一 HTTP 客户端
-├── go_proxy.py             本地代理与端口管理
+├── go_proxy.py             本地代理与端口管理（含夸克会话轮换捕获与保活探针）
 ├── jar_bridge.py / jar_spider.py / jar_patch.py  JAR 桥
 ├── js_spider.py            JS Spider 桥
 ├── pan*.py                 网盘（quark/uc 等）与 Cookie
@@ -83,7 +87,7 @@ python-backend/
 │   ├── spider-loader.js    Spider 加载协议
 │   └── lib/cat.js          聚合库（cheerio/Crypto 等）
 ├── kazumi/                 Kazumi 规则引擎
-│   ├── plugin_manager.py   规则 CRUD 与持久化
+│   ├── plugin_manager.py   规则 CRUD 与持久化（含 Bangumi 分页聚合、WebDAV 同步目录拼接）
 │   ├── rule_engine.py      搜索/剧集编排
 │   ├── xpath_strategy.py / api_strategy.py
 │   ├── models.py / plugin.py / utils.py
@@ -100,8 +104,8 @@ python-backend/
 │   ├── build.py / gen_stubs.py  构建脚本
 │   └── runner.jar          构建产物（不入库）
 ├── spike/                  探针与 Spike 报告
-└── tests/ (40+ 文件)
-    ├── run_all.py          全量回归入口（36 阶段，串行）
+└── tests/ (45+ 文件)
+    ├── run_all.py          全量回归入口（40 阶段，串行）
     ├── smoke.py            冒烟测试
     ├── test_kazumi.py / test_phase3.py / test_config_snapshot.py 等
     ├── fixtures/           配置/媒体夹具（single.json 等确定性生成）
@@ -121,7 +125,7 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`），覆盖观看统计、时间表、播放器、设置、记录、封面链、下载等。
+`tests/js/*.test.js`（`node --test`，35 文件），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、下载去重、右键菜单定义、设置、记录、封面链、下载等。
 
 ## 构建产物（不入库）
 
@@ -134,4 +138,4 @@ python-backend/
 
 ## 文档
 
-`docs/` 顶层 8 核心文档 + `README.md` 索引，详见 [文档索引](README.md)：`ARCHITECTURE`、`KAZUMI`（合并）、`RUNTIME_ISSUES`、`TEST_REPORT`、`DEVELOPMENT_HISTORY`、`THIRD_PARTY`、`TVBOX_FONGMI_PARITY_TASKS`。
+`docs/` 顶层 9 份 + `README.md` 索引，详见 [文档索引](README.md)：`ARCHITECTURE`、`KAZUMI`（合并）、`RUNTIME_ISSUES`、`TEST_REPORT`、`DEVELOPMENT_HISTORY`、`THIRD_PARTY`、`TVBOX_FONGMI_PARITY_TASKS`、`WEBDAV_SYNC_MERGE_DESIGN`。

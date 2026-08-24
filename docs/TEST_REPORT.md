@@ -1,18 +1,18 @@
 # 功能测试报告（YuKi）
 
-> 生成时间：2026-08-22（全量回归 ALL PASS：313 JS tests / 100 py files / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建。
+> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。
 > 本文是「功能测试」的唯一汇总入口；运行异常细节见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)，开发批次见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
 ## 1. 测试总览
 
-> 最近快照：2026-08-22 全量回归 **ALL PASS**（`run_all.py` 36 阶段 / 编译 100 文件 0 error / JS 单元 313 tests / ESLint 0 error / Ruff 全过）。
+> 最近快照：2026-08-23 全量回归 **ALL PASS**（`run_all.py` 40 阶段 / 编译 98 文件 0 error / ESLint 0 error / Ruff 全过）；2026-08-24 增量后 **JS 单元 365/365**、check-js 44 文件 0 错。
 
 | 类别 | 数量 | 结果 |
 |---|---|---|
-| JS 单元测试（`tests/js/*.test.js`） | 313 | ✅ 全部通过 |
-| Python 测试（`run_all.py` 36 阶段 + 编译） | 100 文件 | ✅ 全部通过 |
-| JS 语法检查（`scripts/check-js.js`） | 41 文件 | ✅ 0 错误 |
+| JS 单元测试（`tests/js/*.test.js`，35 文件） | 365 | ✅ 全部通过 |
+| Python 测试（`run_all.py` 40 阶段 + 编译） | 98 文件 | ✅ 全部通过 |
+| JS 语法检查（`scripts/check-js.js`） | 44 文件 | ✅ 0 错误 |
 | 真实界面验收（CDP，`scripts/acceptance-*.js` × 10） | 103 检查项 | ✅ 103/103 |
 | **自动化合计** | **>450** | **全部通过** |
 
@@ -23,9 +23,12 @@
 ### 2.1 JS 单元测试（81）
 | 文件 | 覆盖 |
 |---|---|
-| `player-watch.test.js` | 观看统计 sessionId 元信息、未知/重复退出去重、断流重连观看链增量、ended 会话归属、isDone 判定 |
+| `player-watch.test.js` | 观看统计 sessionId 元信息、未知/重复退出去重、断流重连观看链增量、ended 会话归属、isDone 判定、原生队列逐集记账（每集独立观看链、pos 记账去重） |
+| `playlist-proxy.test.js` | 原生播放列表代理：条目映射 `/pl/<token>/<index>`、按需解析 302、parse=1/DRM 集目 502 停队、会话 TTL |
+| `dl-dedupe.test.js` | 同源同集下载去重：稳定 key 归一（vod 用剧名）、进行中/已完成命中跳过、失败/文件已删放行重下 |
+| `mpv-menu-conf.test.js` | 右键菜单中文定义：TAB 分隔字段、4 空格层级缩进、动态子菜单 `$playlist` 标记 |
 | `timeline.test.js` | 季度区间 `_seasonRange`、季度标签 `_seasonLabel`、排序 `_sortItems`、收藏过滤 `_applyFilters` |
-| `mpv-player.test.js` | 弹幕行解析、ASS 颜色/时间戳、进度缓存、旧会话 teardown、end-file eof 会话号 |
+| `mpv-player.test.js` | 弹幕行解析、ASS 颜色/时间戳、进度缓存、旧会话 teardown、end-file eof 会话号、原生队列续播/ended 载荷（逐集记账字段）、右键菜单版本门控与 menu.conf 注入、错误原因提取降噪 |
 | `settings-2a.test.js` | 关于为设置分类、无画中画钩子、MiSans 内置 yuki:font-css、字体栈 MiSans 优先、导航 order（含 1 项既有 `#popular-tags` 失败） |
 | `records.test.js` | 历史按次记录（recordPlay 每播一条独立）、卡片「集名·时长·时间」、收藏/历史卡片、标签模型、fmtDur |
 | `kazumi-init.test.js` | init 单次绑定、不抢跑、`openBangumiInfoPage` 委托统一详情页 |

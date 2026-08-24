@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-08-22
+> 更新时间：2026-08-24
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -31,8 +31,6 @@
 | 最新运行异常与修复验证 | [docs/RUNTIME_ISSUES.md](docs/RUNTIME_ISSUES.md) |
 | 全量功能测试矩阵与测试结果 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) |
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
-| 代码审查及修复状态 | [CODE_REVIEW.md](CODE_REVIEW.md) / [CODE_REVIEW_FIX_TASKS.md](CODE_REVIEW_FIX_TASKS.md) |
-| 工程化改进待办 | [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) |
 | TVBox 兼容性总览/执行计划 | [docs/TVBOX_FONGMI_PARITY_TASKS.md](docs/TVBOX_FONGMI_PARITY_TASKS.md) |
 
 状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
@@ -49,6 +47,9 @@
 ### 播放与解析
 
 - mpv 播放、硬件加速、倍速、续播、自动连播、断流重连和失败换线。
+- 原生播放列表：在线整季经 `playlist-proxy` 本地按需解析代理（打开哪集解析哪集，302 交真实 CDN）交给 mpv 原生队列连播；静态直链批量直接入队，观看统计/历史逐集记账。
+- mpv 右键中文菜单（menu.conf 注入）与 Anime4K 快捷键（K 键循环档位 + 菜单勾选态同步）；PGUP/PGDWN 上/下一集。
+- 边下边播与手动下载同源同集去重（`dl-dedupe`，「站点 | 剧名 | 集名」稳定 key）。
 - 隐藏 BrowserWindow 通过媒体请求拦截、DOM 轮询和 legacy iframe 跟随提取真实视频流。
 - Anime4K 三档、VLC 外部播放、截图、定时关机。
 - 解析窗口使用 3 个独立 partition 槽位，并通过 single-flight 合并同地址并发请求。
@@ -248,9 +249,9 @@ Node 225/225、JS 语法 40/40、ESLint 0 error（64 条既有 warning）、Ruff
 Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 error，Ruff 通过。
 默认受管 Node 测试会因 `spawn EPERM` 失败，该环境限制已与代码断言失败分开记录。
 
-2026-08-17 回归入口补全 + 配置解析回归修复：`test_kazumi.py`（83 用例）接入 `run_all.py` STAGES，Python 回归从 38 项扩到 121 项（smoke 13 + phase3 25 + kazumi 83），`npm run test:py` 全绿。接入后即捕获一处 HEAD 回归：7816695 的 `_strip_json_comment_lines` 无条件先剥行内 `//`，损坏内嵌 JS spider 源码（phase3 `ijs` 站点加载失败）——已改为严格 JSON 先行解析、注释剥除仅兜底（aa9002f）。同批：夸克 Cookie 误入库处置（214a8c8，DuoDuo/.quark 解除跟踪 + jar JVM cwd 固定到 `<cache>/jar-runtime`）。改进任务清单见 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)。
+2026-08-17 回归入口补全 + 配置解析回归修复：`test_kazumi.py`（83 用例）接入 `run_all.py` STAGES，Python 回归从 38 项扩到 121 项（smoke 13 + phase3 25 + kazumi 83），`npm run test:py` 全绿。接入后即捕获一处 HEAD 回归：7816695 的 `_strip_json_comment_lines` 无条件先剥行内 `//`，损坏内嵌 JS spider 源码（phase3 `ijs` 站点加载失败）——已改为严格 JSON 先行解析、注释剥除仅兜底（aa9002f）。同批：夸克 Cookie 误入库处置（214a8c8，DuoDuo/.quark 解除跟踪 + jar JVM cwd 固定到 `<cache>/jar-runtime`）。
 
-2026-08-17 TVBox Phase A–E 代码收口：兼容套件 S1/S2/S4 改走真实 FastAPI `/action`，新增重试、离线 SKIP、JSON 报告和分层 skipped 原因聚合；新增端口泛化与夸克降级行为测试；`YUKI_PAN_FAST_PATH` 接入设置页；L1-L4 诊断、QuickJS 缺失全局警告和配置导入摘要完成；新增 [TVBOX_CONTRACT_GAPS.md](docs/TVBOX_CONTRACT_GAPS.md) 与 [DATA_MAP.md](docs/DATA_MAP.md)。渲染层 17 个脚本完成 `YUKI.<module>` 导出，兼容浏览器与 VM 测试环境。验证：Python 全量回归 ALL PASS、JS 单元 206/206、JS 语法 40/40、ESLint 0 错误、Ruff PASS。21 仓网络基线与实机/发布验收仍待外部环境。
+2026-08-17 TVBox Phase A–E 代码收口：兼容套件 S1/S2/S4 改走真实 FastAPI `/action`，新增重试、离线 SKIP、JSON 报告和分层 skipped 原因聚合；新增端口泛化与夸克降级行为测试；`YUKI_PAN_FAST_PATH` 接入设置页；L1-L4 诊断、QuickJS 缺失全局警告和配置导入摘要完成；新增 TVBOX_CONTRACT_GAPS.md 与 DATA_MAP.md（两文档已于 2026-08-22 文档精简时归档删除）。渲染层 17 个脚本完成 `YUKI.<module>` 导出，兼容浏览器与 VM 测试环境。验证：Python 全量回归 ALL PASS、JS 单元 206/206、JS 语法 40/40、ESLint 0 错误、Ruff PASS。21 仓网络基线与实机/发布验收仍待外部环境。
 
 2026-08-10 全量功能测试（已完成）：自动化测试共 **200 项全部通过**——JS 单元 60/60、Python 38/38（smoke 13 + phase3 25）、JS 语法 34 文件 0 错误、真实界面验收 10 个脚本 **102/102** 检查项（内容页/系统页/时间表/推荐/详情卡/我的页/观看统计/Kazumi 布局/分页滚动条/MiSans）。完整功能测试矩阵、自动化明细与需用户实测清单见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 
@@ -403,6 +404,18 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 ### 进行中
 
 - 无（本轮两项已完成代码验证与真实界面验收；后续项见 §4「需要继续完成」与「未完成」清单）。
+
+### 2026-08-24 原生播放列表、中文菜单与 Anime4K 快捷键（ca3dad5）
+
+- [x] **原生播放列表**：新增 `src/main/playlist-proxy.js`——在线整季不能预解析直链（懒解析+签名时效+风控），每集映射为本地代理地址 `http://127.0.0.1:<port>/pl/<token>/<index>`，mpv 打开哪集才向后端 `playerContent` 解析哪集并 302 交真实 CDN；Kazumi 源经隐藏窗口 `captureDirect` 二段解析。边界：仅支持直连源（parse=1/DRM/空地址返回 502 + toast 并停队），会话 TTL 2h、上限 8 个；Range/Seek 由 mpv 直连上游不占代理带宽。静态直链批量直接进 mpv 原生队列。
+- [x] **队列逐集记账**：原生队列 mpv 进程内推进不逐集退出——观看统计/历史改逐集 `ended` 记账，每集独立观看链（整季共用一条链会被链内去重扣成约一集），收藏进度逐集更新；`<15s` 短播不计入口径与旧逐集会话一致。
+- [x] **右键中文菜单**：新增 `src/main/mpv-menu-conf.js` 译制 mpv `etc/menu.conf`（官方不做本地化），TAB 分隔/4 空格层级格式注入 userData，`--script-opt=select-menu_conf_path` 指定；仅译文案与 OSD 文字，命令与条件表达式原样保留。轨道/章节二级列表标题硬编码于 select.lua 无法汉化。
+- [x] **Anime4K 快捷键**：hints.lua 注入 `a4k-<mode>` script-binding 写 `user-data/yuki/a4k-request`，主进程消费后运行时替换 glsl-shaders 链（无需重启）+ 持久化设置 + 广播 `yuki:a4k-changed` 同步设置页；`K` 键循环档位；菜单勾选态由启动时写入的当前档位驱动。修复过两处真实缺陷：lua 脚本命名空间错误致菜单点击落空、属性读取 API 不当致 K 键循环恒回第一档。
+- [x] **上/下一集快捷键**：PGUP/PGDWN 触发 `yuki:episode-skip`，渲染层按当前线路推集回退。
+- [x] **夸克会话自动续期**（go_proxy.py）：清共享 jar 前捕获响应滚动的夸克会话字段（__pus/__puus 等）节流合并回加密存储——修复 L-18 清 jar 设计把 Set-Cookie 轮换整体丢弃、Cookie 单向陈旧最终全量 412 的事故根因；6h±抖动低频保活探针维持会话活跃，412 标记可疑供自愈评估。
+- [x] **Bangumi 分页聚合**（plugin_manager.py）：`_aggregate_pages` 自动翻页补足单次拉取总量（页间 0.3s 限速防风控、单页钳制 50），修复渲染层每页数量 60/120 设置触发上游拒绝导致整页空白；WebDAV 同步远程目录拼接补路径穿越守卫。
+- [x] **打包资源定位**（134101a）：新增 `python-backend/hoststate.py` 宿主状态探测（端口/缓存目录/代理地址，替代 Android Java 桥）+ `~/.video-pc → ~/.yuki` 兜底迁移；冻结入口/只读目录下 Python 后端发现与二进制资源根解析修复（download-binaries/python-bridge/mpv-player 配合改造）。
+- 验证：`tests/js/dl-dedupe.test.js` 10 例 + playlist-proxy/menu-conf/player-watch 等新单测，JS 单元 365/365、lint 0 错、check-js 44 文件 0 错；Python 侧 test_circuit/test_quark_session_refresh/test_webdav_conn/test_kazumi_cover_proxy/test_frozen_entrypoint/test_resources_root 新增接入 run_all.py（40 阶段）。打包/实机 QA 待用户验证。
 
 ### 2026-08-24 边下边播去重（同源同集不重复下载）
 

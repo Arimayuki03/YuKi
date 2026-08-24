@@ -1,6 +1,6 @@
 # YuKi 系统架构
 
-> 更新时间：2026-08-22
+> 更新时间：2026-08-24
 > 许可证：[GPLv3](../LICENSE)（`package.json` `GPL-3.0-only`，见 [THIRD_PARTY.md](THIRD_PARTY.md)）
 >
 > 本文描述当前有效架构。历史方案、详细批次和踩坑记录见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
@@ -71,7 +71,17 @@ FastAPI Python 后端
 
 关键约束：
 
-- mpv 每次只播放一集，不使用播放列表承担业务连播。
+- 播放队列分两种形态：**单集会话**（渲染层维护上下文推进连播，解析类/回退路径）与
+  **原生播放列表**（mpv 进程内推进）。在线整季经 `src/main/playlist-proxy.js` 映射为本地
+  按需解析代理条目 `http://127.0.0.1:<port>/pl/<token>/<index>`——mpv 打开哪集才解析哪集
+  （playerContent / Kazumi captureDirect 二段解析），302 交真实 CDN，直链零过期；
+  parse=1/DRM/空地址的集目返回 502 并回调 toast 停队。静态直链批量直接入原生队列。
+- 原生队列不逐集退出进程：观看统计/历史改为逐集 `ended` 记账，每集开独立观看链
+  （链内去重是给断流重连重播同一集用的，整季共用一条链会把时长扣成约一集）。
+- mpv 外观资源由主进程生成注入（`writeMpvAssets`）：快捷键提示 hints.lua、步长 input.conf、
+  中文右键菜单 menu.conf（`mpv-menu-conf.js` 译制）；Anime4K 档位经 lua 写
+  `user-data/yuki/a4k-request`，主进程消费后运行时替换 glsl-shaders 链、持久化设置并广播
+  `yuki:a4k-changed` 同步渲染层；PGUP/PGDWN 上/下一集经 `yuki:episode-skip` 推集。
 - 每次播放分配会话号，旧会话退出不能影响当前会话。
 - `yuki:play` 只有在 mpv 报告 `file-loaded`/ready 后才返回 `ok=true`；首帧超时会停止对应进程。
 - 断流自动重连只允许每条观看链尝试一次，并重新调用原始 `playerContent`，不复用旧 CDN URL。
@@ -85,6 +95,9 @@ FastAPI Python 后端
 - HTML、JSON、登录页、401/403 和已过期签名地址不能直接交给 mpv；Spider 可用
   `skipProbe` 标记真正一次性、探测即消耗的 URL。
 - JAR 网盘 Provider 是首选实现；native Quark Provider 只在显式快路径开启且 JAR 降级时接管。
+  网盘直链代理（`go_proxy.py`）维护夸克会话生命周期：清共享 jar 前捕获响应滚动的
+  `Set-Cookie` 会话字段并节流合并回加密存储（轮换不再被整体丢弃），6h±抖动低频保活探针
+  维持会话活跃，412 标记可疑供自愈评估。
 - DRM 策略：当前明确不支持，不实现绕过（原 ADR-0002 已归档，结论保留）。
 
 ## 5. 下载数据流
@@ -93,6 +106,10 @@ FastAPI Python 后端
 - M3U8 交给 ffmpeg 拉流和封装，支持 AES-128 与失败重试。
 - HLS 广告过滤仅在下载路径重写播放列表；播放时实时过滤尚未实现。
 - 下载列表由主进程聚合状态并推送，渲染层只负责展示。
+- 同源同集下载去重（`src/main/dl-dedupe.js`）：以「站点 | 剧名 | 集名」为稳定 key 登记
+  （直链带签名时效不作 key；vod 一律用剧名使手动下载与播放链归到同一 key）。入队即写携带
+  `epKey` 的完整初始记录（跨重启可恢复）；查重命中「进行中且任务存活」或「已完成且产物在」
+  即跳过，失败/文件已删/引擎孤儿记录放行重下；删除任务/清除列表后允许重新下载。
 - 完成/失败记录写入 `dl-records.json`，保证跨重启可见。
 - 下载目录切换需要重启 aria2c，但保留续传语义。
 
@@ -240,7 +257,7 @@ npm run build:py   # PyInstaller -> python-dist/
 npm run build:win  # NSIS x64 安装包 -> dist/
 ```
 
-`test:all` 最新全量 **ALL PASS**（2026-08-22：`run_all.py` 36 阶段全过、编译 100 文件 0 error、JS 单元 313 tests、ESLint 0 error、Ruff 全过；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
+`test:all` 最新全量 **ALL PASS**（2026-08-23：`run_all.py` 40 阶段全过、编译 98 文件 0 error、ESLint 0 error、Ruff 全过；2026-08-24 增量后 JS 单元 365/365；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
 
 `run_all.py` 按阶段串行（任一阶段失败即停），其中 `config-snapshot`/`ext-semantics`/`capability-router`/`config-security` 四个阶段通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的 loopback 夹具跑，不出网；其余阶段覆盖 smoke/phase3/kazumi/cache/代理/JAR/站点健康等。夹具进入时会隔离宿主代理环境变量与 Windows 系统代理，否则开发机代理会吞请求；gzip、JPEG/PNG 伪装三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，`mtime=0`），四种载体哈希必须相等。
 

@@ -9,7 +9,6 @@
 </p>
 
 <p align="center">
-<!-- TODO: GitHub 仓库创建后，将下方徽章中的 OWNER 替换为实际用户名/组织名 -->
 <a href="https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml"><img src="https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 <a href="https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml"><img src="https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3" /></a>
@@ -25,6 +24,7 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 - CatVod 配置、Python/JavaScript/CMS 爬虫、聚合搜索、详情与播放链路已经完成。
 - Kazumi 规则导入、商店、编辑、测试、搜索、剧集解析和真实视频流提取已经接入。
 - mpv 播放、自动连播、续播、Anime4K、截图、外部播放已接入；画中画已在 2A 中移除。
+- 原生播放列表与边下边播已接入：在线整季经本地按需解析代理交给 mpv 原生队列连播（直链零过期），同源同集下载自动去重；mpv 右键菜单已中文化，Anime4K 支持快捷键循环切换。
 - aria2c 直链下载、ffmpeg HLS 下载、下载记录与系统通知已接入。
 - 收藏、历史、观看统计、Bangumi、WebDAV 和本地文件管理已接入。
 - Windows 安装包已生成；macOS/Linux 打包、安装后冷启动和自动更新仍待验证或实现。
@@ -72,11 +72,8 @@ npm run build:win
 | 查看版本变更记录 | [CHANGELOG.md](CHANGELOG.md) |
 | 查看随安装包分发的第三方组件许可 | [第三方组件与许可声明](docs/THIRD_PARTY.md) |
 
-### 工程审查与执行计划
+### 执行计划
 
-- [代码审查报告](CODE_REVIEW.md) · 安全问题、缺陷和审查基线
-- [代码审查修复任务清单](CODE_REVIEW_FIX_TASKS.md) · 修复步骤与验收记录
-- [改进优化任务清单](IMPROVEMENT_PLAN.md) · 工程化、性能和发布待办
 - [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口）
 
 ## 免责声明

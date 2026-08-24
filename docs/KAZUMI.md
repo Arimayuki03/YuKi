@@ -123,6 +123,8 @@ python-backend/
 - 线程安全：threading.Lock 保护规则列表读写。
 - 导入校验：api 小于等于 8；name 非空唯一；模式必须为 xpath 或 api；XPath 模式五件套非空；API 模式 URL 非空且 JSONPath 合法。
 - 启用禁用：增加 enabled 字段默认 true，禁用后不出现在聚合搜索与详情页弹窗。
+- Bangumi 分页聚合（2026-08-24）：`_aggregate_pages` 通用翻页循环——取满 want 条或上游耗尽即停；首页异常原样抛出（调用方维持「失败返回空」语义），后续页异常降级返回已取部分；页间固定 0.3s 限速防风控。收藏/日历拉取单页钳制 50、单次总量上限 120，修复渲染层每页数量 60/120 设置整页空白。
+- WebDAV 同步目录拼接：`_webdav_sync_dir` 支持用户自定义子路径，含 `..` 直接拒绝（防路径穿越写穿盘根）。
 
 ### 4.3 RuleEngine 规则执行
 - search(config, keyword, cancel_token) 返回 RuleSearchTrace。

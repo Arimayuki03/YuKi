@@ -458,3 +458,26 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - 新增 `release.yml`（tag `v*` → NSIS 构建 → Draft Release），`v0.1.0` 标签已就绪（未推送）。
 
 验证：`npm run test:all` 全量 **ALL PASS**（36 阶段 / 100 py 文件 / 313 JS tests / ESLint 0 error）。
+
+---
+
+## 10. 2026-08-23 ~ 08-24 打包版修复与播放链升级批次
+
+### 10.1 打包资源定位（134101a，2026-08-23）
+
+- 打包版（PyInstaller 冻结入口 + 只读 resources 目录）下 Python 后端发现与二进制资源根解析修复：新增 `python-backend/hoststate.py`（宿主运行时状态：端口/缓存目录/代理地址，替代原 Android Java 桥路径；含 `~/.video-pc → ~/.yuki` 整体迁移兜底，保护 `npm run backend` 独立后端场景）；`download-binaries.js` 资源根解析重构、`python-bridge.js` 冻结入口适配、`mpv-player.js` 二进制发现配合改造。
+- 测试：`test_frozen_entrypoint.py`（201 行）、`test_resources_root.py`（106 行）接入 `run_all.py`。
+
+### 10.2 打包版用户问题批次（04f375d，2026-08-23）
+
+14 项用户报告问题，4 个并行侦查代理定位根因后分簇修复（详细记录见 [../PROGRESS.md](../PROGRESS.md) §7 同日小节与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) R17–R19）：封面毒缓存自愈、滚动位置集中保存恢复、直链截帧（ffmpeg 原生 http/m3u8 输入 + md5(url) 缓存）、下载管理七项（稳定排序/排序下拉/三选删除/完成播放路径兜底/恢复默认位置/目录迁移断点续传/page 源 captureDirect 兜底）、WebDAV 恢复假成功改结构化返回、切分类 L3 前端中止在途请求 + 后端瞬时错误退避重试。
+验证：`npm run test:all` 全绿——run_all.py 全阶段 ALL PASS（新增 webdav-restore 阶段 5 例）、编译 98 文件 0 error、JS 单元 326/326、ESLint 0 error（73 条既有 warning）、Ruff 全过。
+
+### 10.3 原生播放列表、中文菜单与 Anime4K 快捷键（ca3dad5，2026-08-24）
+
+- **原生播放列表（`playlist-proxy.js`）**：在线整季直链懒解析+签名时效+风控，不能预解析整季交给 mpv——每集映射本地代理地址 `/pl/<token>/<index>`，打开哪集解析哪集（playerContent / Kazumi captureDirect），302 交真实 CDN；静态直链批量直接入原生队列。关键决策：仅支持直连源，parse=1/DRM/空地址集目 502 + toast 停队；会话 TTL 2h、上限 8；Range/Seek 直连上游不占代理带宽；`insecureHTTPParser` 宽容解析防 mpv 回放头触发 400 打死整队。队列逐集记账：观看统计/历史逐集 `ended` 记账、每集独立观看链（整季共用一条链会被链内去重扣成约一集的教训写入注释）。
+- **右键中文菜单（`mpv-menu-conf.js`）**：mpv 官方不做界面本地化（mpv#13828），译制 `etc/menu.conf` 注入 userData 经 `--script-opt=select-menu_conf_path` 生效；TAB 分隔/4 空格层级格式约束文档化；轨道/章节二级列表标题硬编码于 select.lua 无法汉化（如实记录边界）。
+- **Anime4K 快捷键**：hints.lua 注入 `a4k-*` script-binding 写 `user-data/yuki/a4k-request`，主进程消费后运行时替换 glsl-shaders 链 + 持久化 + 广播 `yuki:a4k-changed`；`K` 循环档位、PGUP/PGDWN 推集。过程中修掉两个真实缺陷：lua 命名空间错误（yuki-hints.lua → yuki_hints 命名空间，菜单点击全部落空）、属性读取 API 不当致 K 键循环恒回第一档。
+- **夸克会话自动续期（go_proxy.py）**：2026-08 夸克 412 事故复盘落地——L-18「每次请求后清空共享 jar」把服务端 Set-Cookie 轮换整体丢弃，Cookie 单向陈旧直至全量 412 仅重新扫码可解。现在清 jar 前同锁内取走夸克域 cookie 节流合并回加密存储；6h±抖动保活探针一举两得（保活 + 触发轮换捕获）；412 标记可疑供自愈评估；并发不变量不变（显式 headers 携带凭据）。
+- **Bangumi 分页聚合（plugin_manager.py）**：`_aggregate_pages` 自动翻页补足单次总量（页间 0.3s 限速防风控、首页异常原样抛、后续页降级返回部分、单页钳制 50、单次总量上限 120），修复渲染层每页数量 60/120 触发上游拒绝致整页空白；`_webdav_sync_dir` 远程子路径拒绝 `..` 防穿越写穿盘根。
+- 测试：`tests/js/dl-dedupe.test.js` 10 例、`playlist-proxy.test.js`、`mpv-menu-conf.test.js`、`player-watch.test.js` 扩充；Python 侧 `test_circuit.py`、`test_quark_session_refresh.py`、`test_webdav_conn.py`、`test_kazumi_cover_proxy.py` 新增接入 run_all.py（40 阶段）。JS 单元 365/365、lint 0 错、check-js 44 文件 0 错。打包/实机 QA 待用户验证。
