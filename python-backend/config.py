@@ -1020,10 +1020,20 @@ class ConfigManager:
         try:
             ctx.check()
         except RuntimeContractError as error:
+            # 预算耗尽阶段的收尾：慢机器上 straggler 线程的 check() 会因
+            # 「deadline 已钳到当前时刻 + 外层可能已 set 取消事件」而抛出
+            # CANCELLED（而非 TIMEOUT）——此时同样满足「保留已建成站点继续
+            # swap」的救援语义；真正的用户取消发生在预算耗尽之前，不走这里。
             if (getattr(ctx, 'salvage_partial', False)
                     and error.code == 'L1_CONFIG_TIMEOUT' and new_sites):
                 logger.warning(
                     'restore budget exhausted: keep %d/%d built sites, skip the rest',
+                    len(new_sites), len(items))
+            elif (getattr(ctx, 'salvage_partial', False)
+                    and error.code == 'L1_CONFIG_CANCELLED'
+                    and budget_exhausted and new_sites):
+                logger.warning(
+                    'build budget exhausted (cancelled stragglers): keep %d/%d built sites, skip the rest',
                     len(new_sites), len(items))
             else:
                 self._discard({'sites': new_sites},
