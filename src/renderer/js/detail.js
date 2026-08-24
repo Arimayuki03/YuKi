@@ -135,7 +135,7 @@ const Detail = {
                     // 同步移除本地收藏（时间表筛选依赖 bangumiId）
                     if (typeof Records !== 'undefined' && this._bgmId) {
                         const fav = await Records.isFavorite('bangumi', id);
-                        if (fav) await Records.toggleFavorite({ site: 'bangumi', vodId: id, name: nm, bangumiId: id });
+                        if (fav) await Records.toggleFavorite({ site: 'bangumi', vodId: id, name: nm, bangumiId: id, bangumi: true });
                     }
                 } else if (await Kazumi.setBangumiCollection(id, val)) {
                     Kazumi._applyBangumiColState(id);
@@ -144,7 +144,7 @@ const Detail = {
                         const tagMap = { 1: 'want', 2: 'seen', 3: 'watching', 4: 'hold', 5: 'dropped' };
                         const tag = tagMap[val] || 'want';
                         const pic = (this._bgmInfo && this._bgmInfo.images && bangumiCover(this._bgmInfo.images, 'card')) || '';
-                        await Records.setFavTag({ site: 'bangumi', vodId: id, name: nm, pic, siteName: 'Bangumi', bangumiId: id }, tag);
+                        await Records.setFavTag({ site: 'bangumi', vodId: id, name: nm, pic, siteName: 'Bangumi', bangumiId: id, bangumi: true }, tag);
                     }
                 }
                 // 收藏变更由 Favorites.changed（recSet 内触发）统一广播：
@@ -191,6 +191,10 @@ const Detail = {
         this._relations = [];
         this._bgmExtraLoaded = false;
         this._activeTab = '概览';
+        // 多选状态不跨页面残留（T79）：单例标志此前退出详情后仍保留，重进任意
+        // 详情页直接回到多选态；每次打开重置为普通模式
+        this._bgmSelectMode = false;
+        this._epSelectMode = false;
         App.showView('detail');
         this.load();
     },
@@ -223,6 +227,9 @@ const Detail = {
         this._relations = [];
         this._bgmExtraLoaded = false;
         this._activeTab = '概览';
+        // 多选状态不跨页面残留（同 open()）
+        this._bgmSelectMode = false;
+        this._epSelectMode = false;
         App.showView('detail');
         showLoading();
         $('#detail-body').html('<div class="tip-line">正在载入详情…</div>');
@@ -1479,6 +1486,7 @@ const Detail = {
         if (!src || !idxs.length) return;
         showLoading();
         let added = 0, ffmpegMissing = false, ffmpegDownloading = false, failed = 0;
+        let skipDownloading = 0, skipDone = 0; // 同源同集去重：已在队列/已下载的集数
         for (const i of idxs) {
             const ep = src.episodes[i];
             if (!ep) continue;
@@ -1489,8 +1497,15 @@ const Detail = {
             const ext = isM3u8 ? '.mp4' : (r.url.split('?')[0].match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0] || '.mp4';
             const out = `${this.vodName || '视频'} - ${ep.name}${ext}`;
             try {
-                const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', { uri: r.url, out, header: r.header });
+                // ep* 为同源同集去重上下文：与边下边播共用「站点|剧名|集名」key，
+                // 命中重复任务/已完成文件时主进程直接跳过，不再重复下载
+                const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', {
+                    uri: r.url, out, header: r.header,
+                    epSite: this.site || '', epVodName: this.vodName || '', epName: ep.name || '',
+                });
                 if (res && res.ok) added++;
+                else if (res && res.reason === 'already-downloading') skipDownloading++;
+                else if (res && res.reason === 'already-done') skipDone++;
                 else if (res && res.reason === 'ffmpeg-downloading') ffmpegDownloading = true;
                 else if (res && res.reason === 'ffmpeg-missing') ffmpegMissing = true;
                 else failed++;
@@ -1499,6 +1514,8 @@ const Detail = {
         hideLoading();
         const bits = [];
         if (added) bits.push(`已加入下载 ${added} 集，可在“下载”页查看`);
+        if (skipDownloading) bits.push(`${skipDownloading} 集已在下载队列，跳过重复下载`);
+        if (skipDone) bits.push(`${skipDone} 集已下载过，无需重复下载`);
         if (ffmpegDownloading) bits.push('ffmpeg 正在后台自动下载（约 90MB），完成后重试即可');
         if (ffmpegMissing) bits.push('ffmpeg 未就绪，部分 m3u8 切片流暂无法合成（启动时后台下载中，请稍后重试）');
         if (failed) bits.push(`${failed} 集取不到下载地址`);

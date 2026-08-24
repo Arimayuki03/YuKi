@@ -152,7 +152,9 @@ const Popular = {
     async _pageSize() {
         if (typeof pageSizeOf !== 'function') return 24;
         const size = await pageSizeOf('pageSizePopular');
-        return size > 0 && size <= 50 ? size : 20;
+        // 与后端单次拉取上限一致（≤120）：趋势接口单页钳制 ≤50、标签搜索单页 ≤100，
+        // 超出部分由后端翻页聚合补足（页间限速防风控），过大的设置值在此钳到 120。
+        return size > 0 ? Math.min(size, 120) : 20;
     },
 
     _setTagSelect(tag) {

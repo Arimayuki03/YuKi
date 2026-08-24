@@ -160,6 +160,28 @@ class TestKazumiCoverProxy(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, b'ok')
 
+    def test_poisoned_r_prefix_segment_normalized(self):
+        """T78：旧渲染层持久化的损坏组合（/r/{n}/pic/cover/{非l}/，lain CDN 返回
+        HTTP 400）在代理侧归一化为段 l 后转发；裸路径形式保持原样。"""
+        fetched_urls = []
+
+        def fake_get(url, **kw):
+            fetched_urls.append(url)
+            return _FakeRsp(status=200, content=b'ok', ctype='image/jpeg')
+
+        http_client.get = fake_get
+        status, _, _ = _request(
+            self._url('https://lain.bangumi.pro/r/400/pic/cover/c/3c/ec/247_MnPPU.jpg'))
+        self.assertEqual(status, 200)
+        self.assertEqual(len(fetched_urls), 1)  # 已是镜像域，不再追加官方候选
+        self.assertIn('/r/400/pic/cover/l/3c/ec/247_MnPPU.jpg', fetched_urls[0])
+
+        # 裸路径（无 r 前缀）的 c 段合法：原样透传
+        fetched_urls.clear()
+        status, _, _ = _request(self._url('https://lain.bgm.tv/pic/cover/c/a/b/1.jpg'))
+        self.assertEqual(status, 200)
+        self.assertIn('lain.bgm.tv/pic/cover/c/a/b/1.jpg', fetched_urls[0])
+
 
 if __name__ == '__main__':
     unittest.main()

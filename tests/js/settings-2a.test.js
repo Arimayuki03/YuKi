@@ -59,6 +59,10 @@ test('2.4/2.8/2.9/2.10/2.11/3.1/3.2/4.1: 新增设置控件与镜像开关存在
         'webdav_enable',       // 3.2 WebDAV 主开关
         'webdav_enable_history', // 3.2 观看记录同步
         'webdav_enable_collect', // 3.2 收藏同步
+        'webdav_enable_settings', // 设置同步
+        'webdav_enable_stats', // 观看统计同步
+        'webdav_auto_enable',  // 定时自动同步开关
+        'webdav_auto_interval', // 自动同步间隔
         'webdav_save',         // 3.2 保存配置
         'set_bangumi_mirror',  // 4.1 Bangumi 镜像
         'set_git_mirror',      // 4.1 规则仓库镜像

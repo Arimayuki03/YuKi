@@ -81,7 +81,9 @@ test('end-file eof 附带会话号并把进度补满后发出 ended', () => {
     p.on('ended', (info) => { ended = info; });
     p._onEvent({ event: 'end-file', reason: 'eof', playlist_pos: 1 });
     assert.equal(p._activeSession.pos, 120); // 播完把进度补满，供退出判定
-    assert.deepEqual(ended, { sessionId: 9, playlistPos: 1, queueLen: 3 });
+    // 单集会话：nativeQueue=false，itemWallSec 缺失（未设 itemStartMs）为 null
+    assert.deepEqual(ended, { sessionId: 9, playlistPos: 1, queueLen: 3,
+        pos: 120, duration: 120, itemWallSec: null, nativeQueue: false });
 });
 
 test('end-file eof 会话号只属当前活动会话', () => {
@@ -351,4 +353,190 @@ test('headerFieldsValue(): 空/缺失头被过滤，非法输入返回空串', (
     assert.equal(MpvPlayer.headerFieldsValue(undefined), '');
     assert.equal(MpvPlayer.headerFieldsValue(' Referer: x'), '');
     assert.equal(MpvPlayer.headerFieldsValue({}), '');
+});
+
+// ---------------------------------------------------------------- 右键上下文菜单（版本门控 + 参数注入）
+
+// 原生多集队列：m3u 生成 + 首集延迟 seek + 逐集记账载荷
+test('buildM3u(): #EXTINF 集名与 URL 成对；换行/Tab 压空格；空列表回退空串', () => {
+    const m3u = MpvPlayer.buildM3u([
+        { url: 'http://x/1.mp4', title: '第01集\n预告\t版' },
+        { url: 'file:///d/a.mkv' }, // 无标题也保留条目
+        null,
+        { title: '无地址不收录' },
+    ]);
+    const lines = m3u.split('\n').filter((l) => l !== '');
+    assert.equal(lines[0], '#EXTM3U');
+    assert.ok(lines.includes('#EXTINF:-1,第01集 预告 版'));
+    assert.ok(lines.includes('http://x/1.mp4'));
+    assert.ok(lines.includes('file:///d/a.mkv'));
+    assert.ok(!lines.some((l) => l.includes('无地址不收录')));
+    assert.equal(MpvPlayer.buildM3u([]), '');
+    assert.equal(MpvPlayer.buildM3u(null), '');
+});
+
+test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用一次，ready 照常逐次发出', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args); // 只捕获 seek；file-loaded 还会查 playlist-pos
+        return Promise.resolve();
+    };
+    p._activeSession = { id: 30, ready: false, pendingSeekSec: 95.5, seekApplied: false, itemStartMs: Date.now() };
+    let readyCount = 0;
+    p.on('ready', () => { readyCount += 1; });
+    p._onEvent({ event: 'file-loaded' });
+    p._onEvent({ event: 'file-loaded' }); // 第二集装载：不再 seek
+    assert.deepEqual(seeks, [['seek', 95.5, 'absolute+exact']]);
+    assert.equal(readyCount, 2); // waitForReady 依赖每次 file-loader 的 ready 事件
+    assert.equal(p._activeSession.seekApplied, true);
+});
+
+test('ended 载荷：原生队列携带 nativeQueue/playlistPos/itemWallSec/pos/duration 供渲染层逐集记账', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._queueLen = 12;
+    p._activeSession = { id: 31, nativeQueue: true, pos: 30, duration: 90,
+        fullscreen: false, speed: 1, itemStartMs: Date.now() - 30000 };
+    let ended = null;
+    p.on('ended', (info) => { ended = info; });
+    p._onEvent({ event: 'end-file', reason: 'eof', playlist_pos: 4 });
+    assert.equal(ended.playlistPos, 4);
+    assert.equal(ended.queueLen, 12);
+    assert.equal(ended.nativeQueue, true);
+    assert.equal(ended.pos, 90);       // eof 把进度补满
+    assert.equal(ended.duration, 90);
+    assert.ok(ended.itemWallSec >= 29 && ended.itemWallSec <= 32, `itemWallSec 异常：${ended.itemWallSec}`);
+});
+
+// select.lua 的 context-menu 绑定与自定义 menu.conf 自 mpv 0.41 起提供；
+// git 开发版版本号 ≥ 对应的下一个发布版，同样视为支持。
+test('parseMpvVersion(): 解析发布版与 git 版本首行', () => {
+    assert.deepEqual(MpvPlayer.parseMpvVersion('mpv v0.41.0-73-g7b8915bc1d'), { major: 0, minor: 41 });
+    assert.deepEqual(MpvPlayer.parseMpvVersion('mpv 0.40.0'), { major: 0, minor: 40 });
+    assert.deepEqual(MpvPlayer.parseMpvVersion('mpv v1.0.0'), { major: 1, minor: 0 }); // 未来主版本升位
+    assert.equal(MpvPlayer.parseMpvVersion('mpv UNKNOWN'), null);
+    assert.equal(MpvPlayer.parseMpvVersion(''), null);
+    assert.equal(MpvPlayer.parseMpvVersion(null), null);
+});
+
+test('supportsContextMenu(): 仅 0.41+/git 版注入右键菜单（旧版默认右键=暂停，保持原样）', () => {
+    assert.equal(MpvPlayer.supportsContextMenu('mpv v0.41.0-73-g7b8915bc1d'), true);
+    assert.equal(MpvPlayer.supportsContextMenu('mpv v0.42.0 (C) 2026 mpv-player.org'), true);
+    assert.equal(MpvPlayer.supportsContextMenu('mpv v1.0.0'), true);
+    assert.equal(MpvPlayer.supportsContextMenu('mpv 0.40.0'), false);
+    assert.equal(MpvPlayer.supportsContextMenu('mpv 0.38.0'), false);
+    assert.equal(MpvPlayer.supportsContextMenu('mpv UNKNOWN'), false); // 解析失败一律按不支持处理
+    assert.equal(MpvPlayer.supportsContextMenu(null), false);
+});
+
+test('_contextMenuArgs(): menu.conf 存在即注入（旧版 mpv 忽略未知 script-opt 键，无副作用），路径转正斜杠', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const conf = path.join(require('os').tmpdir(), 'yuki-menu-conf-test', 'menu.conf');
+    try { fs.mkdirSync(path.dirname(conf), { recursive: true }); fs.writeFileSync(conf, '退出\tquit\n'); } catch (e) { /* ignore */ }
+
+    const p = Object.create(MpvPlayer.prototype);
+    p.supportsContextMenu = false; // 版本解析仅作参考信息，不再是注入门槛
+    p.menuConfPath = conf;
+    const a = p._contextMenuArgs();
+    assert.equal(a.length, 1);
+    assert.ok(a[0].startsWith('--script-opt=select-menu_conf_path='));
+    assert.ok(!a[0].includes('\\'), 'Windows 路径必须转为正斜杠');
+    assert.ok(a[0].endsWith('/menu.conf'));
+
+    // 未生成/文件缺失时不注入
+    p.menuConfPath = null;
+    assert.deepEqual(p._contextMenuArgs(), []);
+    p.menuConfPath = path.join(require('os').tmpdir(), 'yuki-no-such-menu.conf');
+    assert.deepEqual(p._contextMenuArgs(), []);
+    try { fs.rmSync(path.dirname(conf), { recursive: true, force: true }); } catch (e) { /* ignore */ }
+});
+
+test('_probeContextMenuBinding(): 默认绑定含 select/context-menu 才运行时注入 MBTN_RIGHT', async () => {
+    const mk = (bindings) => {
+        const p = Object.create(MpvPlayer.prototype);
+        const calls = [];
+        p.getProperty = (name) => { assert.equal(name, 'input-bindings'); return Promise.resolve(bindings); };
+        p.command = (...args) => { calls.push(args); return Promise.resolve(); };
+        return { p, calls };
+    };
+    // 新版默认绑定（MENU → context-menu）存在：keybind 注入右键
+    const a = mk([
+        { key: 'MBTN_RIGHT', cmd: 'cycle pause' },
+        { key: 'MENU', cmd: 'script-binding select/context-menu' },
+    ]);
+    await a.p._probeContextMenuBinding();
+    assert.deepEqual(a.calls, [['keybind', 'MBTN_RIGHT', 'script-binding select/context-menu']]);
+    // 旧版（只有右键暂停）：不注入，保持其默认行为，绝不发死绑定
+    const b = mk([{ key: 'MBTN_RIGHT', cmd: 'cycle pause' }]);
+    await b.p._probeContextMenuBinding();
+    assert.deepEqual(b.calls, []);
+});
+
+// ---------------------------------------------------------------- 起播失败原因提取（日志噪音过滤）
+
+// mpv --log-file 尾部充满收尾调试行（Destroying client handle…），直接切尾巴
+// 会把无信息量噪音当错误原因展示给用户（「mpv 已退出，媒体尚未开始播放」弹窗）。
+const MPV_DEAD_LINK_LOG = [
+    '[ 0.412][v][lavf] Opening \'https://v.example/share/dead\'',
+    '[ 0.902][e][ffmpeg] http: HTTP error 404 Not Found',
+    '[ 0.903][e][lavf] Failed to recognize file format.',
+    '[ 0.903][i][cplayer] Exiting... (Errors when loading file)',
+    '[ 0.968][d][console] Destroying client handle...',
+    '[ 0.968][d][select] Destroying client handle...',
+    '[ 0.969][d][osc] Destroying client handle...',
+    '[ 0.969][d] Terminating.',
+].join('\n');
+
+test('extractErrorReason(): 保留 error 级行，剔除 Destroying client handle 噪音', () => {
+    const text = MpvPlayer.extractErrorReason(MPV_DEAD_LINK_LOG);
+    assert.match(text, /HTTP error 404/);
+    assert.match(text, /Failed to recognize file format/);
+    assert.doesNotMatch(text, /Destroying client handle/);
+});
+
+test('extractErrorReason(): 无 error 级时退回非调试行尾部（仍去噪音）', () => {
+    const log = [
+        '[ 0.100][v][cplayer] starting playback',
+        '[ 0.200][d][console] Destroying client handle...',
+        '[ 0.300][i][cplayer] Exiting... (Quit)',
+    ].join('\n');
+    const text = MpvPlayer.extractErrorReason(log);
+    assert.ok(text.includes('starting playback'));
+    assert.ok(text.includes('Exiting'));
+    assert.doesNotMatch(text, /Destroying client handle/);
+});
+
+test('extractErrorReason(): 空输入返回空串；超长截断到 limit', () => {
+    assert.equal(MpvPlayer.extractErrorReason(''), '');
+    assert.equal(MpvPlayer.extractErrorReason(null), '');
+    const long = MpvPlayer.extractErrorReason(`[ 1.000][e][x] ${'a'.repeat(2000)}`);
+    assert.ok(long.length <= 600);
+});
+
+// mpv 旧版 ytdl_hook 对缺失的 youtube-dl/yt-dlp 逐一 spawn 失败会刷屏：
+// "Subprocess failed: init" ×N + "youtube-dl failed"。直链播放与 ytdl 无关，
+// 存在其它模块错误行时必须整段丢弃，只留真实原因。
+const MPV_YTDL_SPAM_ONLY = [
+    '[ 0.236][e][ytdl_hook] Subprocess failed: init',
+    '[ 0.239][e][ytdl_hook] Subprocess failed: init',
+    '[ 1.213][e][ytdl_hook] Subprocess failed: init',
+    '[ 1.216][e][ytdl_hook] youtube-dl failed: not found or not enough permissions',
+].join('\n');
+
+const MPV_YTDL_SPAM_WITH_DEMUX = `${MPV_YTDL_SPAM_ONLY}\n[ 1.300][w][demux] DEMUXER_ERROR_NO_VALID_DATA`;
+
+test('extractErrorReason(): 同文重复行折叠 ×N', () => {
+    const text = MpvPlayer.extractErrorReason(MPV_YTDL_SPAM_ONLY);
+    assert.match(text, /Subprocess failed: init（×3）/);
+    assert.equal((text.match(/Subprocess failed: init/g) || []).length, 1);
+    assert.match(text, /youtube-dl failed/);
+});
+
+test('extractErrorReason(): 有其它模块错误行时丢弃 ytdl 噪音行', () => {
+    const text = MpvPlayer.extractErrorReason(MPV_YTDL_SPAM_WITH_DEMUX);
+    assert.doesNotMatch(text, /ytdl_hook|youtube-dl/);
+    assert.match(text, /DEMUXER_ERROR_NO_VALID_DATA/);
 });

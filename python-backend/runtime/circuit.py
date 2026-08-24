@@ -61,8 +61,13 @@ class CircuitBreaker:
             if error.code.endswith('_CANCELLED'):
                 self._half_open_in_flight = False
                 if self._state == 'half-open':
+                    # 半开探测被取消（典型：用户切分类/切源中止在途请求）：探测
+                    # 结果未知，回到 open，但**不重新计满开放时间**——保持原
+                    # _open_until（进入半开时已过期），下一个 before_call 会立即
+                    # 放行新的单个探测。此前这里重置为满 open_seconds，快速连续
+                    # 切换分类会把熔断无限延长（每次中止 +60s），站点在用户浏览
+                    # 期间始终不可用。
                     self._state = 'open'
-                    self._open_until = max(self._open_until, time.monotonic() + self.open_seconds)
                 return
             if not error.retryable:
                 self._permanent_error = error

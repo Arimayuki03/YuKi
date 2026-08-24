@@ -52,6 +52,23 @@ DANDAN_KEY = os.environ.get('DANDANAPI_KEY', '')
 WEBDAV_SYNC_ROOT = '/kazumiSync'
 
 
+def _webdav_sync_dir(webdav_url, remote_dir=''):
+    """拼接远程同步根目录。
+
+    remote_dir 为用户自定义子路径：空值回退默认 WEBDAV_SYNC_ROOT；
+    自动补前导斜杠、去尾斜杠；含 '..' 直接拒绝（防路径穿越写穿到盘根）。
+    """
+    rd = str(remote_dir or '').strip()
+    if '..' in rd:
+        raise ValueError('远程目录不能包含 ".."')
+    rd = rd.rstrip('/')
+    if not rd:
+        rd = WEBDAV_SYNC_ROOT
+    elif not rd.startswith('/'):
+        rd = '/' + rd
+    return f'{str(webdav_url or "").rstrip("/")}{rd}'
+
+
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
 
@@ -758,37 +775,72 @@ class PluginManager:
             buckets[self._season_weekday(item.get('air_date'))].append(item)
         return [{'weekday': {'id': wd}, 'items': buckets[wd]} for wd in range(1, 8)]
 
+    def _aggregate_pages(self, want, offset, fetch_page):
+        """分页聚合通用循环：fetch_page(remaining, pos) -> (items, total)。
+
+        取满 want 条或上游耗尽（空页 / offset 达到 total）即停；
+        首页异常原样抛出（调用方维持「失败返回空」语义），后续页异常降级为返回已取到的部分。
+        页与页之间固定间隔，避免聚合大页时连续请求触发上游风控（429/封禁）。
+        """
+        items = []
+        total = None
+        pos = max(int(offset or 0), 0)
+        while len(items) < want:
+            if items:
+                time.sleep(0.3)  # 页间限速：聚合翻页不连续打满上游
+            try:
+                chunk_items, total = fetch_page(want - len(items), pos)
+            except Exception as e:
+                if not items:
+                    raise
+                logger.warning('[kazumi] paged fetch stopped at %d/%d: %s', len(items), want, e)
+                break
+            if not chunk_items:
+                break
+            items.extend(chunk_items)
+            pos += len(chunk_items)
+            if total is not None and pos >= total:
+                break
+        return items, (total if total is not None else len(items))
+
     def bangumi_trends(self, limit=24, offset=0):
         """Bangumi 番剧趋势榜单（next.bgm.tv /p1/trending/subjects），返回归一化 {items,total}。
         镜像开启时经 _base_next() 走全域名反代 next.bangumi.pro（免签名，全路径可用）。
-        注意：该端点必须传 type/limit/offset，否则返回 400。"""
-        # 官方/镜像趋势（镜像开启时 _base_next() 指向 next.bangumi.pro）
-        try:
+        注意：该端点必须传 type/limit/offset，否则返回 400；单页 limit 上限按 ≤50 安全使用，
+        超出会被上游拒绝（曾致渲染层 60/120 每页设置整页空白）。故单页钳制 ≤50，
+        剩余量由 _aggregate_pages 自动翻页补足（页间限速），单次拉取总量上限 120。"""
+        def fetch_page(remaining, pos):
             rsp = http_client.get(
                 f'{self._base_next()}/p1/trending/subjects',
-                params={'type': 2, 'limit': limit, 'offset': offset},
+                params={'type': 2, 'limit': min(remaining, 50), 'offset': pos},
                 headers={'User-Agent': BANGUMI_UA},
                 timeout=10,
                 verify=True,
             )
             rsp.raise_for_status()
             data = rsp.json()
+            raw = data.get('data', []) if isinstance(data, dict) else data
+            items = []
+            if isinstance(raw, list):
+                for entry in raw:
+                    item = self._normalize_calendar_item(entry)
+                    if item:
+                        items.append(item)
+            total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
+            return items, total
+
+        want = min(max(int(limit or 0), 1), 120)  # 单次拉取上限与渲染层最大每页档位一致
+        try:
+            items, total = self._aggregate_pages(want, offset, fetch_page)
         except Exception as e:
             logger.warning('[kazumi] bangumi trends failed: %s', e)
             return {'items': [], 'total': 0}
-        raw = data.get('data', []) if isinstance(data, dict) else data
-        items = []
-        if isinstance(raw, list):
-            for entry in raw:
-                item = self._normalize_calendar_item(entry)
-                if item:
-                    items.append(item)
-        total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
-        return {'items': items, 'total': total}
+        return {'items': items[:want], 'total': total}
 
     def bangumi_list_by_tag(self, tag, limit=100, offset=0):
         """按标签搜索番剧（对齐 Kazumi getBangumiList：POST /v0/search/subjects + tag filter）。
-        tag 为空时返回热门排行（日本限定），非空时按标签筛选。"""
+        tag 为空时返回热门排行（日本限定），非空时按标签筛选。
+        v0 搜索单页上限 100：超过时内部翻页聚合，直到取满或结果耗尽。"""
         try:
             if tag:
                 body = {
@@ -802,25 +854,31 @@ class PluginManager:
                     'sort': 'rank',
                     'filter': {'type': [2], 'tag': ['日本'], 'rank': ['>=2', '<=1050'], 'nsfw': False},
                 }
-            rsp = http_client.post(
-                f'{self._base_api()}/v0/search/subjects',
-                params={'limit': limit, 'offset': offset},
-                json=body,
-                headers={'User-Agent': BANGUMI_UA},
-                timeout=(5, 10),
-                verify=True,
-            )
-            rsp.raise_for_status()
-            data = rsp.json()
-            raw = data.get('data', []) if isinstance(data, dict) else data
-            items = []
-            if isinstance(raw, list):
-                for entry in raw:
-                    item = self._normalize_calendar_item(entry)
-                    if item:
-                        items.append(item)
-            total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
-            return {'items': items, 'total': total}
+
+            def fetch_page(remaining, pos):
+                rsp = http_client.post(
+                    f'{self._base_api()}/v0/search/subjects',
+                    params={'limit': min(remaining, 100), 'offset': pos},
+                    json=body,
+                    headers={'User-Agent': BANGUMI_UA},
+                    timeout=(5, 10),
+                    verify=True,
+                )
+                rsp.raise_for_status()
+                data = rsp.json()
+                raw = data.get('data', []) if isinstance(data, dict) else data
+                items = []
+                if isinstance(raw, list):
+                    for entry in raw:
+                        item = self._normalize_calendar_item(entry)
+                        if item:
+                            items.append(item)
+                total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
+                return items, total
+
+            want = min(max(int(limit or 0), 1), 120)
+            items, total = self._aggregate_pages(want, offset, fetch_page)
+            return {'items': items[:want], 'total': total}
         except Exception as e:
             logger.warning('[kazumi] bangumi list by tag failed: %s', e)
             return {'items': [], 'total': 0}
@@ -1592,16 +1650,20 @@ class PluginManager:
 
     # ---------------------------------------------------------------- WebDAV 同步
 
-    def webdav_sync(self, webdav_url, username, password, data):
-        """WebDAV 同步（收藏/历史/规则上传到远程）。"""
+    def webdav_sync(self, webdav_url, username, password, data, ssl_verify=True, remote_dir=''):
+        """WebDAV 同步（收藏/历史/规则上传到远程）。
+
+        ssl_verify=False 时跳过 HTTPS 证书校验（自签名证书的自建服务器）；
+        remote_dir 为自定义远程子目录（空则用 WEBDAV_SYNC_ROOT）。
+        """
         import requests
         from requests.auth import HTTPBasicAuth
         try:
             auth = HTTPBasicAuth(username, password) if username else None
             # 确保同步目录存在
-            sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
+            sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
             try:
-                requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=True)
+                requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=ssl_verify)
             except Exception:
                 pass  # 目录可能已存在
             # 上传数据文件
@@ -1613,7 +1675,7 @@ class PluginManager:
                     headers={'Content-Type': 'application/json'},
                     auth=auth,
                     timeout=15,
-                    verify=True,
+                    verify=ssl_verify,
                 )
                 rsp.raise_for_status()
             logger.info('[kazumi] webdav sync ok: %d files', len(data))
@@ -1622,23 +1684,24 @@ class PluginManager:
             logger.warning('[kazumi] webdav sync failed: %s', e)
             return False
 
-    def webdav_restore(self, webdav_url, username, password, names):
+    def webdav_restore(self, webdav_url, username, password, names, ssl_verify=True, remote_dir=''):
         """WebDAV 恢复（从远程下载收藏/历史/规则）。
 
         返回 {'files': {name: data}, 'ok': bool, 'error': str}：
         - 单个文件 404 视为「云端没有该数据」（从未同步过对应项），不算失败；
         - 连接失败/DNS 错误/非 404 的 HTTP 错误 → ok=False + error 原因。
         此前逐文件吞异常、空结果也当成功返回，网址输错时渲染层提示「恢复完成」。
+        ssl_verify=False 时跳过 HTTPS 证书校验；remote_dir 为自定义远程子目录。
         """
         from requests.auth import HTTPBasicAuth
         result = {'files': {}, 'ok': False, 'error': ''}
         try:
             auth = HTTPBasicAuth(username, password) if username else None
-            sync_dir = f'{webdav_url.rstrip("/")}{WEBDAV_SYNC_ROOT}'
+            sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
             for name in names:
                 file_url = f'{sync_dir}/{name}.json'
                 try:
-                    rsp = http_client.get(file_url, auth=auth, timeout=15, verify=True)
+                    rsp = http_client.get(file_url, auth=auth, timeout=15, verify=ssl_verify)
                 except Exception as e:
                     result['error'] = f'{name}: {e}'
                     logger.warning('[kazumi] webdav restore failed: %s', result['error'])
@@ -1666,6 +1729,50 @@ class PluginManager:
         except Exception as e:
             result['error'] = str(e)
             logger.warning('[kazumi] webdav restore failed: %s', e)
+            return result
+
+    def webdav_test(self, webdav_url, username, password, ssl_verify=True, remote_dir=''):
+        """WebDAV 连接测试（保存配置前快速验证地址/账号，不读写数据）。
+
+        用 PROPFIND（Depth 0）探测同步目录：
+        - 200/207 → 目录可达，ok=True；
+        - 401/403 → 认证失败（用户名或密码错误）；
+        - 其他状态码（多为 404）→ 先 MKCOL 建目录再复测一次，与 webdav_sync 行为一致；
+        - 网络/DNS/SSL 异常 → ok=False + 异常原因。
+        ssl_verify=False 跳过证书校验；remote_dir 为自定义远程子目录。
+        返回 {'ok': bool, 'error': str}。
+        """
+        import requests
+        from requests.auth import HTTPBasicAuth
+        result = {'ok': False, 'error': ''}
+        try:
+            auth = HTTPBasicAuth(username, password) if username else None
+            sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
+            rsp = requests.request('PROPFIND', sync_dir, auth=auth, timeout=10,
+                                   headers={'Depth': '0'}, verify=ssl_verify)
+            if rsp.status_code in (200, 207):
+                result['ok'] = True
+                return result
+            if rsp.status_code in (401, 403):
+                result['error'] = '认证失败：用户名或密码错误'
+                logger.warning('[kazumi] webdav test: auth failed (%s)', rsp.status_code)
+                return result
+            # 目录可能尚未创建（404 等）：建目录后复测；MKCOL 对已存在目录按 RFC 返回 405
+            requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=ssl_verify)
+            recheck = requests.request('PROPFIND', sync_dir, auth=auth, timeout=10,
+                                       headers={'Depth': '0'}, verify=ssl_verify)
+            if recheck.status_code in (200, 207):
+                result['ok'] = True
+                return result
+            if recheck.status_code in (401, 403):
+                result['error'] = '认证失败：用户名或密码错误'
+            else:
+                result['error'] = f'HTTP {recheck.status_code}'
+            logger.warning('[kazumi] webdav test failed: %s', result['error'])
+            return result
+        except Exception as e:
+            result['error'] = str(e) or e.__class__.__name__
+            logger.warning('[kazumi] webdav test failed: %s', result['error'])
             return result
 
     # ---------------------------------------------------------------- 在线规则商店

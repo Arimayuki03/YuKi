@@ -49,7 +49,7 @@ function loadRecords(settings) {
     };
     context.globalThis = context;
     vm.createContext(context);
-    vm.runInContext(`${source}\n;globalThis.__Records = Records; globalThis.__recCard = recCard; globalThis.__fmtDur = fmtDur; globalThis.__tagLabel = tagLabel; globalThis.__normTag = normTag; globalThis.__makeRecordView = makeRecordView; globalThis.__genUid = genUid; globalThis.__ensureRecUids = ensureRecUids;`,
+    vm.runInContext(`${source}\n;globalThis.__Records = Records; globalThis.__recCard = recCard; globalThis.__fmtDur = fmtDur; globalThis.__tagLabel = tagLabel; globalThis.__normTag = normTag; globalThis.__makeRecordView = makeRecordView; globalThis.__genUid = genUid; globalThis.__ensureRecUids = ensureRecUids; globalThis.__mergeExtraRecords = mergeExtraRecords;`,
         context, { filename: 'records.js' });
     return context;
 }
@@ -244,4 +244,62 @@ test('迁移：旧记录缺 uid 时 recGet 按 ts 回填并持久化', async () 
     const uids = settings.history.map((x) => x.uid);
     assert.ok(uids.every(Boolean), '所有记录都应有 uid');
     assert.equal(new Set(uids).size, uids.length, 'uid 互不相同');
+});
+
+// ---------------------------------------------------------------- T79：Bangumi 合并去重
+
+test('mergeExtraRecords：本地收藏带 bangumiId 时，远端同 ID 条目被去掉（同步后不再双卡）', () => {
+    const { __mergeExtraRecords: merge } = loadRecords({});
+    const local = [{ site: 'bangumi', vodId: '999', name: '本地条目', bangumiId: '999' }];
+    const extra = [
+        { site: 'bangumi', vodId: '999', name: '远端同一条目', bangumi: true },
+        { site: 'bangumi', vodId: '12345', name: '仅远端条目', bangumi: true },
+    ];
+    const merged = merge(local, extra);
+    assert.equal(merged.length, 2);
+    assert.ok(merged.some((v) => v.name === '本地条目'));
+    assert.ok(merged.some((v) => v.name === '仅远端条目'));
+});
+
+test('mergeExtraRecords：普通本地收藏（无 bangumiId）不受影响，extra 内部按 vodId 自去重', () => {
+    const { __mergeExtraRecords: merge } = loadRecords({});
+    const local = [{ site: 'cspby', vodId: 'v1', name: '普通收藏' }];
+    const extra = [
+        { site: 'bangumi', vodId: '1', name: 'A', bangumi: true },
+        { site: 'bangumi', vodId: '1', name: 'A 重复', bangumi: true },
+        { site: 'bangumi', vodId: '', name: '无 ID 脏数据', bangumi: true },
+    ];
+    const merged = merge(local, extra);
+    assert.equal(merged.length, 2); // 普通收藏 + 去重后的 A；脏数据被滤除
+    assert.equal(merged[0].name, '普通收藏');
+    assert.equal(merged[1].name, 'A');
+});
+
+test('mergeExtraRecords：空/非法输入稳健兜底', () => {
+    const { __mergeExtraRecords: merge } = loadRecords({});
+    const local = [{ site: 'x', vodId: '1', name: 'a' }];
+    assert.equal(merge(local, []), local);
+    assert.equal(merge(local, null), local);
+    // 空列表 + 有效远端条目：返回去重后的远端条目（跨 VM 原型域，按字段断言）
+    const merged = merge(null, [{ vodId: '2' }]);
+    assert.equal(merged.length, 1);
+    assert.equal(String(merged[0].vodId), '2');
+});
+
+test('recCard：详情页同步写入的本地镜像（site=bangumi 无 bangumi 标志）按账号托管卡渲染（T79 补遗）', () => {
+    const { __recCard } = loadRecords({});
+    const mirror = __recCard(
+        { site: 'bangumi', siteName: 'Bangumi', vodId: '123', name: '某番剧', pic: '', tag: 'want', bangumiId: '123', uid: 'u1' },
+        true, true, {});
+    assert.ok(!mirror.includes('rec-del'), '同步镜像卡不应有删除按钮');
+    assert.ok(!mirror.includes('rec-edit'), '同步镜像卡不应有编辑按钮');
+    assert.ok(mirror.includes('rec-tag-static'), '同步镜像卡标签应为只读');
+    assert.ok(mirror.includes('>Bangumi<'), '应显示 Bangumi 来源徽标');
+
+    // 对照组：普通本地收藏保持可操作
+    const plain = __recCard(
+        { site: 'cspby', vodId: 'v1', name: '普通收藏', tag: 'want', uid: 'u2' },
+        true, true, {});
+    assert.ok(plain.includes('rec-del'));
+    assert.ok(plain.includes('rec-edit'));
 });

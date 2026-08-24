@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -353,8 +353,8 @@
                                     <div class="info-body"><span class="info-label">说明</span>
                                         <div class="info-detail local-desc">
                                             <p>· 管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹</p>
-                                            <p>· 仅展示文件夹与视频/音频文件；单击视频/音频调用播放器播放，单击文件夹进入，按 Esc 返回上层；文件较多时底部有分页条（每页 100 项）。</p>
-                                            <p>· 「上传文件」：把本机其他位置的视频复制到当前目录（会弹窗选文件）。</p>
+                                            <p>· 仅展示文件夹与视频/音频文件；单击视频/音频弹出确认框后交给播放器播放，单击文件夹进入，按 Esc 返回上层；视频卡片自动截帧生成预览图（缺 ffmpeg 时显示占位图）；文件较多时底部有分页条（每页 100 项）。</p>
+                                            <p>· 「上传文件」：把本机其他位置的文件复制到当前目录（弹窗可选多个，列表仅展示其中的视频/音频）。</p>
                                             <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
                                             <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
                                             <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
@@ -365,6 +365,7 @@
                                     <button class="md-btn md-btn-tonal" onclick="uploadFile()">上传文件</button>
                                     <button class="md-btn md-btn-tonal" onclick="showNewFolderDialog()">新建文件夹</button>
                                     <button class="md-btn md-btn-tonal" onclick="pickRoot()">更换根目录</button>
+                                    <button class="md-btn md-btn-tonal" onclick="openLocalDir()" title="在系统资源管理器中打开当前浏览的目录">打开目录</button>
                                     <button class="md-btn md-btn-tonal" onclick="refreshLocal()">刷新</button>
                                 </div>
                                 <div id="file_list"></div>
@@ -470,7 +471,7 @@
                                 <span class="tip-line pad0">首页</span>
                                 <select id="set_pagesize_home" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -482,7 +483,7 @@
                                 <span class="tip-line pad0">搜索</span>
                                 <select id="set_pagesize_search" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -494,7 +495,7 @@
                                 <span class="tip-line pad0">收藏</span>
                                 <select id="set_pagesize_fav" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -506,7 +507,7 @@
                                 <span class="tip-line pad0">历史</span>
                                 <select id="set_pagesize_history" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -518,7 +519,7 @@
                                 <span class="tip-line pad0">直播</span>
                                 <select id="set_pagesize_live" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
@@ -530,10 +531,12 @@
                                 <span class="tip-line pad0">推荐</span>
                                 <select id="set_pagesize_popular" class="md-select">
                                     <option value="10">10 条</option>
-                                    <option value="16">16 个</option>
+                                    <option value="16">16 条</option>
                                     <option value="20" selected>20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
+                                    <option value="60">60 条</option>
+                                    <option value="120">120 条</option>
                                 </select>
                             </div>
                         </div>
@@ -560,13 +563,13 @@
                         <label class="md-switch" title="关闭窗口时不停止正在播放的影片"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放</span></label>
                         <div class="set-group">行为</div>
                         <label class="md-switch" title="开启后记录播放时长和次数统计（我的页面展示）"><input type="checkbox" id="set_watchstats" checked><span class="md-switch-track"></span><span class="md-switch-label">观看统计</span></label>
-                        <label class="md-switch" title="播放时自动把当前集下载到下载目录"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
+                        <label class="md-switch" title="播放时自动把当前集下载到下载目录（网盘资源不支持，始终跳过）"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
                         <label class="md-switch" title="播放时自动加载弹弹 play 弹幕到 mpv（按片名+集数匹配，匹配不到则跳过）"><input type="checkbox" id="set_danmaku"><span class="md-switch-track"></span><span class="md-switch-label">自动加载弹幕</span></label>
                         <label class="md-switch" title="不记录播放历史"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式</span></label>
                         <label class="md-switch" title="m3u8 合成下载时跳过 CUE-OUT/CUE-IN 广告分段（实验性，个别源可能误判）"><input type="checkbox" id="set_hls_adfilter"><span class="md-switch-track"></span><span class="md-switch-label">m3u8 广告过滤</span></label>
                         <div class="set-group">画质</div>
                         <label class="md-switch" title="实时升频锐化，适合动漫；着色器首次启动时自动下载"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分</span></label>
-                        <div class="tip-line pad0"  title="开启超分后选择，下次起播生效">Anime4K 档位</div>
+                        <div class="tip-line pad0"  title="开启超分后选择，播放中修改即时生效">Anime4K 档位</div>
                         <select id="set_anime4k_mode" class="md-select">
                             <option value="a" selected>均衡（Mode A）</option>
                             <option value="aa">细节增强（Mode A+A · 低清片源）</option>
@@ -621,7 +624,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="tip-line pad0"  title="点击键位后按下新键即可修改，保存后下次起播生效">键位自定义</div>
+                        <div class="tip-line pad0"  title="点击键位后按下新键即可修改，Esc 取消；保存后下次起播生效">键位自定义</div>
                         <div id="hotkey_rows"></div>
                         <div class="wall-row">
                             <button id="hotkey_reset" class="md-btn md-btn-tonal">恢复默认键位</button>
@@ -658,7 +661,7 @@
                             <option value="4">4 个</option>
                             <option value="5" selected>5 个（默认）</option>
                             <option value="8">8 个</option>
-                            <option value="16">16 个</option>
+                            <option value="16">16 条</option>
                         </select>
                     </div>
                     <!-- 应用缓存（爬虫/下载临时文件） -->
@@ -672,7 +675,7 @@
                                 </div>
                                 <div class="info-detail">更换位置会重启后端。</div>
                                 <div class="info-detail">旧目录里的缓存不会自动迁移。</div>
-                                <div class="info-detail">清理范围:爬虫缓存、JS 本地存储与下载临时文件；不影响已载入的源与下载好的文件。</div>
+                                <div class="info-detail">清理范围：影片爬虫缓存、下载临时文件、本地预览图、解析会话缓存与推荐榜单/时间表等本地缓存；不影响已载入的源与已下载的文件。</div>
                             </div>
                         </div>
                         <div class="wall-row">
@@ -687,7 +690,7 @@
                         <div class="tip-line pad0 info-tip" >
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail" id="kazumi_cookie_line">验证/解析会话产生的 Cookie 会持久化，规则引擎请求自动带上，避免重启后重新验证。</div>
+                                <div class="info-detail" id="kazumi_cookie_line">Kazumi 规则引擎验证/解析会话产生的 Cookie 会持久化到本机，规则引擎请求自动带上，避免重启后重新验证（与「网盘账号」保存的 Cookie 相互独立）。</div>
                             </div>
                         </div>
                         <div class="wall-row">
@@ -701,7 +704,7 @@
                         <div class="tip-line pad0 info-tip" >
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">封面按片名从 Bangumi 拉取并缓存（内存 + 本机 localStorage），同片名只查一次；匹配错误时可点下方清空。</div>
+                                <div class="info-detail">封面按片名从 Bangumi 拉取并缓存（内存 + 本机 localStorage，保留最近 500 条）：成功匹配长期复用，失败条目约 1 分钟后自动重试；匹配错误时可点下方清空。</div>
                             </div>
                         </div>
                         <div class="wall-row">
@@ -713,7 +716,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；需解析的影片链接会在播放时自动解析载入。</div>
+                                <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；载入后会自动做站点健康检查，结果见下方「站点诊断」。</div>
                             </div>
                         </div>
                         <div class="md-field">
@@ -726,7 +729,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">内容页只展示健康站点；此处保留未建成、未初始化和需要 Android 运行时的原因。</div>
+                                <div class="info-detail">首页只展示健康检查通过的站点；此处按站点列出未建成、初始化失败或需要 Android 运行时等原因，并附配置/运行时/错误统计。</div>
                             </div>
                         </div>
                         <div id="config_diagnostics" class="history-list"></div>
@@ -769,13 +772,13 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">夸克 / UC / 百度等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致。
+                                <div class="info-detail">夸克 / UC / 天翼 / 百度 / 123 / 迅雷等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致。
                                     <br><b>夸克网盘</b>：点「夸克扫码登录」用夸克 App 扫码，登录后自动保存，无需手动复制。
                                     <br><b>其他网盘</b>：浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 →
                                     点任意请求 → 「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）→ 粘贴到对应输入框保存。
                                     <br>注意：只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效。
                                     <br>未配置 Cookie 时，网盘源详情页照常显示，但播放会快速失败并提示原因。
-                                    <br><b>夸克网盘快路径</b>：关闭后先调用 JAR，再在结果退化时使用本地代理兜底；适合排查不同影视仓 JAR 的兼容性。
+                                    <br><b>夸克网盘快路径</b>：开启（默认）且已扫码登录时，夸克源优先走本机直连解析（不经 JAR）；关闭后先调用 JAR，再在结果退化时使用本地代理兜底，适合排查不同影视仓 JAR 的兼容性。
                                     <br><b>起播前媒体探测 (HEAD/Range)</b>：起播前校验视频流有效性，拦截 HTML/403/过期链接并防止播放器黑屏崩溃。
                                     <br><b>同影片多线路自动回退</b>：当前线路解析或起播失败时，自动按顺序尝试同影片其他可用线路。
                                     <br><b>简易解析器与 iframe 跟随</b>：允许旧版规则使用 MutationObserver 提取并跟随嵌套 iframe 媒体直链。</div>
@@ -830,23 +833,16 @@
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="source">
-                        <div class="tool-card-title">源自动检测</div>
+                        <div class="tool-card-title">源自动检测与屏蔽</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启后，首页会在后台检测源是否有内容：首页与所有分类均无内容的源会被自动屏蔽，无影片的分类也会隐藏；关闭后不会自动探测、隐藏或屏蔽源，历史上被屏蔽的源也会恢复显示。</div>
+                                <div class="info-detail">开启「后台自动检测源」后，首页会在后台检测源是否有内容：首页与所有分类均无内容的源会被自动屏蔽，无影片的分类也会隐藏；连续多次探测无响应的失效源也会被屏蔽。已屏蔽源会定期复查，恢复内容后自动解除；关闭检测后不会自动探测、隐藏或屏蔽源，历史上被屏蔽的源也会全部恢复显示。也可在下方手动查看或恢复。
+                                    <div class="tip-line pad0" id="blocked_line">自动屏蔽首页和分类均无内容的源与连续探测无响应的死源，避免下拉里出现空源。</div>
+                                </div>
                             </div>
                         </div>
                         <label class="md-switch" title="后台检测源内容并自动隐藏无内容源"><input type="checkbox" id="set_source_autodetect" checked><span class="md-switch-track"></span><span class="md-switch-label">后台自动检测源</span></label>
-                    </div>
-                    <div class="tool-card" data-setcat="source">
-                        <div class="tool-card-title">屏蔽源</div>
-                        <div class="tip-line pad0 info-tip">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail" id="blocked_line">自动屏蔽首页和分类均无内容的源，避免下拉里出现空源。</div>
-                            </div>
-                        </div>
                         <div class="wall-row">
                             <button id="blocked_view" class="md-btn md-btn-tonal">查看屏蔽源</button>
                             <button id="blocked_restore" class="md-btn md-btn-tonal">恢复被屏蔽的源并重新探测</button>
@@ -894,17 +890,38 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">将收藏、历史与 Kazumi 规则同步到 WebDAV 服务器（如坚果云、Nextcloud）；恢复时会覆盖本地数据。子开关控制哪些数据参与同步。</div>
+                                <div class="info-detail">将收藏、历史、观看统计、规则与应用设置同步到 WebDAV 服务器（如坚果云、Nextcloud）；恢复时会覆盖本地数据，覆盖前会自动备份本机数据。子开关控制哪些数据参与同步，「测试连接」可在同步前验证地址与账号，也可开启定时自动同步按所选间隔上传。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
                         <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
                         <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
+                        <label class="md-switch"><input type="checkbox" id="webdav_enable_settings"><span class="md-switch-track"></span><span class="md-switch-label">设置同步</span></label>
+                        <label class="md-switch"><input type="checkbox" id="webdav_enable_stats"><span class="md-switch-track"></span><span class="md-switch-label">观看统计同步</span></label>
+                        <label class="md-switch"><input type="checkbox" id="webdav_enable_rules"><span class="md-switch-track"></span><span class="md-switch-label">规则同步</span></label>
+                        <label class="md-switch" title="开启后按所选间隔自动「同步到云端」（需已保存地址与账号）"><input type="checkbox" id="webdav_auto_enable"><span class="md-switch-track"></span><span class="md-switch-label">定时自动同步</span></label>
+                        <label class="md-switch" title="开启后应用启动约 5 秒后自动「从云端恢复」一次（多设备场景先取云端数据）；失败仅提示不重试"><input type="checkbox" id="webdav_startup_pull"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动从云端恢复</span></label>
+                        <label class="md-switch" title="自签名证书的 NAS/自建 WebDAV 握手会失败；开启后跳过 HTTPS 证书校验（仅建议自建服务使用，公共网盘勿开）"><input type="checkbox" id="webdav_ssl_skip"><span class="md-switch-track"></span><span class="md-switch-label">跳过 HTTPS 证书校验（自签名服务器）</span></label>
+                        <div class="auto-interval-col">
+                            <span class="tip-line pad0">自动同步间隔</span>
+                            <select id="webdav_auto_interval" class="md-select">
+                                <option value="15">15 分钟</option>
+                                <option value="30">30 分钟</option>
+                                <option value="60" selected>1 小时</option>
+                                <option value="180">3 小时</option>
+                                <option value="360">6 小时</option>
+                                <option value="720">12 小时</option>
+                                <option value="1440">24 小时</option>
+                            </select>
+                        </div>
+                        <div class="tip-line pad0" id="webdav_auto_status"></div>
                         <div class="md-field"><input id="webdav_url" class="md-input" placeholder="WebDAV 地址（如 https://dav.jianguoyun.com/dav/）" /></div>
+                        <div class="md-field"><input id="webdav_remote_dir" class="md-input" placeholder="远程目录（可选，默认 kazumiSync）" /></div>
                         <div class="md-field"><input id="webdav_username" class="md-input" placeholder="用户名" /></div>
-                        <div class="md-field"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /></div>
+                        <div class="md-field"><div class="webdav-pwd-wrap"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /><button type="button" id="webdav_pwd_eye" class="pan-cookie-eye" title="显示/隐藏密码">👁</button></div></div>
                         <div class="wall-row">
                             <button id="webdav_save" class="md-btn md-btn-filled">保存配置</button>
+                            <button id="webdav_test" class="md-btn md-btn-tonal">测试连接</button>
                             <button id="webdav_sync" class="md-btn md-btn-tonal">同步到云端</button>
                             <button id="webdav_restore" class="md-btn md-btn-tonal">从云端恢复</button>
                         </div>
@@ -931,7 +948,7 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="md-field" ><input id="bangumi_token" class="md-input" type="password" placeholder="Bangumi Access Token（sk/ey 开头）" /></div>
+                        <div class="md-field" ><input id="bangumi_token" class="md-input" type="password" placeholder="粘贴你的 Bangumi Access Token（仅保存在本机）" /></div>
                         <a id="bangumi_token_link" href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener" style="font-size:12px;color:var(--md-primary);text-decoration:none;">获取 Bangumi Access Token →</a>
                         <div class="wall-row" >
                             <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
@@ -1021,15 +1038,19 @@
                     </div>
                     <div class="tool-card" data-setcat="about">
                         <div class="tool-card-title">致谢</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">YuKi 的实现站在诸多开源项目的肩膀上。完整第三方组件清单与许可证见仓库内 docs/THIRD_PARTY.md。</div>
+                            </div>
+                        </div>
                         <div class="about-credits">
-                            <div class="about-credit"><b>TVBox / CatVod</b> — 影视聚合架构与站点配置生态</div>
-                            <div class="about-credit"><b>Kazumi</b> — XPath/API 规则引擎与规则商店</div>
-                            <div class="about-credit"><b>Bangumi</b> — 番剧元数据 / 时间表 / 榜单</div>
-                            <div class="about-credit"><b>mpv</b> — 播放器内核（独立窗口）</div>
-                            <div class="about-credit"><b>aria2c</b> — 多协议下载引擎</div>
-                            <div class="about-credit"><b>ffmpeg</b> — m3u8 合成与缩略图抓帧</div>
-                            <div class="about-credit"><b>Anime4K</b> — 动漫实时超分着色器</div>
-                            <div class="about-credit"><b>trace.moe</b> — 以图搜番</div>
+                            <div class="about-credit"><b>上游对照与生态</b> · Kazumi（规则引擎与 Bangumi 体验参考）、FongMi / TV 与 CatVod 生态（TVBox 配置契约与爬虫生态）</div>
+                            <div class="about-credit"><b>播放与处理</b> · mpv（播放器内核）、FFmpeg（m3u8 合成与缩略图抓帧）、aria2（多协议下载引擎）</div>
+                            <div class="about-credit"><b>超分与识图</b> · Anime4K（v4.1 实时动漫超分着色器，均衡 / 细节 / 仅修复三档位）、trace.moe（以图搜番）</div>
+                            <div class="about-credit"><b>字体与前端</b> · MiSans（小米免费商用字体）、jQuery</div>
+                            <div class="about-credit"><b>宿主与后端</b> · Electron / electron-builder / electron-updater、FastAPI / Uvicorn / Pydantic</div>
+                            <div class="about-credit"><b>数据与社区</b> · Bangumi 番组数据与 API，以及所有提交 Issue、贡献代码与完善文档的贡献者</div>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="system">

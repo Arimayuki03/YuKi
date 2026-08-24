@@ -37,10 +37,11 @@ function loadPlayer(settings, extras = {}) {
         },
     };
     if (extras.yuki) Object.assign(context.window.yuki, extras.yuki);
-    // 注入可选的全局 mock（Records / Kazumi / Detail 等）
+    // 注入可选的全局 mock（Records / Kazumi / Detail / Favorites 等）
     if (extras.Records) context.Records = extras.Records;
     if (extras.Kazumi) context.Kazumi = extras.Kazumi;
     if (extras.Detail) context.Detail = extras.Detail;
+    if (extras.Favorites) context.Favorites = extras.Favorites;
     context.globalThis = context;
     vm.createContext(context);
     vm.runInContext(`${source}\n;globalThis.__testPlayer = Player;`, context, { filename: 'player.js' });
@@ -307,4 +308,124 @@ test('Kazumi 源播放退出后写入历史记录（recordPlay 被调用，含 s
     assert.equal(recorded[0].seconds, 120);
     assert.equal(recorded[0].totalEps, 12);
     assert.equal(recorded[0].kazumiSrc, 'https://src.example.com/ep1');
+});
+
+// --------------------------------------------------------------- 原生播放列表（整季队列）逐集记账
+
+function rememberNative(player, sessionId, names, meta = {}) {
+    player._curMeta = { site: 'site-a', vodId: 'vod-a', title: '测试剧', subtitle: '', totalEps: names.length, ...meta };
+    player._rememberSession({ ok: true, sessionId, nativeQueue: true });
+    player._watchSessions.get(sessionId).nativeEpisodes = names;
+}
+
+test('原生队列逐集记账：每集独立计时长/次数（回归：链内去重曾把第2集起扣成0）', async () => {
+    const settings = {};
+    const recorded = [];
+    const player = loadPlayer(settings, { Records: { recordPlay: async (v) => { recorded.push(v); } } });
+    rememberNative(player, 1101, ['第01集', '第02集', '第03集']);
+    const eps = [
+        { playlistPos: 0, pos: 1200, duration: 1200, itemWallSec: 1200 },
+        { playlistPos: 1, pos: 1180, duration: 1180, itemWallSec: 1180 },
+        { playlistPos: 2, pos: 1220, duration: 1220, itemWallSec: 1220 },
+    ];
+    for (const ep of eps) {
+        player._onEnded({ sessionId: 1101, nativeQueue: true, queueLen: 3, speed: 1, ...ep });
+    }
+    await player._watchWrite;
+    // 时长 = 三集墙钟之和；此前实现只计约一集（1220）
+    assert.equal(settings.watchStats.totalSeconds, 3600);
+    assert.equal(settings.watchStats.sessionCount, 3, '每集计一次观看次数');
+    assert.equal(settings.watchStats.titles['测试剧'], 3);
+    assert.equal(settings.watchStats.daily && Object.values(settings.watchStats.daily)[0], 3600);
+    // 每集一条历史，集名取当集
+    assert.deepEqual(recorded.map((v) => v.episode), ['第01集', '第02集', '第03集']);
+    assert.deepEqual(recorded.map((v) => v.seconds), [1200, 1180, 1220]);
+});
+
+test('原生队列中途关闭补记「正在看的这一集」（eof 未触发的当前集不丢失）', async () => {
+    const settings = {};
+    const recorded = [];
+    const player = loadPlayer(settings, { Records: { recordPlay: async (v) => { recorded.push(v); } } });
+    rememberNative(player, 1102, ['第01集', '第02集']);
+    // 第 1 集完整看完（ended 已记账），第 2 集看到 600s 时用户关闭 mpv 窗口
+    player._onEnded({ sessionId: 1102, nativeQueue: true, queueLen: 2,
+        playlistPos: 0, pos: 1200, duration: 1200, itemWallSec: 1200, speed: 1 });
+    await player._watchWrite;
+    await player._onExit({ sessionId: 1102, nativeQueue: true, quit: true,
+        playlistPos: 1, pos: 600, duration: 1180, wallWatched: 1800 });
+    await player._watchWrite;
+    // 补记当前集：pos 口径（会话级墙钟跨集不可分摊）
+    assert.equal(settings.watchStats.totalSeconds, 1800);
+    assert.equal(settings.watchStats.sessionCount, 2);
+    assert.deepEqual(recorded.map((v) => ({ ep: v.episode, sec: v.seconds })),
+        [{ ep: '第01集', sec: 1200 }, { ep: '第02集', sec: 600 }]);
+});
+
+test('原生队列末集自然播完后的退出不重复计账（playlistPos 已在 ended 记过）', async () => {
+    const settings = {};
+    const recorded = [];
+    const player = loadPlayer(settings, { Records: { recordPlay: async (v) => { recorded.push(v); } } });
+    rememberNative(player, 1103, ['第01集']);
+    player._onEnded({ sessionId: 1103, nativeQueue: true, queueLen: 1,
+        playlistPos: 0, pos: 900, duration: 900, itemWallSec: 900, speed: 1 });
+    await player._watchWrite;
+    await player._onExit({ sessionId: 1103, nativeQueue: true, quit: false,
+        playlistPos: 0, pos: 900, duration: 900, wallWatched: 905 });
+    await player._watchWrite;
+    assert.equal(settings.watchStats.totalSeconds, 900, '只有 ended 记的账，exit 不重复');
+    assert.equal(settings.watchStats.sessionCount, 1);
+    assert.equal(recorded.length, 1);
+});
+
+test('原生队列秒开即关（<15s）不计入统计与历史', async () => {
+    const settings = {};
+    const recorded = [];
+    const player = loadPlayer(settings, { Records: { recordPlay: async (v) => { recorded.push(v); } } });
+    rememberNative(player, 1104, ['第01集']);
+    await player._onExit({ sessionId: 1104, nativeQueue: true, quit: true,
+        playlistPos: 0, pos: 5, duration: 900, wallWatched: 6 });
+    await player._watchWrite;
+    assert.equal(settings.watchStats, undefined);
+    assert.equal(recorded.length, 0);
+});
+
+test('原生队列逐集更新收藏观看进度（currentEp=playlistPos+1）', async () => {
+    const settings = {};
+    const favCalls = [];
+    const player = loadPlayer(settings, {
+        Records: { recordPlay: async () => {} },
+        Favorites: { updateProgress: async (site, vodId, p) => { favCalls.push({ site, vodId, ...p }); } },
+    });
+    rememberNative(player, 1105, ['第01集', '第02集']);
+    // 第 1 集看完（ended 记账 + 进度推进），第 2 集看到一半关窗（exit 补记 + 进度再推进）
+    player._onEnded({ sessionId: 1105, nativeQueue: true, queueLen: 2,
+        playlistPos: 0, pos: 1200, duration: 1200, itemWallSec: 1200, speed: 1 });
+    await player._watchWrite;
+    assert.equal(favCalls.length, 1);
+    assert.equal(favCalls[0].site, 'site-a');
+    assert.equal(favCalls[0].vodId, 'vod-a');
+    assert.equal(favCalls[0].currentEp, 1);
+    assert.equal(favCalls[0].totalEps, 2);
+    assert.equal(favCalls[0].percent, 100);
+    // 中途关窗补记同样推进进度（ep2 看到 700/1180）
+    await player._onExit({ sessionId: 1105, nativeQueue: true, quit: true,
+        playlistPos: 1, pos: 700, duration: 1180, wallWatched: 1300 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(favCalls.length, 2);
+    assert.equal(favCalls[1].currentEp, 2);
+    assert.equal(favCalls[1].percent, Math.round(700 / 1180 * 100));
+});
+
+test('原生队列无 vodId（Kazumi 源）不触碰收藏进度', async () => {
+    const settings = {};
+    let favCalled = 0;
+    const player = loadPlayer(settings, {
+        Records: { recordPlay: async () => {} },
+        Favorites: { updateProgress: async () => { favCalled += 1; } },
+    });
+    rememberNative(player, 1106, ['第01集'], { site: 'kazumi:规则', vodId: '' });
+    player._onEnded({ sessionId: 1106, nativeQueue: true, queueLen: 1,
+        playlistPos: 0, pos: 600, duration: 900, itemWallSec: 600, speed: 1 });
+    await player._watchWrite;
+    assert.equal(favCalled, 0);
 });

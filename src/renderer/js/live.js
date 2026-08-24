@@ -90,8 +90,9 @@ const Live = {
         return { name: l.name || url, url: this._asciiUrl(url) };
     },
 
-    /** 从 /sites 拉取 lives + 设置里自定义的直播源（配置载入完成后调用）。 */
-    async load() {
+    /** 从 /sites 拉取 lives + 设置里自定义的直播源（配置载入完成后调用）。
+     *  opts.silent=true：启动自动载入/重载完成的后台刷新，不上全局 loading 遮罩。 */
+    async load(opts) {
         ++this._probeToken; // 作废进行中的探测批次（重载下拉）
         this._clearProbeBar();
         try {
@@ -135,11 +136,13 @@ const Live = {
         sel.append(this.lives.map((l, i) => `<option value="${i}">${escHtml(l.name || l.url)}</option>`).join(''));
         const idx = this.lives.findIndex((l) => !/(redirect|live)/i.test(String(l.name || '')));
         sel.val(idx >= 0 ? idx : 0);
-        await this.loadChannels();
+        await this.loadChannels(false, opts);
     },
 
-    /** force=true（手动点刷新）才重新探测；否则优先用本地可用性缓存（T35）。 */
-    async loadChannels(force) {
+    /** force=true（手动点刷新）才重新探测；否则优先用本地可用性缓存（T35）。
+     *  opts.silent=true：后台静默刷新，不上全局 loading 遮罩。 */
+    async loadChannels(force, opts) {
+        const quietLoad = !!(opts && opts.silent);
         const idx = parseInt($('#live-select').val(), 10);
         const live = this.lives[idx];
         if (!live) return;
@@ -149,7 +152,7 @@ const Live = {
         this._pageSize = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
         this._page = 1;
         $('#live-status').hide();
-        showLoading();
+        if (!quietLoad) showLoading(); // 手动切源/刷新即时反馈；后台静默刷新不上遮罩
         try {
             const data = await doAction('fetchText', { url: live.url });
             const text = (data && data.text) || '';
@@ -195,7 +198,7 @@ const Live = {
             if (token === this._probeToken) $('#live-list').html('<div class="tip-line">直播源载入失败</div>');
             return;
         } finally {
-            if (token === this._probeToken) hideLoading();
+            if (!quietLoad && token === this._probeToken) hideLoading();
         }
         // 频道立即渲染完毕，可用性在后台静默分批探测（首次进入/手动刷新；不再占用 loading 遮罩）
         if (window.yuki && window.yuki.probeUrls) this._probeChannels(token, live.url);

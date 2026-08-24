@@ -23,10 +23,28 @@ const https = require('https');
 const zlib = require('zlib');
 const PythonBridge = require('./python-bridge');
 const MpvPlayer = require('./mpv-player');
+const { PlaylistProxy } = require('./playlist-proxy');
+
+// 模块级注册：无论 setup 流程走到哪里，渲染层调用都不会悬空 pending
+ipcMain.handle('yuki:playlist-build', (_e, queue) => {
+    if (!playlistProxyRef) return { ok: false, reason: 'playlist proxy not ready' };
+    const q = queue || {};
+    // 页面解析型线路（曾解析出 parse=1）：直接拒绝建队，渲染层静默回退逐集
+    if (pageQueueBan.has(`${q.site || ''}|${q.flag || ''}`)) {
+        return { ok: false, reason: 'page-route' };
+    }
+    return playlistProxyRef.register(q).then((r) => {
+        console.log(`[播放列表] 构建：ok=${!!(r && r.ok)} entries=${(r && r.entries && r.entries.length) || 0}` +
+            `${r && r.reason ? ' reason=' + r.reason : ''} kind=${q.kind || 'catvod'}`);
+        return r;
+    });
+});
+const { MENU_CONF_ZH } = require('./mpv-menu-conf');
 const FileManager = require('./file-manager');
 const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
+const { DlDedupe, buildKey: buildEpisodeKey } = require('./dl-dedupe');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb, urlThumb: ffmpegUrlThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
@@ -76,6 +94,15 @@ migrateLegacyDataDir(
 // 媒体直链后缀：非直链 URL（share/播放页）先经隐藏窗口抓媒体请求再交 mpv
 const MEDIA_URL = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
 
+// 后端最近一次 ready 的信息（base/token）：播放列表代理按需解析时惰性读取
+let lastBackendInfo = null;
+// 播放列表代理实例引用：IPC 处理器在模块加载期无条件注册（不依赖 setup 流程走到某一行），
+// 实例化后回填引用；未就绪时显式返回失败而非让渲染层永久 pending。
+let playlistProxyRef = null;
+// 「页面解析型」线路黑名单（site|flag）：代理解析出 parse=1 时精确记录，
+// 后续该线路不再建队列——只有这一类被禁止，m3u8 等直连线路不受影响。
+const pageQueueBan = new Set();
+
 // Anime4K 实时超分着色器链（v4.1，动漫向）三档位（设置项 anime4kMode，T8）：
 // 均衡 Mode A：高光钳制→恢复→2x 升频→再恢复（默认）；细节 Mode A+A：先升频再恢复再升频（低清片源）；
 // 修复 Restore：只恢复细节不升频（已高清的片源）。所需着色器均在启动自动下载清单内。
@@ -121,6 +148,15 @@ function buildAnime4kChain(mode) {
 function anime4kChainFromSettings() {
     if (!(settings && settings.get('anime4k'))) return '';
     return buildAnime4kChain(String(settings.get('anime4kMode') || 'a'));
+}
+
+/** 当前设置对应的 mpv 右键菜单档位（'off' | 'a' | 'aa' | 'restore'）。
+ *  菜单勾选态的唯一事实源：hints.lua 的静态初始值可能过期（默认开启在启动
+ *  下载完成后才落地、设置被同步/恢复改写等），消费端必须以实时设置为准。 */
+function anime4kMenuModeFromSettings() {
+    if (!(settings && settings.get && settings.get('anime4k'))) return 'off';
+    const raw = String(settings.get('anime4kMode') || 'a');
+    return ANIME4K_CHAINS[raw] ? raw : 'off';
 }
 
 /** Anime4K 三档位的展示名（起播 toast / mpv OSD 提示共用）。 */
@@ -201,6 +237,15 @@ const mpv = new MpvPlayer();
 const dl = new Downloader();
 const hls = new HlsDownloader();
 const dlRecords = new DlRecordStore();
+// 同源同集去重（dl-dedupe.js）：边下边播与手动下载共用。liveProvider 聚合
+// aria2 + HLS 全量任务，仅在「记录声称进行中」时被调用做存活复核。
+const dlDedupe = new DlDedupe(dlRecords, async () => {
+    const [aria2Items, hlsItems] = await Promise.all([
+        dl.isAvailable() ? dl.listAll().catch(() => []) : Promise.resolve([]),
+        Promise.resolve(hls.list()),
+    ]);
+    return [...aria2Items, ...hlsItems].map((t) => ({ gid: t.gid, status: t.status }));
+});
 const pushServer = new PushServer();
 const syncplay = new SyncplayClient();
 const dlna = new DlnaCaster();
@@ -374,9 +419,11 @@ async function verifyMpvStart(result, timeoutMs = MPV_START_TIMEOUT_MS) {
     const active = mpv._activeSession;
     const activeIsAnotherRequest = !!(active && active.id !== result.sessionId);
     const generationChanged = expectedGen !== null && mpv.controlGen !== expectedGen;
-    // active=null 且代际未变通常是本次 mpv 自己退出/异步 spawn-error，仍应把
-    // 原始失败原因返回；只有检测到新会话或 controlGen 变化才视为用户取消。
-    if (activeIsAnotherRequest || generationChanged) {
+    // 原生队列豁免代际抖动：队列起播窗口长（首集要经代理解析/抓流），期间旧进程
+    // 延迟退出、杂散 stop() 都会 bump 代际——只要没有新会话接管（active 仍是自己），
+    // 队列进程还活着就继续认定归属，否则会被误判 play-cancelled 而整队消失。
+    if ((activeIsAnotherRequest || generationChanged)
+        && !(result.nativeQueue && !activeIsAnotherRequest)) {
         return {
             ...result,
             ok: false,
@@ -428,6 +475,26 @@ function traceLocalProxy(url, meta = {}) {
         if (meta.playSessionId) parsed.searchParams.set('playSessionId', String(meta.playSessionId));
         return parsed.toString();
     } catch (e) { return url; }
+}
+
+/** 是否为禁止边下边播的动态取流目标（网盘资源全局禁止，与开关设置无关）：
+ *  1) 本机 go-proxy 端点——do=pan（网盘取流）、do=py/js/jar 或带 siteKey
+ *     （蜘蛛代理流）、?url=（直链转发包装）：背后是按需解析的动态会话，
+ *     上游可能回转码 m3u8 播放列表文本或短时效签名地址，交给下载引擎只能
+ *     得到转发包装/残缺分片；
+ *  2) 站点名命中网盘特征——兜底捕获蜘蛛直接回 CDN 签名直链的形态
+ *     （正则与 player.js 原生队列的 isPanSource 排除规则保持一致）。 */
+function isDynamicProxyStream(url, meta = {}) {
+    try {
+        const parsed = new URL(String(url || ''));
+        if (['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname) && parsed.pathname === '/proxy') {
+            const doParam = (parsed.searchParams.get('do') || '').toLowerCase();
+            if (['pan', 'py', 'js', 'jar'].includes(doParam)) return true;
+            if (parsed.searchParams.has('siteKey') || parsed.searchParams.has('url')) return true;
+        }
+    } catch (e) { /* 非 URL 形态：仅按站点名判断 */ }
+    return /pan|quark|uc网盘|aliyun|ali|115|123|天翼|移动|网盘/i
+        .test(`${String(meta.site || '')}|${String(meta.source || '')}`);
 }
 
 function createWindow() {
@@ -603,6 +670,24 @@ function initTray() {
     tray.on('double-click', () => { if (win) { win.show(); win.focus(); } });
 }
 
+// 单实例锁：第二个实例直接退出。双开会让两套 Electron 主/渲染进程各拉起一个
+// yuki-backend 后端（Worker 池也各自独立），进程数与内存压力整体翻倍；低配机型
+// 尤其不可接受。重复启动时唤起已有主窗口。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (win && !win.isDestroyed()) {
+            if (win.isMinimized()) win.restore();
+            win.show();
+            win.focus();
+        } else {
+            createWindow();
+        }
+    });
+}
+
 app.whenReady().then(() => {
     ipcMain.handle('backend-info', () => bridge.getInfo());
     ipcMain.handle('yuki:config-state', () => ({ ...configReload }));
@@ -722,11 +807,15 @@ app.whenReady().then(() => {
 
     // 可自定义键位表（T8）：动作 id → 默认键；渲染层同表提供按键捕获 UI，
     // 键位存 settings.playerHotkeys.keys，此处写入 input.conf（mpv 语法）。
+    // 文件信息走 mpv 内置 stats 脚本第 5 页（与右键菜单「文件信息」同源，见 mpv-menu-conf.js）。
     const HK_DEF_KEYS = {
         pause: 'SPACE', seekBack: 'LEFT', seekFwd: 'RIGHT',
-        volUp: 'UP', volDown: 'DOWN',
+        volUp: 'UP', volDown: 'DOWN', mute: 'm',
         speedDown: '[', speedUp: ']', speedReset: 'BS',
-        frameBack: ',', frameFwd: '.', fullscreen: 'f', screenshot: 's',
+        frameBack: ',', frameFwd: '.', progress: 'o',
+        fullscreen: 'f', screenshot: 's', fileInfo: 'i',
+        audioCycle: 'a', subToggle: 'v', stopPlay: 'Ctrl+s',
+        epPrev: 'PGUP', epNext: 'PGDWN', a4kCycle: 'K',
     };
 
     function writeMpvAssets() {
@@ -739,50 +828,97 @@ app.whenReady().then(() => {
             const keys = Object.assign({}, HK_DEF_KEYS);
             if (hk.keys && typeof hk.keys === 'object') {
                 for (const id of Object.keys(HK_DEF_KEYS)) {
-                    if (hkKeyOk(hk.keys[id])) keys[id] = hk.keys[id];
+                    let v = hk.keys[id];
+                    // 旧版误用 PGDN（mpv 键名为 PGDWN），静默迁移
+                    if (v === 'PGDN') v = 'PGDWN';
+                    if (hkKeyOk(v)) keys[id] = v;
                 }
             }
-            const a4kChain = anime4kChainFromSettings();
-            const a4kHint = a4kChain
-                ? ` | Anime4K 超分: 开（${ANIME4K_MODE_LABELS[String(settings.get('anime4kMode') || 'a')] || '均衡'}）`
-                : '';
+            // Anime4K 初始档位（写进 hints lua 的 user-data，供菜单勾选态）；
+            const a4kInitial = anime4kMenuModeFromSettings();
             const scriptDir = path.join(app.getPath('userData'), 'mpv-scripts');
             fs.mkdirSync(scriptDir, { recursive: true });
-            // lua 提示：起播列键位（随自定义键位动态生成）+ 暂停状态中文 OSD 反馈
-            const hintParts = [
-                `${keys.pause} 暂停/继续`, `${keys.seekBack}/${keys.seekFwd} 快退/快进 ${seek}秒`,
-                `${keys.volUp}/${keys.volDown} 音量±${vol}`, `${keys.speedDown} ${keys.speedUp} 倍速∓${speed}`,
-                `${keys.speedReset} 恢复原速`, `${keys.frameBack} ${keys.frameFwd} 逐帧`, `${keys.fullscreen} 全屏`,
-                `${keys.screenshot} 截图`,
-            ];
             const lua = [
-                'mp.register_event("file-loaded", function()',
-                `  mp.osd_message("快捷键：${hintParts.join(' | ')}${a4kHint}", 6)`,
+                // 文件名即 script-binding 命名空间：mpv 对脚本名做非字母数字→_ 归一化，
+                // hints.lua → hints/，与 mpv-menu-conf.js 的 hints/a4k-<mode> 引用严格对应
+                // （此前用 yuki-hints.lua 时实际命名空间是 yuki_hints，菜单点击全部落空）。
+                '-- hints.lua：快捷键提示 + Anime4K 右键菜单信号（YuKi 自动生成，勿手改）',
+                // 加载即写哨兵：主进程 _verifyA4kBindings 读此属性判定脚本存活——
+                // 无默认键的绑定只注册为输入节区，不会出现在 input-bindings，无法据此探测。
+                'mp.set_property("user-data/yuki/hints-loaded", "1")',
+                // Anime4K 档位信号：菜单项 script-binding hints/a4k-<mode> 只写 user-data，
+                // 档位应用/持久化/OSD 回显由主进程消费 a4k-request 完成；顶层写入当前档位，
+                // 右键菜单勾选态首启即正确（无需运行时握手）。
+                `mp.set_property("user-data/yuki/a4k-mode", "${a4kInitial}")`,
+                'for _, m in ipairs({ "off", "a", "aa", "restore" }) do',
+                '  mp.add_key_binding(nil, "a4k-" .. m, function()',
+                '    mp.set_property("user-data/yuki/a4k-request", m)',
+                '  end)',
+                'end',
+                'mp.add_key_binding(nil, "ep-prev", function()',
+                '  mp.set_property("user-data/yuki/ep-skip", "-1")',
                 'end)',
-                'mp.observe_property("pause", "boolean", function(_, v)',
+                'mp.add_key_binding(nil, "ep-next", function()',
+                '  mp.set_property("user-data/yuki/ep-skip", "1")',
+                'end)',
+                'mp.add_key_binding(nil, "a4k-cycle", function()',
+                '  local arr = { "off", "a", "aa", "restore" }',
+                '  local pos = { off = 1, a = 2, aa = 3, restore = 4 }',
+                // 必须用 native 读：实测 vendor 内置 mpv（v0.41.0-744 自建版）的 Lua
+                // 字符串 API 读 user-data/* 会返回带字面双引号的值（'"a"'），pos[cur]
+                // 永远查不到 → K 键循环恒落回第一档（表现为档位固定不变）；
+                // get_property_native 在新旧版本均返回干净字符串。
+                '  local cur = mp.get_property_native("user-data/yuki/a4k-mode") or "off"',
+                '  local idx = pos[cur] or 1',
+                '  mp.set_property("user-data/yuki/a4k-request", arr[(idx % #arr) + 1])',
+                'end)',
+                'mp.register_event("file-loaded", function()',
+                'end)',
+                // 注意 observe_property 类型串必须是 "bool"："boolean" 非法会让脚本主 chunk
+                // 直接崩溃，连带销毁已注册的 a4k-* 绑定（右键切档因此整体失效过）。
+                'mp.observe_property("pause", "bool", function(_, v)',
                 '  if v ~= nil then mp.osd_message(v and "已暂停" or "继续播放", 1.5) end',
+                'end)',
+                'mp.observe_property("mute", "bool", function(_, v)',
+                '  if v ~= nil then mp.osd_message(v and "已静音" or "取消静音", 1.5) end',
                 'end)',
                 '',
             ].join('\n');
-            fs.writeFileSync(path.join(scriptDir, 'yuki-hints.lua'), lua, 'utf8');
+            fs.writeFileSync(path.join(scriptDir, 'hints.lua'), lua, 'utf8');
             // input.conf：键位取自设置（mpv 语法：add speed 支持小数步长），动作附中文 show-text 反馈。
             // 同键重复只留首个；用户全局 input.conf 已绑定的键不写入应用段，用户行追加在后（同键以用户为准）。
             const userLines = readUserMpvInputConf();
             const userKeys = inputConfBoundKeys(userLines);
             const bindings = [
+                // 上/下集走信号通道（hints/ep-*）：原生队列在 mpv 列表内跳集，
+                // 逐集会话转发渲染层推进——单集会话里 playlist-next 会直接退出 mpv，不可直绑
+                [keys.epPrev, 'script-binding hints/ep-prev', '上一集'],
+                [keys.epNext, 'script-binding hints/ep-next', '下一集'],
+                [keys.a4kCycle, 'script-binding hints/a4k-cycle', ''],
                 [keys.pause, 'cycle pause', ''],
                 [keys.seekBack, `seek -${seek}`, `快退 ${seek} 秒`],
                 [keys.seekFwd, `seek ${seek}`, `快进 ${seek} 秒`],
                 [keys.volUp, `add volume ${vol}`, `音量 +${vol}`],
                 [keys.volDown, `add volume -${vol}`, `音量 -${vol}`],
+                // 静音/音轨/字幕的反馈由 hints.lua 的 observe_property OSD 提供，无需 show-text
+                [keys.mute, 'cycle mute', ''],
+                [keys.audioCycle, 'cycle audio', ''],
+                [keys.subToggle, 'cycle sub', ''],
                 [keys.speedDown, `add speed -${speed}`, `倍速 -${speed}`],
                 [keys.speedUp, `add speed ${speed}`, `倍速 +${speed}`],
                 [keys.speedReset, 'set speed 1', '已恢复原速 1.0x'],
                 [keys.frameBack, 'frame-back-step', '上一帧'],
                 [keys.frameFwd, 'frame-step', '下一帧'],
+                // 进度/文件信息：mpv 内置命令与 stats 脚本自带 OSD 展示
+                [keys.progress, 'show-progress', ''],
+                [keys.fileInfo, 'script-binding stats/display-page-5-toggle', ''],
                 [keys.fullscreen, 'cycle fullscreen', ''],
                 [keys.screenshot, 'screenshot', '已截图'],
+                [keys.stopPlay, 'stop', '已停止播放'],
             ];
+            // 注：右键「打开上下文菜单」不走静态绑定——生成文件无法预知所选二进制能力，
+            // 由 mpv-player 连接后运行时探测默认绑定再注入（_probeContextMenuBinding），
+            // 避免旧版 mpv 按键报 unknown binding、新版误判成暂停。
             const used = new Set();
             const defaults = [];
             for (const [key, cmd, msg] of bindings) {
@@ -800,8 +936,15 @@ app.whenReady().then(() => {
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'input.conf'), conf, 'utf8');
-            mpv.scriptPath = path.join(scriptDir, 'yuki-hints.lua');
+            mpv.scriptPath = path.join(scriptDir, 'hints.lua');
             mpv.inputConfPath = path.join(scriptDir, 'input.conf');
+            // 内置中文右键菜单：翻译版 menu.conf 无条件写入并注入——script-opts 对脚本
+            // 是不透明键值表，旧版 select.lua 不认识该键时静默忽略，无副作用；新版用它
+            // 加载中文菜单。写失败不影响播放，仅退化为所选 mpv 的内置默认菜单。
+            try {
+                fs.writeFileSync(path.join(scriptDir, 'menu.conf'), MENU_CONF_ZH, 'utf8');
+                mpv.menuConfPath = path.join(scriptDir, 'menu.conf');
+            } catch (e) { /* 菜单文件写失败不影响播放 */ }
         } catch (e) { /* 脚本写入失败不影响播放 */ }
     }
     // 截图目录首帧就绪：首次起播前就赋值，保证 writeMpvAssets/首播的 --screenshot-directory
@@ -815,7 +958,7 @@ app.whenReady().then(() => {
     writeMpvAssets();
     ipcMain.handle('yuki:update-hotkeys', () => { writeMpvAssets(); return { ok: true }; });
 
-    // 播放偏好变更（默认倍速 / 记忆位置 / 语言偏好 / Anime4K）：重读设置注入 mpv，下次起播生效
+    // 播放偏好变更（默认倍速 / 记忆位置 / 语言偏好 / Anime4K）：重读设置注入 mpv
     ipcMain.handle('yuki:update-player-prefs', () => {
         const sp = parseFloat(settings.get('playerSpeed'));
         mpv.defaultSpeed = (sp && sp > 0) ? Math.max(0.25, Math.min(4, sp)) : 1;
@@ -826,7 +969,14 @@ app.whenReady().then(() => {
         mpv.subLang = String(settings.get('playerSlang') || '');
         mpv.anime4kShaders = anime4kChainFromSettings();
         mpv.screenshotDir = path.join(app.getPath('pictures'), 'yuki');
-        writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示
+        writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示（下次起播读取）
+        // 播放途中把 Anime4K 配置热同步到运行中的 mpv：设置页与右键菜单共用同一状态源，
+        // 菜单勾选态与实际注入立即对齐，消除「设置页已改、菜单还是旧值」的失步窗。
+        // 与 a4k-request 同款运行时替换（已验证安全）；未播放/IPC 未连接时命令被拒，静默忽略。
+        if (mpv.playing) {
+            mpv.command('no-osd', 'set', 'glsl-shaders', mpv.anime4kShaders).catch(() => { });
+            mpv.command('set', 'user-data/yuki/a4k-mode', anime4kMenuModeFromSettings()).catch(() => { });
+        }
         return { ok: true };
     });
 
@@ -961,6 +1111,9 @@ app.whenReady().then(() => {
         mpv._lastRequestId = meta.requestId || '';
         mpv._lastPlaySessionId = meta.playSessionId || '';
         mpv._stallRetried = false;
+        // 原生队列逐集标题源：file-loaded 时按当前下标经 IPC 设置窗口标题
+        mpv._queueTitles = episodes.map((e) => String(e.title || ''));
+        mpv._queueSeriesTitle = String(title || '');
         // 不自动切换线路；只等待当前 URL 真正 file-loaded，再向渲染层返回成功。
         // 这样失败时会保留当前地址和错误原因，由用户手动选择其它线路。
         const first = mpv.play(episodes, {
@@ -968,24 +1121,65 @@ app.whenReady().then(() => {
             fullscreen: meta.fullscreen, format: meta.format,
             subs: meta.subs, position: meta.position,
             requestId: meta.requestId, playSessionId: meta.playSessionId,
+            // 原生多集队列（meta.playlist≥2 的静态直链列表）从第 epIndex 项起播
+            startIndex: Number.isFinite(Number(meta.epIndex)) ? Number(meta.epIndex) : 0,
         });
+        // verifyMpvStart 需要在校验前就知道这是原生队列（代际抖动豁免，见其内注释）
+        first.nativeQueue = Array.isArray(meta.playlist) && meta.playlist.length > 1;
         let r = first;
         if (first.ok) {
+            if (meta.playlist && meta.playlist.length > 1) {
+                console.log(`[mpv] 原生队列起播：entries=${episodes.length} start=${meta.epIndex || 0} m3u 已装载，等待首集就绪…`);
+            }
             r = await verifyMpvStart(first, MPV_START_TIMEOUT_MS);
+            if (meta.playlist && meta.playlist.length > 1) {
+                console.log(`[mpv] 原生队列起播${r.ok ? '成功' : `失败：${r.reason}${r.error ? ' / ' + String(r.error).slice(0, 160) : ''}`}`);
+                if (!r.ok) { try { mpv.stop(); } catch (e) { /* ignore */ } }
+            }
+        }
+        // 队列会话（meta.queueCtx）的地址是本地代理：失败时再探测只会触发一次多余的
+        // 重新解析，且 502 原因已由代理 toast 告知，跳过补探测。
+        if (!r.ok && r.reason === 'mpv-exited-before-playback' && !meta.queueCtx
+            && /^https?:\/\//i.test(requestedUrl)) {
+            // 从未起播的失败：补一次媒体探测给出精确死因（死链 404 / HTML 风控页 /
+            // 签名过期），替代 mpv 收尾日志里无可操作性的调试噪音。仅失败路径多一次
+            // 轻量请求；探测成功则保持原结果，由日志提取的真实原因兜底。
+            try {
+                const post = await probeMedia(requestedUrl, {
+                    headers: meta.header, skipProbe: false, timeoutMs: 6000,
+                });
+                if (post && !post.ok) {
+                    r = { ...r, url: post.finalUrl || requestedUrl,
+                        postProbe: `${post.reason || 'unknown'}${post.status ? `/${post.status}` : ''}` };
+                }
+            } catch (e) { /* 探测异常不影响原失败结果 */ }
         }
         if (r.ok) {
             // 非连播会话（本地文件/推送）：sessionId 取负，渲染层据此不触碰连播链
             if (meta.noSeq) r.sessionId = -Math.abs(r.sessionId);
+            // 原生多集队列（episodes≥2 静态直链）：渲染层据此改逐集记账、退出不再推进连播
+            r.nativeQueue = episodes.length > 1;
             afterPlay();
             attachAnime4kInfo(r); // 渲染层 toast 提示 Anime4K 是否生效及档位
             // 边下边播（T9，默认关）：静默把当前集追加到下载目录（m3u8 走 ffmpeg 合成，
             // 其余走 aria2）；引擎未就绪/失败静默跳过不打扰播放。
-            // 直播（meta.source==='live'）是无限流，无法下载，跳过
-            if (settings.get('simulDownload') && meta.source !== 'live') {
+            // 直播（meta.source==='live'）是无限流，无法下载，跳过；
+            // 网盘/本地代理动态流全局禁止边下边播：do=pan 等端点是按需解析的取流
+            // 会话，下载引擎只会拿到 m3u8 转发文本或短时效签名流，且与播放抢占
+            // 同一网盘会话的带宽并放大风控概率——即使开关开启也一律跳过。
+            const simulUrl = String((episodes[0] && episodes[0].url) || requestedUrl || '');
+            if (settings.get('simulDownload') && meta.source !== 'live' && meta.source !== 'queue'
+                && !isDynamicProxyStream(simulUrl, meta)) {
                 try {
                     const ep = episodes[0];
                     const urlPath = String(ep.url).split('?')[0];
                     const isM3u8 = /\.m3u8$/i.test(urlPath);
+                    // 同源同集去重：该集已在下载中/已下载（文件在）→ 静默跳过，不重复建任务。
+                    // key 与手动下载一致（站点|剧名|集名），重播/续播/换线路均不再重复下载。
+                    const simulKey = buildEpisodeKey({
+                        site: meta.site || meta.source, vod: meta.title, episode: meta.subtitle,
+                    });
+                    const dup = simulKey ? await dlDedupe.check(simulKey) : null;
                     let out;
                     if (isM3u8) {
                         // m3u8 合成产物固定为 mp4（避免无扩展名导致 ffmpeg 无法推断格式而合成失败）
@@ -995,10 +1189,20 @@ app.whenReady().then(() => {
                         // M-9：命中扩展名才补「.ext」，未命中（如直播/无扩展直链）不加悬挂点号
                         out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + (ext ? '.' + ext : '');
                     }
-                    if (isM3u8) {
+                    if (dup) {
+                        // 命中去重：不建任务，落入下方统一出口返回播放结果
+                    } else if (isM3u8) {
                         syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
-                        hls.add({ url: ep.url, out, header: meta.header,
+                        const hlsGid = hls.add({ url: ep.url, out, header: meta.header,
                             concurrency: parseInt(settings.get('dlSplitConcurrency'), 10) || 5 });
+                        if (simulKey) {
+                            dlDedupe.bind(hlsGid, simulKey, {
+                                gid: hlsGid, kind: 'hls', name: out, files: [], size: 0, done: 0,
+                                percent: 0, status: 'active', uri: ep.url,
+                                header: (meta.header && typeof meta.header === 'object') ? meta.header : undefined,
+                                completedAt: Date.now(),
+                            });
+                        }
                         startDlPoll();
                         r.simulDl = true;
                     } else if (dl.isAvailable()) {
@@ -1013,7 +1217,17 @@ app.whenReady().then(() => {
                                 .map(([k, v]) => `${k}: ${v}`);
                             if (pairs.length) opts.header = pairs;
                         }
-                        await raceWithTimeout(dl.addUri(ep.url, opts), 8000);
+                        const ariaGid = await raceWithTimeout(dl.addUri(ep.url, opts), 8000);
+                        if (simulKey && ariaGid) {
+                            dlDedupe.bind(ariaGid, simulKey, {
+                                gid: ariaGid, kind: 'aria2', name: out, files: [], size: 0, done: 0,
+                                percent: 0, status: 'waiting', uri: ep.url,
+                                header: (opts.header && Array.isArray(opts.header))
+                                    ? Object.fromEntries(opts.header.map((h) => { const i = h.indexOf(': '); return [h.slice(0, i), h.slice(i + 2)]; }))
+                                    : undefined,
+                                completedAt: Date.now(),
+                            });
+                        }
                         startDlPoll();
                         r.simulDl = true;
                     }
@@ -1067,6 +1281,15 @@ app.whenReady().then(() => {
         return fileMgr.list(rel);
     });
 
+    // 打开本地目录（资源管理器）：rel 限白名单内，'' 为根目录
+    fileIpc('yuki:file-open-dir', async (rel) => {
+        const dir = fileMgr.resolveSafe(rel);
+        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error('not a directory');
+        const err = await shell.openPath(dir);
+        if (err) throw new Error(err);
+        return { path: dir };
+    });
+
     ipcMain.handle('yuki:file-upload', async (_e, rel) => {
         try {
             const r = await dialog.showOpenDialog(win, {
@@ -1112,6 +1335,17 @@ app.whenReady().then(() => {
                     if (inside(dlRoot, candidate)) abs = candidate;
                     else return { ok: false };
                 } else return { ok: false };
+            }
+        }
+        // 存量无后缀下载记录自愈：旧版任务曾存出无后缀路径，文件后来补了扩展名
+        // （或被重命名规则加上 .mp4）——原路径已不存在时按常见视频扩展名探测同名
+        // 文件，命中即用；否则这类记录封面永久占位（statSync 失败 → ok:false）
+        if (!fs.existsSync(abs) && !path.extname(abs)) {
+            for (const cand of ['.mp4', '.mkv', '.ts', '.m4v', '.webm', '.mov', '.avi', '.flv']) {
+                const withExt = abs + cand;
+                try {
+                    if (fs.existsSync(withExt)) { abs = withExt; break; }
+                } catch (e) { /* 探测失败继续下一个候选 */ }
             }
         }
         // 无扩展名文件放行（与 yuki:download-play 一致）：让 ffmpeg 实际探测容器格式，
@@ -1356,8 +1590,13 @@ app.whenReady().then(() => {
         'probeSourceUrl', 'probeFailStreak', 'probedAt', 'probedSites', 'probeFp', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
         'useMisansFont', 'wallpaper', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
-        'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
-        'webDavPassword', 'webDavUrl', 'webDavUsername',
+        // WebDAV 同步全量键。此前 EnableSettings/EnableStats/AutoEnable/AutoMinutes
+        // 漏在白名单外，四个开关的写入被静默忽略（重启后回退），此处一并补齐。
+        // RestoreBackup 为恢复前本机备份快照，需可写以便误恢复后找回数据。
+        'webDavAutoEnable', 'webDavAutoMinutes', 'webDavEnable', 'webDavEnableCollect',
+        'webDavEnableHistory', 'webDavEnableRules', 'webDavEnableSettings', 'webDavEnableStats',
+        'webDavPassword', 'webDavRemoteDir', 'webDavRestoreBackup', 'webDavSslSkip',
+        'webDavStartupPull', 'webDavUrl', 'webDavUsername',
     ]);
     ipcMain.handle('yuki:settings-set', (_e, key, value) => {
         const k = String(key);
@@ -1904,6 +2143,7 @@ app.whenReady().then(() => {
                 files: t.files || [], size: t.total || 0, done: t.done || 0,
                 percent: t.percent || 0, status: t.status, uri: t.uri || '',
                 header: t.kind === 'hls' ? (t.header || undefined) : undefined, // L-8:HLS Referer/UA 随记录持久化
+                epKey: dlDedupe.stamp(t.gid, existing), // 去重 key 随记录保留（dlRecords.add 按 gid 整条替换）
                 completedAt: now,
             });
         }
@@ -2025,8 +2265,12 @@ app.whenReady().then(() => {
                 if (!isMagnet && it.name && /\.[a-z0-9]{1,5}$/i.test(path.basename(it.name))) {
                     opts.out = path.basename(it.name);
                 }
-                await dl.addUri(it.uri, opts);
-                if (it.gid) dlRecords.remove(it.gid);
+                const newGid = await dl.addUri(it.uri, opts);
+                if (it.gid) {
+                    // 去重 key 随任务迁移到新 gid，再清旧记录（防幽灵卡片复活）
+                    dlDedupe.carry(it.gid, newGid);
+                    dlRecords.remove(it.gid);
+                }
                 n++;
             } catch (e) { /* 单任务失败不影响其余 */ }
         }
@@ -2104,6 +2348,19 @@ app.whenReady().then(() => {
                     const uri = String(payload.uri || '').trim();
                     if (!uri) throw new Error('empty uri');
                     if (!/^(magnet:|http:|https:)/i.test(uri)) throw new Error('unsupported uri');
+                    // 同源同集去重：详情页/Kazumi 下载会带 ep* 上下文，命中直接跳过。
+                    // vod 一律用剧名（与播放链 meta.title 同源）：手动下载与边下边播两条
+                    // 路径才能归到同一 key；vodId 仅详情页有、播放链拿不到，不能掺入。
+                    const epKey = buildEpisodeKey({
+                        site: payload.epSite, vod: payload.epVodName, episode: payload.epName,
+                    });
+                    if (epKey) {
+                        const dup = await dlDedupe.check(epKey);
+                        if (dup) {
+                            return { ok: false, reason: dup.state === 'done' ? 'already-done' : 'already-downloading',
+                                file: dup.file || '', gid: dup.gid || '' };
+                        }
+                    }
                     await startDlEngine(dl.dir || app.getPath('downloads'));
                     // 详情页批量下载可带文件名与请求头（部分源校验 Referer）
                     const opts = {};
@@ -2127,6 +2384,19 @@ app.whenReady().then(() => {
                         if (pairs.length) opts.header = pairs;
                     }
                     const gid = await dl.addUri(uri, opts);
+                    // 入队即写携带 epKey 的初始记录：跨重启可恢复、查重立即可见
+                    // （后续轮询按真实进度覆盖同 gid 记录，epKey 经 stamp 保留）
+                    if (epKey) {
+                        dlDedupe.bind(gid, epKey, {
+                            gid, kind: 'aria2', name: (out ? String(out).slice(0, 150) : '') || uri,
+                            files: [], size: 0, done: 0, percent: 0,
+                            status: 'waiting', uri,
+                            header: (opts.header && Array.isArray(opts.header))
+                                ? Object.fromEntries(opts.header.map((h) => { const i = h.indexOf(': '); return [h.slice(0, i), h.slice(i + 2)]; }))
+                                : undefined,
+                            completedAt: Date.now(),
+                        });
+                    }
                     startDlPoll();
                     return { ok: true, gid };
                 }
@@ -2136,6 +2406,17 @@ app.whenReady().then(() => {
                     if (!uri) throw new Error('empty uri');
                     // M-2：仅放行 http(s)，防 file:// 等本地/畸形 scheme 经 ffmpeg/分片拉取触碰本地文件
                     if (!/^https?:\/\//i.test(uri)) throw new Error('bad uri protocol');
+                    // 同源同集去重（与 add 一致）：命中「下载中/已完成」直接跳过
+                    const epKey = buildEpisodeKey({
+                        site: payload.epSite, vod: payload.epVodName, episode: payload.epName,
+                    });
+                    if (epKey) {
+                        const dup = await dlDedupe.check(epKey);
+                        if (dup) {
+                            return { ok: false, reason: dup.state === 'done' ? 'already-done' : 'already-downloading',
+                                file: dup.file || '', gid: dup.gid || '' };
+                        }
+                    }
                     syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                     let gid;
                     try {
@@ -2150,6 +2431,15 @@ app.whenReady().then(() => {
                         // ffmpeg 首次启动正后台自动下载（约 90MB）：区别于「未安装」，渲染层提示稍后重试
                         if (e && e.message === 'ffmpeg-missing' && ffmpegEnsuring()) return { ok: false, reason: 'ffmpeg-downloading' };
                         throw e;
+                    }
+                    if (epKey) {
+                        dlDedupe.bind(gid, epKey, {
+                            gid, kind: 'hls', name: String(payload.out || '') || uri,
+                            files: [], size: 0, done: 0, percent: 0,
+                            status: 'active', uri,
+                            header: (payload.header && typeof payload.header === 'object') ? payload.header : undefined,
+                            completedAt: Date.now(),
+                        });
                     }
                     startDlPoll();
                     return { ok: true, gid };
@@ -2233,18 +2523,20 @@ app.whenReady().then(() => {
                         try {
                             if (rec.kind === 'hls') {
                                 syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
-                                hls.add({
+                                const hlsGid = hls.add({
                                     url: rec.uri, out: rec.name,
                                     header: rec.header || undefined, // L-8:恢复原任务的 Referer/UA，避免重启后 403
                                     adFilter: settings.get('hlsAdFilter'),
                                     concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
                                 });
+                                dlDedupe.carry(rec.gid, hlsGid);
                             } else {
                                 // 磁链不用 out 参数（会干扰多文件 BT 种子），普通 HTTP/HTTPS 带文件名恢复
                                 const isMagnet = /^magnet:/i.test(rec.uri);
                                 const opts = {};
                                 if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
-                                await dl.addUri(rec.uri, opts);
+                                const newGid = await dl.addUri(rec.uri, opts);
+                                dlDedupe.carry(rec.gid, newGid);
                             }
                             dlRecords.remove(rec.gid); // 移除旧 gid 记录，新任务由轮询重新持久化
                             gids.push(rec.gid);
@@ -2274,6 +2566,7 @@ app.whenReady().then(() => {
                                     adFilter: settings.get('hlsAdFilter'),
                                     concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
                                 });
+                                dlDedupe.carry(payload.gid, gid);
                                 dlRecords.remove(payload.gid);
                                 startDlPoll();
                                 try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
@@ -2297,6 +2590,7 @@ app.whenReady().then(() => {
                             const opts = {};
                             if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
                             const gid = await dl.addUri(rec.uri, opts);
+                            dlDedupe.carry(payload.gid, gid);
                             dlRecords.remove(payload.gid); // 移除旧 gid 记录，新任务会重新持久化
                             startDlPoll();
                             // 立即推送新列表，避免旧卡消失后新卡延迟 1s 才出现
@@ -2371,6 +2665,7 @@ app.whenReady().then(() => {
                     }
                     // 先移除任务（停止写入），再删除文件
                     dlRecords.remove(payload.gid);
+                    dlDedupe.drop(payload.gid); // 会话去重登记同步清除（持久化记录已随上一行删除）
                     if (String(payload.gid).startsWith('hls-')) { hls.remove(payload.gid); }
                     else { await dl.remove(payload.gid); }
                     if (deleteFiles) rmFilesBestEffort([...delFiles, ...ctrlFiles]);
@@ -2526,13 +2821,19 @@ app.whenReady().then(() => {
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
+        // 完成记录需保留去重 key：dlRecords.add 按 gid 整条替换，从旧记录回填 epKey
+        const prevRec = dlRecords.all().find((x) => x.gid === task.gid);
         dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
-            size: task.total || 0, status: 'complete', completedAt: Date.now() });
+            size: task.total || 0, status: 'complete', epKey: dlDedupe.stamp(task.gid, prevRec),
+            completedAt: Date.now() });
         send('yuki:dl-event', { type: 'completed', task });
     });
     dl.on('error', (task) => {
+        const prevErr = dlRecords.all().find((x) => x.gid === task.gid);
         dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
-            size: task.total || 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
+            size: task.total || 0, status: 'error', errorMessage: task.errorMessage || '',
+            epKey: dlDedupe.stamp(task.gid, prevErr),
+            completedAt: Date.now() });
         send('yuki:dl-event', { type: 'error', task });
     });
     // m3u8 合成任务完成/失败：与 aria2 同一套通知链路
@@ -2542,18 +2843,174 @@ app.whenReady().then(() => {
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
+        const prevHls = dlRecords.all().find((x) => x.gid === task.gid);
         dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
-            size: 0, status: 'complete', completedAt: Date.now() });
+            size: 0, status: 'complete', epKey: dlDedupe.stamp(task.gid, prevHls),
+            completedAt: Date.now() });
         send('yuki:dl-event', { type: 'completed', task });
     });
     hls.on('error', (task) => {
+        const prevHlsErr = dlRecords.all().find((x) => x.gid === task.gid);
         dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
-            size: 0, status: 'error', errorMessage: task.errorMessage || '', completedAt: Date.now() });
+            size: 0, status: 'error', errorMessage: task.errorMessage || '',
+            epKey: dlDedupe.stamp(task.gid, prevHlsErr),
+            completedAt: Date.now() });
         send('yuki:dl-event', { type: 'error', task });
+    });
+
+    // 在线整季原生播放列表：本地按需解析代理（mpv 打开哪集才解析哪集，直链零过期）。
+    // 集目解析失败 → toast 告知并停止队列（mpv 收 502 会跳下一集，这里主动 stop 防静默跳集）。
+    /** 边下边播入队（原生队列与逐集链路共用语义）：成功/去重命中返回 true。 */
+    async function enqueueSimulDownload({ url, siteKey, fileBase, episodeName, header }) {
+        try {
+            if (!settings.get('simulDownload')) return false;
+            const urlPath = String(url).split('?')[0];
+            const isM3u8 = /\.m3u8$/i.test(urlPath);
+            const simulKey = buildEpisodeKey({ site: siteKey, vod: fileBase, episode: episodeName });
+            const dup = simulKey ? await dlDedupe.check(simulKey) : null;
+            let out = (fileBase.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150);
+            if (isM3u8) {
+                out += '.mp4'; // m3u8 合成产物固定 mp4（ffmpeg 推断格式需要扩展名）
+            } else {
+                const ext = (urlPath.match(/\.(mp4|mkv|flv|mov|avi|webm|ts)$/i) || ['', ''])[1];
+                out += ext ? '.' + ext : '';
+            }
+            if (dup) return true; // 已在下载/已下载：视为已处理
+            if (isM3u8) {
+                syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                const hlsGid = hls.add({
+                    url, out, header,
+                    concurrency: parseInt(settings.get('dlSplitConcurrency'), 10) || 5,
+                });
+                if (simulKey) {
+                    dlDedupe.bind(hlsGid, simulKey, {
+                        gid: hlsGid, kind: 'hls', name: out, files: [], size: 0, done: 0,
+                        percent: 0, status: 'active', uri: url,
+                        header: (header && typeof header === 'object') ? header : undefined,
+                        completedAt: Date.now(),
+                    });
+                }
+                startDlPoll();
+                return true;
+            }
+            if (!dl.isAvailable()) return false;
+            await raceWithTimeout(
+                startDlEngine(dl.dir || settings.get('dlDir') || app.getPath('downloads')), 8000);
+            const opts = { out };
+            if (header && typeof header === 'object') {
+                const pairs = Object.entries(header)
+                    .filter(([, v]) => v != null && v !== '')
+                    .map(([k, v]) => `${k}: ${v}`);
+                if (pairs.length) opts.header = pairs;
+            }
+            const ariaGid = await raceWithTimeout(dl.addUri(url, opts), 8000);
+            if (simulKey && ariaGid) {
+                dlDedupe.bind(ariaGid, simulKey, {
+                    gid: ariaGid, kind: 'aria2', name: out, files: [], size: 0, done: 0,
+                    percent: 0, status: 'waiting', uri: url,
+                    header: (opts.header && Array.isArray(opts.header))
+                        ? Object.fromEntries(opts.header.map((h) => { const i = h.indexOf(': '); return [h.slice(0, i), h.slice(i + 2)]; }))
+                        : undefined,
+                    completedAt: Date.now(),
+                });
+            }
+            startDlPoll();
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // 原生队列 × 边下边播：代理每解析成功一集即静默入队下载（集名含 Bangumi 名，
+    // 去重键与手动下载一致，重复播放不会重复建任务）。Kazumi 会话自动携带规则头。
+    /** 原生队列单集解析成功 → 边下边播入队（静默，播放优先）。 */
+    async function onQueueEntryResolved({ index, url, title, sess }) {
+        try {
+            if (!settings.get('simulDownload')) return;
+            if (isDynamicProxyStream(url, {})) return;
+            const epName = title || `第${index + 1}集`;
+            await enqueueSimulDownload({
+                url,
+                siteKey: sess.site || '',
+                fileBase: [sess.seriesTitle, epName].filter(Boolean).join(' · '),
+                episodeName: epName,
+                header: sess.headers || undefined,
+            });
+        } catch (e) { /* 静默：播放优先 */ }
+    }
+
+    const playlistProxy = new PlaylistProxy({
+        getBackend: () => lastBackendInfo,
+        // Kazumi 第二段解析：复用 VIP 解析的隐藏窗口抓流设施（规则头由代理管道转发）
+        captureDirect: (pageUrl, legacy) => parseWin.captureDirect(
+            pageUrl, undefined, !!legacy, new AbortController().signal, {}),
+        onEntryError: ({ index, reason, sess }) => {
+            send('yuki:play-failed', { message: `第 ${index + 1} 集：${reason}，原生连播已停止` });
+            // 仅 parse=1（页面解析型）拉黑该线路；超时/抖动类失败不记，下次可重试
+            if (sess && /需 VIP 解析/.test(String(reason))) {
+                pageQueueBan.add(`${sess.site}|${sess.flag}`);
+            }
+            try { mpv.stop(); } catch (e) { /* ignore */ }
+        },
+    });
+    playlistProxy.on('entry-resolved', onQueueEntryResolved);
+    // 实例回填到模块级处理器（注册在最早期已完成，见文件头部）
+    playlistProxyRef = playlistProxy;
+
+    // 上/下集快捷键：原生队列直接在 mpv 播放列表内跳集（同进程零等待）；
+    // 逐集会话转发渲染层推进（单集会话里 mpv 的 playlist-next 会直接退出进程）。
+    mpv.on('ep-skip', ({ dir } = {}) => {
+        try {
+            const d = Number(dir) || 0;
+            if (!d) return;
+            const nativeActive = !!(mpv._activeSession && mpv._activeSession.nativeQueue
+                && mpv._queueLen > 1);
+            if (nativeActive) {
+                mpv.command(d > 0 ? 'playlist-next' : 'playlist-prev').catch(() => { });
+                return;
+            }
+            send('yuki:episode-skip', { dir: d });
+        } catch (e) { /* ignore */ }
     });
 
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
     mpv.on('ended', (info) => send('yuki:player-ended', info));
+    // 播放器 IPC 就绪：用实时设置推送右键菜单初始档位。hints.lua 里的静态快照可能
+    // 已过期（典型：默认开启在启动着色器下载完成后才写入设置，而 lua 在启动时已按
+    // 'off' 生成），不重推会导致「着色器实际生效、菜单却显示关闭」。推送必然早于
+    // 菜单可用——右键菜单绑定同样在连接后才注入。
+    mpv.on('ipc-connected', () => {
+        mpv.command('set', 'user-data/yuki/a4k-mode', anime4kMenuModeFromSettings()).catch(() => { });
+    });
+    // 播放器右键菜单：Anime4K 全局档位切换。持久化设置 + 当次会话热应用
+    // （glsl-shaders 运行时替换，无需重启 mpv）+ 回写 user-data/yuki/a4k-mode
+    // 驱动菜单勾选态 + OSD 回显 + 通知渲染层同步设置页。
+    // 状态一致性约定：持久层 / 菜单勾选态 / 设置页控件一律反映「已保存的配置意图」；
+    // 着色器未就绪导致未注入时由 OSD 与 ready 字段明示，不得把展示态降级成 off
+    // （否则持久层说开、菜单/UI 说关，重启后又自动开启，三方失步）。
+    mpv.on('a4k-request', ({ mode } = {}) => {
+        try {
+            const tier = ANIME4K_CHAINS[mode] ? String(mode) : '';
+            const on = !!tier;
+            settings.set('anime4k', on);
+            if (on) settings.set('anime4kMode', tier);
+            // 着色器文件缺失/损坏时 buildAnime4kChain 返回 ''：清空运行链＝本次不注入，
+            // 但配置仍按用户选择持久化并在所有界面上如实展示。
+            const chain = on ? buildAnime4kChain(tier) : '';
+            mpv.anime4kShaders = chain;
+            mpv.command('no-osd', 'set', 'glsl-shaders', chain).catch(() => { });
+            mpv.command('set', 'user-data/yuki/a4k-mode', on ? tier : 'off').catch(() => { });
+            const label = (on && chain)
+                ? (ANIME4K_MODE_LABELS[tier] || tier)
+                : (on ? '未生效（着色器未就绪，请在设置中下载）' : '关闭');
+            mpv.command('show-text', `Anime4K 超分：${label}`, 2500).catch(() => { });
+            if (win) {
+                win.webContents.send('yuki:a4k-changed', {
+                    enabled: on, mode: on ? tier : 'off',
+                    label: on ? (ANIME4K_MODE_LABELS[tier] || '') : '',
+                    ready: !!chain,
+                });
+            }
+        } catch (e) { /* 菜单切换失败不影响播放 */ }
+    });
     // mpv 进程异步启动失败（ENOENT/EACCES：文件被删/损坏/无权限）：友好告知渲染层，不崩溃、不静默
     mpv.on('spawn-error', (info) => {
         send('yuki:player-spawn-error', {
@@ -2572,6 +3029,11 @@ app.whenReady().then(() => {
             wallWatched: (info && typeof info.wallWatched === 'number') ? info.wallWatched : null,
             requestId: (info && info.requestId) || '',
             playSessionId: (info && info.playSessionId) || '',
+            // 原生多集队列：渲染层据此在退出时不再按整会话计账/推进（逐集已在 ended 记账），
+            // 并补记「正在看的这一集」（playlistPos 定位当集，与已 eof 记账的下标去重）
+            nativeQueue: !!(info && info.nativeQueue),
+            queueLen: (info && typeof info.queueLen === 'number') ? info.queueLen : null,
+            playlistPos: (info && typeof info.playlistPos === 'number') ? info.playlistPos : -1,
             quit: userStopped, // 用户主动关闭（stop() 或 mpv 窗口关闭）：渲染层据此不等待断流重连、不连播
         });
         // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
@@ -2587,6 +3049,7 @@ app.whenReady().then(() => {
     }
 
     bridge.on('ready', (info) => {
+        lastBackendInfo = info; // 播放列表代理按需解析用（惰性读取，后端重启后自动更新）
         if (win) win.webContents.send('backend-ready', info);
         // Phase 7：自动重载上次成功加载的配置 URL（状态同步置位，供 yuki:config-state 轮询）
         const lastUrl = settings.get('lastConfigUrl');
@@ -2696,6 +3159,20 @@ app.whenReady().then(() => {
     bridge.extraEnv.YUKI_MEDIA_PROBE = settings.get('mediaProbe') === false ? '0' : '1';
     bridge.extraEnv.YUKI_AUTO_LINE_FALLBACK = settings.get('autoLineFallback') === false ? '0' : '1';
     bridge.extraEnv.YUKI_LEGACY_PARSER = settings.get('legacyParser') === false ? '0' : '1';
+    // 低配机型自适应：按整机内存 / 核数收紧后端运行时 Worker 上限。冻结产物里每个
+    // spawn Worker 就是一个独立的 yuki-backend.exe 子进程（jar 站点还会再派生 JVM），
+    // 后端默认总上限 8、其中 jar 3；小内存机器全量拉起会内存暴涨。分档：
+    //   低配（<8GB 或 ≤2 核）→ 总 4 / jar 1；中配（<14GB）→ 总 6 / jar 2；
+    //   其余保持默认 8 / 3。用户显式设置的同名环境变量优先（高级用户自行调优）。
+    (function applyAdaptiveWorkerLimits() {
+        const totalGiB = os.totalmem() / (1024 ** 3);
+        const cores = os.cpus().length;
+        const low = totalGiB < 8 || cores <= 2;
+        const mid = !low && totalGiB < 14;
+        if (!process.env.YUKI_MAX_WORKERS) bridge.extraEnv.YUKI_MAX_WORKERS = String(low ? 4 : mid ? 6 : 8);
+        if (!process.env.YUKI_MAX_JAR_WORKERS) bridge.extraEnv.YUKI_MAX_JAR_WORKERS = String(low ? 1 : mid ? 2 : 3);
+        console.log(`[python-bridge] adaptive worker limits: total=${low ? 4 : mid ? 6 : 8} jar=${low ? 1 : mid ? 2 : 3} (ram=${totalGiB.toFixed(1)}GiB cores=${cores})`);
+    })();
     const lastConfigUrl = settings.get('lastConfigUrl');
     if (lastConfigUrl && /^https?:\/\//i.test(lastConfigUrl)) {
         bridge.extraEnv.YUKI_LAST_CONFIG_URL = lastConfigUrl;
@@ -2763,7 +3240,12 @@ app.whenReady().then(() => {
         if (settings.get('anime4k') === undefined && buildAnime4kChain()) settings.set('anime4k', true);
         // 用 anime4kChainFromSettings 带上档位（buildAnime4kChain 无参回退 Mode A，
         // 会忽略用户设置的 anime4kMode）
-        if (settings.get('anime4k')) mpv.anime4kShaders = anime4kChainFromSettings();
+        if (settings.get('anime4k')) {
+            mpv.anime4kShaders = anime4kChainFromSettings();
+            // 默认开启此刻才落地，早前生成的 hints.lua 仍是 'off' 快照——重写资产，
+            // 使 OSD 提示与菜单初始态同步为最新设置（运行会话另有 ipc-connected 兜底推送）。
+            writeMpvAssets();
+        }
     });
     bridge.start();
     parseWin = new ParseWindow(() => bridge.info, probeMedia);

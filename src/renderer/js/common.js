@@ -223,7 +223,10 @@ function vodCoverImg(pic, eager) {
     return `<img src="${src}" alt="" loading="${load}" decoding="async" referrerpolicy="no-referrer"${miss} onload="coverFadeIn(this)" onerror="this.onerror=null;this.src='${vodPlaceholder()}';this.classList.add('loaded')">`;
 }
 
-/** 封面加载失败时切到下一候选源（T74，配合 vodCoverChain 的 data-fb 链）；链耗尽落占位图。 */
+/** 封面加载失败时切到下一候选源（T74，配合 vodCoverChain 的 data-fb 链）；链耗尽落占位图。
+ *  T78：Kazumi/Bangumi 卡链耗尽时补标 data-cover-missing——此前占位后无标记，
+ *  fillMissingCovers 不再认领，一次瞬时失败即永久占位且重新搜索也不重拉
+ *  （表现为「必须清空缓存才能重新拉取」）；标回后由补拉管线在负缓存过期后换源重试。 */
 function coverChainNext(img) {
     const list = (img && img.dataset && img.dataset.fb) ? String(img.dataset.fb).split('||') : [];
     if (list.length) {
@@ -234,6 +237,11 @@ function coverChainNext(img) {
     img.onerror = null;
     img.src = vodPlaceholder();
     img.classList.add('loaded');
+    try {
+        const card = img.closest ? img.closest('.vod-card') : null;
+        const src = (card && card.dataset) ? String(card.dataset.source || '') : '';
+        if (src.startsWith('kazumi:') || src === 'bangumi') img.setAttribute('data-cover-missing', '1');
+    } catch (e) { /* 标记失败不影响占位兜底 */ }
 }
 
 /** 本地/下载文件起播成功 toast（四条播放入口共用）：外部播放器模式 | mpv 模式附 Anime4K 状态与档位。 */
@@ -284,12 +292,29 @@ function vodCoverChain(pics, eager) {
  */
 const _BGM_SIZE_SEG = { large: 'l', common: 'c', medium: 'm', small: 's', grid: 'g', card: 'c' };
 
-/** 把 lain.bgm.tv 封面 URL 的尺寸路径段（/pic/cover/{l,c,m,g,s}/）替换为目标变体；非该格式原样返回。 */
+/**
+ * lain 图床缩放语义（T78 实测修正）：带 /r/{宽}/ 前缀的 API 形式 URL 由 r 宽度
+ * 承担真实缩放，尺寸段固定为 l（如 common = /r/400/pic/cover/l/…）；裸路径
+ * /pic/cover/{lcmgs}/… 才用段字母区分尺寸。r 前缀 + 非 l 段的组合 CDN 返回
+ * HTTP 400——此前对 API 形式 URL 做 l→c 段替换产出 r/400+c 非法组合，
+ * 历史/收藏/搜索 Bangumi 封面整批拉取失败且链耗尽后无 missing 标记不再重试。
+ * 现按前缀形态分别处理，并对已持久化的损坏组合（r+非l）就地归一化自愈。
+ */
+const _BGM_SIZE_WIDTH = { large: 0, common: 400, medium: 800, small: 200, grid: 100, card: 400 };
+
+/** 把 lain.bgm.tv 封面 URL 转成目标尺寸变体；非该格式原样返回。
+ *  - 带 /r/{n}/pic/cover/ 前缀：段归位为 l，宽度替换为目标变体（large 移除前缀）；
+ *  - 裸路径形式：沿用 /pic/cover/{lcmgs}/ 段字母替换。 */
 function bangumiResizeUrl(url, variant) {
-    const seg = _BGM_SIZE_SEG[variant];
     const u = String(url || '');
-    if (!seg || !u) return u;
-    return u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`);
+    const w = _BGM_SIZE_WIDTH[variant];
+    if (!u || w === undefined) return u;
+    if (/\/r\/\d+\/pic\/cover\//i.test(u)) {
+        const segL = u.replace(/(\/pic\/cover\/)[a-z](\/)/i, '$1l$2');
+        return segL.replace(/\/r\/\d+(?=\/pic\/cover\/)/i, w > 0 ? `/r/${w}` : '');
+    }
+    const seg = _BGM_SIZE_SEG[variant];
+    return seg ? u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`) : u;
 }
 
 /** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.pro）；

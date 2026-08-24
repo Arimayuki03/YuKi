@@ -97,3 +97,30 @@ test('bangumiResizeUrl：仅替换 /pic/cover/{lcmgs}/ 尺寸段', () => {
     assert.equal(__resize('https://example.com/x.jpg', 'common'), 'https://example.com/x.jpg');
     assert.equal(__resize('', 'common'), '');
 });
+
+// ---- T78 回归：lain CDN 缩放由 /r/{宽}/ 前缀承担，段固定为 l；r 前缀 + 非 l 段返回 HTTP 400 ----
+
+test('bangumiResizeUrl：API 形式（/r/宽/l/）card 变体保持合法组合，不再产出 r+非l 段', () => {
+    const { __resize } = loadCommon();
+    const api = 'https://lain.bangumi.pro/r/400/pic/cover/l/13/c5/400602_ZI8Y9.jpg';
+    assert.equal(__resize(api, 'card'), api); // card=common 宽度 400，幂等且合法
+    assert.equal(
+        __resize('https://lain.bgm.tv/r/800/pic/cover/l/a/b/1.jpg', 'card'),
+        'https://lain.bgm.tv/r/400/pic/cover/l/a/b/1.jpg');
+});
+
+test('bangumiResizeUrl：API 形式各变体按 r 宽度前缀映射（large 移除前缀）', () => {
+    const { __resize } = loadCommon();
+    const base = 'https://lain.bgm.tv/r/400/pic/cover/l/a/b/1.jpg';
+    assert.equal(__resize(base, 'medium'), 'https://lain.bgm.tv/r/800/pic/cover/l/a/b/1.jpg');
+    assert.equal(__resize(base, 'small'), 'https://lain.bgm.tv/r/200/pic/cover/l/a/b/1.jpg');
+    assert.equal(__resize(base, 'grid'), 'https://lain.bgm.tv/r/100/pic/cover/l/a/b/1.jpg');
+    assert.equal(__resize(base, 'large'), 'https://lain.bgm.tv/pic/cover/l/a/b/1.jpg');
+});
+
+test('bangumiResizeUrl：已持久化的损坏组合（r 前缀+非 l 段）就地自愈为段 l', () => {
+    const { __resize } = loadCommon();
+    assert.equal(
+        __resize('https://lain.bangumi.pro/r/400/pic/cover/c/3c/ec/247_MnPPU.jpg', 'card'),
+        'https://lain.bangumi.pro/r/400/pic/cover/l/3c/ec/247_MnPPU.jpg');
+});

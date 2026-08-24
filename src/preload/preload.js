@@ -59,10 +59,22 @@ contextBridge.exposeInMainWorld('yuki', {
     onPlayFailed: (cb) => {
         ipcRenderer.on('yuki:play-failed', (_e, info) => cb(info));
     },
+    /** 播放器右键菜单切换 Anime4K 档位后广播 {enabled, mode, label}：设置页控件同步 */
+    onA4kChanged: (cb) => {
+        ipcRenderer.on('yuki:a4k-changed', (_e, info) => cb(info));
+    },
+    /** 上/下集快捷键（逐集会话）：{dir:-1|1}，渲染层按当前线路推进/回退 */
+    onEpisodeSkip: (cb) => {
+        ipcRenderer.on('yuki:episode-skip', (_e, info) => cb(info));
+    },
+    /** 构建整季原生播放列表（本地按需解析代理条目）：{site,flag,vipFlags,eps:[{id,name}],start} */
+    buildPlaylist: (queue) => ipcRenderer.invoke('yuki:playlist-build', queue),
     /** Phase 5 本地文件管理（白名单根目录 + 防穿越，rel 均为根目录相对路径） */
     fileRoot: () => ipcRenderer.invoke('yuki:file-root'),
     filePickRoot: () => ipcRenderer.invoke('yuki:file-pick-root'),
     fileList: (rel) => ipcRenderer.invoke('yuki:file-list', rel || ''),
+    /** 打开本地目录（资源管理器；rel 为根目录相对路径，'' 即白名单根） */
+    fileOpenDir: (rel) => ipcRenderer.invoke('yuki:file-open-dir', rel || ''),
     /** 本地视频预览图（ffmpeg 抓帧，md5 缓存）：{ok, path} | {ok:false} */
     fileThumb: (rel) => ipcRenderer.invoke('yuki:file-thumb', rel),
     fileUpload: (rel) => ipcRenderer.invoke('yuki:file-upload', rel || ''),

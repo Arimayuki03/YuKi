@@ -248,7 +248,11 @@ function fmtTime(ts) {
  *  Kazumi 源历史卡无源封面：复用 Bangumi 封面缓存，未命中占位图标 data-cover-missing 供 fillMissingCovers 补拉。
  *  Bangumi 条目（v.bangumi）：无移除/编辑/勾选按钮，来源徽标显示「Bangumi」，点击进 Bangumi 二级详情页。 */
 function recCard(v, editable, withTags, playCountByName) {
-    const isBgm = !!v.bangumi;
+    // Bangumi 管理态判定（T79 补遗）：除远端条目自带 bangumi 标志外，详情页同步
+    // 写入的本地镜像记录（site='bangumi'，带 bangumiId）同样按账号托管渲染——
+    // 无删除/编辑按钮、标签只读，收藏操作走 Bangumi 详情页；否则去重后留下的卡
+    // 仍带删除按钮，点删后「变成」不可操作的远端卡，观感割裂。
+    const isBgm = !!v.bangumi || String(v.site || '') === 'bangumi';
     const tag = isBgm ? (v.tag || '') : normTag(v.tag);
     const progress = v.progress;
     const progressHtml = progress && progress.totalEps
@@ -410,6 +414,29 @@ async function confirmRecEdit() {
     await recSet(ctx.storeKey, list);
     if (ctx.renderFn) await ctx.renderFn();
     warnToast('已保存');
+}
+
+/** 合并外部条目（Bangumi 收藏）并按 bangumiId 去重（T79）：详情页同步/收藏会为同一
+ *  subject 写入本地条目（带 bangumiId），远端收藏里还有同 ID 条目——不去重则收藏页
+ *  出现两张相同卡片（本地那张可删除、远端那张不可删）。本地无 bangumiId 的普通
+ *  收藏不受影响；extra 内部按 vodId 自去重防远端重复。 */
+function mergeExtraRecords(list, extra) {
+    if (!Array.isArray(list)) list = [];
+    if (!Array.isArray(extra) || !extra.length) return list;
+    const localIds = new Set(
+        list.map((v) => (v && v.bangumiId !== undefined && v.bangumiId !== null) ? String(v.bangumiId) : '')
+            .filter(Boolean));
+    const seen = new Set();
+    const fresh = [];
+    for (const it of extra) {
+        // 空/缺失 vodId 的脏数据直接滤除（远端条目必有 subject_id，缺即不可渲染）
+        if (!it || it.vodId === undefined || it.vodId === null || String(it.vodId) === '') continue;
+        const id = String(it.vodId);
+        if (localIds.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        fresh.push(it);
+    }
+    return list.concat(fresh);
 }
 
 /** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。多选（T40）：收藏支持批量删除/标记想看/标记已看且保留全选；历史仅批量删除且无全选；清空按钮仅历史保留。containerSel 覆盖事件委托根（默认 #${viewName}，供「我的」页内嵌面板复用）。 */
@@ -593,11 +620,12 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 } catch (e) { /* 单条回填失败跳过 */ }
             });
             if (coverBackfilled) await recSet(storeKey, list);
-            // 合并外部条目（Bangumi 收藏）：追加到本地收藏后，统一参与搜索/标签/分页
+            // 合并外部条目（Bangumi 收藏）：追加到本地收藏后，统一参与搜索/标签/分页；
+            // 按 bangumiId 去重避免「详情页同步后出现两张相同卡片」（T79，见 mergeExtraRecords）
             if (this._extra) {
                 try {
                     const extra = await this._extra();
-                    if (Array.isArray(extra) && extra.length) list = list.concat(extra);
+                    list = mergeExtraRecords(list, extra);
                 } catch (e) { /* 合并失败不影响本地列表 */ }
             }
             // 搜索 + 标签过滤（不改存储顺序）

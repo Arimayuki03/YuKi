@@ -247,9 +247,14 @@ def validate_pan_cookie(key, value):
     return issues
 
 
-def save_pan_cookies(cookies):
+def save_pan_cookies(cookies, clear_cache=True):
     """保存网盘 Cookie 配置；返回实际保存的 dict。非法键/空值丢弃。
-    同时返回校验问题列表（不阻止保存，仅提示）。"""
+    同时返回校验问题列表（不阻止保存，仅提示）。
+
+    clear_cache=False 供后台自动轮换使用：夸克经 Set-Cookie 滚动会话字段
+    属正常续期，旧直链仍有效到自身过期，不应清空 signed-url 缓存制造
+    解析抖动；仅用户手动改配置时清缓存。
+    """
     cleaned = {k: str(v).strip() for k, v in (cookies or {}).items()
                if k in PAN_COOKIE_KEYS and str(v).strip()}
     warnings = []
@@ -269,9 +274,10 @@ def save_pan_cookies(cookies):
         raise RuntimeError(f'网盘 Cookie 保存失败: {e}')
     except Exception as e:
         raise RuntimeError(f'网盘 Cookie 加密保存失败: {e}') from e
-    try:
-        from pan.cache import clear_signed_url_cache
-        clear_signed_url_cache()
-    except Exception:
-        pass
+    if clear_cache:
+        try:
+            from pan.cache import clear_signed_url_cache
+            clear_signed_url_cache()
+        except Exception:
+            pass
     return cleaned, warnings

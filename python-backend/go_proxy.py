@@ -16,11 +16,13 @@ Python 实现等价的转发服务：
    边下边按序转发（带背压，内存占用有上限）。
 5. HTTP/1.0：每请求独立连接，避免 keep-alive 复用导致 mpv seek 时协议错乱。
 """
+import http.client
 import http.server
 import logging
 import os
 import json
 import queue
+import random
 import re
 import threading
 import time
@@ -54,7 +56,9 @@ _QSES_LOCK = threading.Lock()
 def _qget(url, **kw):
     with _QSES_LOCK:
         try:
-            return _qses.get(url, **kw)
+            response = _qses.get(url, **kw)
+            _harvest_quark_rotation()
+            return response
         finally:
             try:
                 _qses.cookies.clear()
@@ -65,12 +69,217 @@ def _qget(url, **kw):
 def _qpost(url, **kw):
     with _QSES_LOCK:
         try:
-            return _qses.post(url, **kw)
+            response = _qses.post(url, **kw)
+            _harvest_quark_rotation()
+            return response
         finally:
             try:
                 _qses.cookies.clear()
             except Exception:
                 pass
+
+
+# ---- 会话自动刷新：Set-Cookie 轮换捕获 + 保活探针 ------------------------
+# 背景（2026-08 夸克播放 412 事故复盘）：夸克会话字段（__pus/__puus 等）由
+# 服务端经响应 Set-Cookie 滚动更新；L-18 设计为每次请求后清空共享 jar 防
+# 跨请求凭据污染，副作用是轮换被整体丢弃——本地 Cookie 只会单向陈旧，最终
+# 被媒体边缘按失效签名风控（所有新直链 412，仅重新扫码可解）。
+# 现在在清 jar 前于同一把锁内取走夸克域 cookie，节流合并回加密存储：
+# 并发不变量不变（显式 headers 携带凭据），本地会话却能随服务端轮换续期。
+
+
+def _is_quark_domain(domain):
+    d = str(domain or '').lstrip('.').lower()
+    return d == 'quark.cn' or d.endswith('.quark.cn')
+
+
+def _harvest_quark_rotation():
+    """清 jar 前捕获本次响应滚动的夸克会话字段；仅在 _QSES_LOCK 内调用。"""
+    harvested = {}
+    try:
+        for cookie in list(_qses.cookies):
+            name = getattr(cookie, 'name', '') or ''
+            value = getattr(cookie, 'value', '') or ''
+            if not name or not value:
+                continue
+            if _is_quark_domain(getattr(cookie, 'domain', '')):
+                harvested[name] = value
+    except Exception:
+        return {}
+    if harvested:
+        try:
+            _merge_quark_cookie_rotation(harvested)
+        except Exception as e:
+            logger.debug('quark cookie rotation merge skipped: %s', e)
+    return harvested
+
+
+_ROTATE_LOCK = threading.Lock()
+_ROTATE_STATE = {'last_write': 0.0, 'pending': None, 'timer': None}
+_ROTATE_MIN_INTERVAL = 30.0   # 合并落盘最小间隔（播放突发下多次轮换合并成一次写）
+
+
+def _split_cookie_string(raw):
+    """'k=v; k2=v2' → 有序 dict（保序重建，避免打乱用户粘贴顺序）。"""
+    pairs = {}
+    for part in str(raw or '').split(';'):
+        if '=' not in part:
+            continue
+        key, value = part.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            pairs[key] = value
+    return pairs
+
+
+def _persist_quark_rotation(pairs):
+    from pan_cookies import load_pan_cookies, save_pan_cookies
+    current = load_pan_cookies() or {}
+    updated = dict(current)
+    updated['quark'] = '; '.join('%s=%s' % (k, v) for k, v in pairs.items())
+    # 后台轮换不清 signed-url 缓存（旧直链仍有效至自身过期）
+    save_pan_cookies(updated, clear_cache=False)
+    logger.info('quark 会话 Cookie 已随服务端轮换自动更新（%d 个字段）',
+                len(_split_cookie_string(updated['quark'])))
+
+
+def _flush_pending_rotation():
+    with _ROTATE_LOCK:
+        pending = _ROTATE_STATE['pending']
+        _ROTATE_STATE['pending'] = None
+        _ROTATE_STATE['timer'] = None
+    if pending:
+        try:
+            _persist_quark_rotation(pending)
+        except Exception as e:
+            logger.debug('quark cookie rotation persist failed: %s', e)
+
+
+def _merge_quark_cookie_rotation(harvested):
+    """把捕获的轮换字段合并进本地 quark Cookie（保序、节流落盘）。"""
+    with _ROTATE_LOCK:
+        current = load_pan_cookies_safe().get('quark', '')
+        pairs = _split_cookie_string(current)
+        changed = False
+        for key, value in harvested.items():
+            if pairs.get(key) != value:
+                pairs[key] = value
+                changed = True
+        if not changed:
+            return
+        now = time.time()
+        elapsed = now - _ROTATE_STATE['last_write']
+        if elapsed >= _ROTATE_MIN_INTERVAL:
+            _ROTATE_STATE['last_write'] = now
+            persist_pairs = dict(pairs)
+            # 写盘放锁外执行（DPAPI+文件 IO 较慢），锁内只定状态；
+            # 用独立线程避免阻塞请求路径。
+            threading.Thread(target=_safe_persist, args=(persist_pairs,),
+                             daemon=True, name='quark-cookie-rotate').start()
+        else:
+            _ROTATE_STATE['pending'] = dict(pairs)
+            if _ROTATE_STATE['timer'] is None:
+                timer = threading.Timer(max(1.0, _ROTATE_MIN_INTERVAL - elapsed),
+                                        _flush_pending_rotation)
+                timer.daemon = True
+                _ROTATE_STATE['timer'] = timer
+                timer.start()
+
+
+def _safe_persist(pairs):
+    try:
+        _persist_quark_rotation(pairs)
+    except Exception as e:
+        logger.debug('quark cookie rotation persist failed: %s', e)
+
+
+# ---- 会话保活探针 -------------------------------------------------------
+# 低频认证探活一举两得：保持会话活跃 + 触发服务端 Set-Cookie 轮换（由上面的
+# 捕获链路落盘）。频率刻意压低（6h ± 抖动），避免高频探测本身成为风控诱因。
+
+_KEEPER_INTERVAL = 6 * 3600.0
+_KEEPER_START_DELAY = 120.0
+_keeper_state = {'started': False, 'consecutive_failures': 0}
+_SUSPECT_LOCK = threading.Lock()
+_session_suspect_since = 0.0
+
+
+def mark_quark_session_suspect():
+    """直链刷新后仍被上游拒绝（412 等）时标记会话可疑，供保活线程自愈评估。"""
+    global _session_suspect_since
+    with _SUSPECT_LOCK:
+        if not _session_suspect_since:
+            _session_suspect_since = time.time()
+            logger.warning('夸克直链刷新后仍被拒绝，已标记会话可疑——'
+                           '若持续失败请在设置中重新扫码登录')
+
+
+def _clear_quark_session_suspect(reason):
+    global _session_suspect_since
+    with _SUSPECT_LOCK:
+        if _session_suspect_since:
+            logger.info('夸克会话风控标记解除（%s）', reason)
+        _session_suspect_since = 0.0
+
+
+def _quark_keepalive_once(headers):
+    """单次保活探针：轻量认证接口，成功即触发轮换捕获。返回是否健康。"""
+    r = _qget('https://drive-pc.quark.cn/1/clouddrive/member?pr=ucpro&fr=pc'
+              '&uc_param_str=&fetch_subscribe=false&_ch=home&fetch_identity=false',
+              headers=headers, timeout=15, verify=True)
+    j = r.json() or {}
+    return getattr(r, 'status_code', 0) == 200 and j.get('code') == 0
+
+
+def _quark_session_keeper_loop():
+    while True:
+        time.sleep(_KEEPER_INTERVAL + random.uniform(-600.0, 600.0))
+        try:
+            cookie = (load_pan_cookies_safe() or {}).get('quark', '').strip()
+            if not cookie:
+                continue
+            headers = {'User-Agent': BROWSER_UA,
+                       'Referer': 'https://pan.quark.cn/', 'Cookie': cookie}
+            healthy = _quark_keepalive_once(headers)
+            if healthy:
+                if _keeper_state['consecutive_failures']:
+                    logger.info('quark 会话保活恢复正常')
+                _keeper_state['consecutive_failures'] = 0
+                with _SUSPECT_LOCK:
+                    suspect = _session_suspect_since
+                # 风控冷却通常以小时计：标记超过 30 分钟且探活健康才视为自愈
+                if suspect and time.time() - suspect > 1800:
+                    _clear_quark_session_suspect('保活探针健康')
+            else:
+                _keeper_state['consecutive_failures'] += 1
+                if _keeper_state['consecutive_failures'] >= 2:
+                    logger.warning('quark 会话保活连续失败 %d 次，'
+                                   '建议在设置中重新扫码登录',
+                                   _keeper_state['consecutive_failures'])
+        except Exception as e:
+            logger.debug('quark session keeper error: %s', e)
+
+
+def load_pan_cookies_safe():
+    try:
+        from pan_cookies import load_pan_cookies
+        return load_pan_cookies()
+    except Exception:
+        return {}
+
+
+def start_quark_session_keeper():
+    """幂等启动会话保活守护线程（进程生命周期内一个）。"""
+    with _ROTATE_LOCK:
+        if _keeper_state['started']:
+            return
+        _keeper_state['started'] = True
+    thread = threading.Thread(target=_quark_session_keeper_loop,
+                              daemon=True, name='quark-session-keeper')
+    thread.start()
+    logger.info('quark 会话保活已启动（每 %.0f 小时低频探活 + Cookie 自动轮换）',
+                _KEEPER_INTERVAL / 3600.0)
 
 
 # 自动附加网盘 Cookie 的目标域名白名单（H-1c）：仅夸克/UC 系域名，
@@ -1063,6 +1272,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 body = b'ok'
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
+                # 实例归属标识：绑定后自检用它确认连接确实由本进程接手
+                # （Windows SO_REUSEADDR 允许双进程无声抢绑同一端口）。
+                # 只放响应头，body 保持精确 'ok'（蜘蛛/测试断言该值）。
+                self.send_header('X-GoProxy-Pid', str(os.getpid()))
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 if not head_only:
@@ -1443,6 +1656,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         if probe.status_code not in (200, 206):
             status = int(probe.status_code or 502)
+            # 此前静默转发：mpv 只看到裸状态码，事后日志无从排查。
+            logger.warning('go-proxy 上游 HTTP %d（取流失败，已原样转发给播放器；'
+                           '412/403 多为直链签名失效或夸克风控）', status)
+            if status == 412:
+                # 刷新直链后仍 412：大概率会话被媒体边缘风控，标记供保活线程评估自愈
+                mark_quark_session_suspect()
             probe.close()
             self.send_response(status if 400 <= status <= 599 else 502)
             self.send_header('Content-Length', '0')
@@ -1545,6 +1764,36 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 _base_servers = []
 
 
+def _probe_listener_owner(port, attempts=5):
+    """绑定后自检：确认打到该端口的连接确实由本进程接手。
+
+    Windows 上 SO_REUSEADDR 允许第二个进程无声抢绑同一端口（连接在两个
+    实例间随机分流——「残留旧实例 + 新实例都在听 9978」的分裂态由此产生，
+    表现为网盘播放时好时坏且行为对不上当前代码）。这里向自己的监听端口发
+    do=ck，比对响应头里的 PID；命中他进程 PID 即报告分裂态。多次探测以
+    覆盖随机分流；全自答则视为独占（无法证明不存在分裂，但尽力告警）。
+    """
+    own = str(os.getpid())
+    for _ in range(max(1, attempts)):
+        conn = http.client.HTTPConnection('127.0.0.1', int(port), timeout=1.5)
+        try:
+            conn.request('GET', '/proxy?do=ck')
+            rsp = conn.getresponse()
+            owner = rsp.getheader('X-GoProxy-Pid', '') or ''
+            rsp.read()
+            if owner and owner != own:
+                return owner
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        time.sleep(0.05)
+    return ''
+
+
 def start_go_proxy():
     """启动本地代理服务（幂等：已监听则复用）。
 
@@ -1560,14 +1809,27 @@ def start_go_proxy():
         try:
             srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), _Handler)
         except OSError as e:
-            logger.warning('go-proxy %d 启动失败（端口可能已被占用）: %s', port, e)
+            logger.warning('go-proxy %d 启动失败（端口可能已被占用，'
+                           '若为残留的 YuKi 后端实例请先结束它）: %s', port, e)
             continue
         t = threading.Thread(target=srv.serve_forever, daemon=True,
                              name='go-proxy-%d' % port)
         t.start()
         servers.append(srv)
         logger.info('go-proxy listening on 127.0.0.1:%d（FongMi localProxy 兼容，多线程分段）', port)
+        # 双绑定检测：Windows 允许多进程同时 SO_REUSEADDR 绑定同一端口且
+        # 不报错，连接会被随机分流到任意实例——必须显式探测并大声告警。
+        if port == PORT:
+            foreign = _probe_listener_owner(port)
+            if foreign:
+                logger.warning(
+                    'go-proxy 端口 %d 存在双绑定：部分请求正被另一进程'
+                    '(PID %s) 接走（多为残留的 YuKi 后端/调试实例）。'
+                    '网盘取流会出现「行为与当前代码不符」的随机失败，'
+                    '请结束多余进程后重启应用。', port, foreign)
     _base_servers = servers
+    if servers:
+        start_quark_session_keeper()
     return servers[0] if servers else None
 
 

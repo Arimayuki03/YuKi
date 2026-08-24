@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, _coverCache */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -132,9 +132,10 @@ const Kazumi = {
                 this.dragRuleTo(this._dragName, targetName);
                 this._dragName = null;
             });
-        // WebDAV 同步（3.2 对齐 Kazumi：主开关 + 子开关 + 保存/同步/恢复）
+        // WebDAV 同步（3.2 对齐 Kazumi：主开关 + 子开关 + 保存/测试/同步/恢复）
         $('#webdav_sync').on('click', () => this.webdavSyncUI());
         $('#webdav_restore').on('click', () => this.webdavRestoreUI());
+        $('#webdav_test').on('click', () => this.webdavTestUI());
         $('#webdav_save').on('click', () => this.webdavSaveUI());
         $('#webdav_enable').on('change', function () {
             const on = this.checked;
@@ -142,13 +143,47 @@ const Kazumi = {
             if (!on) {
                 $('#webdav_enable_history').prop('checked', false);
                 $('#webdav_enable_collect').prop('checked', false);
+                $('#webdav_enable_settings').prop('checked', false);
+                $('#webdav_enable_stats').prop('checked', false);
+                $('#webdav_enable_rules').prop('checked', false);
+                $('#webdav_auto_enable').prop('checked', false);
+                $('#webdav_startup_pull').prop('checked', false);
                 window.yuki.settingsSet('webDavEnableHistory', false);
                 window.yuki.settingsSet('webDavEnableCollect', false);
+                window.yuki.settingsSet('webDavEnableSettings', false);
+                window.yuki.settingsSet('webDavEnableStats', false);
+                window.yuki.settingsSet('webDavEnableRules', false);
+                window.yuki.settingsSet('webDavAutoEnable', false);
+                window.yuki.settingsSet('webDavStartupPull', false);
             }
+            Kazumi.scheduleWebdavAutoSync(); // 主开关关闭联动停表，重开恢复调度
         });
         $('#webdav_enable_history').on('change', function () { window.yuki.settingsSet('webDavEnableHistory', this.checked); });
         $('#webdav_enable_collect').on('change', function () { window.yuki.settingsSet('webDavEnableCollect', this.checked); });
+        $('#webdav_enable_settings').on('change', function () { window.yuki.settingsSet('webDavEnableSettings', this.checked); });
+        $('#webdav_enable_stats').on('change', function () { window.yuki.settingsSet('webDavEnableStats', this.checked); });
+        $('#webdav_enable_rules').on('change', function () { window.yuki.settingsSet('webDavEnableRules', this.checked); });
+        $('#webdav_ssl_skip').on('change', function () { window.yuki.settingsSet('webDavSslSkip', this.checked); });
+        $('#webdav_startup_pull').on('change', function () { window.yuki.settingsSet('webDavStartupPull', this.checked); });
+        // 密码显隐：type=password ⇄ text（与网盘 Cookie 眼睛按钮同款交互）
+        $('#webdav_pwd_eye').on('click', function () {
+            const $p = $('#webdav_password');
+            const show = $p.attr('type') === 'password';
+            $p.attr('type', show ? 'text' : 'password');
+            this.textContent = show ? '🙈' : '👁';
+        });
+        // 定时自动同步：开关/间隔变更即时重排调度（无需重启）
+        $('#webdav_auto_enable').on('change', function () {
+            window.yuki.settingsSet('webDavAutoEnable', this.checked);
+            Kazumi.scheduleWebdavAutoSync();
+        });
+        $('#webdav_auto_interval').on('change', function () {
+            window.yuki.settingsSet('webDavAutoMinutes', parseInt(this.value, 10) || 60);
+            Kazumi.scheduleWebdavAutoSync();
+        });
         this.refreshRuleList();
+        this.scheduleWebdavAutoSync(); // 启动即挂载定时同步（内部读持久化设置决定是否生效）
+        this.scheduleWebdavStartupPull(); // 启动拉取：延迟静默执行，开关未开则空转
     },
 
     /** 拉取规则列表并渲染。 */
@@ -595,9 +630,17 @@ const Kazumi = {
             if (s.webDavUrl) $('#webdav_url').val(s.webDavUrl);
             if (s.webDavUsername) $('#webdav_username').val(s.webDavUsername);
             if (s.webDavPassword) $('#webdav_password').val(s.webDavPassword);
+            if (s.webDavRemoteDir) $('#webdav_remote_dir').val(s.webDavRemoteDir);
             $('#webdav_enable').prop('checked', !!s.webDavEnable);
             $('#webdav_enable_history').prop('checked', s.webDavEnableHistory !== false);
             $('#webdav_enable_collect').prop('checked', s.webDavEnableCollect !== false);
+            $('#webdav_enable_settings').prop('checked', s.webDavEnableSettings !== false);
+            $('#webdav_enable_stats').prop('checked', s.webDavEnableStats !== false);
+            $('#webdav_enable_rules').prop('checked', s.webDavEnableRules !== false);
+            $('#webdav_ssl_skip').prop('checked', !!s.webDavSslSkip);
+            $('#webdav_startup_pull').prop('checked', !!s.webDavStartupPull);
+            $('#webdav_auto_enable').prop('checked', !!s.webDavAutoEnable);
+            if (s.webDavAutoMinutes) $('#webdav_auto_interval').val(String(s.webDavAutoMinutes));
         } catch (e) { /* 读取失败不阻塞 */ }
     },
 
@@ -1064,12 +1107,15 @@ const Kazumi = {
         } catch (e) { /* quota 溢出忽略 */ }
     },
 
-    /** 清空 Bangumi 匹配缓存（内存 + localStorage；设置页按钮，封面匹配错误时手动重置）。 */
+    /** 清空 Bangumi 匹配缓存（内存 + localStorage + 全局补拉缓存；设置页按钮，封面匹配错误时手动重置）。 */
     async clearBangumiCoverCache() {
         if (!await confirmDialog('确定清空 Bangumi 封面缓存？清空后需重新搜索才会重新拉取封面。', { okText: '清空' })) return;
         this._bgmMatchCache = new Map();
         this._bgmMatchInflight.clear();
         try { localStorage.removeItem('kazumi_bgm_cover'); } catch (e) { /* ignore */ }
+        // 全局封面补拉缓存（common.js _coverCache）一并清空：否则列表重绘仍直接
+        // 复用已缓存的旧封面 URL，表现为「清理后封面不刷新」
+        try { if (typeof _coverCache !== 'undefined' && typeof _coverCache.clear === 'function') _coverCache.clear(); } catch (e) { /* ignore */ }
         warnToast('已清空 Bangumi 封面缓存，重新搜索即刷新');
     },
 
@@ -1816,6 +1862,17 @@ const Kazumi = {
                 const data = await this.bangumiEpisodes(subjectId);
                 if (token !== this._dlgToken) return;
                 const list = (data && data.data) || [];
+                // 缓存 Bangumi 分集（正片优先）：起播时按序号对齐，播放器标题用
+                // 「集数 + 名称」；未加载过分集页签时由规则 identifier 兜底。
+                this._bgmEpsCache = {
+                    subjectId,
+                    eps: list
+                        .filter((ep) => ep && (ep.type == null || ep.type === 0))
+                        .map((ep) => ({
+                            no: String(ep.sort || ep.ep || ''),
+                            name: String(ep.name_cn || ep.name || ''),
+                        })),
+                };
                 box.html(list.length
                     ? '<div class="tip-line pad0" style="margin-bottom:8px;">点击集数 → 从 Kazumi 规则源选源播放</div>'
                       + list.map((ep) => `<div class="kazumi-detail-ep" tabindex="0">
@@ -2015,7 +2072,19 @@ const Kazumi = {
                 return;
             }
             // 组装连播 episodes（glm5.2 播放链路）
-            const episodes = road ? (road.data || []).map((u, i) => ({ name: (road.identifier || [])[i] || `第${i + 1}集`, url: u })) : [{ name, url }];
+            // 集名优先级：Bangumi 分集（集数+名称，按序号对齐）→ 规则 identifier → 第N集
+            const bgmEps = (this._bgmEpsCache && Array.isArray(this._bgmEpsCache.eps))
+                ? this._bgmEpsCache.eps : null;
+            const episodes = road ? (road.data || []).map((u, i) => {
+                let nm = (road.identifier || [])[i] || `第${i + 1}集`;
+                const b = bgmEps && bgmEps[i];
+                // Bangumi 只有集号没名时，名部分回落规则 identifier，不再整条丢弃
+                if (b && (b.no || b.name)) {
+                    const ident2 = (road.identifier || [])[i] || '';
+                    nm = b.no ? `${b.no} ${b.name || ident2}`.trim() : (b.name || ident2);
+                }
+                return { name: nm, url: u };
+            }) : [{ name, url }];
             const epIndex = episodes.findIndex((ep) => ep.url === url);
             closeDialog('kazumiSourceDialog');
             Player.play('kazumi:' + pluginName, flag, url, title, name, episodes, Math.max(0, epIndex), src || '');
@@ -2064,16 +2133,24 @@ const Kazumi = {
         closeDialog('kazumiSourceDialog');
         this._dlDownloadMode = null;
         warnToast(`开始解析并下载 ${targets.length} 集…`);
-        let ok = 0, fail = 0;
+        let ok = 0, fail = 0, skipped = 0;
         for (const t of targets) {
             const r = await this._downloadKazumiEp(pluginName, t.url, t.name, title, true);
-            if (r) ok++; else fail++;
+            if (r === 'skipped') skipped++;
+            else if (r) ok++;
+            else fail++;
         }
-        warnToast(`下载已加入 ${ok} 集${fail ? `，${fail} 集失败` : ''}，可在“下载”页查看`);
+        const bits = [`下载已加入 ${ok} 集`];
+        if (skipped) bits.push(`${skipped} 集已在队列/已下载，跳过`);
+        if (fail) bits.push(`${fail} 集失败`);
+        warnToast(`${bits.join('，')}，可在“下载”页查看`);
     },
 
     /** 下载 Kazumi 源单集：解析真实直链后交下载引擎（m3u8 走 addHls 合成 mp4）。
-     *  silent=true 时不弹单条 toast（批量下载用）；返回是否成功加入下载。 */
+     *  silent=true 时不弹单条 toast（批量下载用）；返回 true=已加入、'skipped'=同源同集
+     *  去重跳过、false=失败。
+     *  ep* 去重上下文与播放链同源（Player.play 的 site='kazumi:规则名'、title=剧名、
+     *  subtitle=集名），手动下载与边下边播共用「站点|剧名|集名」key。 */
     async _downloadKazumiEp(pluginName, url, name, title, silent) {
         if (!pluginName || !url) { if (!silent) warnToast('下载参数缺失'); return false; }
         if (!silent) showLoading();
@@ -2098,8 +2175,14 @@ const Kazumi = {
             // 无法从 URL 识别扩展名时默认 .mp4（多数流媒体直链无标准后缀）
             const ext = isM3u8 ? '.mp4' : (clean.match(/\.(mp4|flv|mov|mkv|webm|avi|ts)$/i) || [''])[0] || '.mp4';
             const out = `${title || '视频'} - ${name}${ext}`;
-            const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', { uri: resolved.url, out, header: resolved.header });
+            const res = await window.yuki.download.control(isM3u8 ? 'addHls' : 'add', {
+                uri: resolved.url, out, header: resolved.header,
+                epSite: 'kazumi:' + pluginName, epVodName: title || '', epName: name || '',
+            });
             if (res && res.ok) { if (!silent) warnToast(`已加入下载「${name}」，可在“下载”页查看`); return true; }
+            // 去重命中：不算失败，批量路径按 skipped 计数
+            if (res && res.reason === 'already-downloading') { if (!silent) warnToast(`「${name}」已在下载队列，跳过重复下载`); return 'skipped'; }
+            if (res && res.reason === 'already-done') { if (!silent) warnToast(`「${name}」已下载过，无需重复下载`); return 'skipped'; }
             if (!silent) {
                 if (res && res.reason === 'ffmpeg-downloading') warnToast('ffmpeg 正在后台下载，完成后重试即可');
                 else if (res && res.reason === 'ffmpeg-missing') warnToast('ffmpeg 未就绪，m3u8 暂无法合成');
@@ -2183,15 +2266,47 @@ Kazumi.imageSearch = async function (imageFile) {
 
 // ---------------------------------------------------------------- WebDAV 同步
 
-/** WebDAV 同步：上传收藏/历史/规则到远程；按子开关（收藏/历史）决定包含哪些数据。 */
-Kazumi.webdavSync = async function (url, username, password) {
+/**
+ * 设置同步排除项：不参与「设置同步」上传/覆盖。
+ * - favorites/history/watchStats：各自独立文件，由子开关单独控制；
+ * - webDavUrl/Username/Password：凭据不随快照走，避免覆盖本机 WebDAV 配置；
+ * - cacheDir/dlDir/wallpaper：本机绝对路径，跨设备无意义；
+ * - settingsCat：纯本机界面记忆。
+ */
+const WEBDAV_SETTINGS_EXCLUDE = new Set([
+    'favorites', 'history', 'watchStats',
+    'webDavUrl', 'webDavUsername', 'webDavPassword',
+    'cacheDir', 'dlDir', 'wallpaper', 'settingsCat',
+    'webDavRestoreBackup', // 恢复前的本机备份快照，体积大且仅本机有意义
+]);
+
+/** 构建「设置同步」快照：全量设置剔除排除项后的浅拷贝。 */
+Kazumi._webdavSettingsSnapshot = function (s) {
+    const snap = {};
+    for (const k of Object.keys(s || {})) {
+        if (!WEBDAV_SETTINGS_EXCLUDE.has(k)) snap[k] = s[k];
+    }
+    return snap;
+};
+
+/** WebDAV 同步：上传收藏/历史/规则/设置/观看统计到远程；按子开关决定包含哪些数据。
+ *  webDavSslSkip 开启时通知后端跳过证书校验（自签名服务器）；
+ *  remoteDirOverride 未传时用已保存的 webDavRemoteDir（自动同步走此路径）。 */
+Kazumi.webdavSync = async function (url, username, password, remoteDirOverride) {
     try {
         const s = (await window.yuki.settingsGet()) || {};
-        const data = { kazumiRules: this._rules || [] };
+        const data = {};
+        if (s.webDavEnableRules !== false) data.kazumiRules = this._rules || [];
         if (s.webDavEnableCollect !== false) data.favorites = s.favorites || [];
         if (s.webDavEnableHistory !== false) data.history = s.history || [];
+        if (s.webDavEnableSettings !== false) data.settings = this._webdavSettingsSnapshot(s);
+        if (s.webDavEnableStats !== false) data.watchStats = s.watchStats
+            || { totalSeconds: 0, sessionCount: 0, titles: {}, daily: {}, bySite: {} };
+        if (!Object.keys(data).length) { warnToast('未选择任何要同步的内容，请先开启子开关'); return false; }
         const rsp = await doAction('kazumiWebdavSync', {
             url, username, password, data: JSON.stringify(data),
+            sslVerify: s.webDavSslSkip ? '0' : '1',
+            remoteDir: remoteDirOverride !== undefined ? remoteDirOverride : (s.webDavRemoteDir || ''),
         }, '/kazumi/action');
         return rsp && rsp.code === 200;
     } catch (e) {
@@ -2200,23 +2315,39 @@ Kazumi.webdavSync = async function (url, username, password) {
     }
 };
 
-/** WebDAV 恢复：从远程下载收藏/历史/规则；仅恢复子开关启用的数据。 */
-Kazumi.webdavRestore = async function (url, username, password) {
+/** WebDAV 恢复：从远程下载收藏/历史/规则/设置/观看统计；仅恢复子开关启用的数据。 */
+Kazumi.webdavRestore = async function (url, username, password, remoteDirOverride) {
     try {
         const s = (await window.yuki.settingsGet()) || {};
-        const names = ['kazumiRules'];
+        const names = [];
+        if (s.webDavEnableRules !== false) names.push('kazumiRules');
         if (s.webDavEnableCollect !== false) names.unshift('favorites');
         if (s.webDavEnableHistory !== false) names.unshift('history');
+        if (s.webDavEnableSettings !== false) names.push('settings');
+        if (s.webDavEnableStats !== false) names.push('watchStats');
+        if (!names.length) { warnToast('未选择任何要恢复的内容，请先开启子开关'); return false; }
         const rsp = await doAction('kazumiWebdavRestore', {
             url, username, password, names: JSON.stringify(names),
+            sslVerify: s.webDavSslSkip ? '0' : '1',
+            remoteDir: remoteDirOverride !== undefined ? remoteDirOverride : (s.webDavRemoteDir || ''),
         }, '/kazumi/action');
         const d = (rsp && typeof rsp === 'object') ? rsp.data : null;
         // 空数据/失败都必须走失败提示：后端失败返回 {code:500,msg}，此前空对象 {} 是
         // truthy 被当成功——网址输错时提示「恢复完成」实际什么都没恢复
-        const gotAny = d && (d.favorites || d.history || d.kazumiRules);
+        const gotAny = d && (d.favorites || d.history || d.kazumiRules || d.settings || d.watchStats);
         if (rsp && rsp.code === 200 && gotAny) {
+            // 覆盖前备份：恢复直接覆盖本机数据且不可撤销，先把将被覆盖且有差异的
+            // 本地原值存到 webDavRestoreBackup（仅本机、不参与同步快照），供误恢复后找回
+            const backup = { ts: Date.now() };
+            ['favorites', 'history', 'watchStats'].forEach((k) => {
+                if (d[k] && JSON.stringify(s[k] ?? null) !== JSON.stringify(d[k])) backup[k] = s[k] ?? null;
+            });
+            if (d.kazumiRules && (this._rules || []).length) backup.kazumiRules = this._rules;
+            const backedUp = Object.keys(backup).length > 1;
+            if (backedUp) await window.yuki.settingsSet('webDavRestoreBackup', backup);
             if (d.favorites) await window.yuki.settingsSet('favorites', d.favorites);
             if (d.history) await window.yuki.settingsSet('history', d.history);
+            if (d.watchStats) await window.yuki.settingsSet('watchStats', d.watchStats);
             if (d.kazumiRules) {
                 // 规则逐个导入
                 for (const rule of d.kazumiRules) {
@@ -2224,7 +2355,18 @@ Kazumi.webdavRestore = async function (url, username, password) {
                 }
                 await this.refreshRuleList();
             }
-            warnToast('WebDAV 恢复完成');
+            let needRestartHint = false;
+            if (d.settings) {
+                // 设置快照逐键写回（云端文件本身已剔除排除项，这里再兜底过滤一次）
+                for (const [key, val] of Object.entries(d.settings)) {
+                    if (WEBDAV_SETTINGS_EXCLUDE.has(key)) continue;
+                    await window.yuki.settingsSet(key, val);
+                    if (['playerHotkeys', 'proxyEnable', 'proxyUrl', 'panFastPath'].indexOf(key) >= 0) needRestartHint = true;
+                }
+                // 外观类设置即时重放（主题/缩放/字体等），其余多数在使用时读取自然生效
+                if (typeof applySkin === 'function') applySkin(d.settings);
+            }
+            warnToast(`WebDAV 恢复完成${backedUp ? '（覆盖前的本机数据已自动备份）' : ''}${needRestartHint ? '，部分设置重启应用后完全生效' : ''}`);
             return true;
         }
         warnToast(`WebDAV 恢复失败${rsp && rsp.msg ? `：${rsp.msg}` : '（云端无数据或地址/账号有误）'}`);
@@ -2235,16 +2377,25 @@ Kazumi.webdavRestore = async function (url, username, password) {
     }
 };
 
-/** WebDAV 保存配置：持久化地址/账号/密码与开关（不联网，同步/恢复按钮做实际操作）。 */
+/** WebDAV 保存配置：持久化地址/账号/密码/远程目录与开关（不联网，同步/恢复按钮做实际操作）。 */
 Kazumi.webdavSaveUI = async function () {
     const url = $('#webdav_url').val().trim();
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
+    const remoteDir = $('#webdav_remote_dir').val().trim();
     if (!url) { warnToast('请输入 WebDAV 地址'); return; }
     window.yuki.settingsSet('webDavUrl', url);
     window.yuki.settingsSet('webDavUsername', username);
     window.yuki.settingsSet('webDavPassword', password);
+    window.yuki.settingsSet('webDavRemoteDir', remoteDir);
     warnToast('WebDAV 配置已保存');
+};
+
+/** 手动同步/恢复后在状态行记录时间（与自动同步共用同一状态行）。 */
+Kazumi._markWebdavTime = function (ok) {
+    const $st = $('#webdav_auto_status');
+    if (!$st.length) return;
+    $st.text(ok ? `上次同步：${new Date().toTimeString().slice(0, 5)}` : '');
 };
 
 /** WebDAV 同步 UI 入口。 */
@@ -2252,10 +2403,12 @@ Kazumi.webdavSyncUI = async function () {
     const url = $('#webdav_url').val().trim();
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
+    const remoteDir = $('#webdav_remote_dir').val().trim();
     if (!url) { warnToast('请输入 WebDAV 地址'); return; }
     showLoading();
-    const ok = await this.webdavSync(url, username, password);
+    const ok = await this.webdavSync(url, username, password, remoteDir);
     hideLoading();
+    this._markWebdavTime(ok);
     warnToast(ok ? 'WebDAV 同步完成' : 'WebDAV 同步失败');
 };
 
@@ -2264,15 +2417,93 @@ Kazumi.webdavRestoreUI = async function () {
     const url = $('#webdav_url').val().trim();
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
+    const remoteDir = $('#webdav_remote_dir').val().trim();
     if (!url) { warnToast('请输入 WebDAV 地址'); return; }
-    if (!await confirmDialog('从云端恢复将覆盖本地收藏、历史与规则，继续？', { okText: '恢复' })) return;
+    if (!await confirmDialog('从云端恢复将覆盖本地收藏、历史与规则（覆盖前会自动备份本机数据），继续？', { okText: '恢复' })) return;
     showLoading();
-    const ok = await this.webdavRestore(url, username, password);
+    const ok = await this.webdavRestore(url, username, password, remoteDir);
     hideLoading();
+    this._markWebdavTime(ok);
     if (ok) {
         // 刷新收藏/历史视图（收藏入口已并入「我的」页签，同时刷新新面板）
         if (typeof Favorites !== 'undefined' && Favorites.render) Favorites.render();
         if (typeof HistoryView !== 'undefined' && HistoryView.render) HistoryView.render();
         if (typeof My !== 'undefined' && My._inited && My._favorites && My._favorites.render) My._favorites.render();
     }
+};
+
+/** WebDAV 测试连接：探测服务器与同步目录可达性，失败显示具体原因（认证/证书/网络）。 */
+Kazumi.webdavTestUI = async function () {
+    const url = $('#webdav_url').val().trim();
+    const username = $('#webdav_username').val().trim();
+    const password = $('#webdav_password').val();
+    const remoteDir = $('#webdav_remote_dir').val().trim();
+    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    showLoading();
+    let rsp = null;
+    try {
+        rsp = await doAction('kazumiWebdavTest', {
+            url, username, password, remoteDir,
+            sslVerify: $('#webdav_ssl_skip').prop('checked') ? '0' : '1',
+        }, '/kazumi/action');
+    } catch (e) { /* 下方统一处理 */ }
+    hideLoading();
+    if (rsp && rsp.code === 200) warnToast('WebDAV 连接正常，地址与账号可用');
+    else warnToast(`连接失败${rsp && rsp.msg ? `：${String(rsp.msg).slice(0, 80)}` : ''}`);
+};
+
+// ---------------------------------------------------------------- WebDAV 启动时自动恢复
+
+/**
+ * 启动时从云端拉取：延迟 5 秒静默执行一次「从云端恢复」（多设备场景先取云端数据）。
+ * 生效条件：主开关 + 启动拉取开关均已开启且已保存地址；读持久化设置而非 DOM。
+ * 失败仅 toast 提示一次，不影响正常使用，也不重试（避免启动期网络未就绪时反复报错）。
+ */
+Kazumi.scheduleWebdavStartupPull = async function () {
+    setTimeout(async () => {
+        try {
+            const s = (await window.yuki.settingsGet()) || {};
+            if (!s.webDavEnable || !s.webDavStartupPull || !s.webDavUrl) return;
+            const ok = await this.webdavRestore(s.webDavUrl, s.webDavUsername || '', s.webDavPassword || '');
+            if (ok) {
+                if (typeof Favorites !== 'undefined' && Favorites.render) Favorites.render();
+                if (typeof HistoryView !== 'undefined' && HistoryView.render) HistoryView.render();
+                if (typeof My !== 'undefined' && My._inited && My._favorites && My._favorites.render) My._favorites.render();
+            }
+        } catch (e) { /* 启动拉取异常静默跳过 */ }
+    }, 5000);
+};
+
+// ---------------------------------------------------------------- WebDAV 定时自动同步
+
+/**
+ * 定时自动同步调度：setTimeout 链式轮转（避免 setInterval 漂移，间隔/开关变更即重排）。
+ * 生效条件：主开关 + 自动开关均已开启且已保存地址；读持久化设置而非 DOM 输入，
+ * 因此无需打开设置页即可在应用启动后按周期上传。
+ */
+Kazumi.scheduleWebdavAutoSync = async function () {
+    if (this._webdavAutoTimer) { clearTimeout(this._webdavAutoTimer); this._webdavAutoTimer = null; }
+    let s = {};
+    try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { return; }
+    if (!s.webDavEnable || !s.webDavAutoEnable || !s.webDavUrl) {
+        const $st = $('#webdav_auto_status');
+        if ($st.length) $st.text('');
+        return;
+    }
+    const minutes = parseInt(s.webDavAutoMinutes, 10) || 60;
+    this._webdavAutoTimer = setTimeout(() => { this._webdavAutoTick(); }, minutes * 60 * 1000);
+};
+
+/** 自动同步单次执行：静默上传（不弹 loading），成功仅更新状态行，失败才 toast 提醒。 */
+Kazumi._webdavAutoTick = async function () {
+    this._webdavAutoTimer = null;
+    try {
+        const s = (await window.yuki.settingsGet()) || {};
+        const ok = await this.webdavSync(s.webDavUrl || '', s.webDavUsername || '', s.webDavPassword || '');
+        const time = new Date().toTimeString().slice(0, 5);
+        const $st = $('#webdav_auto_status');
+        if ($st.length) $st.text(ok ? `上次自动同步：${time}` : '上次自动同步失败');
+        if (!ok) warnToast('WebDAV 自动同步失败，请检查地址与账号');
+    } catch (e) { /* 本轮异常静默跳过，链路继续下一轮 */ }
+    await this.scheduleWebdavAutoSync();
 };

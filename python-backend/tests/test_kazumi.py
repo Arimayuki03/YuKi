@@ -629,6 +629,39 @@ class TestBangumiSync(unittest.TestCase):
         self.assertIn('next.bgm.tv/p1/trending/subjects', m.call_args[0][0])
         self.assertEqual(m.call_args[1]['params'], {'type': 2, 'limit': 24, 'offset': 0})
 
+    def test_trends_page_limit_clamped_and_aggregated(self):
+        # 回归：渲染层 120 每页曾把 limit=120 原样传给 /p1/trending/subjects，
+        # 超出上游单页安全上限（≤50）导致首页异常、整页空白。
+        # 锁定三点：单页请求 limit ≤50；剩余量自动翻页聚合补足；单次拉取总量钳到 120。
+        from unittest import mock
+        calls = []
+
+        def fake_get(url, **kw):
+            params = dict(kw['params'])
+            calls.append(params)
+            pos = int(params['offset'])
+            per = min(int(params['limit']), 50)  # 模拟上游单页最多回 50 条
+            page = [{'subject': {'id': pos + i + 1, 'name': 'S%d' % (pos + i)}}
+                    for i in range(per)] if pos < 150 else []
+            rsp = mock.Mock()
+            rsp.raise_for_status = lambda: None
+            rsp.json = lambda: {'data': page, 'total': 150}
+            return rsp
+
+        with mock.patch('http_client.get', side_effect=fake_get):
+            out = self.mgr.bangumi_trends(limit=120, offset=0)
+        self.assertEqual(len(out['items']), 120)
+        self.assertTrue(calls, '应至少发起一次上游请求')
+        self.assertTrue(all(int(c['limit']) <= 50 for c in calls), calls)
+        self.assertEqual([int(c['offset']) for c in calls], [0, 50, 100])
+
+        # 总量钳制：请求远超上限时也只拉 120 条，不过量请求触发风控
+        calls.clear()
+        with mock.patch('http_client.get', side_effect=fake_get):
+            out2 = self.mgr.bangumi_trends(limit=500, offset=0)
+        self.assertEqual(len(out2['items']), 120)
+        self.assertLessEqual(len(calls), 3)
+
     def test_calendar_normalizes_weekday_map(self):
         from unittest import mock
 

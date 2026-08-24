@@ -404,6 +404,12 @@ Python 0 残留），Node 单元 222/222，JavaScript 语法 40/40，ESLint 0 er
 
 - 无（本轮两项已完成代码验证与真实界面验收；后续项见 §4「需要继续完成」与「未完成」清单）。
 
+### 2026-08-24 边下边播去重（同源同集不重复下载）
+
+- [x] **同源同集下载去重**：新增 `src/main/dl-dedupe.js`——以「站点|剧名|集名」为稳定 key（直链带签名时效不能作 key；vod 一律用剧名使手动下载与播放链归到同一 key）。入队即写携带 `epKey` 的完整初始记录（跨重启可恢复、查重立即可见）；查重命中「进行中且任务存活 → downloading」「已完成且产物文件在 → done(file)」，失败/文件已删/引擎孤儿记录放行重下。
+- [x] 接线点：`yuki:dl add/addHls`（详情页/Kazumi 手动下载，命中返回 `already-downloading`/`already-done`，渲染层 toast 汇总跳过数）；`yuki:play` 边下边播注册（T9，命中静默跳过不再建重复任务，修复此前每次重播/续播都重复下载）。`epKey` 全链路保留：persistInProgress、aria2/HLS 完成/失败事件、目录迁移重排与重启后恢复入队（gid 变更经 `carry` 转移）、删除任务同步清登记。清除列表/删除任务后允许重新下载（与用户直觉一致）。
+- 验证：`tests/js/dl-dedupe.test.js` 10 例 + JS 单元 365/365、lint 0 错、check-js 44 文件 0 错。
+
 ### 未完成
 
 - [x] Kazumi 独立首页推荐页及趋势数据适配（T62：新增「推荐」导航 + #view-popular，bangumi_trends 归一化 {items,total} 解 {subject} 包裹，卡片封面/排名角标/评分，分页，点击进二级详情页）。

@@ -48,7 +48,41 @@ function mpvVersion(p) {
     } catch (e) { return null; }
 }
 
-function findMpv() {
+/** 解析 --version 首行（如 "mpv v0.41.0-73-g…" 或 "mpv 0.40.0"）→ { major, minor }；无法解析返回 null。 */
+function parseMpvVersion(line) {
+    const m = /v?(\d+)\.(\d+)/.exec(String(line || '').trim());
+    return m ? { major: parseInt(m[1], 10), minor: parseInt(m[2], 10) } : null;
+}
+
+/**
+ * 右键上下文菜单能力：select.lua 的 context-menu 绑定、Windows 原生菜单与自定义菜单定义
+ * （--script-opt=select-menu_conf_path）自 0.41 起提供（PR #16816/#18057 之后）；git 开发版
+ * 版本号 ≥ 对应的下一个发布版，同样满足。旧版注入会在按键时报 unknown binding，故按版本门控。
+ */
+function supportsContextMenu(versionLine) {
+    const v = parseMpvVersion(versionLine);
+    return !!v && (v.major > 0 || v.minor >= 41);
+}
+
+/**
+ * 多集静态列表 → m3u 文本：#EXTINF 携带集名，mpv 原生播放列表（右键菜单/F8）显示标题
+ * 而非裸 CDN 地址。仅用于 URL 已知的静态列表（本地/下载/直链批量）；在线剧集的直链
+ * 懒解析且带签名时效（整季预解析既慢又会被风控、放到后面集数时早已过期），仍走渲染层
+ * 逐集驱动，不进原生队列。无可播放项返回空串，调用方回退单集路径。
+ */
+function buildM3u(episodes) {
+    const lines = ['#EXTM3U'];
+    for (const ep of (Array.isArray(episodes) ? episodes : [])) {
+        if (!ep || !ep.url) continue;
+        // EXTINF 的集名在首个逗号后，换行/Tab 会破坏行结构，压成空格
+        const name = String(ep.title || '').replace(/[\r\n\t]+/g, ' ').trim();
+        lines.push(`#EXTINF:-1,${name}`);
+        lines.push(String(ep.url));
+    }
+    return lines.length > 1 ? lines.join('\n') + '\n' : '';
+}
+
+function findMpv(verOut) {
     const exe = WIN ? 'mpv.exe' : 'mpv';
     const candidates = [];
     const vendor = path.join(ROOT, 'vendor', 'mpv', exe);
@@ -77,6 +111,7 @@ function findMpv() {
         const v = mpvVersion(p);
         if (v) { // 能打印版本才算可用；损坏二进制回退下一候选
             console.log(`[mpv] 使用 ${v}（${p}）`);
+            if (verOut && typeof verOut === 'object') verOut.version = v; // 带回版本首行供能力判断
             return p;
         }
     }
@@ -86,7 +121,10 @@ function findMpv() {
 class MpvPlayer extends EventEmitter {
     constructor() {
         super();
-        this.binary = findMpv();
+        // findMpv 顺带带回版本首行，用于判定 context-menu 能力（右键菜单/中文 menu.conf 注入门控）
+        const probe = {};
+        this.binary = findMpv(probe);
+        this.supportsContextMenu = supportsContextMenu(probe.version);
         this.proc = null;
         this.socket = null;
         // IPC 命名管道：pid + 最近一次播放时间戳，杜绝「管道已存在（残留 mpv 仍占用）→
@@ -101,8 +139,12 @@ class MpvPlayer extends EventEmitter {
         this._pending = new Map();
         this._danmakuLines = [];
         this._laneCounter = 0;
-        this.scriptPath = null;   // 可选 lua 脚本（主进程写入的快捷键提示，见 index.js）
+        this.scriptPath = null;   // 可选 lua 脚本（快捷键提示 + Anime4K 右键菜单信号，见 index.js）
         this.inputConfPath = null; // 可选 input.conf（自定义快捷键步长，见 index.js）
+        this.menuConfPath = null;  // 可选中文右键菜单定义 menu.conf（--script-opt=select-menu_conf_path，见 index.js writeMpvAssets）
+        this._queueTitles = null;  // 原生队列逐集集名表（index.js 注入；file-loaded 时设置窗口标题用）
+        this._queueSeriesTitle = ''; // 原生队列片名（标题 = yuki · 片名 · 集名）
+        this.supportsContextMenu = false; // 所选二进制支持 context-menu（mpv 0.41+）；决定右键菜单绑定与 menu.conf 是否注入
         this.logFilePath = null;  // 可选 mpv 运行日志（--log-file，主进程指定，见 index.js）
         this.watchLaterDir = null; // 续播位置记录目录（--save-position-on-quit）
         this.defaultSpeed = 1;     // 默认倍速（≠1 时起播注入 --speed）
@@ -128,13 +170,18 @@ class MpvPlayer extends EventEmitter {
         if (v) {
             console.log(`[mpv] 自定义路径生效：${v}（${p}）`);
             this.binary = p;
+            this.supportsContextMenu = supportsContextMenu(v); // 自定义二进制同样按版本门控
             return true;
         }
         return false;
     }
 
     /** 重置为自动发现（内置 vendor → PATH），清除自定义路径。 */
-    resetBinary() { this.binary = findMpv(); }
+    resetBinary() {
+        const probe = {};
+        this.binary = findMpv(probe);
+        this.supportsContextMenu = supportsContextMenu(probe.version);
+    }
 
     get playing() { return !!this.proc; }
 
@@ -203,6 +250,17 @@ class MpvPlayer extends EventEmitter {
         ];
     }
 
+    /**
+     * 右键中文菜单参数（起播时拼入 argv）：menu.conf 无条件注入——script-opts 对脚本而言
+     * 是不透明键值表，旧版 select.lua 不认识 menu_conf_path 键时静默忽略，无副作用；
+     * 新版则用它加载中文菜单定义。路径统一正斜杠，规避 mpv keyvalue 列表值中反斜杠的
+     * 转义歧义。（右键「打开菜单」的绑定不在此处：由连接后的运行时能力探测注入，见 _connectIpc。）
+     */
+    _contextMenuArgs() {
+        if (!this.menuConfPath || !fs.existsSync(this.menuConfPath)) return [];
+        return [`--script-opt=select-menu_conf_path=${this.menuConfPath.replace(/\\/g, '/')}`];
+    }
+
     /** 播放首项并装载播放列表。episodes: [{url, title}]；opts.header 注入 HTTP 头（解析直链常需 Referer） */
     play(episodes, opts = {}) {
         this._refreshIpcPath();
@@ -217,6 +275,12 @@ class MpvPlayer extends EventEmitter {
             return { ok: false, reason: 'mpv-missing', ...trace };
         }
         if (!episodes || !episodes.length) return { ok: false, reason: 'empty playlist' };
+        // 原生播放列表模式（episodes≥2，静态直链）：整季装载进 mpv 原生列表，连播由
+        // mpv 同进程推进。外部播放器主播放器在进入本方法前已分流（index.js extPrimary）；
+        // 在线剧集因直链懒解析+签名时效仍走渲染层逐集驱动，不进此模式（见 buildM3u 注）。
+        const nativeQueue = episodes.length > 1;
+        let deferredSeekSec = null;
+        let playlistPath = '';
         this._danmakuLines = [];
         this._writeAss();
 
@@ -235,15 +299,35 @@ class MpvPlayer extends EventEmitter {
             `--osd-playing-msg=${opts.title || 'YuKi'}`,
             // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
             // 注意 ${media-title} 是 mpv 属性展开，必须用普通字符串避免被 JS 模板插值。
-            '--title=yuki · ${media-title}',
         ];
+        // 窗口标题：原生队列用 ${media-title}（EXTINF 集名随切集自动跟随）；
+        // 单集会话直接采用已知集名标题，避免 CDN 文件名/乱码串进标题。
+        if (nativeQueue) {
+            args.push('--title=yuki');
+        } else {
+            const epTitle = String(opts.title || 'YuKi').replace(/["$]/g, '');
+            args.push(`--title=yuki · ${epTitle}`);
+        }
         if (WIN) args.push('--osd-font=Microsoft YaHei');
         const headerFields = MpvPlayer.headerFieldsValue(opts.header);
         if (headerFields) args.push(`--http-header-fields=${headerFields}`);
+        // 直链媒体（m3u8/mp4/ts 等）永远不需要 ytdl 解析：显式排除 ytdl_hook。
+        // 旧版 mpv 的 ytdl_hook 会对所有 URL 先尝试 youtube-dl/yt-dlp，二进制缺失时
+        // 反复 spawn 失败（"Subprocess failed: init"），既拖慢起播约 1s，又把无信息量
+        // 的错误刷满日志尾部、淹没真实失败原因。非直链（推送的分享页等）保留 ytdl：
+        // 安装了 yt-dlp 的用户仍可受益。
+        {
+            const firstUrl = String((episodes[0] && episodes[0].url) || '');
+            const firstPath = firstUrl.split(/[?#]/)[0];
+            if (/\.(m3u8|mp4|flv|mov|mkv|webm|ts)$/i.test(firstPath)) {
+                args.push('--script-opt=ytdl_hook-exclude=.*');
+            }
+        }
         // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
         // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
         if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
         if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
+        args.push(...this._contextMenuArgs());
         // mpv 运行日志落盘（每次启动覆盖）：--no-terminal 会吞掉全部终端输出，
         // 起播失败时 stderr 为空、用户只能看到无信息量的 'error'；落盘日志让
         // HTTP 4xx/5xx、TLS、超时等真实原因可以在退出时回读（见 exit 处理）。
@@ -262,8 +346,12 @@ class MpvPlayer extends EventEmitter {
         if (speed && speed !== 1) args.push(`--speed=${speed}`);
         // FongMi position 使用毫秒；mpv --start 使用秒。仅接受有限的非负数，
         // 防止源配置把任意字符串拼进播放器参数。
+        // 原生队列不用 --start：它是全局选项，会错误作用于列表里的每一集；
+        // 改为首集装载后经 IPC seek 一次（session.pendingSeekSec，见 _onEvent file-loaded）。
         if (Number.isFinite(Number(opts.position)) && Number(opts.position) > 0) {
-            args.push(`--start=${Math.max(0, Number(opts.position) / 1000)}`);
+            const startSec = Math.max(0, Number(opts.position) / 1000);
+            if (nativeQueue) deferredSeekSec = startSec;
+            else args.push(`--start=${startSec}`);
         }
         // 外置字幕：Result.subs 的 url/src 字段映射到 mpv --sub-file。
         // DRM/特殊自定义轨道仍由上层保留并明确提示，不把未知对象拼进 argv。
@@ -299,8 +387,18 @@ class MpvPlayer extends EventEmitter {
         args.push(...this._cacheArgs(isNet));
         // 截图目录/格式/文件名模板（mpv 原生 s 键与 IPC 截图都存到这里，见 _screenshotArgs）
         args.push(...this._screenshotArgs());
-        args.push('--', episodes[0].url);
-        for (let i = 1; i < episodes.length; i++) args.push(episodes[i].url);
+        // 原生队列：m3u（#EXTINF 集名进 mpv 原生列表，右键菜单/F8 可见可切）+ 起始集下标
+        if (nativeQueue) {
+            playlistPath = path.join(os.tmpdir(), `yuki-playlist-${process.pid}-${Date.now()}.m3u8`);
+            fs.writeFileSync(playlistPath, buildM3u(episodes), 'utf8');
+            const startIndex = Number.isFinite(Number(opts.startIndex))
+                ? Math.max(0, Math.floor(Number(opts.startIndex))) : 0;
+            // --playlist-start 为 0 基下标；0 时不传，保持 argv 与旧单集路径完全一致
+            if (startIndex > 0) args.push(`--playlist-start=${startIndex}`);
+            args.push('--', playlistPath);
+        } else {
+            args.push('--', episodes[0].url);
+        }
         this._queueLen = episodes.length;
         this._lastFs = !!opts.fullscreen;
         this._lastSp = (speed && speed > 0) ? speed : 1;
@@ -335,6 +433,11 @@ class MpvPlayer extends EventEmitter {
             userStopped: false, // 应用主动 stop() 置位：退出时不得断流重连
             ready: false,       // 已收到 file-loaded / core-idle=false，才算真正开始播放
             stderr: '',         // 最近一段 mpv 错误输出（避免错误日志无限增长）
+            nativeQueue,        // 原生多集队列：ended 逐集携带 nativeQueue/playlistPos 供渲染层逐集记账
+            pendingSeekSec: deferredSeekSec, // 首集装载后一次性 seek（原生队列替代全局 --start）
+            seekApplied: false,
+            queueIdx: Number(opts.startIndex) || 0, // 当前播放的列表下标（file-loaded 时经 IPC 刷新；end-file 记账用）
+            itemStartMs: Date.now(), // 当前集墙钟起点（每次 file-loaded 刷新；逐集统计用）
             // 观看时长统计（墙钟）：累计播放器运行时长（打开播放器后运行了多久，含暂停）。
             playStartMs: Date.now(),
             pausedMs: 0,        // 累计暂停时长（毫秒）
@@ -365,8 +468,11 @@ class MpvPlayer extends EventEmitter {
             // 无信息量的 endReason='error'，渲染层提示无法给出可操作的原因。
             if (!session.ready && !session.stderr && this.logFilePath) {
                 try {
-                    const logText = fs.readFileSync(this.logFilePath, 'utf8').trim();
-                    if (logText) session.stderr = logText.slice(-4000);
+                    const logText = fs.readFileSync(this.logFilePath, 'utf8');
+                    // 尾部直切会带满收尾调试行（Destroying client handle…），展示给
+                    // 用户的「原因」毫无信息量；改为提取 error/warn 级与错误关键词行。
+                    const reason = MpvPlayer.extractErrorReason(logText);
+                    if (reason) session.stderr = reason;
                 } catch (e) { /* 日志缺失时保持原样 */ }
             }
             // ChildProcess 的 exit 触发时 mpv IPC 通常已经断开；直接使用播放期间持续观察的缓存。
@@ -383,6 +489,11 @@ class MpvPlayer extends EventEmitter {
                 speed: session.speed,
                 endReason: session.endReason || null,
                 ready: !!session.ready,
+                nativeQueue: !!session.nativeQueue,
+                queueLen: this._queueLen,
+                // 当前集下标（与 ended 的 playlistPos 同源，file-loaded 时经 IPC 刷新）：
+                // 原生队列退出时渲染层据此补记「正在看的这一集」并与已记账下标去重
+                playlistPos: (typeof session.queueIdx === 'number') ? session.queueIdx : -1,
                 stderr: session.stderr ? session.stderr.trim().slice(-8192) : null,
                 // 用户主动关闭：应用 stop() 标记，或 mpv 自己 end-file reason=quit/stop（点窗口关闭键）
                 userStopped: session.userStopped || session.endReason === 'quit' || session.endReason === 'stop',
@@ -399,6 +510,7 @@ class MpvPlayer extends EventEmitter {
             sessionId,
             ...trace,
             controlGen: this.controlGen,
+            nativeQueue, // 渲染层/调用方据此区分原生多集队列（连播由 mpv 推进）与单集会话
             // 调用方需要把实际交给 mpv 的地址回传给渲染层/日志，便于复制和诊断。
             url: episodes[0].url,
             urls: episodes.map((episode) => episode.url),
@@ -578,6 +690,14 @@ class MpvPlayer extends EventEmitter {
             this.command('observe_property', 0x103, 'time-pos').catch(() => { });
             this.command('observe_property', 0x104, 'duration').catch(() => { });
             this.command('observe_property', 0x105, 'pause').catch(() => { });
+            // Anime4K 右键菜单档位请求（hints.lua 写 user-data 信号，主进程消费后回写当前档位）
+            this.command('observe_property', 0x106, 'user-data/yuki/a4k-request').catch(() => { });
+            this.command('observe_property', 0x107, 'user-data/yuki/ep-skip').catch(() => { });
+            this._probeContextMenuBinding();
+            this._verifyA4kBindings();
+            // 连接就绪通知：主进程据此用实时设置推送菜单初始档位等会话级状态
+            // （hints.lua 的静态快照可能过期，见 index.js ipc-connected 处理）。
+            this.emit('ipc-connected');
         });
         sock.once('error', () => {
             setTimeout(() => this._connectIpc(attempt + 1, active.id), 100);
@@ -631,12 +751,56 @@ class MpvPlayer extends EventEmitter {
                     if (active.pauseSince) { active.pausedMs += Date.now() - active.pauseSince; active.pauseSince = 0; }
                 }
             }
+            // Anime4K 右键菜单档位请求（hints.lua 写入）：读后立即清空，
+            // 这样重复请求同一档位也能再次触发 observe（observe 只在值变化时上报）
+            if (msg.name === 'user-data/yuki/a4k-request' && typeof msg.data === 'string' && msg.data) {
+                const mode = msg.data;
+                this.command('set', 'user-data/yuki/a4k-request', '').catch(() => { });
+                this.emit('a4k-request', { mode });
+            }
+            // 上/下集信号（hints/ep-*）：读后清零，同方向连续按键可再次触发
+            if (msg.name === 'user-data/yuki/ep-skip' && typeof msg.data === 'string' && msg.data) {
+                const dir = Number(msg.data);
+                this.command('set', 'user-data/yuki/ep-skip', '').catch(() => { });
+                if (dir === -1 || dir === 1) this.emit('ep-skip', { dir });
+            }
             return;
         }
         if (msg.event === 'file-loaded') {
             const active = this._activeSession;
             if (active) {
                 active.ready = true;
+                // 窗口此时必然已创建：补一次前置激活兜底。spawn 时那次可能早于窗口
+                // 创建（慢网络下 VO 初始化滞后），PowerShell 辅助进程虽有 6s 自轮询，
+                // 这里再加一发保证「媒体真正开播」时刻也在前台。
+                this._bringToFront();
+                // 逐集墙钟起点：原生队列里 mpv 每装载一项就刷新一次，ended 时算出本集观看秒数
+                active.itemStartMs = Date.now();
+                // 刷新当前列表下标（end-file 记账需要；事件本身不带 playlist_pos）
+                this.command('get_property', 'playlist-pos').then((v) => {
+                    if (this._activeSession === active && typeof v === 'number') active.queueIdx = v;
+                    // 原生队列：窗口标题 + OSD 模板 + 立即弹条，三处同步为「yuki · 片名 · 集名」。
+                    // 不依赖 ${media-title}——流 metadata 会覆盖它导致只剩片名。
+                    if (active.nativeQueue && Array.isArray(this._queueTitles)) {
+                        const idx = (typeof active.queueIdx === 'number') ? active.queueIdx : 0;
+                        const nm = this._queueTitles[idx] || `第${idx + 1}集`;
+                        const series = String(this._queueSeriesTitle || '');
+                        const full = (`yuki · ${series}${series && nm ? ' · ' : ''}${nm}`)
+                            .replace(/·\s*$/, '').trim();
+                        // force-media-title 强制覆盖 media-title：OSC/统计/Windows 媒体浮层
+                        // 读到的标题全部变为我们指定的集名（流内嵌 title 标签被压制）
+                        this.command('set', 'force-media-title', full).catch(() => { });
+                        this.command('set', 'title', full).catch(() => { });
+                        this.command('show-text', full, 1200).catch(() => { });
+                    }
+                }).catch(() => { });
+                // 原生队列的首集续播位置：--start 会作用到每一集（全局选项），故只在
+                // 首次 file-loaded 后经 IPC seek 一次，后续集数从头播。
+                if (active.pendingSeekSec != null && !active.seekApplied) {
+                    active.seekApplied = true;
+                    const sec = active.pendingSeekSec;
+                    this.command('seek', sec, 'absolute+exact').catch(() => { /* 起播 seek 失败不致命 */ });
+                }
                 this.emit('ready', { sessionId: active.id, ...traceFields(active) });
             }
             return;
@@ -647,12 +811,73 @@ class MpvPlayer extends EventEmitter {
             if (active) active.endReason = msg.reason;
             if (msg.reason === 'eof') {
                 if (active && typeof active.duration === 'number') active.pos = active.duration;
-                const playlistPos = (typeof msg.playlist_pos === 'number') ? msg.playlist_pos : -1;
+                // end-file 事件不带 playlist_pos：优先事件字段，缺省回退会话跟踪值
+                // （file-loaded 时经 IPC 刷新，end-file 触发时仍是刚结束这一集的下标）
+                let playlistPos = (typeof msg.playlist_pos === 'number') ? msg.playlist_pos : -1;
+                if (playlistPos < 0 && active && typeof active.queueIdx === 'number') {
+                    playlistPos = active.queueIdx;
+                }
                 // 附带队列长度：渲染层据此区分「mpv 队列自动推进」与「队列末尾播完」（接力连播用）
+                // 原生队列额外携带逐集记账字段（pos/duration/itemWallSec/nativeQueue）：
+                // 进程在队列中途不会退出，渲染层改为逐集在 ended 写统计/历史（口径与旧逐集会话一致）。
+                const itemWallSec = (active && active.itemStartMs)
+                    ? Math.max(0, Math.round((Date.now() - active.itemStartMs) / 1000)) : null;
                 this.emit('ended', { sessionId: active ? active.id : null,
-                    ...(active ? traceFields(active) : {}), playlistPos, queueLen: this._queueLen });
+                    ...(active ? traceFields(active) : {}), playlistPos, queueLen: this._queueLen,
+                    pos: (active && typeof active.pos === 'number') ? active.pos : null,
+                    duration: (active && typeof active.duration === 'number') ? active.duration : null,
+                    itemWallSec,
+                    nativeQueue: !!(active && active.nativeQueue) });
             }
         }
+    }
+
+        /**
+     * 右键上下文菜单绑定：连接后运行时探测，不猜版本号。
+     * 直接查默认绑定表里有没有 select/context-menu（0.41+ 内置默认）：有 → 运行时
+     * keybind 注入 MBTN_RIGHT；没有 → 保持该二进制默认行为（如旧版的右键暂停），
+     * 绝不注入会报 unknown binding 的死绑定。版本号解析（supportsContextMenu）仅作
+     * 设置页提示等参考用途，不再作为注入依据。
+     */
+    _probeContextMenuBinding() {
+        return this.getProperty('input-bindings').then((list) => {
+            if (!Array.isArray(list)) return null;
+            // 能力探测：默认绑定表里有没有 select/context-menu（0.41+ 内置默认）
+            const capable = list.some((b) => b && typeof b.cmd === 'string'
+                && b.cmd.includes('select/context-menu'));
+            if (!capable) {
+                console.log('[mpv] 右键菜单：当前 mpv 无上下文菜单能力，右键保持其默认行为');
+                return null;
+            }
+            // 新版 mpv 已自带 MBTN_RIGHT → select/context-menu 默认绑定；再注入一次
+            // 会双绑定（实测每次右键触发两次 script-binding，间隔毫秒级），菜单行为
+            // 异常。仅在没有任何 MBTN_RIGHT 绑定时补注入（旧版能力但未绑定的情形）。
+            const bound = list.some((b) => b && b.key === 'MBTN_RIGHT'
+                && typeof b.cmd === 'string' && b.cmd.includes('select/context-menu'));
+            if (bound) {
+                console.log('[mpv] 右键菜单：使用内置 MBTN_RIGHT 绑定，跳过注入');
+                return null;
+            }
+            return this.command('keybind', 'MBTN_RIGHT', 'script-binding select/context-menu')
+                .then(() => console.log('[mpv] 右键菜单：已启用（MBTN_RIGHT → 上下文菜单）'));
+        }).catch(() => { /* 探测失败不影响播放；下次起播重试 */ });
+    }
+
+    /**
+     * Anime4K 菜单信号自检：hints.lua 是否成功加载。
+     * 不能用 input-bindings 判定——add_key_binding(nil,…) 注册的是无键绑定，
+     * 只进输入节区（define-section），永不出现于 input-bindings；改为读脚本
+     * 加载时写入的哨兵属性 user-data/yuki/hints-loaded，缺失即 lua 未加载
+     * （语法/路径问题），右键切档会无响应——大声记日志便于定位。
+     */
+    _verifyA4kBindings() {
+        this.getProperty('user-data/yuki/hints-loaded').then((v) => {
+            if (String(v) === '1') {
+                console.log('[mpv] Anime4K 菜单信号：hints.lua 已加载');
+            } else {
+                console.warn('[mpv] Anime4K 菜单信号缺失：哨兵属性不存在（hints.lua 未加载？详见 mpv 日志）');
+            }
+        }).catch(() => { /* 查询失败不影响播放 */ });
     }
 
     command(...args) {
@@ -734,6 +959,62 @@ class MpvPlayer extends EventEmitter {
         return this._danmakuLines.length;
     }
 
+    /**
+     * 从 mpv --log-file 文本提取「起播前退出」的可读原因。
+     * 日志尾部充满收尾调试噪音（Destroying client handle…/Terminating 等），
+     * 直接 slice(-N) 会把这些无信息量行当错误原因展示给用户（实测对话框只剩
+     * 一串 Destroying client handle）。这里优先保留 error/warn 级别行和含
+     * HTTP/网络/解封装错误关键词的行；一行都没有时退回尾部非调试行。
+     * 另做两层降噪：同文重复行折叠为一条（ytdl_hook 对多个候选二进制逐一
+     * 失败会刷屏）；存在其它模块的错误行时整段丢弃 ytdl 行——直链播放与
+     * youtube-dl 无关，其失败（not found/permissions）不是退出原因。
+     */
+    static extractErrorReason(logText, limit = 600) {
+        const lines = String(logText || '').split(/\r?\n/);
+        const levelOf = (line) => {
+            const m = line.match(/^\[\s*[\d.]+\]\[([edvwi])\]/);
+            return m ? m[1] : '';
+        };
+        const ERRORISH_RE = /error|fail|timed? ?out|timeout|refused|reset|broken pipe|tls|ssl|certificate|40[134]\b|429\b|5\d\d\b|no video|unrecognized|invalid data|unable to|denied|not found|expired|forbidden|abort/i;
+        const isNoise = (line) => /destroying client handle/i.test(line)
+            || /^\[\s*[\d.]+\]\[d\](?:\[[a-z-]+\])?\s+(?:Terminating\.?|Exiting|Uninit)\b/i.test(line);
+        const important = [];
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || isNoise(line)) continue;
+            const level = levelOf(line);
+            if (level === 'e' || level === 'w'
+                || (!level && ERRORISH_RE.test(line))) important.push(line);
+        }
+        let pool = important;
+        if (!pool.length) {
+            // 无 error/warn 行：退回非调试行尾部（仅排除 [d] 调试级；v/i 级行保留）
+            pool = lines.map((l) => l.trim()).filter((line) => line && !isNoise(line)
+                && !/^\[\s*[\d.]+\]\[d\]/.test(line));
+        }
+        // 同文去重（剥掉时间戳后比对），重复的追加 ×N 计数
+        const normOf = (line) => line.replace(/^\[\s*[\d.]+\]\[[a-z]\]/, '').trim();
+        const collapsed = [];
+        const counts = new Map();
+        for (const line of pool) {
+            const key = normOf(line);
+            counts.set(key, (counts.get(key) || 0) + 1);
+            if (counts.get(key) === 1) collapsed.push(line);
+        }
+        for (const line of collapsed) {
+            const n = counts.get(normOf(line));
+            if (n > 1) collapsed[collapsed.indexOf(line)] = `${line}（×${n}）`;
+        }
+        // 有其它模块的错误行时丢弃 ytdl 行（直链播放与 youtube-dl 缺失无关）
+        let picked = collapsed;
+        if (collapsed.some((l) => /\[ytdl_hook\]|youtube-dl|yt-dlp/i.test(l))) {
+            const nonYtdl = collapsed.filter((l) => !/\[ytdl_hook\]|youtube-dl|yt-dlp/i.test(l));
+            if (nonYtdl.length) picked = nonYtdl;
+        }
+        const text = picked.slice(-6).join(' ｜ ');
+        return text.length > limit ? text.slice(-limit) : text;
+    }
+
     /** 弹弹 play comment → 内部弹幕对象 {time,mode,size,color,content}。非法项返回 null。 */
     static _parseDandan(c) {
         if (!c || typeof c !== 'object') return null;
@@ -756,9 +1037,15 @@ class MpvPlayer extends EventEmitter {
      *  逗号写成 \,，头与头之间仍用逗号分隔。 */
     static headerFieldsValue(header) {
         if (!header || typeof header !== 'object') return '';
+        // 头值清洗：规则站返回的 UA/Referer 常带尾部空格或换行——原样注入后，
+        // mpv 对每个请求（含本地播放列表代理）都回放这些头，Node 严格解析会以
+        // HPE_INVALID_HEADER_TOKEN 拒收（"Unexpected whitespace after header value"）。
+        const clean = (s) => String(s).replace(/[\r\n\t]+/g, ' ').trim();
         return Object.entries(header)
             .filter(([, v]) => v != null && v !== '')
-            .map(([k, v]) => `${k}: ${String(v).replace(/,/g, '\\,')}`)
+            .map(([k, v]) => [clean(k), clean(v)])
+            .filter(([k, v]) => k && v !== '')
+            .map(([k, v]) => `${k}: ${v.replace(/,/g, '\\,')}`)
             .join(', ');
     }
 
@@ -830,5 +1117,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         fs.writeFileSync(this.assPath, '\uFEFF' + header + body + '\n', 'utf8');
     }
 }
+
+// 版本能力解析/原生队列构建对外暴露（测试与调用方复用）
+MpvPlayer.parseMpvVersion = parseMpvVersion;
+MpvPlayer.supportsContextMenu = supportsContextMenu;
+MpvPlayer.buildM3u = buildM3u;
 
 module.exports = MpvPlayer;

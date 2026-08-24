@@ -777,6 +777,16 @@ function pickRoot() {
     }).catch(() => warnToast('选择失败'));
 }
 
+/** 在系统资源管理器中打开当前浏览的本地目录（白名单内；未设根目录时由主进程拒绝并提示）。 */
+function openLocalDir() {
+    // currentRoot 为当前目录的相对路径（'' 即白名单根；needRoot 态主进程返回 root not set）
+    window.yuki.fileOpenDir(currentRoot || '').then((r) => {
+        if (!r || !r.ok) {
+            warnToast(r && r.reason === 'root not set' ? '尚未选择根目录' : '打开目录失败');
+        }
+    }).catch(() => warnToast('打开目录失败'));
+}
+
 /** 目录指纹（T40 刷新防闪烁）：路径 + 各条目 dir/名/时间序列化；
  *  刷新后指纹不变则跳过重渲（避免缩略图重拉导致列表闪烁）。 */
 function _localFp(st) {
@@ -930,20 +940,30 @@ function snapSizeTier(v) {
     return String(best);
 }
 
-// 动作表与主进程 HK_DEF_KEYS 一致：[id, 说明, 默认键]
+// 动作表与主进程 HK_DEF_KEYS 一致：[id, 说明, 默认键]；按功能分组排序（播放/音量倍速/画面与其他），
+// 文件信息走 mpv 内置 stats 脚本第 5 页（与播放器右键菜单「文件信息」同源）
 const HK_UI_ACTIONS = [
     ['pause', '暂停 / 继续', 'SPACE'],
     ['seekBack', '快退', 'LEFT'],
     ['seekFwd', '快进', 'RIGHT'],
+    ['frameBack', '上一帧', ','],
+    ['frameFwd', '下一帧', '.'],
+    ['epPrev', '上一集', 'PGUP'],
+    ['epNext', '下一集', 'PGDWN'],
+    ['a4kCycle', 'Anime4K 档位循环', 'K'],
+    ['progress', '显示进度', 'o'],
     ['volUp', '音量加', 'UP'],
     ['volDown', '音量减', 'DOWN'],
+    ['mute', '静音切换', 'm'],
     ['speedDown', '倍速减', '['],
     ['speedUp', '倍速加', ']'],
     ['speedReset', '恢复原速', 'BS'],
-    ['frameBack', '上一帧', ','],
-    ['frameFwd', '下一帧', '.'],
     ['fullscreen', '全屏切换', 'f'],
     ['screenshot', '截图', 's'],
+    ['fileInfo', '文件信息', 'i'],
+    ['audioCycle', '切换音轨', 'a'],
+    ['subToggle', '切换字幕', 'v'],
+    ['stopPlay', '停止播放', 'Ctrl+s'],
 ];
 let _hkKeys = HK_UI_ACTIONS.reduce((m, a) => { m[a[0]] = a[2]; return m; }, {});
 let _hkCapturing = null; // 正在捕获的动作 id
@@ -958,12 +978,13 @@ function hkConflicts() {
     return dup;
 }
 
+/** 紧凑芯片网格：动作标签在上、键位按钮在下（T8 布局重构，见 ui.css .hk-chip）。 */
 function renderHotkeyRows() {
     const dup = hkConflicts();
     $('#hotkey_rows').html(HK_UI_ACTIONS.map(([id, label]) => `
-        <div class="hk-row${dup.has(_hkKeys[id]) ? ' conflict' : ''}" data-action="${id}">
+        <div class="hk-chip${dup.has(_hkKeys[id]) ? ' conflict' : ''}">
             <span class="hk-label">${label}</span>
-            <button type="button" class="hk-key${_hkCapturing === id ? ' capturing' : ''}" data-action="${id}">${_hkCapturing === id ? '按新键…（Esc 取消）' : _hkEsc(_hkKeys[id])}</button>
+            <button type="button" class="hk-key${_hkCapturing === id ? ' capturing' : ''}" data-action="${id}" title="点击修改键位">${_hkCapturing === id ? '按新键…' : _hkEsc(_hkKeys[id])}</button>
         </div>`).join(''));
 }
 
@@ -1508,28 +1529,40 @@ function initSettingsPanel() {
             }
         }
     });
-    // Anime4K 动漫超分：持久化并通知主进程（下次起播注入着色器；文件缺失自动跳过）。
-    // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次开关暂不生效）
+    // Anime4K 动漫超分：持久化并通知主进程（播放中热应用，未播放则下次起播注入；文件缺失自动跳过）。
+    // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次不注入）
     $('#set_anime4k').on('change', function () {
         window.yuki.settingsSet('anime4k', this.checked);
         if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         if (this.checked) {
             const a4k = _assetStatus && _assetStatus.anime4k;
             if (a4k && !a4k.ready) {
-                warnToast('Anime4K 着色器尚未就绪（自动下载中或下载失败），开关暂不生效');
+                warnToast('Anime4K 着色器尚未就绪（自动下载中或下载失败），本次未生效');
             } else {
-                warnToast('已开启 Anime4K 超分（下次起播生效）');
+                warnToast('已开启 Anime4K 超分');
             }
         } else {
             warnToast('已关闭 Anime4K 超分');
         }
     });
-    // Anime4K 档位：持久化并通知主进程（下次起播注入对应着色器链）
+    // Anime4K 档位：持久化并通知主进程（播放中热切换对应着色器链）
     $('#set_anime4k_mode').on('change', function () {
         window.yuki.settingsSet('anime4kMode', this.value);
         if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
-        warnToast('Anime4K 档位已保存，下次起播生效');
+        warnToast('Anime4K 档位已保存，播放中修改即时生效');
     });
+    // 播放器右键菜单切档后同步设置页控件（菜单侧即时生效+持久化，这里只对齐 UI）。
+    // mode 仅在合法档位时回填下拉：off/未知值不能写入（下拉无对应 option，会置空显示，
+    // 与持久层保存的档位失步）；ready=false 表示着色器未就绪本次未注入，明确告知。
+    if (window.yuki && window.yuki.onA4kChanged) {
+        window.yuki.onA4kChanged(({ enabled, mode, ready }) => {
+            $('#set_anime4k').prop('checked', !!enabled);
+            if (mode === 'a' || mode === 'aa' || mode === 'restore') $('#set_anime4k_mode').val(mode);
+            if (enabled && ready === false) {
+                warnToast('Anime4K 着色器尚未就绪（自动下载中或下载失败），本次未生效');
+            }
+        });
+    }
     // 界面动画开关（T73：由下拉改为与 MiSans 一致的开关）
     $('#set_anim').on('change', function () {
         const on = this.checked;
@@ -1632,8 +1665,9 @@ function initSettingsPanel() {
     });
     // 缓存位置：选目录 → 确认后重启后端生效
     $('#cache_dir_pick').on('click', pickCacheDir);
-    // 缓存位置：恢复默认
+    // 缓存位置：恢复默认（T40：二次确认——会清自定义路径并重启后端，误触代价较高）
     $('#cache_dir_reset').on('click', async () => {
+        if (!await confirmDialog('恢复为系统默认缓存位置？\n自定义目录将被停用（旧缓存文件保留不删），后端将重启以生效。', { okText: '恢复' })) return;
         try {
             const r = await window.yuki.pickCacheDir('__default__');
             if (r && r.ok) {

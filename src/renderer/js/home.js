@@ -171,7 +171,9 @@ const Home = {
         const bootSettings = await this._getSourceSettings();
         const blocked = await this._getBlocked(bootSettings);
         this._prerenderFromCache(blocked, bootSettings); // 冷启动即时上屏：网络返回前先用缓存渲染源下拉 + 分类标签
-        await this.loadSites();
+        // silent：启动自动首载不上全局遮罩——缓存画面保持可见，网络返回后原位覆盖
+        // （开机链路上遮罩反复闪现的源头之一，与重载完成刷新同策略）。
+        await this.loadSites({ silent: true });
     },
 
     /** 冷启动即时上屏：用本地缓存的站点列表 + 当前源分类标签预渲染，避免等 /sites & homeContent 网络。
@@ -226,7 +228,10 @@ const Home = {
         try { localCacheSet(HOME_CLASS_CACHE_PREFIX + site, classes, HOME_CLASS_CACHE_TTL); } catch (e) { /* 缓存失败忽略 */ }
     },
 
-    async loadSites() {
+    /** opts.silent=true：启动自动载入/重载完成的后台刷新——首页内容原位静默更新，
+     *  全程不上全局 loading 遮罩（用户手动切源/刷新仍走默认遮罩反馈）。 */
+    async loadSites(opts) {
+        const silent = !!(opts && opts.silent);
         const sitesLoadToken = ++this._sitesLoadToken;
         const isCurrentSitesLoad = () => sitesLoadToken === this._sitesLoadToken;
         // 配置切换时让正在进行的旧首页请求立即失效，避免旧内容回写。
@@ -359,7 +364,7 @@ const Home = {
         if (!this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
         $('#site-select').val(this.site);
         if (!isCurrentSitesLoad()) return;
-        await this.loadHome();
+        await this.loadHome(undefined, { silent });
         if (!isCurrentSitesLoad()) return;
         if (this._autoProbeEnabled) {
             // 探测延迟启动：先让首页 feed/分类上屏（避免 8 并发探测与首屏内容
@@ -855,7 +860,18 @@ const Home = {
         const size = await this._pageSize();
         if (token !== this._loadToken) return;
         $('#home-pager').empty();
-        showLoading();
+        // 防闪现：遮罩延迟 250ms 再上。缓存即时上屏路径会先撤掉定时器，
+        // 只有真正进入网络等待时用户才会看到加载态（消除「短暂显示加载中」）。
+        // silent（启动自动载入/重载完成的后台刷新）：完全不上全局遮罩，
+        // 缓存画面保持可见，网络返回后原位覆盖——消除开机后遮罩反复闪现。
+        const quietLoad = !!(opts && opts.silent);
+        let loadingShown = false;
+        const loadingTimer = quietLoad ? null : setTimeout(() => { loadingShown = true; showLoading(); }, 250);
+        const dismissLoading = () => {
+            if (loadingTimer) clearTimeout(loadingTimer);
+            if (loadingShown) hideLoading();
+            loadingShown = false;
+        };
         this._feedCacheBooted = false;
         try {
             // 冷启动即时上屏：先用缓存的分类标签渲染（避免空标签栏闪现），网络返回后以最新结果覆盖
@@ -872,7 +888,7 @@ const Home = {
             ]);
             // 持久化 feed 缓存已即时上屏 → 提前撤掉全局遮罩（遮罩会挡住缓存画面，
             // 慢源网络期间用户被迫看转圈）；网络返回后令牌校验通过才静默覆盖。
-            if (this._feedCacheBooted) hideLoading();
+            if (this._feedCacheBooted) dismissLoading();
             const [data, feedItems] = await pFirstScreen;
             if (token !== this._loadToken) return;
             if (data && Array.isArray(data.class)) {
@@ -899,7 +915,7 @@ const Home = {
         } catch (e) {
             warnToast(this.page > 1 ? '全部载入失败' : '首页载入失败');
         } finally {
-            hideLoading();
+            dismissLoading();
         }
         // T60：后台探测分类，隐藏无影片的分类（不阻塞首屏；结果不丢进度，见 _probeClasses）
         if (this._autoProbeEnabled) this._probeClasses();
@@ -1106,17 +1122,13 @@ const Home = {
         showLoading();
         try {
             await this._fetchCat(tid, this.page, size);
-            // 瞬时故障自动重试一次：站点限流/连接抖动（L3_RUNTIME_CALL_FAILED）在
-            // 800ms 后基本可恢复，直接把页面翻成「暂无内容」体验太差
+            // 瞬时故障自动重试：站点限流/连接抖动（L3_RUNTIME_CALL_FAILED/TIMEOUT）
+            // 在 800ms 后基本可恢复；熔断（L3_RUNTIME_CIRCUIT_OPEN）按后端给出的
+            // retryAfterMs 等到半开窗口再试——此前只有一次 800ms 重试，熔断期内
+            // 必然再次被拒，页面直接翻成「暂无内容」，与「稍后将自动重试」的
+            // 承诺不符。
             if (token === this._loadToken && !this._catItems.length && this._catError) {
-                const errObj = this._catError;
-                const errText = (typeof errObj === 'string' ? errObj : String((errObj && errObj.code) || '')) || '';
-                if (/L3_RUNTIME_(CALL_FAILED|TIMEOUT|CIRCUIT_OPEN)/.test(errText)) {
-                    await new Promise((r) => setTimeout(r, 800));
-                    if (token !== this._loadToken) return;
-                    this._catWinDelete(this.site, tid); // 丢弃半程窗口重新拉取
-                    await this._fetchCat(tid, this.page, size);
-                }
+                await this._autoRetryCat(token, tid, this.page, size, 2);
             }
             if (token !== this._loadToken) return;
             this.renderGrid(this._catItems, this._catError);
@@ -1128,6 +1140,48 @@ const Home = {
             if (token === this._loadToken) warnToast('分类载入失败');
         } finally {
             hideLoading();
+        }
+    },
+
+    /** 空态占位（含恢复进度提示）：不改动列表状态，只更新网格区文案。 */
+    _showGridTip(text) {
+        $('#home-grid').html(`<div class="tip-line">${String(text || '')}</div>`);
+    },
+
+    /**
+     * 分类拉取失败的自动恢复重试（熔断/瞬时错误）：
+     *  - L3_RUNTIME_CIRCUIT_OPEN：按后端 details.retryAfterMs（熔断剩余开放时间）
+     *    等到半开窗口再探测，等待期间显示倒计时状态行；最多 retriesLeft 次。
+     *  - L3_RUNTIME_CALL_FAILED / TIMEOUT：固定 800ms 短退避。
+     *  每次等待后校验加载令牌，切源/切分类立即放弃；最终仍失败则交回调用方
+     *  渲染「暂无内容 + 原因」。
+     */
+    async _autoRetryCat(token, tid, pg, size, retriesLeft) {
+        if (retriesLeft <= 0) return;
+        const errObj = this._catError;
+        const errText = (typeof errObj === 'string' ? errObj : String((errObj && errObj.code) || '')) || '';
+        if (!errText) return;
+        const isCircuit = /L3_RUNTIME_CIRCUIT_OPEN/.test(errText);
+        let waitMs = 800;
+        if (isCircuit) {
+            const details = (errObj && typeof errObj === 'object' && errObj.details) || {};
+            const retryAfter = parseInt(details.retryAfterMs, 10);
+            // 半开窗口前重试必然再被拒：等到 retryAfterMs + 余量；上限 15s 防
+            // 后端状态缺失时久等（半开探测失败会重新打开，下一轮继续等）
+            waitMs = Math.min(Math.max(Number.isFinite(retryAfter) ? retryAfter : 0, 1000) + 500, 15000);
+        } else if (!/L3_RUNTIME_(CALL_FAILED|TIMEOUT)/.test(errText)) {
+            return; // 其它错误（凭据缺失等）不自动重试
+        }
+        this._showGridTip(isCircuit
+            ? `站点熔断恢复中，约 ${Math.ceil(waitMs / 1000)} 秒后自动重试…`
+            : '源响应异常，正在自动重试…');
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (token !== this._loadToken) return; // 切源/切分类后旧重试作废
+        this._catWinDelete(this.site, tid); // 丢弃半程窗口重新拉取
+        await this._fetchCat(tid, pg, size);
+        if (token !== this._loadToken) return;
+        if (!this._catItems.length && this._catError) {
+            await this._autoRetryCat(token, tid, pg, size, retriesLeft - 1);
         }
     },
 

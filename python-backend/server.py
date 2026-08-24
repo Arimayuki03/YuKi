@@ -1858,6 +1858,11 @@ def create_app():
             return body, (ctype or 'image/jpeg')
 
         try:
+            # 旧渲染层曾持久化损坏组合（/r/{n}/pic/cover/{非l}/，lain CDN 对其返回
+            # HTTP 400）：真实缩放由 r 宽度前缀承担，段应固定为 l——这里归一化自愈，
+            # 让带病记录的封面也能经代理拉回（裸路径 /pic/cover/{lcmgs}/ 合法，不动）。
+            if re.search(r'/r/\d+/pic/cover/', url, re.I):
+                url = re.sub(r'(/pic/cover/)[a-z](/)', r'\1l\2', url, flags=re.I)
             parts = urllib.parse.urlsplit(url)
             if parts.scheme not in ('http', 'https') or parts.hostname not in _bangumi_cover_hosts:
                 return JSONResponse({'code': 403, 'msg': 'host not allowed'}, status_code=403)
@@ -2172,7 +2177,7 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBangumiTrends':
             limit = int(form.get('limit', '24'))
             offset = int(form.get('offset', '0'))
-            data = kazumi_mgr.bangumi_trends(min(limit, 50), max(offset, 0))
+            data = kazumi_mgr.bangumi_trends(min(limit, 120), max(offset, 0))
             return 200, json.dumps({'code': 200, 'trends': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
 
         if do == 'kazumiBangumiListByTag':
@@ -2180,7 +2185,7 @@ def dispatch_kazumi_action(form):
                 tag = form.get('tag', '')
                 limit = int(form.get('limit', '100'))
                 offset = int(form.get('offset', '0'))
-                data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 200), max(offset, 0))
+                data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 120), max(offset, 0))
                 return 200, json.dumps({'code': 200, 'items': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
             return _cached_bangumi(do, form, _build)
 
@@ -2354,11 +2359,14 @@ def dispatch_kazumi_action(form):
             username = form.get('username', '')
             password = form.get('password', '')
             data_str = form.get('data', '{}')
+            ssl_verify = form.get('sslVerify', '1') != '0'
+            remote_dir = form.get('remoteDir', '')
             try:
                 data = json.loads(data_str)
             except Exception:
                 data = {}
-            ok = kazumi_mgr.webdav_sync(url, username, password, data)
+            ok = kazumi_mgr.webdav_sync(url, username, password, data,
+                                        ssl_verify=ssl_verify, remote_dir=remote_dir)
             return (200 if ok else 500), json.dumps({'code': 200 if ok else 500, 'msg': 'sync ok' if ok else 'sync failed'}, ensure_ascii=False)
 
         if do == 'kazumiWebdavRestore':
@@ -2366,17 +2374,33 @@ def dispatch_kazumi_action(form):
             username = form.get('username', '')
             password = form.get('password', '')
             names_str = form.get('names', '[]')
+            ssl_verify = form.get('sslVerify', '1') != '0'
+            remote_dir = form.get('remoteDir', '')
             try:
                 names = json.loads(names_str)
             except Exception:
                 names = []
-            result = kazumi_mgr.webdav_restore(url, username, password, names)
+            result = kazumi_mgr.webdav_restore(url, username, password, names,
+                                               ssl_verify=ssl_verify, remote_dir=remote_dir)
             # 失败（连接错误/无数据）返回 500 + 原因：此前恒 200 空数据，渲染层把
             # 空对象当成功提示「恢复完成」，网址输错时误导用户（同步端点早有对齐语义）
             if not result.get('ok'):
                 msg = str(result.get('error') or 'restore failed')
                 return 500, json.dumps({'code': 500, 'msg': msg}, ensure_ascii=False)
             return 200, json.dumps({'code': 200, 'data': result.get('files') or {}}, ensure_ascii=False)
+
+        if do == 'kazumiWebdavTest':
+            url = form.get('url', '')
+            username = form.get('username', '')
+            password = form.get('password', '')
+            ssl_verify = form.get('sslVerify', '1') != '0'
+            remote_dir = form.get('remoteDir', '')
+            result = kazumi_mgr.webdav_test(url, username, password,
+                                            ssl_verify=ssl_verify, remote_dir=remote_dir)
+            if not result.get('ok'):
+                msg = str(result.get('error') or 'connect failed')
+                return 500, json.dumps({'code': 500, 'msg': msg}, ensure_ascii=False)
+            return 200, json.dumps({'code': 200}, ensure_ascii=False)
 
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except Exception as e:
@@ -2440,7 +2464,15 @@ def main():
     # 先以内置示例源兜底就绪，恢复移入后台线程（经 _config_task 上报状态，
     # 主进程 auto-reload 会等它结束再决策是否需要网络重载）。
     load_default_sites()
-    print(f'YUKI_BACKEND_READY port={port} token={token}', flush=True)
+    # READY 行是主进程/渲染端 waitBackend 的唯一启动信号，必须尽力发出；但打包版里
+    # 父进程可能在子进程刚启动时就退出（如旧版本双开后第二实例被关闭），stdout 管道
+    # 随之失效，Windows 上写入抛 OSError [Errno 22] Invalid argument。服务本身仍能
+    # 健康运行（健康检查走 HTTP），吞掉写失败即可——否则未处理异常会让 PyInstaller
+    # 弹「脚本执行出错」错误框。
+    try:
+        print(f'YUKI_BACKEND_READY port={port} token={token}', flush=True)
+    except OSError:
+        logger.warning('READY 行写入 stdout 失败（管道失效），已忽略')
     if last_cached_url:
         _start_config_restore_async(last_cached_url)
     import uvicorn

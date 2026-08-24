@@ -134,7 +134,11 @@ const App = {
             if (t && t.status === 'done' && t.summary && Number(t.summary.healthy ?? t.summary.sites) > 0) {
                 loaded = Number(t.summary.healthy ?? t.summary.sites);
             }
-            if (!busy) break;
+            // 观察到空闲 = 窗口期内正常完成：清掉 busy 标记、跳出。此前 stillBusy
+            // 一旦置位就不再清除，导致正常完成后仍误启动 watchConfigTask——守望
+            // 会在 3s 后对着已完成的任务再触发一轮重复的 loadSites/Live.load，
+            // 与 onConfigReloaded 事件的刷新叠加，全局遮罩连续闪现两次。
+            if (!busy) { stillBusy = false; break; }
             stillBusy = true;
             if (!quiet) showLoading();
             await new Promise((r) => setTimeout(r, 1000));
@@ -165,10 +169,10 @@ const App = {
             this._configWatch = null;
             if (t && t.status === 'done') {
                 if (typeof Home !== 'undefined' && Home._inited && Home.loadSites) {
-                    Promise.resolve().then(() => Home.loadSites()).catch(() => {});
+                    Promise.resolve().then(() => Home.loadSites({ silent: true })).catch(() => {});
                 }
                 if (typeof Live !== 'undefined' && Live._inited && Live.load) {
-                    Promise.resolve().then(() => Live.load()).catch(() => {});
+                    Promise.resolve().then(() => Live.load({ silent: true })).catch(() => {});
                 }
             }
         }, 3000);
@@ -257,12 +261,16 @@ $(async function bootstrap() {
     if (window.yuki.onConfigReloaded) {
         window.yuki.onConfigReloaded((info) => {
             if (!info || !info.ok) return;
+            // 完成事件是权威信号：停掉可能仍在跑的后台守望轮询（waitConfigDone
+            // 15s 超时兜底）。否则事件刷新后守望又在 3s 内重复触发一轮
+            // loadSites/Live.load，首页/直播遮罩连续闪现两次。
+            if (App._configWatch) { clearInterval(App._configWatch); App._configWatch = null; }
             if (typeof Player !== 'undefined' && Player.resetVipFlags) Player.resetVipFlags();
             if (typeof Home !== 'undefined' && Home._inited && Home.loadSites) {
-                Promise.resolve().then(() => Home.loadSites()).catch(() => {});
+                Promise.resolve().then(() => Home.loadSites({ silent: true })).catch(() => {});
             }
             if (typeof Live !== 'undefined' && Live._inited && Live.load) {
-                Promise.resolve().then(() => Live.load()).catch(() => {});
+                Promise.resolve().then(() => Live.load({ silent: true })).catch(() => {});
             }
         });
     }

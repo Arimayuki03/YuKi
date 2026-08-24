@@ -53,6 +53,7 @@ const Player = {
     _watchChain: 0,          // 观看链序号：显式起播开新链；断流重连经 player-session 复用旧链
     _watchChainMax: new Map(), // chainId → 该链已累计的最大 pos（重连只补增量，不重复累计）
     _watchChainCounted: new Set(), // 已计过观看次数/部数的链（重连会话不再 +1 次数）
+    _nativeRecorded: new Map(), // 原生队列 sessionId → 已逐集记过账的 playlistPos 集合（exit 补记当前集时去重）
     _lastExitedWatch: null, // 断流退出后主进程重连时复用上一会话元信息
     _currentPlayback: null, // 原始 playerContent 参数；断流时必须重新解析，不能复用 CDN URL
     _reconnectAttempts: 0,  // 每个原始播放请求最多自动刷新一次
@@ -87,11 +88,17 @@ const Player = {
             if (window.yuki.onPlayerSession) {
                 window.yuki.onPlayerSession((info) => this._adoptSession(info));
             }
+            if (window.yuki.onEpisodeSkip) {
+                window.yuki.onEpisodeSkip((info) => this._onEpisodeSkip(info));
+            }
         }
     },
 
     /** 单集播完（end-file eof，附会话号）：按会话记录时间戳；旧集延迟 ended 不误判新集。 */
     _onEnded(info) {
+        // 队列记账诊断：无条件打印事件关键字段，定位 nativeQueue/playlistPos 断点
+        console.log(`[队列记账?] sid=${info && info.sessionId} native=${!!(info && info.nativeQueue)} ` +
+            `pos=${info && info.playlistPos} wall=${info && info.itemWallSec} queueLen=${info && info.queueLen}`);
         const now = Date.now();
         const sid = (info && typeof info.sessionId === 'number') ? info.sessionId : 0;
         if (sid) {
@@ -103,6 +110,99 @@ const Player = {
         }
         // 仅当前会话（或无会话号的旧协议事件）才更新全局兜底时间戳，旧会话 ended 不污染
         if (!sid || sid === this._session) this._endedAt = now;
+        // 原生多集队列（静态直链批量）：连播由 mpv 进程内推进，进程不会逐集退出，
+        // 观看统计/历史改为逐集在 ended 记账——口径与旧的逐集会话一致（<15s 短播不计、
+        // 每集一条历史、集名取当集）。未看完的当前集在最终 exit 补记（见 _onExit）。
+        if (info && info.nativeQueue && typeof info.playlistPos === 'number' && info.playlistPos >= 0) {
+            const meta = (typeof sid === 'number') ? this._watchSessions.get(sid) : null;
+            const wall = (typeof info.itemWallSec === 'number') ? info.itemWallSec : null;
+            const watched = (wall != null) ? wall
+                : ((typeof info.pos === 'number') ? info.pos : null);
+            // 诊断：队列逐集记账的四个前提（会话元信息/时长门槛）任一不满足都会静默跳过
+            console.log(`[队列记账] pos=${info.playlistPos} wall=${wall} meta=${!!meta} watched=${watched}`);
+            if (meta && typeof watched === 'number' && watched >= 15) {
+                const names = Array.isArray(meta.nativeEpisodes) ? meta.nativeEpisodes : [];
+                const snapshot = { ...meta, subtitle: names[info.playlistPos] || meta.subtitle || '' };
+                // 每集必须开独立观看链：chainId 的链内去重是给「断流重连重播同一集」用的，
+                // 整季共用一条链时第 2 集起 pos 不高于链内最大值 → 时长增量被扣成 0、
+                // 次数只计一次（表现为看一整季统计只多约一集）。逐集独立后口径回归旧逐集会话；
+                // 时长走 progress.wallWatched（= 本集墙钟 itemWallSec，与旧单集会话同通道），
+                // 缺失时 _writeWatch 自动回退 pos 增量。
+                snapshot.chainId = ++this._watchChain;
+                const progress = {
+                    pos: (typeof info.pos === 'number') ? info.pos : null,
+                    duration: (typeof info.duration === 'number') ? info.duration : null,
+                    fullscreen: info.fullscreen, speed: info.speed,
+                    wallWatched: (wall != null && wall > 0) ? wall : undefined,
+                };
+                // 记录该下标已记账：exit 补记当前集时据此去重（末集自然播完后的退出不重复计）
+                if (typeof sid === 'number') {
+                    let recorded = this._nativeRecorded.get(sid);
+                    if (!recorded) {
+                        recorded = new Set();
+                        this._nativeRecorded.set(sid, recorded);
+                        if (this._nativeRecorded.size > 64) {
+                            const oldest = this._nativeRecorded.keys().next().value;
+                            this._nativeRecorded.delete(oldest);
+                        }
+                    }
+                    recorded.add(info.playlistPos);
+                }
+                this._watchWrite = this._watchWrite
+                    .catch(() => { /* 上一次失败不阻塞后续统计 */ })
+                    .then(() => this._writeWatch(progress, snapshot, watched));
+                // 收藏观看进度：原生队列进程不逐集退出，_onExit 的进度更新走不到，
+                // 改为逐集在 ended 更新（口径与旧逐集会话一致）
+                this._updateFavProgress(snapshot, info.playlistPos,
+                    (typeof info.pos === 'number') ? info.pos : 0,
+                    (typeof info.duration === 'number') ? info.duration : 0);
+            }
+        }
+    },
+
+    /** 收藏条目观看进度更新（仅带 vodId 的 CatVod 源生效）；fire-and-forget 不影响播放。 */
+    _updateFavProgress(meta, playlistPos, pos, duration) {
+        if (!meta || !meta.vodId) return;
+        if (typeof Favorites === 'undefined' || !Favorites.updateProgress) return;
+        try {
+            const percent = (duration > 0) ? Math.min(100, Math.round((pos / duration) * 100)) : 0;
+            Favorites.updateProgress(meta.site, meta.vodId, {
+                currentEp: playlistPos + 1,
+                totalEps: meta.totalEps || 0,
+                percent,
+                ts: Date.now(),
+            }).catch(() => { /* 进度更新失败不影响播放 */ });
+        } catch (e) { /* 进度更新失败不影响播放 */ }
+    },
+
+    /** 原生队列退出补记「正在看的这一集」（eof 未触发的当前集）。
+     *  口径与旧逐集会话的 pos 回退一致：watched=pos，≥15s 才计；该下标若已在 ended
+     *  记过账（如末集自然播完后的退出）则跳过防重复。会话级墙钟跨集不可分摊，
+     *  故不用 exit 的 wallWatched。 */
+    _recordNativePartial(info) {
+        const sid = (info && typeof info.sessionId === 'number') ? info.sessionId : 0;
+        const meta = sid ? this._watchSessions.get(sid) : null;
+        if (!meta) return;
+        const p = (info && typeof info.playlistPos === 'number' && info.playlistPos >= 0)
+            ? info.playlistPos : -1;
+        if (p < 0) return;
+        const recorded = this._nativeRecorded.get(sid);
+        if (recorded && recorded.has(p)) return;
+        const watched = (typeof info.pos === 'number') ? info.pos : null;
+        if (typeof watched !== 'number' || watched < 15) return;
+        const names = Array.isArray(meta.nativeEpisodes) ? meta.nativeEpisodes : [];
+        const snapshot = { ...meta, subtitle: names[p] || meta.subtitle || '' };
+        snapshot.chainId = ++this._watchChain; // 独立观看链（同 _onEnded 逐集口径）
+        const progress = {
+            pos: watched,
+            duration: (typeof info.duration === 'number') ? info.duration : null,
+            fullscreen: info.fullscreen, speed: info.speed,
+        };
+        this._watchWrite = this._watchWrite
+            .catch(() => { /* 上一次失败不阻塞后续统计 */ })
+            .then(() => this._writeWatch(progress, snapshot, watched));
+        this._updateFavProgress(snapshot, p, watched,
+            (typeof info.duration === 'number') ? info.duration : 0);
     },
 
     /** 断流重连：主进程用新会话号重播本集，渲染层把新会话并入旧观看链（元信息含 chainId）。 */
@@ -132,12 +232,53 @@ const Player = {
         return (Date.now() - endedAt) < 10000;
     },
 
+    /** 上/下集快捷键（逐集会话）：按当前线路推进或回退一集；原生队列由主进程直跳。 */
+    async _onEpisodeSkip({ dir } = {}) {
+        const d = Number(dir) || 0;
+        if (!d) return;
+        const seq = this._seq || (this._currentPlayback
+            && Array.isArray(this._currentPlayback.episodes)
+            && this._currentPlayback.episodes.length > 1
+            ? {
+                site: this._currentPlayback.site, flag: this._currentPlayback.flag,
+                title: this._currentPlayback.title,
+                episodes: this._currentPlayback.episodes,
+                index: this._currentPlayback.epIndex || 0,
+                vodId: this._currentPlayback.vodId,
+                kazumiSrc: this._currentPlayback.kazumiSrc || '',
+            }
+            : null);
+        if (!seq) { warnToast('当前播放没有可切换的剧集列表'); return; }
+        const nextIndex = (Number(seq.index) || 0) + d;
+        const next = seq.episodes[nextIndex];
+        if (!next) { warnToast(d > 0 ? '已经是最后一集' : '已经是第一集'); return; }
+        warnToast(`${d > 0 ? '下一' : '上一'}集：${next.name || ''}`);
+        this._playToken += 1;
+        this.play(seq.site, seq.flag, next.url, seq.title, next.name,
+            seq.episodes, nextIndex, seq.kazumiSrc);
+    },
+
     /**
      * mpv 进程退出：连播核心驱动点。
      * 「看完」判定：退出时剩余时长 <8s；进度取不到（IPC 已断）时，
      * 10s 内收到过 ended 事件同样视为看完。提前关闭 → 终止连播链。
      */
     async _onExit(info) {
+        // 原生多集队列：已看完的各集已在 ended 记账（_onEnded）；退出时补记「正在看的
+        // 这一集」——eof 未触发（中途关窗/断流退出是常态用法），漏记会让历史、最近观看
+        // 和统计在该场景下完全不更新。不再按整条会话重复计账、不断流重连（重连会从列表头
+        // 重播）、不推进渲染层连播链。
+        if (info && info.nativeQueue) {
+            this._recordNativePartial(info);
+            this._seq = null;
+            this._currentPlayback = null;
+            this._reconnectInProgress = false;
+            if (info && typeof info.sessionId === 'number') {
+                this._watchSessions.delete(info.sessionId);
+                this._nativeRecorded.delete(info.sessionId);
+            }
+            return;
+        }
         // 观看统计（「我的」页）：任何 mpv 会话真实退出都累计时长/次数，与连播链无关
         this._recordWatch(info);
         // 非当前会话的退出（切集时被杀旧进程的延迟退出/本地播放）不驱动连播
@@ -374,6 +515,11 @@ const Player = {
                 }
             } catch (e) { /* ignore */ }
         }
+        // 原生多集队列：缓存逐集集名表。mpv 的 playlistPos 即所传列表下标（整表装载、
+        // 仅起点可选），ended 逐集记账时据此取「当集名」写入历史，替代会话级 subtitle。
+        if (result.nativeQueue && this._currentPlayback && Array.isArray(this._currentPlayback.episodes)) {
+            meta.nativeEpisodes = this._currentPlayback.episodes.map((e) => String((e && e.name) || ''));
+        }
         this._watchSessions.set(result.sessionId, meta);
         // 自动加载弹幕（方案 A，默认关）：起播成功后按片名+集数从弹弹 play 拉整集弹幕推给 mpv。
         // fire-and-forget，不阻塞起播；失败/匹配不到静默跳过。
@@ -446,12 +592,118 @@ const Player = {
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
         try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
-        // 尝试从当前视图取 vodId（详情页连播时记录观看进度）。仅 CatVod 源使用 Detail.vodId：
-        // Kazumi 源从弹窗直接起播，Detail.vodId 可能残留上一次 CatVod 详情的 id，须隔离（T4）。
+        // 元信息必须先于原生队列分支装配：队列会话经 _rememberSession 读取 _curMeta
+        // （观看统计/最近观看/历史都依赖它），放在分支之后会导致整季会话元信息为空。
         let vodId = '';
         try {
             if (!String(site).startsWith('kazumi:') && typeof Detail !== 'undefined' && Detail.vodId) vodId = Detail.vodId;
         } catch (e) { /* ignore */ }
+        this._curMeta = { site, title, subtitle: subtitle || '', vodId, kazumiSrc: kazumiSrc || '',
+            totalEps: (Array.isArray(episodes) ? episodes.length : 0) };
+        // 尝试从当前视图取 vodId（详情页连播时记录观看进度）。仅 CatVod 源使用 Detail.vodId：
+        // Kazumi 源从弹窗直接起播，Detail.vodId 可能残留上一次 CatVod 详情的 id，须隔离（T4）。
+        // （vodId 已在上方声明并赋值，此处不再重复声明——曾因重复 let 引发 SyntaxError。）
+        // 原生整季队列：整季以本地代理地址装载进 mpv 播放列表——右键菜单可见可切、
+        // 同进程连播推进；代理在 mpv 打开每集时才解析（直链零过期）。
+        // 排除项：网盘类源仅针对 CatVod（夸克等解析慢且依赖 Cookie 会话）；
+        // Kazumi 是番剧规则引擎——规则名含「ali/移动」等子串会被误伤，故不做网盘过滤。
+        // 边下边播开启时不走原生队列：下载需要真实直链，逐集链路才能同步入队
+        // 边下边播与原生队列兼容：代理每解析成功一集，主进程即静默入队下载
+        // （集名含 Bangumi 名，去重键与手动一致）；队列起播失败仍回退本链路兜底。
+        if (autoNext && Array.isArray(episodes) && episodes.length > 1 && window.yuki.buildPlaylist) {
+            const isKazumi = String(site || '').startsWith('kazumi:');
+            if (this._playContext === trace && !playAbort.signal.aborted) showLoading('构建播放列表…');
+            const vip = await this.getVipFlags().catch(() => []);
+            // Kazumi：确保 Bangumi 分集缓存就绪（未打开过分集页签时按详情页 subjectId 拉取一次），
+            // 集名优先级 = Bangumi（集数+名称）→ 规则 identifier → 第N集
+            if (isKazumi && typeof Kazumi !== 'undefined' && typeof Kazumi.bangumiEpisodes === 'function') {
+                const subj = (typeof Detail !== 'undefined' && Detail._bgmId) || null;
+                const cacheOk = Kazumi._bgmEpsCache && Kazumi._bgmEpsCache.subjectId === subj
+                    && Array.isArray(Kazumi._bgmEpsCache.eps) && Kazumi._bgmEpsCache.eps.length;
+                if (subj && !cacheOk) {
+                    await Kazumi.bangumiEpisodes(subj).then((data) => {
+                        const list = (data && data.data) || [];
+                        Kazumi._bgmEpsCache = {
+                            subjectId: subj,
+                            eps: list
+                                .filter((ep) => ep && (ep.type == null || ep.type === 0))
+                                .map((ep) => ({
+                                    no: String(ep.sort || ep.ep || ''),
+                                    name: String(ep.name_cn || ep.name || ''),
+                                })),
+                        };
+                    }).catch(() => { /* 拉取失败走 identifier 兜底 */ });
+                    if (Kazumi._bgmEpsCache && Kazumi._bgmEpsCache.eps.length) {
+                        console.log('[Kazumi] Bangumi 分集示例：', JSON.stringify(Kazumi._bgmEpsCache.eps[0]));
+                    }
+                }
+            }
+            // 集名富化：Bangumi（集数+名称）优先，规则 identifier 兜底——必须在
+            // 自动拉取之后执行，否则首次播放时缓存未就绪会全部落到第N集。
+            const bgmList = (isKazumi && typeof Kazumi !== 'undefined'
+                && Kazumi._bgmEpsCache && Array.isArray(Kazumi._bgmEpsCache.eps))
+                ? Kazumi._bgmEpsCache.eps : null;
+            const qEps = episodes.map((e, i) => {
+                const orig = String((e && e.name) || '');
+                const b = bgmList && bgmList[i];
+                let nm = orig || `第${i + 1}集`;
+                if (b && (b.no || b.name)) {
+                    nm = b.no ? `${b.no} ${b.name || orig}`.trim() : (b.name || orig);
+                }
+                return { id: String((e && (e.url ?? e.id)) || ''), name: nm };
+            });
+            // Kazumi 预热可能包含隐藏窗口抓流（数秒），竞速窗口相应放宽
+            const built = await Promise.race([
+                window.yuki.buildPlaylist({
+                kind: isKazumi ? 'kazumi' : 'catvod',
+                title: String(title || ''),
+                site: String(site || ''), flag: String(flag || ''),
+                pluginName: isKazumi ? String(site).slice(7) : '',
+                vipFlags: JSON.stringify(vip || []),
+                eps: qEps,
+                start: epIndex || 0,
+                }).catch(() => null),
+                new Promise((res) => setTimeout(() => res(null), 20000)),
+            ]).catch(() => null);
+            if (built && built.ok && Array.isArray(built.entries)
+                && built.entries.length === episodes.length) {
+                this._seq = null;
+                this._currentPlayback = null;
+                const entry = built.entries[built.startIndex] || built.entries[0];
+                // 加载文案推进：建表是瞬时的，真正的等待发生在首集解析——别让文案停在「构建播放列表」
+                if (this._playContext === trace && !playAbort.signal.aborted) {
+                    showLoading(`正在打开 ${entry.title || '第1集'}…`);
+                }
+                const r = await this._playDirect(entry.url, {
+                    // 副标题置空：队列会话的 OSD 标题只显示片名——每集集名由 m3u 的
+                    // EXTINF 进入 media-title（窗口标题/切集 OSD 自动跟随），避免
+                    // osd-playing-msg 在每次装载时都弹「第01集」的陈旧集名。
+                    title, subtitle: '', site, vodId,
+                    totalEps: episodes.length,
+                    playlist: built.entries, epIndex: epIndex || 0,
+                    // Kazumi 预热产出的规则头：全局注入，保证清单+分片都带 Referer/UA
+                    header: built.headers || undefined,
+                    skipProbe: true, source: 'queue', quietFail: true,
+                    speed: carrySpeed, fullscreen: carryFullscreen,
+                    // 不挂 requestId/playSessionId：起播后数秒内的杂散 cancelRuntime
+                    // （详情页重复触发等）曾把已成功解析的原生队列误杀为 play-cancelled；
+                    // 用户主动关闭仍经 mpv.stop() 生效，与此通道无关。
+                    requestId: '', playSessionId: '',
+                }).catch((e) => ({ ok: false, reason: String(e) }));
+                if (r && r.ok) {
+                    // 逐集历史需要集名表：把 entries 标题挂到本会话的观看元信息上
+                    if (typeof r.sessionId === 'number') {
+                        const wm = this._watchSessions.get(r.sessionId);
+                        if (wm) wm.nativeEpisodes = built.entries.map((e) => e.title);
+                    }
+                    return r;
+                }
+                // 队列起播失败（首集解析超时/不支持等）：静默回退逐集链路，下次点击自动重试。
+                // page 型线路的拉黑由主进程按 parse=1 精确判定（见 yuki:playlist-build）。
+            } else {
+                // 原生播放列表构建失败：同样静默回退下方逐集连播，无需提示。
+            }
+        }
         this._seq = (autoNext && Array.isArray(episodes) && (epIndex || 0) + 1 < episodes.length)
             ? { site, flag, title, episodes, index: epIndex || 0, vodId, kazumiSrc: kazumiSrc || '' }
             : null;
@@ -873,7 +1125,6 @@ const Player = {
         const result = (r && typeof r === 'object') ? { ...r, ok: false } : { ok: false };
         if (meta.requestId && !result.requestId) result.requestId = meta.requestId;
         if (meta.playSessionId && !result.playSessionId) result.playSessionId = meta.playSessionId;
-        const reason = String(result.reason || 'mpv-play-failed');
         const url = String(result.url || meta.url || '');
         const labels = {
             'mpv-missing': '未检测到 mpv，请在设置中安装或指定播放器',
@@ -887,22 +1138,41 @@ const Player = {
             'media-probe-login-page': '媒体地址跳转到登录页，已拒绝交给播放器',
             'media-probe-json-error': '媒体地址返回接口错误，已拒绝交给播放器',
             'media-probe-http-403': '媒体地址返回 403，Cookie 或签名可能已过期',
+            'media-probe-not-media': '媒体地址不是可识别的音视频内容，已拒绝交给播放器',
+            'media-probe-network-error': '媒体地址网络请求失败（连接被拒/DNS/代理异常）',
             'media-probe-expired-url': '媒体地址签名已过期',
             'media-probe-probe-timeout': '媒体地址探测超时',
             'media-probe-probe-cancelled': '媒体地址探测已取消',
         };
-        let note = labels[reason] || `mpv 播放失败：${reason}`;
+        let reason = String(result.reason || 'mpv-play-failed');
+        // 起播失败后的补探测（主进程 postProbe）比 mpv 收尾日志更可操作：
+        // 死链/风控页直接按探测原因给文案（如「媒体地址返回 HTTP 404」）
+        if (result.postProbe) reason = `media-probe-${String(result.postProbe).split('/')[0]}`;
+        let note = labels[reason];
+        if (!note) {
+            const httpMatch = /^media-probe-http-(\d{3})$/.exec(reason);
+            note = httpMatch
+                ? `媒体地址返回 HTTP ${httpMatch[1]}（链接可能已失效或被站点拦截）`
+                : `mpv 播放失败：${reason}`;
+        }
         const detail = String(result.error || '').replace(/\s+/g, ' ').trim();
         if (detail) note += `：${detail.slice(-240)}`;
+        // 静默退出（无补探测、无日志可提取）：常见于旧版内置/自装 mpv 的行为差异，
+        // 给出可操作的下一步而不是干巴巴的「mpv 已退出」
+        if (reason === 'mpv-exited-before-playback' && !detail && !result.postProbe) {
+            note += '（未捕获到具体原因：可在 设置 → 组件状态 更新内置播放器后重试，或换其它线路播放）';
+        }
         if (meta.prefix && reason !== 'mpv-missing') note = `${meta.prefix}：${note}`;
-        // 网盘本地取流失败最常见原因是夸克 Cookie 缺失/过期（未登录时上游
-        // 401/14001，登录过期时 401/412）：给出明确的扫码登录引导而非笼统报错。
+        // 网盘本地取流失败按两类给可操作引导：Cookie 缺失/过期（上游 401/14001，
+        // 未登录时后端快速失败）→ 扫码重登；已登录仍失败多为夸克侧直链被拒
+        // （412 风控/权益异常或边缘故障，实测 API 正常但所有新签直链 412）→
+        // 重新扫码刷新会话 + 稍后重试/换线路，不能笼统断言「未登录」。
         const panStreamFailed = this._isLocalGoProxyStreamUrl(url)
             && /(?:^|[?&])do=pan(?:&|$)/.test(String(url));
         if (panStreamFailed && reason !== 'play-cancelled') {
             note = note.includes('Cookie')
                 ? note
-                : `${note}（网盘资源常见原因：夸克账号未登录或登录已过期，请在设置中重新扫码）`;
+                : `${note}（网盘资源常见原因：夸克 Cookie 缺失或过期——请在设置中重新扫码；若已登录仍失败，多为夸克侧直链被拒（风控），请重新扫码后再试或稍后换线路播放）`;
         }
         // 旧请求等待起播期间用户可能已经点了新剧集；旧请求返回取消时不能
         // 清掉新请求刚建立的连播上下文，也不能弹出旧地址的失败窗口。
@@ -1013,6 +1283,8 @@ const Player = {
             }
             if (r) {
                 hideLoading();
+                // 原生队列静默降级：失败弹窗交给回退后的逐集链路处理，避免双弹窗/空弹窗
+                if (meta.quietFail) return { ok: false, ...r };
                 return this._mpvFailure(r, { ...meta, url });
             }
             // playUrl IPC 超时（r 为 null）：主进程可能仍会稍后接管播放，

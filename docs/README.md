@@ -26,6 +26,7 @@
 | 文档 | 用途 | 使用建议 |
 |---|---|---|
 | [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 当前唯一执行入口 |
+| [WebDAV 同步冲突策略与双向合并设计](WEBDAV_SYNC_MERGE_DESIGN.md) | 多设备同步的合并算法、策略选择与硬约束（无墓碑/全量快照/200 上限） | 暂缓实现；动工前先按此文档核对「待确认项」 |
 
 ## 文档状态优先级
 

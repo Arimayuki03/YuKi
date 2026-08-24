@@ -25,11 +25,18 @@ function loadCommon() {
     return context;
 }
 
-/** 模拟 <img> DOM 元素（dataset/classList/src）。 */
-function fakeImg(html) {
+/** 模拟 <img> DOM 元素（dataset/classList/src）；cardSource 提供时模拟 closest('.vod-card')。 */
+function fakeImg(html, cardSource) {
     const src = (html.match(/src="([^"]*)"/) || [])[1] || '';
     const fb = (html.match(/data-fb="([^"]*)"/) || [])[1] || '';
-    return { dataset: { fb }, src, classList: { add() {} }, onerror: null };
+    const img = {
+        dataset: { fb }, src,
+        classList: { add() {} },
+        attrs: {},
+        setAttribute(name, value) { this.attrs[name] = String(value); },
+    };
+    img.closest = () => (cardSource !== undefined ? { dataset: { source: cardSource } } : null);
+    return img;
 }
 
 test('vodCoverChain：按序尝试多来源，失败逐级切换，最终落占位图（T74）', () => {
@@ -61,4 +68,28 @@ test('vodCoverChain：图片带淡入与加载策略', () => {
     assert.match(html, /loading="eager"/);
     assert.match(html, /referrerpolicy="no-referrer"/);
     assert.match(html, /onload="coverFadeIn\(this\)"/);
+});
+
+test('coverChainNext：Kazumi/Bangumi 卡链耗尽补标 data-cover-missing（供补拉管线重试，T78）', () => {
+    const ctx = loadCommon();
+    const html = ctx.__chain(['https://a/b.jpg'], true); // 单候选 → 一次失败即耗尽
+    const kazumi = fakeImg(html, 'kazumi:baimao');
+    ctx.__next(kazumi);
+    assert.equal(kazumi.src, ctx.__ph());
+    assert.equal(kazumi.attrs['data-cover-missing'], '1');
+
+    const bangumi = fakeImg(html, 'bangumi');
+    ctx.__next(bangumi);
+    assert.equal(bangumi.attrs['data-cover-missing'], '1');
+
+    // 非 Bangumi 系卡片保持原行为：不标 missing
+    const plain = fakeImg(html, 'cspby');
+    ctx.__next(plain);
+    assert.equal(plain.attrs['data-cover-missing'], undefined);
+
+    // 无卡片上下文（如以图搜番结果）不抛错、不标记
+    const orphan = fakeImg(html);
+    ctx.__next(orphan);
+    assert.equal(orphan.src, ctx.__ph());
+    assert.equal(orphan.attrs['data-cover-missing'], undefined);
 });

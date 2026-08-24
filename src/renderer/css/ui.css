@@ -686,6 +686,9 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 .rec-tags { display:flex; gap:6px; flex-wrap:wrap; }
 /* 横排小行：遮罩选择 / 壁纸按钮 / 下载目录按钮等 */
 .wall-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+/* 竖排小行：WebDAV 自动同步间隔（文字在上、选择框在下） */
+.auto-interval-col { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin-top:8px; }
+.auto-interval-col .md-select { width:220px; min-width:0; max-width:100%; }
 
 /* 网盘账号（网盘影视源）板块 */
 .pan-cookie-item {
@@ -731,6 +734,10 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
     opacity: .55; transition: opacity .15s, background .15s;
 }
 .pan-cookie-eye:hover { opacity: 1; background: var(--md-surface-container-high); }
+/* WebDAV 密码显隐：复用 .pan-cookie-eye 按钮样式，输入框右侧留白防文字压按钮 */
+.webdav-pwd-wrap { position: relative; }
+.webdav-pwd-wrap .md-input { padding-right: 38px !important; }
+.webdav-pwd-wrap .pan-cookie-eye { top: 50%; transform: translateY(-50%); }
 /* 每页影片数量（T40）：四项「标签+下拉」两列网格；标签定宽右对齐、
    下拉等宽，非全屏半宽下不再四组挤一行造成字体错位；窄窗折单列 */
 .pagesize-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px 18px; margin-top:8px; max-width:560px; }
@@ -740,23 +747,36 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 @media (max-width:700px) { .pagesize-grid { grid-template-columns:1fr; max-width:280px; } }
 /* 快捷键/语言偏好网格：auto-fill 自适应折列 */
 .hotkey-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; }
-/* mpv 键位自定义表（T8）：动作名 + 键位按钮；捕获中/冲突态高亮 */
-.hk-row {
-    display:flex; align-items:center; justify-content:space-between; gap:10px;
-    padding:7px 0; border-bottom:1px dashed var(--md-outline-variant);
+/* mpv 键位自定义表（T8 紧凑重构）：芯片网格 —— 动作标签在上、键位按钮在下，
+   auto-fill 多列自适应折列，替代原全宽单列行；捕获中/冲突态整卡高亮 */
+#hotkey_rows {
+    display:grid;
+    grid-template-columns:repeat(auto-fill, minmax(104px, 1fr));
+    gap:8px;
+    margin-top:8px;
 }
-.hk-row:last-child { border-bottom:none; }
-.hk-label { font-size:13px; color:var(--md-on-surface-variant); }
+.hk-chip {
+    display:flex; flex-direction:column; gap:5px;
+    padding:9px 10px;
+    border:1px solid var(--md-outline-variant); border-radius:10px;
+    background:var(--md-surface);
+}
+.hk-label {
+    font-size:12px; line-height:1.2; color:var(--md-on-surface-variant);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
 .hk-key {
-    min-width:92px; height:32px; padding:0 12px; font-size:13px; font-family:inherit;
-    border:1px solid var(--md-outline); border-radius:8px;
-    background:var(--md-surface); color:var(--md-on-surface); cursor:pointer;
+    width:100%; min-width:0; height:28px; padding:0 8px; font-size:12.5px; font-family:inherit;
+    border:1px solid var(--md-outline); border-radius:7px;
+    background:var(--md-surface-container); color:var(--md-on-surface); cursor:pointer;
     transition:border-color .15s, background .15s, color .15s;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 .hk-key:hover { border-color:var(--md-primary); }
 .hk-key.capturing { border-color:var(--md-primary); background:var(--md-primary-container); color:var(--md-on-primary-container); }
-.hk-row.conflict .hk-key { border-color:var(--md-error); color:var(--md-error); }
-.hk-row.conflict .hk-label { color:var(--md-error); }
+.hk-chip.conflict { border-color:var(--md-error); }
+.hk-chip.conflict .hk-key { border-color:var(--md-error); color:var(--md-error); }
+.hk-chip.conflict .hk-label { color:var(--md-error); }
 .tool-card {
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
     border-radius:16px; padding:18px 20px; margin-bottom:16px;
@@ -1443,7 +1463,8 @@ body.frameless #view-detail { padding-top:48px !important; }
 /* 下载管理（卡片化：与直链/工具页同为 tool-card，限宽居中） */
 .downloads-wrap { max-width:980px; margin:0 auto; }
 .dl-input-bar { display:flex; gap:10px; align-items:center; margin-bottom:14px; }
-.dl-input-bar .md-input { flex:1; }
+/* 输入栏与直链播放输入框同款（48px 高、24px 圆角） */
+.dl-input-bar .md-input { flex:1; height:48px; border-radius:24px; }
 .dl-input-bar .md-btn { flex-shrink:0; white-space:nowrap; }
 
 .dl-toolbar {
@@ -1671,7 +1692,11 @@ html.glass-on .history-item,
 html.glass-on .dl-item,
 html.glass-on .bangumi-info-card,
 html.glass-on .detail-overview-card,
-html.glass-on .detail-episodes-panel {
+html.glass-on .detail-episodes-panel,
+html.glass-on .detail-char-card,
+html.glass-on .detail-comment,
+html.glass-on .detail-staff,
+html.glass-on .detail-relation {
     background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil), transparent);
 }
 /* 模糊层独立成 glass-blur 类（applyGlass 第二步再挂；见上方两段式注释） */
@@ -1683,7 +1708,11 @@ html.glass-on.glass-blur .history-item,
 html.glass-on.glass-blur .dl-item,
 html.glass-on.glass-blur .bangumi-info-card,
 html.glass-on.glass-blur .detail-overview-card,
-html.glass-on.glass-blur .detail-episodes-panel {
+html.glass-on.glass-blur .detail-episodes-panel,
+html.glass-on.glass-blur .detail-char-card,
+html.glass-on.glass-blur .detail-comment,
+html.glass-on.glass-blur .detail-staff,
+html.glass-on.glass-blur .detail-relation {
     backdrop-filter:blur(var(--glass-blur));
     -webkit-backdrop-filter:blur(var(--glass-blur));
 }
