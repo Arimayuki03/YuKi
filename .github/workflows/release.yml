@@ -1,16 +1,16 @@
 name: Release
 
-# tag 驱动的发布流水线：推�?v* 标签后自动构�?Windows 安装包并创建 Draft Release�?# 发布流程�?CONTRIBUTING.md「发布流程」章节�?
+# tag 椹卞姩鐨勫彂甯冩祦姘寸嚎锛氭帹閫?v* 鏍囩鍚庤嚜鍔ㄦ瀯寤?Windows 瀹夎鍖呭苟鍒涘缓 Draft Release銆?# 鍙戝竷娴佺▼瑙?CONTRIBUTING.md銆屽彂甯冩祦绋嬨€嶇珷鑺傘€?
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # 创建 Release 与上传产物所必需
+  contents: write # 鍒涘缓 Release 涓庝笂浼犱骇鐗╂墍蹇呴渶
 
 jobs:
   windows:
-    name: Windows NSIS 安装�?    runs-on: windows-latest
+    name: Windows NSIS 瀹夎鍖?    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -20,29 +20,29 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
-      - name: 安装依赖
+      - name: 瀹夎渚濊禆
         run: npm ci
-      - name: 准备 Python 构建环境
+      - name: 鍑嗗 Python 鏋勫缓鐜
         run: python -m venv python-backend/.venv
-      - name: 构建 Python 后端（PyInstaller �?python-dist/�?        run: npm run build:py
-      # 与本�?build:win 的差异：CI 是全�?checkout，vendor/ 为空�?      # extraResources 会把 vendor/** 打入安装包，必须先完整填充，
-      # 否则产物缺少 mpv/aria2c/ffmpeg，与开发机构建的安装包不一致�?      - name: 下载全部第三方二进制（mpv/aria2c/anime4k/ffmpeg/misans�?        run: node scripts/download-binaries.js all
-      - name: 打包 Windows 安装�?        run: npx electron-builder --win --publish never
-      - name: 上传构建构件
+      - name: 鏋勫缓 Python 鍚庣锛圥yInstaller 鈫?python-dist/锛?        run: npm run build:py
+      # 涓庢湰鍦?build:win 鐨勫樊寮傦細CI 鏄叏鏂?checkout锛寁endor/ 涓虹┖锛?      # extraResources 浼氭妸 vendor/** 鎵撳叆瀹夎鍖咃紝蹇呴』鍏堝畬鏁村～鍏咃紝
+      # 鍚﹀垯浜х墿缂哄皯 mpv/aria2c/ffmpeg锛屼笌寮€鍙戞満鏋勫缓鐨勫畨瑁呭寘涓嶄竴鑷淬€?      - name: 涓嬭浇鍏ㄩ儴绗笁鏂逛簩杩涘埗锛坢pv/aria2c/anime4k/ffmpeg/misans锛?        run: node scripts/download-binaries.js all
+      - name: 鎵撳寘 Windows 瀹夎鍖?        run: npx electron-builder --win --publish never
+      - name: 涓婁紶鏋勫缓鏋勪欢
         uses: actions/upload-artifact@v4
         with:
           name: yuki-windows-installer
           path: dist/*.exe
           if-no-files-found: error
-      - name: 创建 Draft Release 并挂载安装包
+      - name: 鍒涘缓 Draft Release 骞舵寕杞藉畨瑁呭寘
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          generate_release_notes: true # 维护者随后替换为 CHANGELOG 提炼的正�?Notes �?publish
+          generate_release_notes: true # 缁存姢鑰呴殢鍚庢浛鎹负 CHANGELOG 鎻愮偧鐨勬寮?Notes 鍐?publish
           files: dist/*.exe
 
-  # macOS / Linux 打包与安装后冷启动验证仍�?PROGRESS.md 计划内，
-  # 验证通过后再启用对应 job（build:mac = dmg / build:linux = AppImage+deb）：
+  # macOS / Linux 鎵撳寘涓庡畨瑁呭悗鍐峰惎鍔ㄩ獙璇佷粛鍦?PROGRESS.md 璁″垝鍐咃紝
+  # 楠岃瘉閫氳繃鍚庡啀鍚敤瀵瑰簲 job锛坆uild:mac = dmg / build:linux = AppImage+deb锛夛細
   #
   # macos:
   #   name: macOS DMG
