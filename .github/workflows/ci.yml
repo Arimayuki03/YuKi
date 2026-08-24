@@ -8,54 +8,58 @@ on:
 
 jobs:
   js:
-    name: JS 鍗曞厓娴嬭瘯 + 璇硶闂ㄧ
+    name: JS 单元测试 + 语法门禁
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      # postinstall 鐨?download-binaries 宸插閿欙紙|| exit 0锛夛紝CI 鎷変笉鍒颁簩杩涘埗涓嶉樆濉?      - run: npm ci
-      - name: 渚涘簲閾惧璁?        run: npm audit --omit=dev || true
-        # 杩愯鏃朵緷璧栧璁★紙褰撳墠浠?electron 閾撅級锛涢杞瀵燂紝绋冲畾鍚庡幓鎺?|| true
+      # postinstall 的 download-binaries 已容错（|| exit 0），CI 拉不到二进制不阻塞
+      - run: npm ci
+      - name: 供应链审计
+        run: npm audit --omit=dev || true
+        # 运行时依赖审计（当前仅 electron 链）；首轮观察，稳定后去掉 || true
       - run: npm run test:jsunit
       - run: npm run test:js
 
   python:
-    name: Python 鍥炲綊锛坰moke/phase3/kazumi/jar + 缂栬瘧妫€鏌ワ級
+    name: Python 回归（smoke/phase3/kazumi/jar + 编译检查）
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-      - name: 瀹夎閿佸畾渚濊禆
+      - name: 安装锁定依赖
         run: pip install -r python-backend/requirements.txt
-      - name: 渚涘簲閾惧璁?        run: |
+      - name: 供应链审计
+        run: |
           pip install pip-audit
           pip-audit -r python-backend/requirements.txt --strict || true
-          # --strict 澶辫触鏆備笉鎷︽埅锛堥杞熀绾垮厛瑙傚療锛夛紝绋冲畾鍚庡幓鎺?|| true
-      - name: 杩愯鍚庣鍥炲綊
+          # --strict 失败暂不拦截（首轮基线先观察），稳定后去掉 || true
+      - name: 运行后端回归
         run: python python-backend/tests/run_all.py
         env:
           PYTHONUTF8: 1
           PYTHONIOENCODING: utf-8
-        # jar-e2e 闃舵鍦ㄦ棤 JDK 鐜鑷姩璺宠繃锛況unner 鑷甫 Java 鍒欑湡璺?      - name: Ruff lint
+        # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真跑
+      - name: Ruff lint
         run: |
           pip install ruff
           ruff check python-backend
 
-  # B3 鍚庣画澧炲己锛歵ag push 鏃剁殑 electron-builder 鏋勫缓浜х墿
+  # B3 后续增强：tag push 时的 electron-builder 构建产物
 
-  # 褰辫浠撳吋瀹规€у浠讹紙渚濊禆澶栫綉 + 杈冩參锛夛細鎵嬪姩瑙﹀彂
+  # 影视仓兼容性套件（依赖外网 + 较慢）：手动触发
   compat:
-    name: 褰辫浠撳吋瀹规€э紙21 浠撹鏂欙級
+    name: 影视仓兼容性（21 仓语料）
     runs-on: windows-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with: { python-version: '3.14' }
       - run: pip install -r python-backend/requirements.txt
       - run: python python-backend/tests/test_config_compat.py
