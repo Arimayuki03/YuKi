@@ -11,16 +11,14 @@ jobs:
     name: JS 单元测试 + 语法门禁
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
-      # postinstall 的 download-binaries 已容错（|| exit 0），CI 拉不到二进制不阻塞
-      - run: npm ci
-      - name: 供应链审计
-        run: npm audit --omit=dev || true
-        # 运行时依赖审计（当前仅 electron 链）；首轮观察，稳定后去掉 || true
+      # postinstall �?download-binaries 已容错（|| exit 0），CI 拉不到二进制不阻�?      - run: npm ci
+      - name: 供应链审�?        run: npm audit --omit=dev || true
+        # 运行时依赖审计（当前�?electron 链）；首轮观察，稳定后去�?|| true
       - run: npm run test:jsunit
       - run: npm run test:js
 
@@ -28,24 +26,22 @@ jobs:
     name: Python 回归（smoke/phase3/kazumi/jar + 编译检查）
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
       - name: 安装锁定依赖
         run: pip install -r python-backend/requirements.txt
-      - name: 供应链审计
-        run: |
+      - name: 供应链审�?        run: |
           pip install pip-audit
           pip-audit -r python-backend/requirements.txt --strict || true
-          # --strict 失败暂不拦截（首轮基线先观察），稳定后去掉 || true
+          # --strict 失败暂不拦截（首轮基线先观察），稳定后去�?|| true
       - name: 运行后端回归
         run: python python-backend/tests/run_all.py
         env:
           PYTHONUTF8: 1
           PYTHONIOENCODING: utf-8
-        # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真跑
-      - name: Ruff lint
+        # jar-e2e 阶段在无 JDK 环境自动跳过；runner 自带 Java 则真�?      - name: Ruff lint
         run: |
           pip install ruff
           ruff check python-backend
@@ -58,8 +54,8 @@ jobs:
     runs-on: windows-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: '3.14' }
       - run: pip install -r python-backend/requirements.txt
       - run: python python-backend/tests/test_config_compat.py
