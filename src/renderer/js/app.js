@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, UIState, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
 
 const App = {
     currentView: 'home',
@@ -14,6 +14,13 @@ const App = {
     // 视图导航历史栈：鼠标侧键后退弹栈、前进走重做栈（仅视图级，不含弹窗）
     _navStack: [],
     _navForward: [],
+    // 分支级位置记忆（移动端 Tab 式分栈）：四个内容分支各自记住最后停留的位置——
+    // 从某分支打开过详情，则该分支的记忆是那条详情（附 site|vodId 内容指纹），
+    // 点该分支导航回到详情；其他分支不受影响、直通各自的根页面。
+    // 单例详情被其他分支换片后，旧记忆指纹失配自动回根，绝不显示错误的影片。
+    // 停留在详情页时点内容分支导航 = 去那个页面（直进目标根，「点击其他页面不受影响」）。
+    _branchViews: ['home', 'search', 'popular', 'timeline'],
+    _branchLast: { home: 'home', search: 'search', popular: 'popular', timeline: 'timeline' },
     // 页级缓存（任务十一）：只读浏览视图在 TTL 内再次切入时跳过 enter 网络重拉。
     // 仅收录只读视图（home/popular/timeline/my-统计）；history/收藏/下载等反映用户操作的视图绝不缓存。
     _cacheableViews: { home: 60000, popular: 60000, timeline: 60000 },
@@ -28,12 +35,40 @@ const App = {
         return at > 0 && (Date.now() - at) < ttl;
     },
 
-    /** opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）。
+    /** 当前详情页的内容指纹（site|vodId）：单例容器被换片后旧记忆据此自动失效。
+     *  open()/openBangumi() 先写 Detail.site/vodId 再 showView，此处读取已是新内容。 */
+    _detailKey() {
+        try {
+            if (typeof Detail === 'undefined') return '';
+            return `${String(Detail.site || '')}|${String(Detail.vodId || '')}`;
+        } catch (e) { return ''; }
+    },
+
+    /** 主导航点击的目标视图：该分支记住了自己的详情子页、且指纹与当前单例详情
+     *  一致时回到详情；否则直通分支根。页面状态记忆总开关关闭时同样直通。
+     *  停留在详情页时点内容分支导航：直进目标分支根（「点击其他页面不受影响」）。 */
+    navTarget(branch) {
+        if (this._branchViews.indexOf(branch) < 0) return branch; // 直播/历史/我的等无子页分支直通
+        if (typeof UIState !== 'undefined' && UIState.isEnabled && !UIState.isEnabled()) return branch;
+        if (this.currentView === 'detail') return branch;
+        const mem = this._branchLast[branch];
+        if (mem && mem.v === 'detail'
+            && document.getElementById('view-detail')
+            && this._detailKey() === mem.key) return 'detail';
+        return branch;
+    },
+
+    /** 视图切换主入口：opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）；
      *  opts.refresh === true 时强制重拉（忽略页级缓存 TTL）。 */
     showView(name, opts) {
         // 旧收藏路由并入「我的」收藏页签（左侧独立收藏入口已移除）
         let myTab = null;
         if (name === 'favorites') { name = 'my'; myTab = 'favorites'; }
+        const fromView = this.currentView; // 详情归属判定用：进入详情前所在视图
+        // 「新开详情」标记：仅 Detail.open/openBangumi 装载新内容时置位；导航恢复、
+        // 鼠标侧键返回、嵌套快照恢复等「重新展示」路径不带此标记，不改写记忆
+        const freshDetail = name === 'detail' && this._detailOpening === true;
+        this._detailOpening = false;
         // 切走前保存当前视图滚动位置：.view 靠 display:none 切换，Chromium 会把
         // 隐藏滚动容器的 scrollTop 归零——详情页返回搜索页等场景将回不到原浏览位置
         if (name !== this.currentView) {
@@ -69,11 +104,26 @@ const App = {
         if (name === 'timeline') {
             const firstTl = (typeof Timeline !== 'undefined') && !Timeline._inited; // init() 首次会自行 load()，避免重复拉取
             Timeline.init();
-            Timeline.refreshCollections(); // 每次进入重建收藏过滤集合（仅本地，无日历网络）
-            if (!firstTl && !skipEnter) Timeline.load(); // 再次切入且已过期 → 刷新日历（TTL 内则跳过）
+            // TTL 内再次切入：跳过收藏集合重建与日历重拉——DOM 原样保留，切回即显
+            // 上次内容（收藏状态变更由 FavHub 订阅实时同步，无需每次进页重扫重绘）。
+            // 过期/首次才重建过滤集合并刷新日历。
+            if (!skipEnter) {
+                Timeline.refreshCollections(); // 重建收藏过滤集合（仅本地，无日历网络）
+                if (!firstTl) Timeline.load(); // 再次切入且已过期 → 刷新日历（TTL 内则跳过）
+            }
             this._viewLoadedAt.timeline = Date.now();
         } // 番剧时间表（Bangumi）
         if (name === 'popular' && !skipEnter) { Popular.enter(); this._viewLoadedAt.popular = Date.now(); } // Kazumi 首页推荐（Bangumi 趋势，T62）
+        // 分支位置记忆更新：仅「新开详情」且来源是四分支之一时，该分支记住这条详情
+        // （附内容指纹，换片后失配自动回根）；恢复展示/回根视图时按对应规则改写，
+        // 其他入口（历史/收藏/下载等）打开的详情不属于四个内容分支，不写记忆。
+        if (name === 'detail') {
+            if (freshDetail && this._branchViews.indexOf(fromView) >= 0) {
+                this._branchLast[fromView] = { v: 'detail', key: this._detailKey() };
+            }
+        } else if (this._branchViews.indexOf(name) >= 0) {
+            this._branchLast[name] = name;
+        }
         if (!opts || opts.push !== false) {
             if (this._navStack[this._navStack.length - 1] !== name) {
                 this._navStack.push(name);
@@ -181,8 +231,10 @@ const App = {
 
     initNav() {
         $('.main-nav-item').on('click', (e) => {
-            const v = $(e.currentTarget).data('view');
-            this.showView(v);
+            const v = String($(e.currentTarget).data('view') || '');
+            // 分支位置记忆：点主导航回到该分支上次停留处（首页/搜索/推荐/时间表的
+            // 详情子页）；已在分支内再点主导航 → 回分支根。其余分支直通。
+            this.showView(this.navTarget(v));
         });
         // 侧栏收缩/展开（只显示图标），状态持久化
         $('#nav-collapse').on('click', () => {
@@ -204,7 +256,16 @@ const App = {
         });
         btn.addEventListener('click', () => {
             const v = document.querySelector('.view.active');
-            if (v) v.scrollTo({ top: 0, behavior: 'smooth' });
+            if (!v) return;
+            // 平滑回顶标记：滚动补偿类逻辑（如吐槽续拉锚点回拨）据此避让，
+            // 防止与进行中的平滑动画抢滚动条造成画面割裂。
+            v._yukiSmoothTop = true;
+            const clear = () => { v._yukiSmoothTop = false; };
+            if ('onscrollend' in v) v.addEventListener('scrollend', clear, { once: true });
+            else setTimeout(clear, 1500);
+            // 已在顶部时 scrollend 可能不触发，兜底再清一次
+            setTimeout(clear, 3000);
+            v.scrollTo({ top: 0, behavior: 'smooth' });
         });
     },
 };
@@ -228,6 +289,10 @@ $(async function bootstrap() {
     // 尽早读取本地设置（主题/启动页/字体开关，无需等后端）
     let s = {};
     try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { /* 首次运行无 settings */ }
+
+    // 页面状态记忆总开关（设置 → 外观）：同步给 ui-state.js（各页持久化读写的唯一门禁）。
+    // 须在任何视图 init/enter 之前生效——启动恢复路径据此决定是否还原上次状态。默认开。
+    if (typeof UIState !== 'undefined' && UIState.setEnabled) UIState.setEnabled(s.uiStateMemory !== false);
 
     // 载入内置 MiSans 字体（打包内置、无运行时下载；开关关闭时回退系统字体，T61 / 2.11）
     await applyMisansFont(s.useMisansFont !== false);
@@ -295,7 +360,7 @@ $(async function bootstrap() {
         if (window.yuki.winClose) $('#win-close').on('click', () => window.yuki.winClose());
     })();
 
-    showLoading('正在启动后端服务…');
+    showLoading('正在启动后端服务…', { blocking: true });
     const ok = await waitBackend();
     hideLoading();
     if (!ok) {

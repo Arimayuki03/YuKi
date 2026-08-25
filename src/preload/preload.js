@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld('yuki', {
     onEpisodeSkip: (cb) => {
         ipcRenderer.on('yuki:episode-skip', (_e, info) => cb(info));
     },
+    /** 外部播放器进程退出 {sessionId, pid, kind, wallSec, titles}：wallSec 为进程存活
+     *  墙钟秒数（口径同 mpv wallWatched），渲染层据此计入观看统计/最近观看/历史 */
+    onExternalPlayerExit: (cb) => {
+        ipcRenderer.on('yuki:ext-player-exit', (_e, info) => cb(info));
+    },
     /** 构建整季原生播放列表（本地按需解析代理条目）：{site,flag,vipFlags,eps:[{id,name}],start} */
     buildPlaylist: (queue) => ipcRenderer.invoke('yuki:playlist-build', queue),
     /** Phase 5 本地文件管理（白名单根目录 + 防穿越，rel 均为根目录相对路径） */
@@ -77,7 +82,6 @@ contextBridge.exposeInMainWorld('yuki', {
     fileOpenDir: (rel) => ipcRenderer.invoke('yuki:file-open-dir', rel || ''),
     /** 本地视频预览图（ffmpeg 抓帧，md5 缓存）：{ok, path} | {ok:false} */
     fileThumb: (rel) => ipcRenderer.invoke('yuki:file-thumb', rel),
-    fileUpload: (rel) => ipcRenderer.invoke('yuki:file-upload', rel || ''),
     fileNewFolder: (rel, name) => ipcRenderer.invoke('yuki:file-new-folder', rel || '', name),
     fileDelFile: (rel) => ipcRenderer.invoke('yuki:file-del-file', rel),
     fileDelFolder: (rel) => ipcRenderer.invoke('yuki:file-del-folder', rel),

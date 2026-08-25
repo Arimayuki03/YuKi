@@ -7,7 +7,7 @@
  * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet */
+/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, UIState */
 
 const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
@@ -62,6 +62,7 @@ const Timeline = {
             if (wd >= 1 && wd <= 7) {
                 this._weekday = wd;
                 this._page = 1;
+                this._saveView(); // 选择态存档（切页/重启不回初始态）
                 this._renderWeekdays();
                 this._renderGrid();
             }
@@ -69,11 +70,13 @@ const Timeline = {
         $('#timeline-season').on('change', () => {
             this._season = $('#timeline-season').val() || 'current';
             this._page = 1;
+            this._saveView();
             this.load();
         });
         $('#timeline-sort').on('change', () => {
             this._sort = $('#timeline-sort').val() || 'heat';
             this._page = 1;
+            this._saveView();
             this._renderGrid();
         });
         $('#timeline-filters').on('click', '.timeline-filter-chip', (e) => {
@@ -84,6 +87,7 @@ const Timeline = {
             this._filters[key] = !this._filters[key];
             el.toggleClass('active', this._filters[key]);
             this._page = 1;
+            this._saveView();
             this._renderGrid();
         });
         // 保存过滤 chip 的原始 title，供禁用/启用态切换还原
@@ -91,9 +95,52 @@ const Timeline = {
         // 先按当前（默认禁用）态即时展示过滤行，避免筛选按钮在收藏数据异步拉取完成前「消失一会」；
         // _loadColSets 完成后会再调 _setColAvailable 更新为可用态（此前只在异步回调里首次 show，导致延迟出现）。
         this._setColAvailable(this._colAvailable);
+        this._restoreView(); // 恢复持久化的星期/季度/排序/过滤/页码（含控件选中态），随后 load() 按存档拉取
         // 收藏过滤数据（异步，不阻塞首屏）
         this._loadColSets();
         await this.load();
+    },
+
+    /** 页面选择态持久化（切页/重启不回初始态）：星期/季度/排序/收藏过滤/页码。
+     *  ui-state.js 未加载的测试沙箱环境静默降级为不持久化。 */
+    _viewState() {
+        try { return (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('timeline') : null; } catch (e) { return null; }
+    },
+    _saveView() {
+        try {
+            if (typeof UIState === 'undefined' || !UIState.set) return;
+            UIState.set('timeline', {
+                weekday: this._weekday,
+                season: this._season,
+                sort: this._sort,
+                filters: {
+                    dropped: !!this._filters.dropped,
+                    watched: !!this._filters.watched,
+                    onlyWatching: !!this._filters.onlyWatching,
+                },
+                page: this._page || 1,
+            });
+        } catch (e) { /* 持久化失败不影响主流程 */ }
+    },
+
+    /** init 时恢复存档并同步下拉/筛选 chip 的选中态（数据层恢复先行，控件缺失时仅跳过 UI 同步）。 */
+    _restoreView() {
+        const st = this._viewState();
+        if (!st) return;
+        if (st.weekday >= 1 && st.weekday <= 7) this._weekday = Number(st.weekday);
+        if (st.season === 'current' || /^\d{4}Q[1-4]$/.test(String(st.season))) this._season = String(st.season);
+        if (['heat', 'rating', 'date'].indexOf(st.sort) >= 0) this._sort = String(st.sort);
+        const f = (st.filters && typeof st.filters === 'object') ? st.filters : {};
+        this._filters = { dropped: !!f.dropped, watched: !!f.watched, onlyWatching: !!f.onlyWatching };
+        this._page = Math.max(1, Number(st.page) || 1);
+        try {
+            $('#timeline-season').val(this._season);
+            $('#timeline-sort').val(this._sort);
+            const filters = this._filters;
+            $('#timeline-filters .timeline-filter-chip').each(function () {
+                $(this).toggleClass('active', !!filters[String($(this).data('filter') || '')]);
+            });
+        } catch (e) { /* 控件缺失不影响数据层恢复 */ }
     },
 
     // ---------------------------------------------------------------- 季节索引
@@ -319,9 +366,8 @@ const Timeline = {
 
     async _loadCurrent() {
         this._mode = 'current';
-        // 命中缓存即时上屏，后台静默刷新（不弹 loading，不打断已见内容）
+        // 命中缓存即时上屏，后台静默刷新；不弹全局加载遮罩，数据到达后直接上屏
         const hit = this._tryCache();
-        if (!hit) showLoading();
         try {
             const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action');
             const cal = (rsp && rsp.calendar) || [];
@@ -337,8 +383,8 @@ const Timeline = {
             }
         } catch (e) {
             if (!hit) warnToast('时间表载入失败');
-        } finally {
-            if (!hit) hideLoading();
+            // 无缓存兜底且日历为空：渲染网络/镜像引导空态（多为无法直连 Bangumi）
+            if (!hit && !this._calendar.length) this._renderGrid();
         }
     },
 
@@ -347,7 +393,6 @@ const Timeline = {
         if (!range) { this._loadCurrent(); return; }
         this._mode = 'season';
         const hit = this._tryCache();
-        if (!hit) showLoading();
         try {
             const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action');
             const cal = (rsp && rsp.calendar) || [];
@@ -363,8 +408,8 @@ const Timeline = {
             }
         } catch (e) {
             if (!hit) warnToast('该季度数据载入失败');
-        } finally {
-            if (!hit) hideLoading();
+            // 无缓存兜底且日历为空：渲染网络/镜像引导空态
+            if (!hit && !this._calendar.length) this._renderGrid();
         }
     },
 
@@ -391,7 +436,10 @@ const Timeline = {
         this._page = Math.min(Math.max(1, this._page), pagecount);
         const slice = items.slice((this._page - 1) * size, this._page * size);
         const grid = $('#timeline-grid').empty();
-        if (!slice.length) {
+        if (!this._calendar.length) {
+            // 日历整体为空：多为网络无法访问 Bangumi，落到网络/镜像引导空态
+            grid.html(bangumiNetGuide());
+        } else if (!slice.length) {
             grid.html('<div class="tip-line">该日暂无番剧更新</div>');
         } else {
             grid.html(slice.map((item) => this._renderCard(item)).join(''));
@@ -401,7 +449,7 @@ const Timeline = {
         renderPagerBox($('#timeline-pager'), {
             page: this._page,
             pagecount,
-            onJump: (pg) => { this._page = pg; this._renderGrid(); },
+            onJump: (pg) => { this._page = pg; this._saveView(); this._renderGrid(); },
         });
     },
 

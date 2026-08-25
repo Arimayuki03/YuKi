@@ -349,3 +349,117 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 - **追加（同日十四段·m3u 文件入口重构定版）**：用户复测 page 源仍双窗音频无画面、m3u8 无总时长拉不了进度条，并指出 kazumi 全量预热对千级集数的灾难性影响。复盘定性：① **中文集名内嵌 URL 是双窗真凶**——PotPlayer 发请求行不编码非 ASCII 字符，HPE_INVALID_URL 拒收后播放器开新窗口换方式重试（一窗成功一窗卡死=「双窗其一识别成音频」），此前仅当日志噪音处理属误判；② kazumi 并行预热全部集目页信息在千级集数下注册耗时爆炸（渲染层竞速必然超时）。重构定版：① **外部启动统一 .m3u 文件单参数入口**（含单条目）——EXTINF 集名走 UTF-8 文件内容（不经过 HTTP，显示与请求合法彻底分离），条目 URL 回归纯 ASCII 序号+扩展名，TOKEN_RE 同步收窄；② **kazumi 预热回归起始集 only**，其余集目探测时按需解析（页信息+抓流合流 in-flight）。验收：三集含中文集名列表全 ASCII、PotPlayer 经 m3u 文件单窗播放且窗口标题为 EXTINF 集名、HPE 错误 0；eslint 0 error、JS 单元 383/383。
 - **追加（同日十五段·外部启动串行化定版）**：用户复测 catvod 双窗+音频并附日志。日志链路还原：线路A 建队失败（VIP 拒）→ 回退逐集 static 包装 spawn；随后线路B 建队成功 → 队列 spawn——两次独立启动在各自 await（register/buildPlaylist）间隙交错，kill 收敛存在理论逃逸窗口。结构性修复：**外部启动串行链（extLaunchChain promise 队列）**——所有 launchExternalPlayerItems 调用严格依次执行，kill→spawn 位于串行头部且中间无 await，与任何并发交错都不可能产生第二个存活窗口（最后到达的启动胜出）；同时 spawn/kill 全量打点日志（m3u 文件名、条目数、首条 URL、pid）供后续观测。另以真实源形态（lzcdn31 master 清单 + 相对子清单 + 防盗链）做全链路实验：12 请求鉴权全对 0 拒绝、单窗播放、EXTINF 集名生效——pipe 链路对该源形态本身无缺陷，「音频窗」即双 spawn 中失败方的表现，随串行化一并消除。验收：eslint 0 error、JS 单元 383/383。
 
+### R21 · VLC 作为主播放器时本地文件/下载文件只拉起窗口不播放（2026-08-26）
+
+- **发现时间**：2026-08-26（用户报告：VLC 主播放器下「本地文件」页与「下载」页一键播放均只开空窗口）
+- **现象**：选 VLC 为主播放器后，在线视频正常；本地文件管理页与下载完成一键播放只弹出 VLC 空主窗口，不加载任何媒体。
+- **触发链路**：`yuki:file-push` / `yuki:dl-play` → `launchExternalPlayer(extPrimary, abs.replace(/\\/g,'/'))` → `buildExternalPlayerArgs('vlc')` → `spawn(execPath, [url, '--no-video-title-show'])`
+- **根因（两处叠加）**：
+  1. **正斜杠盘符路径的 MRL 歧义**：file-push/dl-pass 为规避 mpv 反斜杠转义问题统一传 `C:/path/to/file.mp4` 形态。PotPlayer/mpv 均可解析该形态，但 VLC 的 MRL 解析器会把 `C:` 当作未知 URI scheme（`c://host`），静默放弃加载 → 空窗口。此前 R20 实测表里 PotPlayer 对同形态正常，掩盖了 VLC 差异。
+  2. **开关位于 URL 之后**：vlc 分支旧实现 `args=[url]` 再 push `--http-header-fields`/`--no-video-title-show`——选项缀在内容参数后，部分 VLC 版本把尾随 token 一并当内容条目处理，加重加载异常。
+- **修复**：
+  - 新增 `toExternalLocalUrl(abs, kind)`：VLC 走 `pathToFileURL` 生成 `file:///C:/...` 标准 URI（百分号编码空格/中文，彻底绕开 MRL scheme 歧义）；其余播放器维持正斜杠路径不变；
+  - `yuki:file-push` 与 `yuki:dl-play` 外部分支均经该转换后起播（并补传 label，观看会话标题可记录文件名）；
+  - `buildExternalPlayerArgs` vlc/mpv 分支统一改为**选项在前、URL 置末**（`args=[]` → push 开关 → 最后 `args.push(url)`），消除尾随 token 歧义。
+- **状态**：✅ 已修复（回归测试见 `tests/js/external-player-spawn.test.js`：转换函数存在且 file-push/dl-play 两入口必经转换、URL 置于参数序列末尾）。内置 mpv 路径不受影响（仍用正斜杠形态）。
+
+### R22 · VLC 播放在线视频失败——mpv 开关误用 + UA 封锁 + 302 丢头三因叠加（2026-08-26）
+
+- **发现时间**：2026-08-26（用户报告；日志证据：`~/.yuki/logs/electron-main.log` 2026-08-25T15:46Z `spawn vlc pid目标 url=https://v.lzcdn31.com/...index.m3u8?sign=...` 与 08-26T00:53 本地 kazumi 队列 m3u spawn）
+- **现象**：VLC 主播放器下在线视频全部失败（page/catvod 单集裸直链、kazumi 队列管道均未播成）；同一 URL 换 PotPlayer 可播、内置 mpv 可播。
+- **根因（三处叠加）**：
+  1. **vlc 分支误用 mpv 开关**：`buildExternalPlayerArgs('vlc')` 生成的 `--http-header-fields=...` 是 mpv/libav 语法，**VLC 根本不认识**——对未知开关 VLC 直接报 `unknown option or missing mandatory argument` 并拒绝加载（非静默忽略，VideoLAN 论坛实锤）。防盗链头从未真正生效过。VLC 真实开关为 `--http-user-agent=` 与 `--http-referrer=`（wiki.videolan.org Documentation:Modules/http；注意 referrer 双写 r）。
+  2. **CDN WAF 封锁 VLC 默认 UA**：page 线路 header 置空后裸直链直接交给播放器，国内 CDN 按 UA 白名单放行——PotPlayer/mpv 默认 UA 恰好过关掩盖了缺陷，`VLC/3.x LibVLC` 是重点封锁对象 → 403。旁证：`sniffMediaExt` 以 `Mozilla/5.0` 探测同源即 200。
+  3. **代理 302 直连丢头**：`_serveResolved` 对 static/catvod 的 Referer/UA-only 会话 302 直连（仅 Cookie/AuthZ 才 pipe），302 后播放器裸连上游、头留在代理侧——UA 校验 CDN 一律拒之。十二段已在 kazumi 上回滚过同一优化，static/catvod 存在同样问题。
+- **修复**：
+  - vlc 分支改用真实开关 `--http-user-agent=${ua}` / `--http-referrer=${referer}`；
+  - `launchExternalPlayerItems` 对 VLC 统一前置 `--http-user-agent=Mozilla/5.0`（裸直链场景兜底；管道代理条目入站不校验 UA，开关无害）；
+  - `_serveResolved` 分流条件统一为「会话头非空即 pipe」（kazumi/static/catvod 一致），时长体验由 catvod 预取 + 定长回写（七段③/九段①）兜底，不再依赖 302 直连。
+- **验证**：JS 单元 400/400（含新增回归：vlc 分支禁用 `--http-header-fields` 且使用真实开关、items 路径 VLC 默认 UA 前置、static UA-only 管道会话转发上游带头非 302）；check-js 47 文件 0 错。kazumi 管道链路 PotPlayer 已验证可用（R20 六段），VLC 侧待用户实测复核。
+
+
+### R23 · PotPlayer 播 m3u8 被识别成 MPEG TS——清单 Content-Type 缺失/generic 触发「未知内容」路径（2026-08-26）
+
+- **发现时间**：2026-08-26（用户报告：PotPlayer 播放 page 线路 m3u8 源被识别成 MPEG TS）
+- **触发链路**：`yuki:play`（page 单集，`isPageRoute` → header=null）→ `resolveExternalItems` → `pipeWrapAuthUrl` 无鉴权头原样返回 → `launchExternalPlayerItems` 单条目直启裸 CDN URL → PotPlayer 直连拉清单
+- **根因（本机 PotPlayer 26.06.30 请求矩阵实测，本地同内容 HLS × 7 变体）**：
+
+  | 变体 | URL 形态 | 响应头 | PotPlayer 行为 |
+  |---|---|---|---|
+  | A | `index.m3u8` | mpegurl+定长 | ✅ HLS 感知（取分片） |
+  | B | `index.m3u8?sign=x` | mpegurl+定长 | ✅ HLS 感知 |
+  | C | `index.m3u8?sign=x` | **video/mp2t** 谎报+定长 | ✅ HLS 感知（扩展名优先于 CT 谎报） |
+  | D | `index.m3u8` | **octet-stream + chunked 无定长** | ❌ ICY 原始流探测 → MPEG TS 误判 |
+  | E | master 变体清单 | mpegurl+定长 | ✅ HLS 感知 |
+  | F | 本地 .m3u 文件间接入口 | — | ✅ HLS 感知 |
+  | H | `file.m3u8?sign=x` | **完全无 Content-Type** | ❌ ICY/WINAMP 探测 → MPEG TS 误判 |
+
+  结论：查询串不破坏扩展名识别、CT 谎报无碍；**唯一触发条件是清单响应缺 Content-Type 或为 application/octet-stream**——PotPlayer 据此把 URL 判入「未知内容」原始流路径（发 `Icy-MetaData:1`/WINAMP UA 探测），按 MPEG TS 解码（时长渐进、不可拖动）。国内 CDN 清单响应恰以 octet-stream/缺头常见（R20 七段已有记录）。f4393f0 把 page 源改为单集直连后该形态完全绕开代理的 mpegurl 回写，缺陷暴露。
+- **修复**：
+  - `playlist-proxy.js`：register 新增 `forcePipe` 会话标志；`_serveResolved` 分流条件放宽为 `needAuth || sess.forcePipe`（无头也强制管道）；`_pipeRemote` 对无会话头请求补默认浏览器 UA（Node http 不自动带 UA，部分 WAF 拒收无 UA 请求）；
+  - `index.js`：`pipeWrapAuthUrl` 包装条件扩为「带鉴权头 **或** PotPlayer + 嗅探提示 .m3u8」，后者注册时携带 `forcePipe: true`；kind 经 `resolveExternalItems(items, kind)` 传入；`yuki:external-player` 单集入口同样经包装。VLC/mpv 内容嗅探不依赖 CT 头维持裸直链不变；mp4/flv 不包装维持旧行为。
+- **验证**：JS 单元 406/406（新增回归：forcePipe 会话回写 mpegurl+定长+默认 UA 而非 302、无 forcePipe 维持 302、pipeWrapAuthUrl 门控与 forcePipe 携带、_serveResolved 条件、external-player 入口覆盖）；check-js 47 文件 0 错；eslint 0 error。端到端实测：真实 PlaylistProxy（forcePipe 无头 static）+ 真实 PotPlayer 26.06.30 + octet-stream 问题 CDN 模拟——PotPlayer 经代理取标准化清单后正常取分片（上游收到 UA=Mozilla/5.0 的清单与分片请求），误判消除。VLC/mpv 链路行为零变化。
+
+### R24 · VLC 播 kazumi 队列弹「无法打开 MRL …/pl/&lt;token&gt;/%12、…/Z」——畸形路径静默 404 弹窗刷屏（2026-08-26）
+
+- **发现时间**：2026-08-26（用户报告：VLC 主播放器播 kazumi 源报「您的输入无法被打开」，MRL 为 `http://127.0.0.1:14171/pl/<token>/%12` 与 `…/<token>/Z`）
+- **现场证据**（electron-main.log 20:45:06 会话，token `mt94w0ta-s7s7rp15`）：
+  - 磁盘 m3u 文件字节级干净（LF、无 BOM/NUL，8 条目全部 `/pl/<token>/N.m3u8` 规范形态）；
+  - 代理侧第 1/2/3/4/7 集解析全部成功（~2.5s/集的跳扫节奏），**无任何解析失败记录**；
+  - 垃圾路径命中 `_handleAsync` 的 TOKEN_RE 不匹配分支 → **静默 404 无日志**，VLC 每条弹一张模态报错框。
+- **定位过程**（受控复现台：真实 PlaylistProxy + 模拟 kazumiResolve 后端 + 模拟上游 CDN + 真实 VLC，9 种清单形态矩阵）：
+  - 合法媒体清单 → VLC 正常经 `/seg/` 取分片播放，链路本身无恙（R22 管道化对合法内容工作正常）；
+  - gzip 未解压体 / HTML 错误页 / UTF-16 / BOM 等非清单元数据直通形态 → VLC 尾部 Range 探测后跳条目，**均不产生 `/pl/` 垃圾请求**；
+  - Node WHATWG URL 对 `%zz` 等非法百分号序列并不抛错 → `_rewriteManifest` 的 `mapped || line` 兜底几乎不会保留远端清单行；
+  - 结论：垃圾 MRL 只能由 VLC 把某份以 `/pl/<token>/N.m3u8` 为基址的响应内容按相对 URI 解析产生，触发源在真实源站（TikTok 系 CDN）的异常清单内容里，本地无法离线复现具体形态；
+  - 全仓仅 register() 一处构造 `/pl/` URL，排除 YuKi 自身拼错地址。
+- **修复**（症状层止血 + 可观测性，触发源待带日志复现实锤后另行根治）：
+  - `playlist-proxy.js` `_handleAsync`：未匹配路径留痕日志（区分活令牌/无令牌）；**活跃令牌**下的越界下标与畸形路径改回最小合法空清单（`#EXTM3U\n#EXT-X-ENDLIST\n`，200 + mpegurl），VLC 静默跳过该条目而非弹窗刷屏——严格 TOKEN_RE 对畸形路径取不到会话，补宽松前缀 `/^\/pl\/([A-Za-z0-9_-]{8,64})\//` 二次提取令牌判存活；令牌不存在维持 404（静默跳过会掩盖过期/重启后的真实失效）；`/seg` 校验失败分支同样补日志；
+  - 待办：~~用户下次复现时 electron-main.log 的 `[播放列表] 未匹配路径` 行可锁定确切触发时序~~ **已在 R27 破案**：畸形路径是「渐进式 MP4 冒充 .m3u8」被 VLC 按 m3u 拆解出的二进制碎片行相对解析所致，非源站清单内容异常；软响应继续作为兜底。
+- **验证**：JS 单元 413/413（原「未知 token / 越界下标 → 404」改为「未知 token → 404；活令牌下越界/畸形路径 → 空清单软响应」，覆盖 `%12`/`Z` 实测形态）；eslint 0 error。
+
+### R25 · VLC 播放列表面板：已播集名变乱码、当前集显示为片名——源流内嵌元数据被 VLC 改名（2026-08-26）
+
+- **发现时间**：2026-08-26（R24 修复后用户复测：播放成功，但播放列表面板中已播条目变乱码、当前条目变成无集数的片名；重启 VLC/重播后恢复正常，再播再次出现）
+- **定性**：**非 YuKi 数据缺陷，属 VLC 行为 × 源站流内嵌元数据的组合表现**
+- **排除项**（受控复现台逐项实测，真实 VLC + HTTP 接口 `playlist.json` 码点级比对）：
+  - m3u 文件的 EXTINF 集名写入 VLC 后逐码点正确（`第1集 测试` = U+7B2C,31,U+96C6,20,U+6D4B,U+8BD5）——加载环节零问题，BOM 有无均一致；
+  - 上游媒体清单的 `#EXTINF:6.000,标题` 字段、响应头 `Icy-Name` / `Content-Disposition`、master 清单 `#EXT-X-STREAM-INF` 的 `NAME` 属性、段首裸 ID3v2 TIT2 帧——**均不会触发条目改名**；
+  - 合法清单下播放列表面板保持 8 条目扁平结构，无子项展开。
+- **结论**：改名发生在播放期——VLC 从每一路流的内嵌元数据实时更新条目名。该源直链为字节系（TikTok 级）CDN 的 HLS，其分片带业务用 timed-metadata；多数集的这类数据是垃圾字节（已播条目→乱码），个别可解析出标题（当前条目→片名、无集数）。重启后恢复是因为 m3u 重新加载了正确集名。具体载体（ID3-PES 变体/DVB 描述符等）未能离线合成复现，不影响定性。
+- **处置**：
+  - 不做代理侧剥离——管道模式下过滤流内嵌元数据需对 TS 分片做字节级手术，损坏风险远大于外观收益；
+  - VLC 无公开开关禁用流元数据改写条目名（`--no-metadata-network-access` 仅限在线元数据查询）；
+  - 对用户口径：纯外观问题、自愈性（重开即恢复）、mpv/PotPlayer 无此行为；介意者对该源换 mpv/PotPlayer 观看。
+- **关联**：R24 的未匹配路径日志继续保留，用于后续该源其它异常的定位。
+
+### R26 · kazumi 队列「解析成功后完全无反应」——直通模式上游断流不终止响应，播放器无限等待（2026-08-26）
+
+- **发现时间**：2026-08-26（用户复测：播放列表面板正常显示，但起播毫无反应、不报错也不跳下一集）
+- **现场证据**（electron-main.log 21:59 会话）：
+  - `第 1 集解析成功` 后**再无任何请求日志**——VLC 未跳下一集、未报错、未取分片；
+  - 54s 后仅一条 `clientError: ECONNRESET write`——连接一直挂着，最终被掐断时才暴露；
+  - 用户在 12 分钟内重启应用 5 次：旧实例拉起的 VLC 是孤儿进程（detached 存活），其 m3u 指向已死实例的代理端口 → 连接拒绝 →「有播放列表但点了没反应」的表象之一。
+- **根因**（代码审计 + 回归测试钉死）：`_passthrough` 用 `rs.stream.pipe(res)` 转发直通流——Node 的 `pipe()` 在**源 error/aborted 时不会 end 目标**。上游 CDN 断流（socket idle 超时销毁/服务器掐断）后：
+  1. 播放器侧连接保持打开 → 把「断流」当「无限缓冲」永远等待（不报错、不超时、不前进）；
+  2. 同族场景：清单收取循环只依赖 socket idle 超时，「每 <15s 滴一包却永不结束」的上游可无限躲过。
+- **修复**（`playlist-proxy.js`）：
+  - `_passthrough`：补 `aborted/error/close` 三事件 → `res.end()` 终止响应（对已完成响应二次 end 无害）；断流即明确收场，播放器立刻失败/跳下一集；
+  - 清单收取加**总死线看门狗**（`MANIFEST_COLLECT_DEADLINE_MS`=30s，与活动无关，测试可经 `manifestCollectDeadlineMs` 注入短值）：触发即销毁上游流并回 **504**，不再服务截断清单；
+  - 留痕日志：应答决策（pipe/302）、pipe 完成状态码、上游非 200 直通（st+ct）、上游取流失败原因、清单收取超时。
+- **验证**：JS 单元 415/415（新增两回归：①直通上游中途 destroy → 响应必须在有限时间内 end；②注入 300ms 死线 → 慢滴清单回 504 且按时触发）；eslint 0 error。
+- **用户侧注意**：外部播放器是 detached 进程，**重启 YuKi 不会回收旧 VLC 窗口**——排查前先关掉全部 VLC 再从 YuKi 重播，避免对着指向已死端口的孤儿窗口误判。
+
+### R27 · 「单字母+地球图标」垃圾条目与 R24 悬案真因——kazumi/catvod 条目硬编码 .m3u8 标签，渐进式 MP4 被 VLC 按 m3u 拆解（2026-08-26）
+
+- **发现时间**：2026-08-26（R26 修复后用户实测：VLC 播放列表面板出现大量「地球图标 + 随机单英文」条目）
+- **破案日志**（22:16 会话，新增应答阶段留痕直接命中）：
+  - `第 1 集解析成功 → https://v16.xzcs3zlph.com/.../video/tos/al…` + `上游非200直通 st=206 ct=video/mp4`——**该 kazumi 源抓到的真实流是渐进式 MP4，不是 HLS**；
+  - 随后同一集连续多次 206 应答、一次 st=416（越界 Range）、ECONNRESET——VLC 在逐个尝试垃圾子条目。
+- **根因链**：`register()` 对 kazumi/catvod 条目统一硬编码 `.m3u8` 标签 → VLC 按 URL 扩展名把 `/pl/<token>/N.m3u8` 交给 m3u 解析器 → MP4 二进制按 0x0A 断行拆成海量「行」→ 每行成为子条目（单字母/乱码 + 地球图标=相对解析回代理的网络项）→ 并诱发 `…/%12`、`…/Z` 畸形请求。**R24 的悬案（畸形路径来源）就此闭环：不是源站清单内容异常，而是「MP4 冒充 m3u8」的二进制碎片**。
+- **修复**（`playlist-proxy.js`）：
+  - 新增 `sniffExtFromHead(buf, ct)`：ftyp→.mp4、FLV→.flv、188 同步字节×3→.ts、EBML→.mkv，兜底按响应头 video/* 映射；识别失败返回 ''；
+  - `_pipeRemote`：`.m3u8` 标签请求（含 206）一律进收取循环窥探判型——`#EXTM3U` 魔串照旧重写回写；非 HLS 且嗅探成功 → 销毁上游流并 **302 到同会话同集的正确扩展名地址**（demux 与内容对齐，垃圾条目无从产生）；嗅探失败维持原直通行为不冒险；
+  - 非 `.m3u8` 标签请求行为完全不变；改标签扩展名永不为 .m3u8 → 无回环。
+- **验证**：JS 单元 417/417（新增两回归：①ftyp+video/mp4 经 .m3u8 入口 → 302 至 /0.mp4 且纠偏地址正常直通；②TS 魔串 → 302 .ts、未知格式维持直通；R26 直通断流用例改用不可嗅探格式以继续覆盖终止语义）；eslint 0 error。
+- **关联**：R24 畸形路径软响应继续保留（对历史遗留列表/其它未知形态兜底）；R26 断流终止语义不受影响。

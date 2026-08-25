@@ -11,7 +11,7 @@
  * - M3U：#EXTINF:-1 group-title="组名",频道名 后跟地址行
  * 播放：首地址交主进程 mpv；失败时返回当前地址和错误，不自动切换线路。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar, UIState */
 
 /**
  * T39：直播每页频道数 = 铺满一屏的容量（铺满后才翻页）。
@@ -42,7 +42,11 @@ const Live = {
     init() {
         if (this._inited) return;
         this._inited = true;
-        $('#live-select').on('change', () => this.loadChannels(false));
+        $('#live-select').on('change', () => {
+            // 换源即存档：URL 认源（不随下拉重排漂移），分组随新源归「全部」
+            this._saveView({ group: '' });
+            this.loadChannels(false);
+        });
         // T35：手动刷新才重新探测可用性，平时进页/切源直接用本地缓存
         $('#live-refresh').on('click', () => this.loadChannels(true));
         $('#live-groups').on('click', '.class-tab', (e) => {
@@ -50,8 +54,9 @@ const Live = {
             $('#live-groups .class-tab').removeClass('active');
             $(e.currentTarget).addClass('active');
             this.group = g;
+            this._saveView(); // 分组选择存档（切页/重启不回「全部」）
             this._page = 1; // 切分组回第一页
-            this.renderList();
+            this.renderList(true); // 用户切分组：卡片错峰入场动画
         });
         $('#live-list').on('click', '.live-item', (e) => {
             const idx = parseInt($(e.currentTarget).data('idx'), 10);
@@ -75,6 +80,24 @@ const Live = {
     /** 中文域名（IDN）转 punycode：浏览器 URL 自动转换 hostname，后端拉取才不会失败。 */
     _asciiUrl(u) {
         try { return new URL(u).href; } catch (e) { return u; }
+    },
+
+    /** 页面选择态持久化（切页/重启不回初始态）：按 URL 记住选中的直播源与分组。
+     *  patch 可选覆盖部分字段（如换源时 group 归零）。ui-state.js 未加载的沙箱静默跳过。 */
+    _viewState() {
+        try { return (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('live') : null; } catch (e) { return null; }
+    },
+    _saveView(patch) {
+        try {
+            if (typeof UIState === 'undefined' || !UIState.set) return;
+            const idx = parseInt($('#live-select').val(), 10);
+            const live = this.lives[idx];
+            const st = { url: live ? String(live.url || '') : '', group: this.group || '' };
+            const p = (patch && typeof patch === 'object') ? patch : {};
+            if ('url' in p) st.url = String(p.url || '');
+            if ('group' in p) st.group = String(p.group || '');
+            UIState.set('live', st);
+        } catch (e) { /* 持久化失败不影响主流程 */ }
     },
 
     /** 归一化 lives 条目：支持 http url 与 TVBox proxy://do=live&ext=<base64 url> 两种形式。 */
@@ -129,13 +152,21 @@ const Live = {
         if (!this.lives.length) {
             sel.append('<option value="">（无直播源）</option>');
             $('#live-groups').empty();
-            $('#live-list').html('<div class="tip-line">当前配置没有直播源。可到“设置 → 源设置 → 直播源”添加 txt/m3u 直播源或导入 TVBox 配置，也可载入含 lives 的配置。</div>');
+            $('#live-list').html('<div class="tip-line">当前配置没有直播源。可到“设置 → CatVod源设置 → 直播源”添加 txt/m3u 直播源或导入 TVBox 配置，也可载入含 lives 的配置。</div>');
             return;
         }
         // T65：直播源选项拼串一次性写入
         sel.append(this.lives.map((l, i) => `<option value="${i}">${escHtml(l.name || l.url)}</option>`).join(''));
-        const idx = this.lives.findIndex((l) => !/(redirect|live)/i.test(String(l.name || '')));
-        sel.val(idx >= 0 ? idx : 0);
+        // 选中源恢复（切页/重启/配置静默重载不回默认）：按 URL 匹配上次的源；
+        // 无存档或存档源已不在列表时退回启发式默认（优先非 redirect/live 命名）。
+        let idx = this.lives.findIndex((l) => !/(redirect|live)/i.test(String(l.name || '')));
+        if (idx < 0) idx = 0;
+        const st = this._viewState();
+        if (st && st.url) {
+            const uidx = this.lives.findIndex((l) => String(l.url || '') === String(st.url));
+            if (uidx >= 0) idx = uidx;
+        }
+        sel.val(idx);
         await this.loadChannels(false, opts);
     },
 
@@ -174,7 +205,13 @@ const Live = {
                 } catch (e) { /* 无缓存走首次探测 */ }
             }
             if (!cacheHit) this.channels = channels;
+            // 分组恢复（切页/重启不回「全部」）：仅当存档的源就是当前源时沿用其分组；
+            // 换源/无存档/该分组在新源下已不存在 → 回退「全部」（renderList 会按 group 过滤）。
             this.group = '';
+            const st = this._viewState();
+            if (st && st.url && String(st.url) === String(live.url) && st.group) {
+                if (this.channels.some((c) => c.group === String(st.group))) this.group = String(st.group);
+            }
             this.renderGroups();
             this.renderList();
             if (!this.channels.length) {
@@ -374,8 +411,10 @@ const Live = {
         box.html(tabs.join(''));
     },
 
-    renderList() {
-        const box = $('#live-list').empty();
+    /** animate=true：本次渲染的频道卡片播放入场动画（分类切换/翻页）。
+     *  后台探测分批刷新/静默重载不传参，避免列表反复重播动画闪烁。 */
+    renderList(animate) {
+        const box = $('#live-list').empty().toggleClass('anim-cards', !!animate);
         // T34 分页：先按分组过滤再切片，索引保留在完整 channels 中的位置（点击播放用）
         const shown = [];
         this.channels.forEach((c, i) => {
@@ -398,7 +437,7 @@ const Live = {
         renderPagerBox($('#live-pager'), {
             page: this._page,
             pagecount,
-            onJump: (pg) => { this._page = pg; this.renderList(); },
+            onJump: (pg) => { this._page = pg; this.renderList(true); }, // 翻页同规格动画（T30 惯例）
         });
     },
 

@@ -52,6 +52,7 @@
 - 边下边播与手动下载同源同集去重（`dl-dedupe`，「站点 | 剧名 | 集名」稳定 key）。
 - 隐藏 BrowserWindow 通过媒体请求拦截、DOM 轮询和 legacy iframe 跟随提取真实视频流。
 - Anime4K 三档、VLC 外部播放、截图、定时关机。
+- 外部播放器观看统计与历史：PotPlayer/VLC 进程退出按运行墙钟（口径同 mpv wallWatched，`ext-watch` 会话追踪 + `yuki:ext-player-exit` 事件）计入统计/最近观看/历史；主播放链、播放弹窗按钮与直链播放入口全覆盖（≥15s 记一次）。
 - 解析窗口使用 3 个独立 partition 槽位，并通过 single-flight 合并同地址并发请求。
 
 ### 下载与数据

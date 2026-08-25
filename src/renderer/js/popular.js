@@ -7,7 +7,7 @@
  * 标签筛选仿 Kazumi PopularPage：下拉菜单选择预设标签，选定后服务端拉取该标签番剧。
  * 卡片复用 common.js bangumiCard；点击进二级详情页（Kazumi.openBangumiInfoPage）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel */
+/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const POPULAR_TAGS = [
@@ -48,29 +48,52 @@ const Popular = {
             const tag = String(e.currentTarget.value || '');
             if (tag === this._tag) return;
             this._tag = tag;
+            this._saveView(); // 标签切换即存档（load 内会再补一次带最新页码的快照）
             this.load(1);
         });
+    },
+
+    /** 页面选择态持久化（切页/重启不回初始态）：记录当前标签与页码。
+     *  ui-state.js 未加载的测试沙箱环境静默降级为不持久化。 */
+    _viewState() {
+        try { return (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('popular') : null; } catch (e) { return null; }
+    },
+    _saveView() {
+        try {
+            if (typeof UIState === 'undefined' || !UIState.set) return;
+            UIState.set('popular', { tag: this._tag || '', page: this._page || 1 });
+        } catch (e) { /* 持久化失败不影响主流程 */ }
     },
 
     /**
      * 视图切入：内存无数据时优先用本地缓存立即上屏（热门番组），后台再静默刷新；
      * 无缓存才等网络。会话内已加载过则直接复用（瞬间切换）。
+     * 持久化恢复（切页/重启不回初始态）：有存档标签时直接回到该标签视图
+     * （标签页无内容缓存，按存档页码重新拉取）；热门番组命中缓存时也恢复存档页码。
      */
     async enter() {
         this.init();
         if (!this._items.length) {
+            const st = this._viewState();
+            if (st && st.tag && POPULAR_TAGS.indexOf(String(st.tag)) >= 0) {
+                this._tag = String(st.tag);
+                this._setTagSelect(this._tag);
+                await this.load(Number(st.page) || 1);
+                return;
+            }
             const cached = this._loadCache();
             if (cached && Array.isArray(cached.items) && cached.items.length) {
                 this._tag = '';
                 this._items = cached.items;
                 this._total = cached.total || 0;
+                this._page = Math.max(1, Number(st && st.page) || 1); // 恢复上次页码（默认第 1 页）
                 this._setTagSelect('');
                 this._renderGrid();
                 this._renderPager();
-                this.load(1, true); // 静默后台刷新，不阻塞切换
+                this.load(this._page, true); // 静默后台刷新，不阻塞切换
                 return;
             }
-            await this.load(1);
+            await this.load((st && Number(st.page)) || 1);
             return;
         }
         const size = await this._pageSize();
@@ -95,6 +118,7 @@ const Popular = {
         this._loading = true;
         this._size = await this._pageSize();
         this._page = Math.max(1, page || 1);
+        this._saveView(); // 页码存档（标签/翻页共用此入口）
         if (!silent) showLoading();
         try {
             const offset = (this._page - 1) * this._size;
@@ -114,6 +138,8 @@ const Popular = {
             this._saveCache(); // 仅缓存热门番组（推荐页落地视图），内部按 _tag 守卫
         } catch (e) {
             if (!silent) warnToast('推荐载入失败');
+            // 载入失败且当前无内容：同样落到网络/镜像引导空态（多为无法直连 Bangumi）
+            if (!this._items.length) this._renderGrid();
         } finally {
             if (!silent) hideLoading();
             this._loading = false;
@@ -166,7 +192,8 @@ const Popular = {
     _renderGrid() {
         const grid = $('#popular-grid').empty();
         if (!this._items.length) {
-            grid.html('<div class="tip-line">暂无数据</div>');
+            // 空态引导：多为网络无法访问 Bangumi，指引开启镜像并附隐私说明
+            grid.html(bangumiNetGuide());
             return;
         }
         grid.html(this._items.map((item) => bangumiCard(item)).join(''));

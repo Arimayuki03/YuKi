@@ -28,6 +28,7 @@ function loadPopular() {
         hideLoading: () => {},
         renderPagerBox: () => {},
         bangumiCard: (item) => `<div class="bangumi-card" data-id="${item.id}">${item.name || ''}</div>`,
+        bangumiNetGuide: () => '<div class="tip-line">bangumi-guide</div>',
         escHtml: (s) => String(s),
         openDialog: () => {},
         closeDialog: () => {},

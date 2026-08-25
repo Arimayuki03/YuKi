@@ -470,15 +470,24 @@ html, body {
     box-shadow: 0 3px 5px -1px var(--md-shadow), 0 6px 10px rgba(0,0,0,0.14), 0 1px 18px rgba(0,0,0,0.12);
 }
 
-/* ── Loading overlay（T30：遮罩淡入 + M3 变弧 spinner + 载入文案，关闭淡出见 .out） ── */
+/* ── Loading 指示器（T30 遮罩改造：默认被动化——不整屏压暗、pointer-events:none
+   不拦截点击，浏览/搜索/详情等日常载入界面照常可用；spinner 改挂自带深色胶囊底。
+   必须要的全局遮罩走显式申请：showLoading(text,{blocking:true}) 加 .blocking
+   恢复全屏 scrim + 输入拦截（后端启动、播放链路）。关闭淡出见 .out） ── */
 #loadingToast {
     display: none;
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: var(--md-scrim);
+    pointer-events: none;
     animation: ldIn .18s ease;
 }
+/* 关键路径变体：恢复 T30 原始行为（scrim 底 + 挡输入），胶囊底让位给 scrim */
+#loadingToast.blocking {
+    pointer-events: auto;
+    background: var(--md-scrim);
+}
+#loadingToast.blocking .md-progress-wrap { background: transparent; box-shadow: none; }
 #loadingToast.out { opacity:0; transition:opacity .15s ease; }
 
 /* centering wrapper 钬� separates position from rotation */
@@ -488,6 +497,11 @@ html, body {
     left: 50%;
     transform: translate(-50%, -50%);
     text-align: center;
+    /* 被动模式的可读性底：深色胶囊替代整屏 scrim，任何内容上都清晰 */
+    padding: 12px 16px;
+    border-radius: 12px;
+    background: rgba(0,0,0,.55);
+    box-shadow: 0 4px 16px rgba(0,0,0,.28);
 }
 
 .md-progress {
@@ -605,8 +619,7 @@ body.frameless .view { padding-top:48px; }
    48px = 固定顶部条 32px + 8px 缓冲，内容不会被始终可见的条遮挡。 */
 .view { display:none; height:100%; overflow-y:auto; padding:48px 24px 20px; }
 .view.active { display:block; }
-/* 设置页无顶部工具条，顶部间距收窄更紧凑 */
-#view-settings { padding-top:24px; }
+/* 设置页与首页/搜索页同规格顶部对齐：沿用 .view 的 48px 顶距（与左侧栏首项平齐），不再单独收窄 */
 /* 隐藏全局滚动条（仍可滚动，观感更干净）—— #main-nav 同样隐藏，避免界面缩放 150% 等特大档下左侧出现垂直滚动条 */
 body, .view, #main-nav { scrollbar-width:none; }
 body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar { width:0; height:0; display:none; }
@@ -615,21 +628,23 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 .md-dialog-body::-webkit-scrollbar, .bangumi-detail-content::-webkit-scrollbar,
 .detail-info .detail-desc::-webkit-scrollbar, #view-direct::-webkit-scrollbar { width:0; height:0; display:none; }
 
-/* 设置独立视图容器（T12 二级菜单：一级分类导航 + 二级详情卡片区；居中限宽，窄窗不贴边） */
+/* 设置独立视图容器（T12 二级菜单：一级分类导航 + 二级详情卡片区）。
+   与首页/搜索页同款对齐：不居中限宽，左缘直接落在 .view 的 24px 内边距上，
+   一级菜单按钮与卡片区块和其它页面的工具条/网格同一起点。 */
 .settings-wrap {
-    width:100%; max-width:1060px; margin:0 auto; padding:0 16px; box-sizing:border-box;
+    width:100%; box-sizing:border-box;
     display:grid; grid-template-columns:200px 1fr; gap:0 20px; align-items:start;
-    /* 行高稳定：内容较矮的分类下容器至少占满一屏（24 顶 + 20 底 padding 抵消），
+    /* 行高稳定：内容较矮的分类下容器至少占满一屏（48 顶 + 20 底 padding 抵消），
        切换分类时行高不随卡片高度回缩，吸顶导航的 sticky 行程恒定、按钮列表不上下跳动 */
-    min-height:calc(100vh - 44px);
+    min-height:calc(100vh - 68px);
 }
-@media (min-width:1500px) { .settings-wrap { max-width:1320px; } }
-@media (min-width:2200px) { .settings-wrap { max-width:1680px; } }
 @media (max-width:900px) { .settings-wrap { grid-template-columns:1fr; } }
-/* 一级分类导航：宽屏竖排吸顶（留 8px 顶距），窄屏横排换行。
+/* 一级分类导航：宽屏竖排吸顶，窄屏横排换行。
+   top 必须为 0：Chromium 把 sticky 偏移叠加在容器起点之上，
+   非 0 值会让导航在未滚动时也整体下移、与首页/侧栏首项错位。
    min-height 撑开导航列，避免内容列较矮时 sticky 导航被父容器底边顶起
    （切换分类时导航/列表上下位移的根因）。 */
-.settings-nav { display:flex; flex-direction:column; gap:8px; position:sticky; top:8px; align-self:start; min-height:80vh; }
+.settings-nav { display:flex; flex-direction:column; gap:8px; position:sticky; top:0; align-self:start; min-height:80vh; }
 @media (max-width:900px) { .settings-nav { flex-direction:row; flex-wrap:wrap; margin-bottom:16px; position:static; min-height:0; } }
 .settings-nav-item {
     padding:11px 18px; border-radius:20px; font-size:15px; cursor:pointer; text-align:center;
@@ -639,6 +654,17 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 }
 .settings-nav-item:hover { background:var(--md-secondary-container); }
 .settings-nav-item.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); font-weight:600; }
+
+/* ===== 设置页动画：分类切换卡片错峰上浮 =====
+   panels.js showSetCat() 以 .set-enter 重触发（移除→reflow→重挂，同详情页 tab-enter 手法），
+   错峰延迟由 JS 按「可见序号」内联写入 animationDelay（隐藏卡不占序号，各分类首卡从 0 起跳）。
+   仅非毛玻璃启用（T54 同因）：glass-on 下 tool-card 携带 backdrop-filter，
+   opacity/transform 动画会反复重建模糊采样层致闪烁。 */
+@keyframes setCardIn {
+    from { opacity:0; transform:translateY(12px); }
+    to { opacity:1; transform:none; }
+}
+html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { animation:setCardIn .3s cubic-bezier(.2,.7,.3,1) both; }
 
 /* 本地文件视图（T28：原工具面板页签移除，直显本地文件卡） */
 .tools-wrap { max-width: 980px; margin: 0 auto; }
@@ -679,6 +705,9 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 .settings-grid .tool-card > .tool-card-title { margin-bottom:0; }
 /* 标签紧贴下方控件：margin 与控件 8px 合并后取 8px（不再叠加拉大） */
 .settings-grid .tip-line.pad0:not(.info-tip) { padding-bottom:0; margin-bottom:4px; }
+/* ⓘ说明行同样收紧底距：padding 不参与 margin 折叠，压掉 .pad0 的 10px，
+   使「说明 → 下方控件」与「标签 → 控件」同为 8px 节奏（网络/日志等各分区统一） */
+.settings-grid .tip-line.pad0.info-tip { padding-bottom:0; }
 .settings-grid .tool-card > .md-field { margin:0; }
 /* 收藏/历史页工具条：标签筛选行；搜索框已并入顶部 view-toolbar（T13，与首页同规格） */
 .rec-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 12px; }
@@ -931,6 +960,9 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 .search-status.done .ss-fill { width:100% !important; background:var(--md-primary); }
 /* 首页源/分类探测进度条（T81）：复用 search-status 样式，与分类栏留间距 */
 #home-probe-bar { margin-top:8px; }
+/* 首页配置载入进度条：提示文案较长（含「请勿切换源或分类」），放宽文本占比；
+   窗口过窄时仍按 ellipsis 截断兜底 */
+#home-restore-bar .ss-text { max-width:62%; }
 .src-group { margin-top:26px; }
 .src-head { font-size:15px; font-weight:700; padding:8px 0; color:var(--md-primary); border-bottom:1px solid var(--md-outline-variant); }
 .src-count { font-size:12px; font-weight:400; color:var(--md-on-surface-variant); margin-left:6px; }
@@ -938,9 +970,21 @@ body::-webkit-scrollbar, .view::-webkit-scrollbar, #main-nav::-webkit-scrollbar 
 .src-group > .vod-grid { margin-top:8px; }
 
 /* 详情页：统一 hero + 内容页签（CatVod / Bangumi 共用）。顶部对齐侧栏（36px）。 */
-#view-detail { padding:48px 24px 40px; }
-body.frameless #view-detail { padding-top:48px !important; }
+/* overflow-anchor:none：关闭 Chromium 原生滚动锚定——页签内容替换时浏览器会自行
+   微调 scrollTop「保持可见内容稳定」，与 detail.js 的显式钳制和高度过渡叠加，
+   表现为点击页签后画面二次位移。滚动位置统一由 _clampDetailScroll 决定。 */
+/* 滚动根不设顶部内边距：sticky 的约束框是滚动容器的 scrollport（padding box），
+   顶距若留在 #view-detail 上会把吸顶位整体压下 48px，导致 detail.js 的吸顶
+   检测/落位数学（按贴边假设编写）全部偏移——切页签后卡片被功能栏遮挡。
+   顶部留白改由返回按钮的 margin-top 承担（见下），scrollport 顶边与容器盒子重合 */
+#view-detail { padding:0 24px 40px; overflow-anchor:none; }
+body.frameless #view-detail { padding-top:0 !important; }
 #detail-body { width:100%; max-width:1560px; margin:0 auto; }
+/* 顶部对齐：返回按钮在 #detail-body 之外，顶距需单独补（原由 #view-detail
+   padding-top 承担，现移入 #detail-body 供吸顶数学使用）；overflow:auto 的
+   滚动根为 BFC，按钮 margin-top 不会塌陷出容器。注意顶距只加在按钮上方，
+   不能落到 #detail-body——否则会叠进按钮与封面的既有间距 */
+#view-detail > .back-btn { margin-top:48px; }
 .back-btn { margin-bottom:18px; }
 .detail-head { display:grid; grid-template-columns:minmax(260px, 360px) minmax(0, 1fr); gap:28px; margin-bottom:20px; align-items:stretch; }
 .detail-cover { min-width:0; }
@@ -975,11 +1019,55 @@ body.frameless #view-detail { padding-top:48px !important; }
 .detail-actions { display:flex; flex-wrap:wrap; gap:8px; margin:0; }
 .detail-actions .tag-active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
 .detail-button-mark { margin-right:6px; font-size:11px; }
-.detail-tabs { gap:4px; align-items:center; padding:4px; margin-bottom:18px; border:1px solid var(--md-outline-variant); border-radius:14px; background:var(--md-surface-container); }
-.detail-tab { display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 18px; border-radius:10px; cursor:pointer; font-size:13px; color:var(--md-on-surface-variant); background:transparent; transition:background .15s, color .15s, transform .15s; user-select:none; }
-.detail-tab.active { background:var(--md-primary); color:var(--md-on-primary); font-weight:600; box-shadow:0 2px 6px color-mix(in srgb, var(--md-primary) 24%, transparent); }
+/* 吸顶锚点哨兵：零高度静态元素，供 detail.js 测吸顶滚动位（自身永不粘性
+   位移，offsetTop 恒等于页签栏布局顶；压掉行内空隙避免产生 1px 偏移） */
+#detail-tabs-sentinel { display:block; height:0; margin:0; font-size:0; line-height:0; }
+/* 页签栏 sticky 吸顶：贴顶位由 --tabs-stick-top 驱动（detail.js init 写入：
+   标准模式 0 贴窗口顶；无边框 33 = 拖拽带 32 + 1，拖拽带吞点击不可压入），
+   缺省回落 33px。不透明背景避免下层内容透出；z-index 压过卡片阴影但远低于
+   浮层（1200+）。 */
+.detail-tabs { position:sticky; top:var(--tabs-stick-top, 33px); z-index:30; gap:4px; align-items:center; padding:4px; margin-bottom:18px; border:1px solid var(--md-outline-variant); border-radius:14px; background:var(--md-surface-container); transition:border-radius .22s ease, box-shadow .22s ease; }
+/* 吸顶遮罩（顶帽）：吸顶后填满「窗口顶 ↔ 功能栏」之间的空隙（无边框模式为
+   33px 拖拽带下缘空隙；标准模式贴顶时高度归零不可见），满足「吸顶后上方不
+   显示任何内容」。刻意用等宽 ::before 而非全向 box-shadow——旧阴影左右各外
+   扩 64px 且下缘贴到元素底边，会在功能栏两侧整段露出与页面底色不同的色块
+   「耳朵」。top 外扩 1px 盖住自身上边框行，避免缝隙。
+   宽度必须与功能栏边框盒严格等宽且左右缝零错位：
+   · 盒体对齐包含块（功能栏 padding box）left:0/right:0——该原点与功能栏
+     自身边框同源（整数矩形），吸附行为一致；
+   · 两侧描边用 ±1px 外扩 box-shadow 而非自身 border：旧版 border 写在
+     ::before 上会参与绝对定位 left/right 求解，Windows 显示缩放残留
+     devicePixelRatio≈1.00000003 尾数时 1px 被 hairline 吸附成 0.6667px，
+     盒体被推到 23.67/1256.33 这类分数坐标——描边抗锯齿发虚且与功能栏
+     边线错开一物理像素（实测遮罩右缝落 1256 列、功能栏落 1255 列，
+     表现为吸顶后两侧竖线「错台」，即遮罩与功能栏宽度观感不一致）。
+     阴影矩形 = 整数盒体 ±1px，与功能栏左右边框列重合，同源同吸附，
+     任何 DPI/界面缩放下严格共线。
+   层级必须用正层、不能用负 z-index：旧版 z-index:-1 把顶帽垫在自身背景之下，
+   但 Chromium 合成器对「负 z-index 伪元素」与相邻合成层（角色卡 hover 时被
+   transform 提升为独立层）的绘制顺序不稳定，实测吸顶后滚动内容时最左/最右
+   列卡片的绿色 hover 边会穿透顶帽露出。改为正层（不设 z-index）后，顶帽随
+   功能栏整体（z-index:30 的堆叠上下文）压过一切页面内容；几何上顶帽只覆盖
+   功能栏 border-box 上方的空隙带，不会叠到页签按钮或自身边框行。
+   pointer-events:none 避免空隙带拦截拖拽带命中测试。 */
+.detail-tabs::before { content:''; position:absolute; left:0; right:0; pointer-events:none;
+    top:calc(var(--tabs-stick-top, 33px) * -1 - 1px);
+    height:calc(var(--tabs-stick-top, 33px) + 1px);
+    background:var(--md-surface-container);
+    box-shadow:1px 0 0 var(--md-outline-variant), -1px 0 0 var(--md-outline-variant);
+    opacity:0; }
+body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container); }
+.detail-tabs.tabs-stuck { border-top-left-radius:0; border-top-right-radius:0; box-shadow:0 12px 28px -16px var(--md-shadow); }
+.detail-tabs.tabs-stuck::before { opacity:1; }
+/* 页签按钮不含 transform 位移（hover 仅变色、按下不缩沉）：任何位移都会被
+   感知为「点击后位置改变」，稳定性优先 */
+.detail-tab { display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 18px; border-radius:10px; cursor:pointer; font-size:13px; color:var(--md-on-surface-variant); background:transparent; transition:background .15s, color .15s; user-select:none; }
+/* 激活态不加粗：CJK 加粗会撑宽按钮，切换时把同行后续页签左右推挤（画面横向抖动）；
+   主色底+反白的对比已足够区分激活态 */
+.detail-tab.active { background:var(--md-primary); color:var(--md-on-primary); box-shadow:0 2px 6px color-mix(in srgb, var(--md-primary) 24%, transparent); }
 .detail-tab:hover:not(.active) { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
-.detail-tab:active { transform:translateY(1px); }
+/* 按下不位移（同上：稳定性优先，反馈交给背景色变化） */
+.detail-tab:active { background:var(--md-surface-container-high); }
 .detail-content { min-height:160px; }
 .detail-overview-grid { display:grid; gap:12px; }
 .detail-overview-card, .detail-episodes-panel { padding:20px 22px; border:1px solid var(--md-outline-variant); border-radius:16px; background:var(--md-surface-container); box-shadow:0 2px 8px color-mix(in srgb, var(--md-shadow) 45%, transparent); }
@@ -1019,7 +1107,8 @@ body.frameless #view-detail { padding-top:48px !important; }
 .play-src { min-height:38px; padding:8px 14px; border:1px solid var(--md-outline-variant); border-radius:11px; cursor:pointer; font-size:13px; font-family:inherit; background:var(--md-surface-container-high); color:var(--md-on-surface-variant); user-select:none; transition:background .15s, color .15s, border-color .15s, transform .15s; }
 .play-src:hover:not(.active) { border-color:var(--md-primary); background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
 .play-src:active { transform:translateY(1px); }
-.play-src.active { background:var(--md-primary); color:var(--md-on-primary); border-color:var(--md-primary); font-weight:600; }
+/* 激活态不加粗（同 .detail-tab：避免加粗撑宽推挤同行按钮） */
+.play-src.active { background:var(--md-primary); color:var(--md-on-primary); border-color:var(--md-primary); }
 .play-src-count { margin-left:4px; opacity:.78; font-size:11px; }
 .kazumi-entry { display:flex; align-items:center; gap:10px; padding:10px 14px; margin-bottom:16px; background:var(--md-surface-container-high); border:1px dashed var(--md-outline-variant); border-radius:12px; font-size:13px; color:var(--md-on-surface-variant); }
 .ep-dl-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:0 0 12px; padding:10px 12px; background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); border-radius:12px; }
@@ -1057,10 +1146,8 @@ body.frameless #view-detail { padding-top:48px !important; }
 
 /* Bangumi 页签内容 */
 .detail-comment-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-.detail-comment-count { font-size:12px; color:var(--md-on-surface-variant); }
+.detail-comment-count { flex:none; font-size:12px; font-weight:600; color:var(--md-on-secondary-container); background:var(--md-secondary-container); padding:3px 10px; border-radius:999px; }
 .detail-comment-toolbar #detail-comment-order { margin-left:auto; }
-.detail-comment-scroll { max-height:60vh; overflow-y:auto; scrollbar-width:none; }
-.detail-comment-scroll::-webkit-scrollbar { width:0; height:0; display:none; }
 .detail-comment-more, .detail-comment-end { text-align:center; padding:10px 0; }
 .char-float-cmt-toolbar { display:flex; justify-content:flex-end; margin-bottom:8px; }
 /* 角色吐槽排序按钮上移至页签行、与左侧两个页签齐平并靠右对齐 */
@@ -1122,6 +1209,24 @@ body.frameless #view-detail { padding-top:48px !important; }
 .detail-relation-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; overflow:hidden; }
 .detail-relation-subname { font-size:12px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
+/* 详情页签快速滚动防撕裂：① 图片异步解码+加载淡入，消除加载完突现（pop-in）；
+ * ② content-visibility:auto 让视口外卡片跳过布局/绘制（contain-intrinsic-size 的
+ * auto 关键字记住实测高度，避免估算误差导致滚动条回跳）。显著降低快速滑动与
+ * 回顶动画期间主线程解码/光栅压力——掉帧与棋盘格光栅化正是「卡片撕裂」来源。
+ * 仅作用于 #detail-tab-content 内容区；角色浮层（char-float）不在滚动路径，不受影响。 */
+#detail-tab-content .detail-staff-avatar,
+#detail-tab-content .detail-char-avatar,
+#detail-tab-content .detail-relation-poster img,
+#detail-tab-content .detail-comment-avatar { opacity:0; transition:opacity .18s ease; }
+#detail-tab-content .detail-staff-avatar.loaded,
+#detail-tab-content .detail-char-avatar.loaded,
+#detail-tab-content .detail-relation-poster img.loaded,
+#detail-tab-content .detail-comment-avatar.loaded { opacity:1; }
+#detail-tab-content .detail-comment,
+#detail-tab-content .detail-staff,
+#detail-tab-content .detail-relation,
+#detail-tab-content .detail-char-card { content-visibility:auto; contain-intrinsic-size:auto 128px; }
+
 /* 角色卡中文名（T75）：在原名下方小字展示中文译名 */
 .detail-char-name-cn { padding:0 10px 8px; font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border-radius:0 0 13px 13px; }
 
@@ -1177,10 +1282,9 @@ body.frameless #view-detail { padding-top:48px !important; }
 }
 
 @media (max-width:700px) {
-    /* 窄窗下顶部仍对齐侧栏（36px），避免页面顶部与侧栏顶部错位 */
-    #view-detail { padding:48px 14px 32px; }
-    /* 无边框模式：详情页 padding 简写会覆盖 frameless 预留的顶部高度，窄窗下保持不被顶部拖拽带遮挡 */
-    body.frameless #view-detail { padding-top:48px !important; }
+    /* 窄窗下顶部仍对齐侧栏（36px）：顶距由返回按钮 margin-top 承担，滚动根不设顶距（吸顶数学依赖） */
+    #view-detail { padding:0 14px 32px; }
+    body.frameless #view-detail { padding-top:0 !important; }
     .detail-head { grid-template-columns:104px minmax(0, 1fr); gap:14px; }
     .detail-hero-cover, .detail-cover img { min-height:156px; }
     .detail-hero-info { padding:16px; border-radius:14px; }
@@ -1196,8 +1300,9 @@ body.frameless #view-detail { padding-top:48px !important; }
     .detail-action-copy { min-width:0; }
     .kazumi-col-btns { width:100%; }
     .kazumi-watch-row { align-items:flex-start; flex-direction:column; }
-    .detail-tabs { overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none; }
-    .detail-tabs::-webkit-scrollbar { display:none; }
+    /* 吸顶态不裁剪：overflow 会把负偏移的吸顶顶帽（::before）一并裁掉 */
+    .detail-tabs:not(.tabs-stuck) { overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none; }
+    .detail-tabs:not(.tabs-stuck)::-webkit-scrollbar { display:none; }
     .detail-tab { flex:none; padding:8px 14px; }
     .detail-overview-card, .detail-episodes-panel { padding:16px; border-radius:14px; }
     .detail-source-summary { align-items:flex-start; flex-wrap:wrap; }
@@ -1211,7 +1316,38 @@ body.frameless #view-detail { padding-top:48px !important; }
 
 @media (prefers-reduced-motion:reduce) {
     .detail-tab, .play-src, .ep-btn, .kazumi-detail-ep { transition:none; }
+    /* 页签淡入与入场动画一并关闭 */
+    html:not(.glass-on) #detail-tab-content.tab-enter > *,
+    html:not(.glass-on) #detail-body.detail-page-anim .detail-hero,
+    html:not(.glass-on) #detail-body.detail-page-anim .detail-tabs,
+    html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content,
+    html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { animation:none; }
 }
+
+/* ===== 详情页动画：页签内容淡入 + 页面入场分级上浮 =====
+   切页签不做高度补间：高度过渡会让页面其余板块随内容伸缩位移，且毛玻璃下带
+   backdrop-filter 的卡片逐帧改尺寸会反复重建模糊采样层（撕裂闪烁，同 T54 成因）。
+   切页签动画为纯透明度淡入——不带任何 translate 位移，保证点击页签后
+   任何板块的位置零变化；上浮位移只用于打开详情页的入场（detailRiseIn）。
+   T54 约束下这些动画仅在非毛玻璃模式启用。 */
+@keyframes detailTabIn {
+    from { opacity:0; }
+    to { opacity:1; }
+}
+@keyframes detailRiseIn {
+    from { opacity:0; transform:translateY(14px); }
+    to { opacity:1; transform:none; }
+}
+/* 页签内容切换纯淡入（_swapTabContent 以 .tab-enter 重触发；无位移） */
+html:not(.glass-on) #detail-tab-content.tab-enter > * { animation:detailTabIn .24s ease-out both; }
+/* 打开详情页入场：hero → 页签栏 → 内容依次上浮（render() 挂 detail-page-anim，
+   每次 innerHTML 重建自动重播） */
+html:not(.glass-on) #detail-body.detail-page-anim .detail-hero { animation:detailRiseIn .34s cubic-bezier(.2,.7,.3,1) both; }
+html:not(.glass-on) #detail-body.detail-page-anim .detail-tabs { animation:detailRiseIn .34s cubic-bezier(.2,.7,.3,1) .06s both; }
+html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animation:detailRiseIn .34s cubic-bezier(.2,.7,.3,1) .12s both; }
+/* 制作人员卡 hover 反馈（角色卡/关联卡/选集卡已有 hover，此处补齐同语言） */
+.detail-staff { transition:border-color .15s, background .15s; }
+.detail-staff:hover { border-color:var(--md-primary); background:var(--md-surface-container-high); }
 
 /* ===== Kazumi 规则源（kimi UI） ===== */
 /* 详情页 Kazumi 入口 */
@@ -1265,6 +1401,8 @@ body.frameless #view-detail { padding-top:48px !important; }
 .kazumi-road-toolbar { display:flex; align-items:center; gap:12px; padding:2px 0 10px;
     border-bottom:1px solid var(--md-outline-variant); margin-bottom:12px; }
 .kazumi-road-toolbar .kazumi-plugin-head { border:none; padding:0; }
+.kazumi-road-toolbar .kazumi-road-toolbar-spacer { flex:1; min-width:0; }
+.kazumi-road-toolbar .kazumi-eps-order { flex-shrink:0; white-space:nowrap; }
 /* 弹窗内线路分组 */
 .kazumi-road-group { margin-bottom:16px; }
 .kazumi-road-name { font-size:13px; font-weight:600; padding:6px 0;
@@ -1526,6 +1664,20 @@ body.frameless #view-detail { padding-top:48px !important; }
 .live-name { flex:1; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--md-on-surface); }
 .live-group { flex:none; font-size:11px; padding:2px 8px; border-radius:10px;
     background:var(--md-surface-container-high); color:var(--md-on-surface-variant); }
+/* 直播频道卡片入场动画：仅用户切分组/翻页时由 JS 加 .anim-cards 启用（T30 同 vod-card 惯例），
+   后台探测分批重渲染不加该类，避免列表反复重播闪烁。
+   fill 用 backwards（非 both）：结束后释放 transform，保住 hover 上浮不被 fill 锁死。 */
+.live-list.anim-cards .live-item { animation:liveIn .28s cubic-bezier(.2,.7,.3,1) backwards; }
+/* 卡片错峰入场：前 10 张逐张出现，延迟封顶 */
+.live-list.anim-cards .live-item:nth-child(2)  { animation-delay:.03s; }
+.live-list.anim-cards .live-item:nth-child(3)  { animation-delay:.06s; }
+.live-list.anim-cards .live-item:nth-child(4)  { animation-delay:.09s; }
+.live-list.anim-cards .live-item:nth-child(5)  { animation-delay:.12s; }
+.live-list.anim-cards .live-item:nth-child(6)  { animation-delay:.15s; }
+.live-list.anim-cards .live-item:nth-child(7)  { animation-delay:.18s; }
+.live-list.anim-cards .live-item:nth-child(8)  { animation-delay:.21s; }
+.live-list.anim-cards .live-item:nth-child(9)  { animation-delay:.24s; }
+.live-list.anim-cards .live-item:nth-child(10) { animation-delay:.27s; }
 
 /* ===== 收藏 / 历史视图 ===== */
 .view-title { font-size:16px; font-weight:700; }
@@ -1655,8 +1807,25 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
     box-shadow:0 8px 40px rgba(0,0,0,.5);
 }
 
-/* ===== 壁纸模式：body 铺图 + 各层半透明遮罩（--wall-veil 由 body[data-dim] 调节） ===== */
-body.has-wallpaper { --wall-veil: 80%; background-size:cover; background-position:center; background-attachment:fixed; }
+/* ===== 壁纸模式：独立固定层铺图 + 各层半透明遮罩（--wall-veil 由 body[data-dim] 调节） =====
+ * 壁纸不再由 body 背景 + background-attachment:fixed 承载（快速滚动撕裂根因）：
+ * fixed attachment 在 Chromium 下无法稳定成独立合成层，滚动每帧都要重绘壁纸可视
+ * 区域；毛玻璃开启时几十个 backdrop-filter 卡片又逐帧对这块反复重绘的背景做模糊
+ * 采样，GPU 合成跟不上即表现为快速滑动/回顶时的卡片撕裂。改为 position:fixed
+ * 伪元素独立合成层：滚动只平移内容层、壁纸层零失效，模糊采样命中稳定缓存。
+ * JS 侧仍写 body.style.backgroundImage（common.js applySkin），此处 inherit 接住；
+ * 清空壁纸时继承到 none、伪元素自然无图，JS 无需改动。 */
+body.has-wallpaper { --wall-veil: 80%; }
+body.has-wallpaper::before {
+    content:'';
+    position:fixed; inset:0;
+    z-index:-1;
+    pointer-events:none;
+    transform:translateZ(0);   /* 强制提升为常驻合成层，避免首次滚动才提层的顿挫 */
+    background-image:inherit;
+    background-size:cover;
+    background-position:center;
+}
 /* T41 修正：veil 越高遮罩越不透明；此前 low/high 数值写反与选项描述相反 */
 body.has-wallpaper[data-dim="low"] { --wall-veil: 62%; }
 body.has-wallpaper[data-dim="high"] { --wall-veil: 90%; }
@@ -1699,7 +1868,9 @@ html.glass-on .detail-staff,
 html.glass-on .detail-relation {
     background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil), transparent);
 }
-/* 模糊层独立成 glass-blur 类（applyGlass 第二步再挂；见上方两段式注释） */
+/* 模糊层独立成 glass-blur 类（applyGlass 第二步再挂；见上方两段式注释）
+ * detail 页四类「滚动卡片」（角色卡/吐槽卡/制作行/关联行）与其他卡片一致
+ * 无条件挂模糊：不区分有无壁纸，观感统一优先。 */
 html.glass-on.glass-blur #main-nav,
 html.glass-on.glass-blur .tool-card,
 html.glass-on.glass-blur .vod-card,
@@ -1745,10 +1916,11 @@ html.glass-switching *::after {
 }
 /* 毛玻璃与入场动画：视图切换/卡片入场动画的 opacity/transform 会让 Chromium 在动画
    期间反复重建各卡 backdrop-filter 的采样层，配合壁纸表现为「遮罩闪烁约一秒、模糊
-   才补上」（安装包实测复现）。仅禁用这两个携带/包裹模糊层的入场动画，对话框、
+   才补上」（安装包实测复现）。仅禁用这三个携带/包裹模糊层的入场动画，对话框、
    toast、悬浮过渡等其余动画保持不变。 */
 html.glass-on .view.active,
-html.glass-on .vod-card {
+html.glass-on .vod-card,
+html.glass-on .live-item {
     animation:none !important;
 }
 
@@ -1891,6 +2063,7 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 /* ===== 界面动画（T30：easing 统一 cubic-bezier(.2,.7,.3,1) 更顺滑；卡片错峰入场） ===== */
 @keyframes viewIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
 @keyframes cardIn { from { opacity:0; transform:scale(.96); } to { opacity:1; transform:none; } }
+@keyframes liveIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 @keyframes dlgIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
 @keyframes floatIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
 /* Snackbar 入场动画：末态保留水平居中位移（T23：viewIn 的 transform:none 会在动画结束后
@@ -2015,6 +2188,9 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .md-btn-icon { width:48px; height:48px; min-width:48px; max-width:48px; flex:0 0 48px; border-radius:24px; }
     .md-btn-icon svg { width:22px; height:22px; }
     .md-select { height:52px; padding-right:50px; background-position:right 16px center; background-size:18px 18px; font-size:16px; border-radius:12px; }
+    /* 下载管理卡片同步放宽：控件放大后工具栏一行放不下会折行（筛选框与「打开下载目录」分家），
+       按 settings-wrap 先例放大 max-width 保证单行 */
+    .downloads-wrap { max-width:1200px; }
     .tip-line { font-size:15.5px; }
     .view-title { font-size:22px; }
     .tool-card { font-size:16px; }
@@ -2069,7 +2245,10 @@ html.dark .asset-missing { border-left-color:#ff8a80; }
 /* ===== 详情页最终覆盖（置于旧 Kazumi 预览样式之后，避免通用弹窗规则污染统一详情） ===== */
 #detail-body .kazumi-bangumi-colrow { margin:0; padding:8px 14px; gap:16px; }
 #detail-body .kazumi-bangumi-colrow .tip-line { padding:0; }
-#detail-body .kazumi-watch-row { margin:0; padding:10px 14px; }
+/* :not 排除「开始观看」精简条（-plain）：ID 覆盖若不排除会以 (1,1,0) 压过
+   .kazumi-watch-row.detail-watch-row-plain 的 padding:0，使按钮比上方收藏栏
+   卡片左缘缩进 14px；排除后回落 1192 行规则，按钮左缘与收藏栏卡片对齐 */
+#detail-body .kazumi-watch-row:not(.detail-watch-row-plain) { margin:0; padding:10px 14px; }
 #detail-body .kazumi-watch-row .tip-line { padding:0; }
 #detail-body .kazumi-col-btns { flex:1; }
 #detail-body .bi-stars { letter-spacing:1px; }

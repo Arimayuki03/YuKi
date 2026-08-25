@@ -40,9 +40,9 @@ const Detail = {
     _bgmEpDesc: false,
     _bgmSelectMode: false,  // Bangumi 分集多选模式（默认关，点「多选」显示勾选框+全选）
     _epSelectMode: false,   // CatVod 分集多选模式
-    _commentDesc: false,    // 吐槽排序（false=按接口默认顺序，true=倒序）
+    _commentDesc: true,     // 吐槽排序：false=正序（时间旧→新），true=倒序（时间新→旧，默认）
     _commentLimit: 20,      // 吐槽当前展示条数（下拉加载递增）
-    _charCommentDesc: false,
+    _charCommentDesc: true, // 角色吐槽排序默认倒序（同番剧吐槽）
     _escBound: false,
     _lastVod: null,
     _vod: null,
@@ -168,6 +168,30 @@ const Detail = {
             if (App.currentView === 'detail') { this.back(); return true; }
             return false;
         });
+        // 页签栏吸顶位：尽量靠上。标准模式贴窗口顶（0）；无边框模式顶部 32px
+        // 是窗口拖拽带（-webkit-app-region:drag 吞点击且层级更高），吸顶位压在
+        // 其下 1px 处（33）。写入 CSS 变量供 .detail-tabs 的 sticky top 消费，
+        // _stickTop() 与其保持同一数值来源。
+        const stickTop = document.body.classList.contains('frameless') ? 33 : 0;
+        document.documentElement.style.setProperty('--tabs-stick-top', stickTop + 'px');
+        // 页签栏吸顶状态检测：功能栏滚到吸顶位后加 tabs-stuck，CSS 据此展开
+        // 向上遮罩——滚动内容不再从功能栏上方穿过（需求：吸顶后上方不显示
+        // 任何内容）。passive 监听每帧仅一次布局读取。
+        const viewEl = document.getElementById('view-detail');
+        if (viewEl && !this._stuckBound) {
+            this._stuckBound = true;
+            viewEl.addEventListener('scroll', () => {
+                const bar = viewEl.querySelector('.detail-tabs');
+                if (!bar) return;
+                bar.classList.toggle('tabs-stuck', bar.getBoundingClientRect().top <= this._stickTop() + 1);
+            }, { passive: true });
+        }
+    },
+
+    /** 功能栏吸顶位（视口内 y）：标准模式贴窗口顶（0）；无边框模式顶部 32px
+     *  拖拽带吞点击，压在其下 1px（33）。与 init 写入的 --tabs-stick-top 一致。 */
+    _stickTop() {
+        return document.body.classList.contains('frameless') ? 33 : 0;
     },
 
     open(site, vodId, fallbackName) {
@@ -195,6 +219,7 @@ const Detail = {
         // 详情页直接回到多选态；每次打开重置为普通模式
         this._bgmSelectMode = false;
         this._epSelectMode = false;
+        App._detailOpening = true; // 标记「新开详情」：app.js 据此把详情记忆归属到来源分支（恢复展示不写）
         App.showView('detail');
         this.load();
     },
@@ -230,6 +255,7 @@ const Detail = {
         // 多选状态不跨页面残留（同 open()）
         this._bgmSelectMode = false;
         this._epSelectMode = false;
+        App._detailOpening = true; // 标记「新开详情」：app.js 据此把详情记忆归属到来源分支（恢复展示不写）
         App.showView('detail');
         showLoading();
         $('#detail-body').html('<div class="tip-line">正在载入详情…</div>');
@@ -282,7 +308,7 @@ const Detail = {
         App.showView(this.backView || 'home');
     },
 
-    /** CatVod 详情页自动匹配 Bangumi 数据开关（T74：设置 → 源设置，默认关）。 */
+    /** CatVod 详情页自动匹配 Bangumi 数据开关（T74：设置 → CatVod源设置，默认关）。 */
     async _catvodBgmMatchEnabled() {
         try {
             const s = (await window.yuki.settingsGet()) || {};
@@ -365,7 +391,7 @@ const Detail = {
             this.sources = this.parsePlay(vod);
             this.activeSource = 0;
             await this._restoreLastSource();
-            // 自动匹配 Bangumi（T74 开关：设置 → 源设置「详情页自动匹配 Bangumi 数据」，默认关）
+            // 自动匹配 Bangumi（T74 开关：设置 → CatVod源设置「详情页自动匹配 Bangumi 数据」，默认关）
             if (await this._catvodBgmMatchEnabled() && typeof Kazumi !== 'undefined') {
                 try {
                     const name = vod.vod_name || this.vodName;
@@ -444,9 +470,14 @@ const Detail = {
         </div>`;
         // 页签栏
         const tabs = DETAIL_TABS.map((t) => `<span class="detail-tab ${t === this._activeTab ? 'active' : ''}" data-tab="${t}" role="tab" aria-selected="${t === this._activeTab ? 'true' : 'false'}">${t}</span>`).join('');
-        html += `<div class="detail-tabs class-tabs" role="tablist" aria-label="详情内容">${tabs}</div>`;
+        // 吸顶锚点哨兵：零高度静态元素紧贴页签栏前。不能用页签栏自身的
+        // offsetTop 测吸顶锚点——Chromium 对已吸顶的 sticky 元素返回含粘性
+        // 位移的布局位（滚得越深数值越虚增），会导致切页签永远停在原位。
+        html += `<div id="detail-tabs-sentinel" aria-hidden="true"></div><div class="detail-tabs class-tabs" role="tablist" aria-label="详情内容">${tabs}</div>`;
         html += `<div id="detail-tab-content" class="detail-content" role="tabpanel"></div>`;
-        $('#detail-body').html(html);
+        // detail-page-anim：hero/页签/内容分级上浮入场（CSS 按非毛玻璃门控）。
+        // innerHTML 替换不清除容器类，每次打开详情/嵌套返回都会重播一次入场动画。
+        $('#detail-body').addClass('detail-page-anim').html(html);
         this._refreshLocalCol();
         this._renderTabContent();
         // 后台加载 Bangumi 补充数据
@@ -529,6 +560,7 @@ const Detail = {
     },
 
     _renderTabContent() {
+        this._unbindCommentPageScroll(); // 离开吐槽页签时摘除页面滚动续拉监听
         if (this._activeTab === '概览') this._renderOverview();
         else if (this._activeTab === '分集') this._renderEpisodes();
         else if (this._activeTab === '角色') this._renderCharacters();
@@ -542,7 +574,73 @@ const Detail = {
         this._activeTab = tab;
         $('#detail-body .detail-tab').removeClass('active').attr('aria-selected', 'false');
         $(`#detail-body .detail-tab[data-tab="${tab}"]`).addClass('active').attr('aria-selected', 'true');
-        this._renderTabContent();
+        // 交换前先捕获吸顶区间状态：_swapTabContent 内的钳制可能中途改变滚动位，
+        // 交换后再据捕获结果落位，避免落位被跳过
+        const deep = this._isBelowTabsStick();
+        this._swapTabContent(() => this._renderTabContent());
+        // 吸顶状态下切页签：内容落到功能栏底边之下（含 24px 间距预留）。
+        // 功能栏由 sticky 钉在原像素、上方被遮罩覆盖——唯一可见变化是栏下换装
+        this._snapToTabsStick(deep);
+    },
+
+    /** 吸顶滚动位下限：哨兵布局顶 - 吸顶位。静态哨兵不受 sticky 粘性位移污染
+     *  （已吸顶的元素自身 offsetTop 会包含位移，不可用）。-1 表示页签未挂载。 */
+    _tabsStickFloor() {
+        const sentinel = document.getElementById('detail-tabs-sentinel');
+        return sentinel ? Math.max(0, sentinel.offsetTop - this._stickTop()) : -1;
+    },
+
+    /** 视口当前是否处于吸顶区间（切页签/数据到达前捕获，防中途钳制干扰）。 */
+    _isBelowTabsStick() {
+        const viewEl = document.getElementById('view-detail');
+        const floor = this._tabsStickFloor();
+        return !!(viewEl && floor >= 0 && viewEl.scrollTop >= floor);
+    },
+
+    /** 吸顶状态下让页签内容完整显示在功能栏之下（force=交换前已处于吸顶区间）。
+     *  落位目标按渲染后的实测内容文档位反推：内容首行 = 吸顶位 + 功能栏实测
+     *  高度 + 24px 间距预留——不依赖任何假定尺寸（功能栏高度/间距变化自校正），
+     *  卡片不会被功能栏遮挡；结果与吸顶阈值取大以维持钉住态和遮罩覆盖。
+     *  同步单帧赋值，无平滑动画即无中间位移。 */
+    _snapToTabsStick(force) {
+        const viewEl = document.getElementById('view-detail');
+        const bar = viewEl && viewEl.querySelector('.detail-tabs');
+        const contentEl = document.getElementById('detail-tab-content');
+        if (!viewEl || !bar || !contentEl || !contentEl.isConnected) return;
+        const floor = this._tabsStickFloor();
+        if (!force && !(floor >= 0 && viewEl.scrollTop >= floor)) return;
+        const contentDocY = contentEl.getBoundingClientRect().top
+            - viewEl.getBoundingClientRect().top + viewEl.scrollTop;
+        const target = Math.max(floor,
+            contentDocY - (this._stickTop() + bar.offsetHeight + 24));
+        const max = viewEl.scrollHeight - viewEl.clientHeight;
+        viewEl.scrollTop = Math.max(0, Math.min(target, max));
+    },
+
+    /** 同步收敛滚动越界。innerHTML 替换后内容变矮时 Chromium 要到下一次布局才
+     *  钳制 scrollTop，表现为先画一帧越界内容再跳回——页签「画面抖动」的来源之一。
+     *  在同一帧内显式钳制即可消除该跳变（配合 #view-detail 的 overflow-anchor:none，
+     *  滚动位置只由这里决定，避免浏览器锚定与高度过渡叠加二次位移）。 */
+    _clampDetailScroll() {
+        const viewEl = document.getElementById('view-detail');
+        if (!viewEl) return;
+        const max = viewEl.scrollHeight - viewEl.clientHeight;
+        if (viewEl.scrollTop > max) viewEl.scrollTop = Math.max(0, max);
+    },
+
+    /** 页签内容交换：同步替换 + 滚动越界钳制 + 新内容轻量淡入。
+     *  刻意不做高度补间——高度过渡会让页面其余板块随内容伸缩而位移（违背
+     *  「点页签板块位置不变」），且毛玻璃下带 backdrop-filter 的卡片被逐帧
+     *  改尺寸会反复重建模糊采样层，表现为撕裂闪烁（同 T54 成因）。
+     *  动画仅保留新内容自身的淡入上浮（CSS 端按非毛玻璃门控）。 */
+    _swapTabContent(renderFn) {
+        renderFn(); // 各页签渲染器同步写 DOM
+        this._clampDetailScroll();
+        const box = document.getElementById('detail-tab-content');
+        if (!box || !box.isConnected) return;
+        box.classList.remove('tab-enter');
+        void box.offsetWidth; // 强制 reflow 以重启动画
+        box.classList.add('tab-enter');
     },
 
     _renderOverview() {
@@ -713,6 +811,8 @@ const Detail = {
                     </div>`;
                 }).join('')
                 : '<div class="tip-line">暂无分集信息</div>');
+            // 分集异步回填使页签内容增高：同步钳制滚动，避免视口深处越界晚钳制跳动
+            this._clampDetailScroll();
             // 勾选框：阻止冒泡，仅切换选中；点击集主体则打开选源播放
             box.find('.ep-check').on('click', (e) => {
                 e.stopPropagation();
@@ -772,59 +872,178 @@ const Detail = {
     },
 
     _renderComments(append) {
+        // 页签落点守卫：续拉响应返回时用户可能已切到其他页签（制作/角色/关联等），
+        // 此时绝不能把评论写进内容区——否则会整块覆盖该页签的卡片（表现为卡片
+        // 「画面割裂」成评论列表，回顶/快速滚动时在途请求落地尤易复现）。
+        // 数据已并入 _comments，下次进入吐槽页签自然完整渲染。
+        if (this._activeTab !== '吐槽') return;
         const box = $('#detail-tab-content');
         if (!this._bgmId) { box.html('<div class="tip-line">未匹配到 Bangumi 数据</div>'); return; }
         if (!this._bgmExtraLoaded) { box.html('<div class="tip-line">加载中…</div>'); return; }
-        const list = this._commentDesc ? this._comments.slice().reverse() : this._comments;
-        const rows = list.map((c) => {
-            const user = (c.user && (c.user.nickname || c.user.username)) || c.username || c.nickname || '';
-            const avatar = (c.user && c.user.avatar && (c.user.avatar.medium || c.user.avatar.small || c.user.avatar.large))
-                || c.avatar || '';
-            const text = c.comment || c.content || '';
-            const ts = c.updatedAt || c.updated_at || c.createdAt || c.created_at || 0;
-            const time = Detail._fmtCommentTimeFull(ts);
-            const rate = (c.rate || (c.comment && typeof c.comment === 'object' && c.comment.rate)) || 0;
-            const replies = (Array.isArray(c.replies) && c.replies.length) ? c.replies : null;
-            const repliesHtml = replies ? `<div class="detail-comment-replies">${replies.map((r) => {
-                const ru = (r.user && (r.user.nickname || r.user.username)) || r.username || r.nickname || '';
-                const ra = (r.user && r.user.avatar && (r.user.avatar.medium || r.user.avatar.small || r.user.avatar.large))
-                    || r.avatar || '';
-                const rt = r.content || r.comment || '';
-                const rts = r.createdAt || r.created_at || r.updatedAt || r.updated_at || 0;
-                const rtime = Detail._fmtCommentTimeFull(rts);
-                return `<div class="detail-comment-reply">
+        // 排序不依赖接口返回顺序（next.bgm 默认并非时间正序）：按评论时间显式排序，
+        // false=正序（旧→新），true=倒序（新→旧），保证切换语义与按钮文案一致。
+        const list = this._comments.slice().sort((a, b) => {
+            const ta = Detail._commentTsMs(a.updatedAt || a.updated_at || a.createdAt || a.created_at || 0);
+            const tb = Detail._commentTsMs(b.updatedAt || b.updated_at || b.createdAt || b.created_at || 0);
+            return this._commentDesc ? tb - ta : ta - tb;
+        });
+        const keys = this._commentKeys(list);
+        // 续拉增量分支：列表已在屏上时只插入新增行，不整表重绘。
+        // 整表 box.html() 会重建全部头像 <img>（重新解码→闪烁）并造成滚动位置跳动。
+        const listBox = append ? box.find('.detail-comment-list').first() : $();
+        if (listBox.length && listBox.children('.detail-comment').length) {
+            this._appendCommentRows(listBox[0], list, keys);
+            box.find('.detail-comment-count')
+                .text(`共 ${this._comments.length} 条${this._commentAllLoaded ? '' : '+'}`);
+            this._updateCommentFooter(listBox[0]);
+        } else {
+            const rows = list.map((c, k) => Detail._commentRowHtml(c, keys[k])).join('');
+            const foot = this._commentAllLoaded
+                ? (this._comments.length ? '<div class="tip-line detail-comment-end">没有更多了</div>' : '')
+                : '<div class="tip-line detail-comment-more">下拉加载更多…</div>';
+            box.html(`<div class="detail-comment-toolbar">
+                    <span class="detail-comment-count">共 ${this._comments.length} 条${this._commentAllLoaded ? '' : '+'}</span>
+                    <button type="button" id="detail-comment-order" class="md-btn md-btn-tonal md-btn-sm">${this._commentDesc ? '⇅ 切正序' : '⇅ 切倒序'}</button>
+                </div>
+                <div class="detail-comment-list">${rows || '<div class="tip-line">暂无吐槽</div>'}${foot}</div>`);
+            $('#detail-comment-order').on('click', () => { this._commentDesc = !this._commentDesc; this._renderComments(); });
+        }
+        // 无内滚容器：与「制作」页签一致随详情页自然下延；滚动根（#view-detail）
+        // 触底续拉（无条数上限）。每次渲染先解绑旧监听避免累积。
+        this._unbindCommentPageScroll();
+        const viewEl = document.getElementById('view-detail');
+        if (viewEl && !this._commentAllLoaded) {
+            this._onCommentPageScroll = () => {
+                if (this._activeTab !== '吐槽') return;
+                if (viewEl.scrollTop + viewEl.clientHeight >= viewEl.scrollHeight - 40) this._loadMoreComments();
+            };
+            viewEl.addEventListener('scroll', this._onCommentPageScroll);
+        }
+    },
+
+    /**
+     * 单条吐槽行 HTML（带 data-key 供增量更新做 DOM 复用）。
+     * 从 _renderComments 抽出为纯函数：全量渲染与续拉增量插入共用同一模板。
+     */
+    _commentRowHtml(c, key) {
+        const user = (c.user && (c.user.nickname || c.user.username)) || c.username || c.nickname || '';
+        const avatar = (c.user && c.user.avatar && (c.user.avatar.medium || c.user.avatar.small || c.user.avatar.large))
+            || c.avatar || '';
+        const text = c.comment || c.content || '';
+        const ts = c.updatedAt || c.updated_at || c.createdAt || c.created_at || 0;
+        const time = Detail._fmtCommentTimeFull(ts);
+        const rate = (c.rate || (c.comment && typeof c.comment === 'object' && c.comment.rate)) || 0;
+        const replies = (Array.isArray(c.replies) && c.replies.length) ? c.replies : null;
+        const repliesHtml = replies ? `<div class="detail-comment-replies">${replies.map((r) => {
+            const ru = (r.user && (r.user.nickname || r.user.username)) || r.username || r.nickname || '';
+            const ra = (r.user && r.user.avatar && (r.user.avatar.medium || r.user.avatar.small || r.user.avatar.large))
+                || r.avatar || '';
+            const rt = r.content || r.comment || '';
+            const rts = r.createdAt || r.created_at || r.updatedAt || r.updated_at || 0;
+            const rtime = Detail._fmtCommentTimeFull(rts);
+            return `<div class="detail-comment-reply">
                     <div class="detail-comment-head">
-                        ${ra ? `<img class="detail-comment-avatar" src="${escHtml(ra)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.display='none'">` : ''}
+                        ${ra ? `<img class="detail-comment-avatar" src="${escHtml(ra)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onload="this.classList.add('loaded')" onerror="this.style.display='none'">` : ''}
                         <span class="detail-comment-user">${escHtml(ru)}</span><span class="detail-comment-time">${escHtml(rtime)}</span>
                     </div>
                     <div class="detail-comment-text">${Detail._renderCommentBBCode(typeof rt === 'string' ? rt : '')}</div>
                 </div>`;
-            }).join('')}</div>` : '';
-            return `<div class="detail-comment">
+        }).join('')}</div>` : '';
+        return `<div class="detail-comment"${key ? ` data-key="${escHtml(key)}"` : ''}>
                 <div class="detail-comment-head">
-                    ${avatar ? `<img class="detail-comment-avatar" src="${escHtml(avatar)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.display='none'">` : ''}
+                    ${avatar ? `<img class="detail-comment-avatar" src="${escHtml(avatar)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onload="this.classList.add('loaded')" onerror="this.style.display='none'">` : ''}
                     <span class="detail-comment-user">${escHtml(user)}</span>${rate ? `<span class="detail-comment-rate">★ ${escHtml(String(rate))}</span>` : ''}<span class="detail-comment-time">${escHtml(time)}</span>
                 </div>
                 <div class="detail-comment-text">${Detail._renderCommentBBCode(typeof text === 'string' ? text : '')}</div>
                 ${repliesHtml}
             </div>`;
-        }).join('');
-        const foot = this._commentAllLoaded
+    },
+
+    /**
+     * 吐槽稳定键：时间戳+用户+评分+正文长度+回复数。接口无评论 ID，用字段指纹代替；
+     * 完全相同的重复条目按 _comments 原始顺序追加序号区分（与展示排序无关，跨渲染稳定）。
+     * 返回与 list 对齐的 key 数组。
+     */
+    _commentKeys(list) {
+        const base = (c) => [
+            Detail._commentTsMs(c.updatedAt || c.updated_at || c.createdAt || c.created_at || 0),
+            (c.user && (c.user.nickname || c.user.username)) || c.username || c.nickname || '',
+            c.rate || 0,
+            String(c.comment || c.content || '').length,
+            Array.isArray(c.replies) ? c.replies.length : 0,
+        ].join('|');
+        const occ = new Map();
+        const byObj = new Map();
+        for (const c of this._comments) { // 原始数组顺序分配序号，不受当前排序方向影响
+            const b = base(c);
+            const n = (occ.get(b) || 0) + 1;
+            occ.set(b, n);
+            byObj.set(c, `${b}#${n}`);
+        }
+        return list.map((c) => byObj.get(c) || `${base(c)}#0`);
+    },
+
+    /**
+     * 续拉增量插入：双指针把新排序结果合并进已渲染列表，只为新条目建节点，
+     * 已有行（含头像）原样保留避免重载闪烁。旧列表是新列表的子集（数据只增不减）。
+     */
+    _appendCommentRows(container, list, keys) {
+        const viewEl = document.getElementById('view-detail');
+        // 锚点补偿避让：平滑回顶进行中、或视口已处首屏时跳过。
+        // 回顶是用户明确的「去列表顶端」意图——正序模式下新续拉的更早评论本就属于顶端，
+        // 此时应停在 scrollTop≈0 看新顶内容；若仍做锚点回拨会与回顶动画抢滚动条，造成画面割裂。
+        const smoothToTop = !!(viewEl && viewEl._yukiSmoothTop);
+        const nearTop = !!viewEl && viewEl.scrollTop <= viewEl.clientHeight;
+        // 锚点：视口内第一可见行。若新行插在其上方，内容整体下移，事后按位移差回拨 scrollTop。
+        let anchor = null;
+        let anchorTop = 0;
+        if (viewEl && !smoothToTop && !nearTop) {
+            for (const el of container.querySelectorAll('.detail-comment')) {
+                const r = el.getBoundingClientRect();
+                if (r.bottom > 0) { anchor = el; anchorTop = r.top; break; }
+            }
+        }
+        const existing = Array.from(container.querySelectorAll('.detail-comment'));
+        const footEl = container.querySelector('.detail-comment-end, .detail-comment-more');
+        const holder = document.createElement('div');
+        let i = 0; // 指向尚未越过的旧行
+        for (let k = 0; k < list.length; k++) {
+            const key = keys[k];
+            if (i < existing.length && existing[i].dataset.key === key) { i++; continue; }
+            holder.innerHTML = Detail._commentRowHtml(list[k], key);
+            const node = holder.firstElementChild;
+            if (!node) continue;
+            const ref = i < existing.length ? existing[i] : footEl; // 尾部提示行之前 / 列表末尾
+            if (ref) container.insertBefore(node, ref); else container.appendChild(node);
+            // 不推进 i：后续新条目仍可能排在同一旧行之前
+        }
+        // 滚动补偿：锚点行仍在文档中时，把它拉回原来的屏幕位置（上方插入场景）
+        if (anchor && viewEl && anchor.isConnected) {
+            const delta = anchor.getBoundingClientRect().top - anchorTop;
+            if (Math.abs(delta) > 0.5) viewEl.scrollTop += delta;
+        }
+    },
+
+    /** 原位更新列表尾部提示（下拉加载更多… ↔ 没更多了），不动已渲染的评论行。 */
+    _updateCommentFooter(container) {
+        const cur = container.querySelector('.detail-comment-end, .detail-comment-more');
+        const want = this._commentAllLoaded
             ? (this._comments.length ? '<div class="tip-line detail-comment-end">没有更多了</div>' : '')
             : '<div class="tip-line detail-comment-more">下拉加载更多…</div>';
-        box.html(`<div class="detail-comment-toolbar">
-                <span class="detail-comment-count">共 ${this._comments.length} 条${this._commentAllLoaded ? '' : '+'}</span>
-                <button type="button" id="detail-comment-order" class="md-btn md-btn-tonal md-btn-sm">${this._commentDesc ? '⇅ 切正序' : '⇅ 切倒序'}</button>
-            </div>
-            <div id="detail-comment-scroll" class="detail-comment-scroll">${rows || '<div class="tip-line">暂无吐槽</div>'}${foot}</div>`);
-        $('#detail-comment-order').on('click', () => { this._commentDesc = !this._commentDesc; this._renderComments(); });
-        // 滚动到底部续拉（无条数上限）
-        const sc = document.getElementById('detail-comment-scroll');
-        if (sc) {
-            sc.addEventListener('scroll', () => {
-                if (sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 40) this._loadMoreComments();
-            });
-        }
+        if (!want) { if (cur) cur.remove(); return; }
+        if (cur && cur.outerHTML === want) return;
+        const holder = document.createElement('div');
+        holder.innerHTML = want;
+        const next = holder.firstElementChild;
+        if (!next) return;
+        if (cur) cur.replaceWith(next); else container.appendChild(next);
+    },
+
+    /** 解绑挂在详情页滚动根上的吐槽续拉监听（重渲染 / 切页签时调用）。 */
+    _unbindCommentPageScroll() {
+        const el = document.getElementById('view-detail');
+        if (el && this._onCommentPageScroll) el.removeEventListener('scroll', this._onCommentPageScroll);
+        this._onCommentPageScroll = null;
     },
 
     /** 评论时间：兼容 Unix 秒/毫秒时间戳与字符串。 */
@@ -883,6 +1102,19 @@ const Detail = {
         if (isNaN(d.getTime())) return '';
         const pad = (x) => String(x).padStart(2, '0');
         return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    },
+
+    /** 评论时间 → 毫秒时间戳（排序用）：兼容 Unix 秒/毫秒、数字串与日期字符串，解析失败返回 0。 */
+    _commentTsMs(ts) {
+        if (!ts) return 0;
+        if (typeof ts === 'string' && !/^\d+$/.test(ts)) {
+            const d = new Date(ts);
+            return isNaN(d.getTime()) ? 0 : d.getTime();
+        }
+        let n = Number(ts);
+        if (!n) return 0;
+        if (n < 1e12) n *= 1000; // 秒 → 毫秒
+        return n;
     },
 
     /** 从角色 info 中提取中文名。优先级：
@@ -997,7 +1229,7 @@ const Detail = {
                 role: String(c.relation || c.role_name || ''),
                 html: `<div class="detail-char-card" data-char-id="${escHtml(c.id || '')}" tabindex="0" title="点击查看人物详情与吐槽">
                     <div class="detail-char-avatar-wrap">${(c.images && (c.images.medium || c.images.grid))
-                        ? `<img class="detail-char-avatar" src="${escHtml(c.images.medium || c.images.grid)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.closest('.detail-char-avatar-wrap').classList.add('noimg');this.remove()">`
+                        ? `<img class="detail-char-avatar" src="${escHtml(c.images.medium || c.images.grid)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onload="this.classList.add('loaded')" onerror="this.closest('.detail-char-avatar-wrap').classList.add('noimg');this.remove()">`
                         : '<span class="detail-char-noimg">🎭</span>'}</div>
                     <div class="detail-char-name">${escHtml(mainName)}</div>
                     ${subName ? `<div class="detail-char-name-cn">${escHtml(subName)}</div>` : ''}
@@ -1111,8 +1343,12 @@ const Detail = {
 
     /** 渲染角色吐槽列表（支持排序切换；含用户头像、回复与完整时间）。 */
     _renderCharComments(panel) {
-        const list = (this._charComments || []).slice();
-        if (this._charCommentDesc) list.reverse();
+        // 与番剧吐槽一致：按时间显式排序（false=正序旧→新，true=倒序新→旧），不依赖接口返回顺序。
+        const list = (this._charComments || []).slice().sort((a, b) => {
+            const ta = Detail._commentTsMs(a.createdAt || a.created_at || a.updatedAt || a.updated_at || 0);
+            const tb = Detail._commentTsMs(b.createdAt || b.created_at || b.updatedAt || b.updated_at || 0);
+            return this._charCommentDesc ? tb - ta : ta - tb;
+        });
         const html = list.length ? list.map((c) => {
             const user = (c.user && (c.user.nickname || c.user.username)) || c.username || c.nickname || '';
             const avatar = (c.user && c.user.avatar && (c.user.avatar.medium || c.user.avatar.small || c.user.avatar.large))
@@ -1204,7 +1440,7 @@ const Detail = {
             const subName = (cn && orig && cn !== orig) ? orig : '';
             const img = (s.images && (s.images.medium || s.images.grid || s.images.small)) || '';
             return `<div class="detail-staff">
-                ${img ? `<img class="detail-staff-avatar" src="${escHtml(img)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.display='none'">` : '<span class="detail-staff-noimg">👤</span>'}
+                ${img ? `<img class="detail-staff-avatar" src="${escHtml(img)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onload="this.classList.add('loaded')" onerror="this.style.display='none'">` : '<span class="detail-staff-noimg">👤</span>'}
                 <div class="detail-staff-info">
                     <span class="detail-staff-jobs">${escHtml(jobs)}</span>
                     <span class="detail-staff-name">${escHtml(mainName)}</span>
@@ -1223,7 +1459,7 @@ const Detail = {
             const name = r.name_cn || r.name || '';
             const subName = (r.name && r.name_cn && r.name !== r.name_cn) ? r.name : '';
             return `<div class="detail-relation" ${r.id ? `data-rel-id="${escHtml(r.id)}" tabindex="0"` : ''}>
-                <div class="detail-relation-poster">${img ? `<img src="${escHtml(img)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.closest('.detail-relation-poster').classList.add('noimg');this.remove()">` : '<span class="detail-relation-noimg">🎬</span>'}</div>
+                <div class="detail-relation-poster">${img ? `<img src="${escHtml(img)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onload="this.classList.add('loaded')" onerror="this.closest('.detail-relation-poster').classList.add('noimg');this.remove()">` : '<span class="detail-relation-noimg">🎬</span>'}</div>
                 <div class="detail-relation-info">
                     <span class="detail-relation-type">${escHtml(r.relation || '')}</span>
                     <span class="detail-relation-name">${escHtml(name)}</span>
@@ -1252,10 +1488,15 @@ const Detail = {
             this._staff = Array.isArray(cached.staff) ? cached.staff : [];
             this._relations = Array.isArray(cached.relations) ? cached.relations : [];
             this._bgmExtraLoaded = true;
-            if (this._activeTab === '吐槽') this._renderComments();
-            else if (this._activeTab === '角色') this._renderCharacters();
-            else if (this._activeTab === '关联') this._renderRelations();
-            else if (this._activeTab === '制作') this._renderStaff();
+            // 缓存数据上屏走淡入。仅限四个 Bangumi 页签触发重渲染（_activeTab
+            // 必为其中之一，_renderTabContent 派发到同一渲染器）；不重渲染
+            // 概览/分集，避免重置分集多选等交互状态。吸顶区间内数据落位后
+            // 内容保持在功能栏之下可见
+            if (['吐槽', '角色', '关联', '制作'].includes(this._activeTab)) {
+                const deep = this._isBelowTabsStick();
+                this._swapTabContent(() => this._renderTabContent());
+                this._snapToTabsStick(deep);
+            }
             return;
         }
         try {
@@ -1282,10 +1523,14 @@ const Detail = {
                     staff: this._staff, relations: this._relations,
                 }, DETAIL_BGMEXTRA_TTL);
             }
-            if (this._activeTab === '吐槽') this._renderComments();
-            else if (this._activeTab === '角色') this._renderCharacters();
-            else if (this._activeTab === '关联') this._renderRelations();
-            else if (this._activeTab === '制作') this._renderStaff();
+            // 网络数据到达后重绘：与缓存命中分支同语义——仅四个 Bangumi 页签
+            // 走动画式交换（淡入，消除「加载中→数据」两段跳变）；吸顶区间内
+            // 数据落位后内容保持在功能栏之下可见
+            if (['吐槽', '角色', '关联', '制作'].includes(this._activeTab)) {
+                const deep = this._isBelowTabsStick();
+                this._swapTabContent(() => this._renderTabContent());
+                this._snapToTabsStick(deep);
+            }
         } catch (e) { /* Bangumi 数据加载失败 */ }
     },
 

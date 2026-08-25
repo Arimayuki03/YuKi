@@ -1355,9 +1355,10 @@ const Kazumi = {
             return;
         }
 
-        // 初始化源状态：每启用规则一张卡（pending）
+        // 初始化源状态：每张可用规则一张卡（pending）；已判定失效的源（validity === 'invalid'）
+        // 不建卡即在选源弹窗中隐藏，后端 /search/kazumi-stream 同步跳过该类源
         const plugins = {};
-        this._rules.filter((r) => r.enabled !== false).forEach((r) => {
+        this._rules.filter((r) => r.enabled !== false && r.validity !== 'invalid').forEach((r) => {
             plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
         });
         this._dlgState = { title, token, keyword: title, plugins, expanded: null };
@@ -2018,19 +2019,27 @@ const Kazumi = {
 
     /** 渲染线路与剧集列表。src 为番剧源页 URL，写入历史记录供历史卡重新选源（T4）。 */
     _renderChapterRoads(pluginName, roads, title, token, src) {
+        // 剧集展示顺序（会话级记忆，跨弹窗保留）：false=正序（源站原始顺序），true=倒序。
+        // 只影响展示——roads 原始数组不反转，Bangumi 分集多选下载按下标定位、
+        // 勾选集子集过滤、连播队列方向均不受影响；点任意集仍从该集起按原顺序连播。
+        if (typeof this._chapterEpsDesc !== 'boolean') this._chapterEpsDesc = false;
         const box = $('#kazumi-dialog-body');
         let html = `<div class="kazumi-road-toolbar">
             <button class="md-btn md-btn-tonal md-btn-sm kazumi-road-back">← 返回选源</button>
             <span class="kazumi-plugin-head">${escHtml(pluginName)} · ${escHtml(title)}</span>
+            <span class="kazumi-road-toolbar-spacer"></span>
+            <button class="md-btn md-btn-tonal md-btn-sm kazumi-eps-order" title="${this._chapterEpsDesc ? '切换为正序（第1集在前）' : '切换为倒序（最后一集在前）'}">${this._chapterEpsDesc ? '↑ 正序' : '↓ 倒序'}</button>
         </div>`;
         roads.forEach((road, ri) => {
-            const eps = (road.data || []).map((url, ei) => {
-                const name = (road.identifier || [])[ei] || `第${ei + 1}集`;
-                return `<button class="ep-btn kazumi-ep-btn" data-plugin="${escHtml(pluginName)}" data-url="${escHtml(url)}" data-name="${escHtml(name)}" data-flag="${escHtml(road.name)}">
-                    <span class="ep-name">${escHtml(name)}</span>
-                    <span class="ep-dl-one kazumi-ep-dl" data-url="${escHtml(url)}" data-name="${escHtml(name)}" data-flag="${escHtml(road.name)}" title="下载本集">⬇</span>
-                </button>`;
-            }).join('');
+            // 先按原始下标组装 {url,name}，再按需整体倒转展示：集名回落仍以原始集号为基准
+            const items = (road.data || []).map((url, ei) => ({
+                url, name: (road.identifier || [])[ei] || `第${ei + 1}集`,
+            }));
+            if (this._chapterEpsDesc) items.reverse();
+            const eps = items.map((it) => `<button class="ep-btn kazumi-ep-btn" data-plugin="${escHtml(pluginName)}" data-url="${escHtml(it.url)}" data-name="${escHtml(it.name)}" data-flag="${escHtml(road.name)}">
+                    <span class="ep-name">${escHtml(it.name)}</span>
+                    <span class="ep-dl-one kazumi-ep-dl" data-url="${escHtml(it.url)}" data-name="${escHtml(it.name)}" data-flag="${escHtml(road.name)}" title="下载本集">⬇</span>
+                </button>`).join('');
             html += `<div class="kazumi-road-group">
                 <div class="kazumi-road-name">${escHtml(road.name)}（${(road.data || []).length} 集）</div>
                 <div class="ep-grid">${eps}</div>
@@ -2048,6 +2057,12 @@ const Kazumi = {
         box.find('.kazumi-road-back').on('click', () => {
             if (token !== this._dlgToken) return;
             this._backToSources();
+        });
+        // 剧集顺序切换：翻转展示方向后整体重渲染（roads 原始数据不变，重渲染幂等）
+        box.find('.kazumi-eps-order').on('click', () => {
+            if (token !== this._dlgToken) return;
+            this._chapterEpsDesc = !this._chapterEpsDesc;
+            this._renderChapterRoads(pluginName, roads, title, token, src);
         });
         // 下载本集：从当前 Kazumi 源解析真实直链后加入下载队列（阻止冒泡避免触发播放）
         // 下载模式下点击 ⬇ 也应批量下载勾选集（而非只下载本集），与点击集主体行为一致

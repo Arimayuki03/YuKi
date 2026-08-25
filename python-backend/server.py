@@ -1620,6 +1620,7 @@ def create_app():
                              year: str = Query(''), sort: str = Query('')):
         """SSE 流式 Kazumi 规则源搜索（T73）：每个规则源完成即推一条 data，全部结束发 event: done。
         结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。
+        已判定失效的规则源（validity == 'invalid'）不参与检索、不推送。
 
         可选筛选参数 tag/year/sort（任务三 part 2）：作为模板变量 @tag/@year/@sort
         注入声明支持它们的规则源搜索请求（searchURL 含 @tag 等占位，或 API 模式 query 引用）。
@@ -1629,7 +1630,7 @@ def create_app():
             if not word:
                 yield 'event: done\ndata: {}\n\n'
                 return
-            plugins = list(kazumi_mgr.enabled_plugins())
+            plugins = list(kazumi_mgr.searchable_plugins())
             if not plugins:
                 yield 'event: done\ndata: {}\n\n'
                 return
@@ -2006,10 +2007,13 @@ def dispatch_kazumi_action(form):
             plugin_filter = form.get('plugin', '').strip()
             if not keyword:
                 return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
-            plugins = list(kazumi_mgr.enabled_plugins())
             if plugin_filter:
-                # 单源重查（SourceSheet 别名/手动/重试/验证后重试）
-                plugins = [p for p in plugins if p.name == plugin_filter]
+                # 单源重查（SourceSheet 别名/手动/重试/验证后重试）：显式指定源名，
+                # 不做无效源过滤——被判失效的源修复后仍可手动重试并翻回 valid
+                plugins = [p for p in kazumi_mgr.enabled_plugins() if p.name == plugin_filter]
+            else:
+                # 全源检索跳过已判定失效的规则（validity == 'invalid'）
+                plugins = list(kazumi_mgr.searchable_plugins())
             # 空插件列表直接返回（M-23）：max_workers=0 会让线程池抛异常变 500
             if not plugins:
                 return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)

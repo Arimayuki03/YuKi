@@ -29,6 +29,9 @@ const TOKEN_RE = /^\/pl\/([A-Za-z0-9_-]{8,64})\/(\d{1,4})(?:\.[a-z0-9]{1,5})?$/i
 const SEG_RE = /^\/seg\/([A-Za-z0-9_-]{8,64})\/(\d{1,4})(?:\.[a-z0-9]{1,5})?\/([A-Za-z0-9_-]+)$/i;
 const RESOLVE_TIMEOUT_MS = 12000;
 const UPSTREAM_TIMEOUT_MS = 15000;
+// 清单收取总超时：上游「慢滴不结束」（每 <15s 来一包躲过 socket 空闲超时、
+// 却永不发终止块）时，idle 超时永远不触发——必须有与活动无关的总死线兜底。
+const MANIFEST_COLLECT_DEADLINE_MS = 30 * 1000;
 const MANIFEST_MAX_BYTES = 6 * 1024 * 1024;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_SESSIONS = 8;
@@ -51,6 +54,21 @@ function hintExt(directUrl) {
     return /^\.(m3u8?|mp4|m4v|mkv|flv|ts|webm|mov|avi)$/.test(ext) ? ext : '.m3u8';
 }
 
+/** 按响应头 + 首块字节嗅探真实媒体扩展名（R27）。队列条目统一打 .m3u8 标签，
+ *  非 HLS 内容（字节系源常给渐进式 MP4）会被 VLC 等 .m3u8 解析器把二进制按行
+ *  拆成海量垃圾子条目（单字母+地球图标），并相对解析出 …/%12、…/Z 类畸形请求
+ *  （R24 悬案的真正源头）。识别失败返回 ''，调用方维持原直通行为不冒险。 */
+function sniffExtFromHead(buf, ct) {
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+    if (b.length >= 12 && b.toString('latin1', 4, 8) === 'ftyp') return '.mp4';
+    if (b.length >= 4 && b.toString('latin1', 0, 3) === 'FLV') return '.flv';
+    if (b.length >= 377 && b[0] === 0x47 && b[188] === 0x47 && b[376] === 0x47) return '.ts';
+    if (b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return '.mkv';
+    const ctm = /video\/(mp4|x-flv|flv|mp2t|webm)/i.exec(String(ct || ''));
+    if (ctm) return { mp4: '.mp4', 'x-flv': '.flv', flv: '.flv', mp2t: '.ts', webm: '.webm' }[ctm[1].toLowerCase()];
+    return '';
+}
+
 class PlaylistProxy extends EventEmitter {
     /**
      * @param {object} [opts]
@@ -65,6 +83,9 @@ class PlaylistProxy extends EventEmitter {
         // Kazumi 第二段解析：隐藏窗口抓真实流（index.js 注入 parseWin.captureDirect 适配）
         // 返回 {ok, url, header?}；注入才启用 Kazumi 分支。
         this.captureDirect = typeof opts.captureDirect === 'function' ? opts.captureDirect : null;
+        // 清单收取总超时可注入（测试用短死线）；0/非法值回落默认 30s
+        this.manifestCollectDeadlineMs = Number(opts.manifestCollectDeadlineMs) > 0
+            ? Number(opts.manifestCollectDeadlineMs) : MANIFEST_COLLECT_DEADLINE_MS;
         this.sessions = new Map(); // token → 会话（catvod / kazumi 两种 kind）
         // insecureHTTPParser：mpv 会把全局 --http-header-fields 原样回放到本地代理，
         // 规则站返回的头值可能带尾随空格等"非严格合法"内容——宽容解析直接放行，
@@ -146,6 +167,10 @@ class PlaylistProxy extends EventEmitter {
             headers: null,      // 会话级规则头（Kazumi 预热产出；全局头由此而来）
             cache: new Map(),   // index → 已解析直链（预热命中的集不再重复解析）
             pipe: !!ctx.pipe,   // 管道模式：数据面经本代理转发（外部播放器会话）
+            // 强制管道：无会话头也不 302 直连（PotPlayer 的 m3u8 规范化包装，
+            // 见 index.js pipeWrapAuthUrl——CDN 清单缺 Content-Type 时 PotPlayer
+            // 会误判成 MPEG TS，必须由代理回写标准 mpegurl 头）。
+            forcePipe: !!ctx.forcePipe,
         };
         if (kind === 'static') {
             // 静态直链：会话头直接来自调用方；全部集目预填缓存（无需懒解析）
@@ -264,6 +289,7 @@ class PlaylistProxy extends EventEmitter {
             try { upstream = unb64u(seg[3]); } catch (e) { upstream = ''; }
             if (!sess || !(index >= 0 && index < sess.eps.length)
                 || !/^https?:\/\//i.test(upstream) || !sess.pipe) {
+                console.log(`[播放列表] /seg 未匹配(${!sess ? '无令牌' : !sess.pipe ? '非管道会话' : '上游地址非法'}): ${rawPath.slice(0, 100)}`);
                 res.statusCode = 404; res.end();
                 return;
             }
@@ -274,7 +300,29 @@ class PlaylistProxy extends EventEmitter {
         const sess = m ? this.sessions.get(m[1]) : null;
         const index = m ? parseInt(m[2], 10) : -1;
         if (!sess || index < 0 || index >= sess.eps.length) {
-            res.statusCode = 404; res.end();
+            // R24（VLC 用户实测）：源站异常清单内容会被 VLC 当 URI 行按相对地址解析回
+            // /pl/<token>/ 目录下（…/%12、…/Z 等，复现台九种清单形态定位为源站内容触发）。
+            // 裸 404 每条诱发一张「无法打开 MRL」模态弹窗刷屏；活跃令牌下改回最小合法
+            // 空清单（#EXTM3U+#EXT-X-ENDLIST），VLC 静默跳过该条目——与 PotPlayer 对
+            // 垃圾条目的容忍行为对齐。令牌不存在（过期/应用重启）维持 404：静默跳过会
+            // 掩盖真实失效。留痕日志供后续定位具体触发内容。
+            // 注意严格 TOKEN_RE 对畸形路径不匹配、取不到会话——用宽松前缀再提一次
+            // 令牌判断存活。
+            let live = sess;
+            if (!live) {
+                const loose = /^\/pl\/([A-Za-z0-9_-]{8,64})\//.exec(rawPath);
+                live = loose ? this.sessions.get(loose[1]) || null : null;
+            }
+            if (live) {
+                res.writeHead(200, {
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Cache-Control': 'no-store',
+                });
+                res.end('#EXTM3U\n#EXT-X-ENDLIST\n');
+            } else {
+                res.statusCode = 404; res.end();
+            }
+            console.log(`[播放列表] 未匹配路径(${live ? '活令牌' : '无令牌'}): ${rawPath.slice(0, 120)}`);
             return;
         }
         // 预热命中的集直接回给播放器；其余按需解析后缓存。
@@ -321,19 +369,16 @@ class PlaylistProxy extends EventEmitter {
     async _serveResolved(sess, index, url, req, res) {
         const isLocal = /^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(url);
         if (!isLocal) {
-            // 管道分流（按源生态差异化）：
-            // - catvod / static（CMS 采集站 / page 包装）：**仅 Cookie/Authorization
-            //   才走 pipe**，Referer/UA-only 一律 302 直连。实测 lzcdn31 等主 CDN
-            //   仅 UA 即 200，Referer 多为规则作者冗余；直连可让 PotPlayer 拿到
-            //   CDN 原始清单与分片（与 mpv 完全一致），拖动 seek 由 CDN 原生 Range
-            //   支撑，避免代理重写引入的 DISCONTINUITY 重建与音画漂移。
-            // - kazumi（规则引擎）：规则头就是防盗链配置（哪怕只有 UA），一律 pipe
-            //   注入，不做直连冒险。
+            // 管道分流：**会话头非空即 pipe**（kazumi/static/catvod 统一，R22）；
+            // forcePipe 会话（PotPlayer 的 m3u8 规范化包装）无头也强制 pipe——
+            // 302 直连会让 PotPlayer 裸连 CDN，清单缺 Content-Type 时再次误判
+            // MPEG TS（R23 实验矩阵实锤），规范化必须发生在代理回写侧。
             const keys = Object.keys(sess.headers || {}).map((k) => String(k).toLowerCase());
-            const strongAuth = keys.some((k) => ['cookie', 'authorization'].includes(k));
-            const needAuth = sess.kind === 'kazumi' ? keys.length > 0 : strongAuth;
-            if (sess.pipe && needAuth) {
+            const needAuth = keys.length > 0;
+            console.log(`[播放列表] 第 ${index + 1} 集应答 ${sess.pipe && (needAuth || sess.forcePipe) ? 'pipe' : '302'} → ${url.slice(0, 80)}`);
+            if (sess.pipe && (needAuth || sess.forcePipe)) {
                 const st = await this._pipeRemote(sess, index, url, req, res);
+                console.log(`[播放列表] 第 ${index + 1} 集 pipe 完成 st=${st}`);
                 // 直链签名时效过期（上游 403/410）：PotPlayer 已在播放中或刚起播，
                 // page 解析直链常带短时效 sign —— 时好时坏的根源。代理清该集缓存
                 // 强制重解析（refresh=1）并用新直链重试一次，仅在响应尚未开始时
@@ -517,20 +562,51 @@ class PlaylistProxy extends EventEmitter {
         const headers = {};
         // 只注入会话规则头；入站请求头一律不透传，避免把 127.0.0.1 上下文泄漏给源站
         Object.assign(headers, sess.headers || {});
+        // 无会话头的强制管道会话（PotPlayer m3u8 规范化包装）：Node http 不自动带
+        // UA，部分 CDN WAF 拒收无 UA 请求 → 补浏览器 UA（与 sniffMediaExt/R22 的
+        // Mozilla/5.0 口径一致；有会话头时以规则头为准不覆盖）。
+        if (!Object.keys(headers).length) headers['User-Agent'] = 'Mozilla/5.0';
         const range = String(req.headers.range || '');
         if (range) headers.Range = range;
         let rs;
         try { rs = await this._upstreamGet(upstreamUrl, headers, 2); }
         catch (e) {
+            console.log(`[播放列表] 上游取流失败: ${e && e.message}`);
             res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
             res.end('upstream error');
             return 0;
         }
+        const ct0 = String(rs.headers['content-type'] || '').toLowerCase();
+        // R22（VLC 实锤）：清单判定只看 Content-Type/扩展名，与入站 Range **解耦**。
+        // VLC 的 HTTP 访问层对一切 GET 都带「Range: bytes=0-」（清单也不例外），
+        // 旧逻辑「有 Range 即直通」令 VLC 从未拿到重写清单——分片地址原样指向上游，
+        // 播放器绕过代理裸连 CDN，会话头全丢 → 防盗链源 403（PotPlayer 不发 Range
+        // 故从未暴露；本机真实 VLC 复现：清单请求 range="bytes=0-"，分片直连上游被 WAF 拒）。
+        const looksManifest = ct0.includes('mpegurl') || /\.m3u8?(?:$|\?)/i.test(rs.finalUrl || '');
+        // R27：kazumi/catvod 队列条目统一打 .m3u8 标签，但真实内容可能是渐进式 MP4
+        // 等非 HLS——这类请求必须先进收取循环窥探判型（HLS→重写；非 HLS→302 改标签）
+        const reqLabelHls = /\.m3u8?$/i.test(String(req.url || '').split('?')[0]);
+        if ((looksManifest || reqLabelHls) && range) {
+            // 带 Range 取到的可能是 206 局部清单/媒体：丢弃后无 Range 整取，保证拿到完整可判型正文
+            try { rs.stream.destroy(); } catch (e) { /* ignore */ }
+            // 重取沿用同一 headers（含 forcePipe 会话的默认 UA 注入），仅剥除 Range
+            const retryHeaders = { ...headers };
+            delete retryHeaders.Range;
+            try {
+                rs = await this._upstreamGet(upstreamUrl, retryHeaders, 2);
+            } catch (e) {
+                try { res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('upstream error'); } catch (e2) { /* ignore */ }
+                return 0;
+            }
+        }
         const ct = String(rs.headers['content-type'] || '').toLowerCase();
-        // 带 Range 的取流 / 非 200 / 明确的非清单类型 → 纯直通（清单只在整取时有意义）
-        const forceRaw = !!range || rs.status !== 200
-            || (!ct.includes('mpegurl') && !/\.m3u8?(?:$|\?)/i.test(rs.finalUrl));
+        const looksManifestFinal = ct.includes('mpegurl') || /\.m3u8?(?:$|\?)/i.test(rs.finalUrl);
+        // 带 Range 的取流 / 非 200 / 明确的非清单类型 → 纯直通（清单只在整取时有意义）。
+        // 例外：.m3u8 标签请求放行 206 进窥探循环——206+mp4 正是「MP4 冒充清单」的高发形态
+        const forceRaw = (rs.status !== 200 && !(reqLabelHls && rs.status === 206))
+            || (!looksManifestFinal && !reqLabelHls);
         if (forceRaw) {
+            if (rs.status !== 200) console.log(`[播放列表] 上游非200直通 st=${rs.status} ct=${ct || '∅'}`);
             this._passthrough(res, rs);
             // 返回上游状态码：403/410 通常是直链签名时效过期，调用方据此触发重解析
             return rs.status;
@@ -539,6 +615,15 @@ class PlaylistProxy extends EventEmitter {
         const chunks = [];
         let total = 0;
         let mode = 'detect'; // detect → manifest | raw
+        let redirected = false; // R27：非 HLS 内容 → 已 302 到正确扩展名，响应已收场
+        // 总死线看门狗：与活动无关（socket idle 超时可被「慢滴不结束」的上游躲过）。
+        // 触发即销毁上游流，收取循环经 error/aborted 收场，按超时明确回 504。
+        let stalled = false;
+        const collectDeadline = setTimeout(() => {
+            stalled = true;
+            console.log('[播放列表] 清单收取超时，销毁上游流');
+            try { rs.stream.destroy(); } catch (e) { /* ignore */ }
+        }, this.manifestCollectDeadlineMs);
         await new Promise((resolve) => {
             rs.stream.on('data', (c) => {
                 if (mode === 'detect') {
@@ -547,6 +632,24 @@ class PlaylistProxy extends EventEmitter {
                         // 统一 writeHead+end（writeHead 之后再 setHeader 会抛
                         // ERR_HTTP_HEADERS_SENT，响应悬挂——实测）
                         mode = 'manifest';
+                    } else if (reqLabelHls) {
+                        // R27：.m3u8 标签下探到非 HLS 内容——302 到同会话同集的真实
+                        // 扩展名地址，让播放器 demux 与内容对齐。嗅探失败（未知格式）
+                        // 维持原直通行为不冒险。嗅探出的扩展名永不为 .m3u8 → 无回环。
+                        const ext = sniffExtFromHead(c, ct);
+                        if (ext) {
+                            console.log(`[播放列表] 第 ${index + 1} 集非HLS内容(${ct || '∅'})，改标签 ${ext}`);
+                            try { rs.stream.destroy(); } catch (e) { /* ignore */ }
+                            const host = String((req.headers && req.headers.host) || '127.0.0.1');
+                            res.writeHead(302, { Location: `http://${host}/pl/${sess.token}/${index}${ext}` });
+                            res.end();
+                            redirected = true;
+                            resolve();
+                            return;
+                        }
+                        mode = 'raw';
+                        this._passthrough(res, rs, c);
+                        return;
                     } else {
                         mode = 'raw';
                         this._passthrough(res, rs, c);
@@ -561,6 +664,18 @@ class PlaylistProxy extends EventEmitter {
             rs.stream.on('end', resolve);
             rs.stream.on('error', resolve);
         });
+        clearTimeout(collectDeadline);
+        if (redirected) return 302;
+        if (stalled) {
+            // 收取超时：响应头尚未写出（清单模式未回写）→ 明确 504，播放器立刻
+            // 失败/跳下一集，而不是把断流当无限缓冲干等（R26 根因的同族场景）
+            console.log('[播放列表] 清单收取超时，回 504');
+            try {
+                res.writeHead(504, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end('manifest collect timeout');
+            } catch (e) { /* 客户端已断开 */ }
+            return rs.status || 0;
+        }
         if (mode !== 'manifest') { try { res.end(); } catch (e) { /* ignore */ } return rs.status; }
         const text = Buffer.concat(chunks).toString('utf8');
         const body = this._rewriteManifest(text, rs.finalUrl, sess, index, req);
@@ -595,6 +710,14 @@ class PlaylistProxy extends EventEmitter {
             });
         }
         if (preChunk) res.write(preChunk);
+        // R26（VLC 实锤）：上游断流必须终止响应——pipe() 在源 error/aborted 时
+        // **不会 end 目标**，上游一死播放器就把「断流」当成「无限缓冲」永远等待
+        // （kazumi 起播后画面毫无反应、也不报错不跳下一集的根因）。close 在正常
+        // 结束后也会触发，对已完成响应二次 end 是无害 no-op。
+        const terminate = () => { try { res.end(); } catch (e) { /* 连接已死 */ } };
+        rs.stream.on('aborted', terminate);
+        rs.stream.on('error', terminate);
+        rs.stream.on('close', terminate);
         rs.stream.pipe(res);
     }
 

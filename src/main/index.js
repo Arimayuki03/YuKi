@@ -23,6 +23,7 @@ const https = require('https');
 const zlib = require('zlib');
 const PythonBridge = require('./python-bridge');
 const MpvPlayer = require('./mpv-player');
+const { extWatch } = require('./ext-watch');
 const { PlaylistProxy } = require('./playlist-proxy');
 
 // 模块级注册：无论 setup 流程走到哪里，渲染层调用都不会悬空 pending
@@ -1111,9 +1112,11 @@ app.whenReady().then(() => {
             // 多条目 m3u 列表：EXTINF 集名 + 纯 ASCII 代理地址；catvod 无头/UA-only
             // 条目经代理 302 直连（探测零等待，总时长即时），强防盗链条目 pipe 预取
             // 加速——整季列表与时长体验兼得。
-            // Page 借鉴 mpv：单集直连，不经过 playlist-proxy 队列与静态管道
-            // （mpv 亦如此）。page 直链自带有效签名且 CDN 实测仅 UA 即 200，
-            // 管道重写反而引入相对路径签名丢失与 mpeg ts 误判风险。
+            // Page 单集：PotPlayer 的 m3u8 直链经 pipeWrapAuthUrl 强制包静态管道
+            // （R23：CDN 清单缺/generic Content-Type 时 PotPlayer 误判 MPEG TS，
+            // 必须由代理回写标准 mpegurl 头；VLC/mpv 不依赖该头维持裸直链）。
+            // page 直链自带有效签名，管道重写的 query 继承（_rewriteManifest）
+            // 已保证相对分片/子清单签名不丢。
             const isPageRoute = pageQueueBan.has(`${meta.site || ''}|${meta.flag || ''}`);
             const isQueue = !isPageRoute && Array.isArray(meta.playlist) && meta.playlist.length > 1;
             const items = isQueue
@@ -1345,18 +1348,6 @@ app.whenReady().then(() => {
         return { path: dir };
     });
 
-    ipcMain.handle('yuki:file-upload', async (_e, rel) => {
-        try {
-            const r = await dialog.showOpenDialog(win, {
-                title: '选择要上传的文件',
-                properties: ['openFile', 'multiSelections'],
-            });
-            if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'canceled' };
-            const copied = fileMgr.uploadFiles(rel, r.filePaths);
-            return { ok: true, copied };
-        } catch (err) { return { ok: false, reason: err.message }; }
-    });
-
     fileIpc('yuki:file-new-folder', (rel, name) => { fileMgr.newFolder(rel, name); return {}; });
     fileIpc('yuki:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
     fileIpc('yuki:file-del-folder', (rel) => { fileMgr.delFolder(rel); return {}; });
@@ -1447,7 +1438,10 @@ app.whenReady().then(() => {
         const playUrl = abs.replace(/\\/g, '/');
         if (extPrimary) {
             // 本地文件无鉴权头，直接交指定播放器起播（无 file-loaded 校验，spawn 成功即视为已交）
-            const r = launchExternalPlayer(extPrimary, playUrl);
+            // VLC 对正斜杠本地路径处理不可靠（只起窗口不播），改用 file:// URI
+            const extKind = externalPlayerKind(extPrimary);
+            const extUrl = toExternalLocalUrl(abs, extKind);
+            const r = launchExternalPlayer(extPrimary, extUrl, null, title);
             return r.ok ? { ...r, viaExternal: true } : r;
         }
         // 与 yuki:play 对齐：起播前刷新 Anime4K 着色器链（开关/档位实时生效）。
@@ -2838,8 +2832,10 @@ app.whenReady().then(() => {
             if (!fileMgr.isVideo(abs) && path.extname(abs)) return { ok: false, reason: 'not-video' };
             const title = path.basename(abs);
             if (extPrimary) {
-                // 本地文件无鉴权头；Windows 反斜杠路径转正斜杠，规避个别播放器解析问题
-                const r = launchExternalPlayer(extPrimary, abs.replace(/\\/g, '/'));
+                // 本地文件无鉴权头；VLC 用 file:// URI 解决正斜杠本地路径“只起窗口不播”
+                const extKind = externalPlayerKind(extPrimary);
+                const extUrl = toExternalLocalUrl(abs, extKind);
+                const r = launchExternalPlayer(extPrimary, extUrl, null, title);
                 return r.ok ? { ...r, viaExternal: true } : r;
             }
             // 与 yuki:play 对齐：起播前刷新 Anime4K 着色器链，下载文件同样实时生效
@@ -3096,6 +3092,11 @@ app.whenReady().then(() => {
         // 断流恢复由渲染层重新调用 playerContent（refresh=1）后再进入本入口，
         // 这样短期 CDN URL 会被重新评估；主进程不得直接复用旧地址。
     });
+
+    // 外部播放器进程退出 → 渲染层记账（观看统计/最近观看/播放历史）。外部播放器无法
+    // 像 mpv 那样查询播放位置，墙钟秒数（进程存活时长）即本次观看时长，口径同 mpv 的
+    // wallWatched；统计写入仍由渲染层复用 _writeWatch（隐身模式/统计开关单一出处）。
+    extWatch.on('exit', (info) => send('yuki:ext-player-exit', info));
 
     /** 自动重载收尾：清状态并通知渲染层（ok=是否成功载入站点）。 */
     function finishReload(ok, sites) {
@@ -3391,10 +3392,11 @@ app.whenReady().then(() => {
      *  2. 条目 URL 携带内容一致的扩展名提示，引导正确解码路径与时长计算；
      *  3. 整季写入 .m3u8 播放列表文件交给 PotPlayer——原生列表可切集连播，
      *     单一文件入口天然杜绝多窗口；单条目直接 spawn URL 不落盘；
-     *  4. 同播放意图短窗内二次启动：kill 旧进程再起新的（对齐内置 mpv 收敛语义），
+     * 4. 同播放意图短窗内二次启动：kill 旧进程再起新的（对齐内置 mpv 收敛语义），
      *     渲染层竞态双发也只剩一个存活窗口。
-     * VLC/mpv 的 header 开关语法可靠且各自支持 #EXTVLCOPT/--http-header-fields，
-     * 维持命令行直传，不走管道。
+     * VLC 的 HTTP 头经真实开关 --http-user-agent/--http-referrer 直传（R22 修正，
+     * 旧注释误以为其支持 mpv 的 --http-header-fields）；裸直链统一下发浏览器 UA
+     * 规避 CDN WAF 的 VLC UA 封锁。
      */
 
     /** 外部播放列表临时目录（userData 下，写入前清理 1 小时前的残留）。 */
@@ -3474,22 +3476,42 @@ app.whenReady().then(() => {
         return '.m3u8';
     }
 
-    /** 把带鉴权头的真实直链包成 static 管道代理地址。失败时返回原 URL（退回旧行为）。
-     *  ctx 可选：{ site, flag, vipFlags }，供上游 403 时重解析刷新签名直链。 */
+    /**
+     * 把真实直链包成 static 管道代理地址。失败时返回原 URL（退回旧行为）。
+     * 包装条件（命中其一）：
+     * 1. 带鉴权头——播放器直连带不上头（历史行为）；
+     * 2. PotPlayer + HLS 直链——2026-08-26 本机 PotPlayer 26.06.30 矩阵实测：
+     *    清单响应缺 Content-Type 或 application/octet-stream 时，PotPlayer 走
+     *    「未知内容」原始流路径（Icy-MetaData/WINAMP 探测），把 m3u8 当 MPEG
+     *    TS 播（时长渐进、不可拖动）；查询串与 video/mp2t 谎报 CT 均无碍，
+     *    唯 CT 缺失/generic 是触发条件。代理回写标准 mpegurl+定长根治；
+     *    VLC/mpv 内容嗅探不依赖该头，维持裸直链。
+     * ctx 可选：{ site, flag, vipFlags, kind }——site/flag/vipFlags 供上游 403
+     * 时重解析刷新签名直链；kind 为外部播放器类型（potplayer 才启用条件 2）。
+     */
     async function pipeWrapAuthUrl(url, header, title, ctx) {
         if (!playlistProxyRef || !/^https?:\/\//i.test(url)) return url;
         if (isPlaylistProxyUrl(url)) return url;
-        if (!hasAuthHeader(header)) return url;
+        const strongAuth = hasAuthHeader(header);
+        const isPot = String((ctx && ctx.kind) || '') === 'potplayer';
+        // 仅在需要决策时探测扩展名提示（mpv/VLC 无鉴权场景零开销维持原样）
+        let hint = '';
+        try { hint = (strongAuth || isPot) ? await sniffMediaExt(url, header || {}) : ''; } catch (e) { hint = ''; }
+        // PotPlayer 只包 HLS：hint 兜底即 .m3u8；嗅探失败（''）不包装维持旧行为。
+        // mp4/flv 裸流 PotPlayer 处理正常，经代理中继徒增带宽与故障面。
+        if (!strongAuth && !(isPot && hint === '.m3u8')) return url;
         try {
-            const hint = await sniffMediaExt(url, header);
             const reg = await playlistProxyRef.register({
                 kind: 'static', title: String(title || ''), site: String((ctx && ctx.site) || ''), flag: String((ctx && ctx.flag) || ''),
                 vipFlags: String((ctx && ctx.vipFlags) || '[]'),
                 eps: [{ id: url, name: String(title || ''), hint }],
-                start: 0, pipe: true, headers: { ...header },
+                start: 0, pipe: true,
+                // 无鉴权头的规范化包装必须强制管道：302 回 CDN 会复现 CT 问题
+                forcePipe: !strongAuth,
+                headers: { ...(header || {}) },
             });
             if (reg && reg.ok && Array.isArray(reg.entries) && reg.entries.length === 1) {
-                console.log(`[外部播放器] 带鉴权直链包静态管道(${hint})：${url.slice(0, 80)}`);
+                console.log(`[外部播放器] 直链包静态管道(${hint}${strongAuth ? '' : '+forcePipe'})：${url.slice(0, 80)}`);
                 return reg.entries[0].url;
             }
         } catch (e) { /* 注册失败退回直传 */ }
@@ -3499,8 +3521,9 @@ app.whenReady().then(() => {
     /**
      * 归一化并解析外部播放条目通道。
      * items: [{ url, title, header }] → [{ url(最终地址), title }]，顺序保持。
+     * kind：外部播放器类型（potplayer 的 m3u8 需管道规范化，见 pipeWrapAuthUrl）。
      */
-    async function resolveExternalItems(items) {
+    async function resolveExternalItems(items, kind) {
         const out = [];
         for (const it of items) {
             let url = String(it.url || '');
@@ -3508,7 +3531,7 @@ app.whenReady().then(() => {
             if (/^https?:\/\//i.test(url)) {
                 // 管道地址已是最终形态；带鉴权头直链包静态管道；无鉴权头直连 CDN
                 // 传递 site/flag/vipFlags：page 源直链签名时效短，403 时代理可凭此重解析刷新
-                url = await pipeWrapAuthUrl(url, header, it.title, { site: it.site, flag: it.flag, vipFlags: it.vipFlags });
+                url = await pipeWrapAuthUrl(url, header, it.title, { site: it.site, flag: it.flag, vipFlags: it.vipFlags, kind });
             }
             out.push({ url, title: String(it.title || '') });
         }
@@ -3551,7 +3574,9 @@ app.whenReady().then(() => {
     /**
      * 用指定外部播放器起播一批条目（重写后的统一入口）。
      * items: [{ url, title, header }]；
-     * 返回 { ok, via, kind, launchedPid } 或 { ok:false, reason }。
+     * 返回 { ok, via, kind, launchedPid, sessionId } 或 { ok:false, reason }。
+     * sessionId 为观看会话号（ext-watch）：渲染层据此挂元信息，进程退出后按墙钟
+     * 时长计入观看统计/历史（借鉴 mpv 的会话+退出事件架构）。
      * 多条目走临时 .m3u 文件（EXTINF 集名，不经 HTTP → 无请求行编码问题；
      * PotPlayer 原生列表可切集）；单条目直接 spawn URL（page 源单集经 .m3u
      * 间接会被部分版本误判容器类型，实测直链更稳）。
@@ -3559,8 +3584,9 @@ app.whenReady().then(() => {
     function launchExternalPlayerItems(execPath, items) {
         const p = extLaunchChain.then(async () => {
             const kind = externalPlayerKind(execPath);
-            const resolved = await resolveExternalItems(items);
+            const resolved = await resolveExternalItems(items, kind);
             if (!resolved.length || resolved.some((it) => !it.url)) return { ok: false, reason: 'bad item' };
+            let sessionId = 0;
             try {
                 const { spawn } = require('child_process');
                 // 此刻位于串行链头部：kill 上一个 pid 后立刻 spawn，中间无 await，
@@ -3569,53 +3595,68 @@ app.whenReady().then(() => {
                     console.log(`[外部播放器] 收敛：kill 旧进程 pid=${lastExtLaunchPid}`);
                     killPrevExtPlayer(lastExtLaunchPid);
                 }
-                // 单条目直链、列表走文件：兼顾 page 源兼容性与多集列表显示
+                // 观看会话开账：beginSession 内部会显式结清上一条在播会话（taskkill
+                // 失败/非 win32 时旧进程 exit 事件不可依赖），保证任何时刻至多一条
+                // 未结算会话；attach 后进程退出（含被 taskkill）回传墙钟时长。
+                sessionId = extWatch.beginSession({ kind, execPath, titles: resolved.map((it) => it.title) });
+                // 单条目直链、列表走文件：兼顾 page 源兼容性与多集列表显示。
+                // 列表 m3u 是本地文件路径：必须过 toExternalLocalUrl——VLC 的 MRL
+                // 解析器把裸盘符路径（C:/…）当未知 URI scheme 静默拒载 → 空窗口
+                // 不播（R21 同根因：file-push/dl-play 两入口已修，kazumi/catvod
+                // 整季队列的 m3u 入口此前漏网，即「VLC 播 kazumi 源失败而
+                // PotPlayer 正常」的根因）；其余播放器维持正斜杠路径。
+                // 单条目是 http(s) 直链/代理地址，不经本地路径转换。
                 const isSingle = resolved.length === 1;
-                const target = isSingle ? resolved[0].url : writeExtPlaylistFile(resolved);
+                let target = isSingle ? resolved[0].url
+                    : toExternalLocalUrl(writeExtPlaylistFile(resolved), kind);
+                // VLC 补默认浏览器 UA（R22）：page 线路 header 置空后裸直链交给播放器，
+                // 国内 CDN WAF 按 UA 白名单放行——PotPlayer/mpv 默认 UA 恰好过关，VLC 的
+                // 「VLC/3.x LibVLC」是重点封锁对象 → 403。sniffMediaExt 以 Mozilla/5.0
+                // 探测即 200 为现成佐证，故裸 URL 场景统一下发浏览器 UA；管道代理条目
+                // 入站不校验 UA，该开关无害。开关置于内容之前（R21：URL 必须收尾）。
+                const spawnArgs = kind === 'vlc'
+                    ? ['--http-user-agent=Mozilla/5.0', target]
+                    : [target];
                 console.log(`[外部播放器] spawn ${kind} pid目标 ${isSingle ? 'url' : 'm3u'}=${String(target).slice(0, 70)} 条目=${resolved.length}`);
-                const child = spawn(execPath, [target], { detached: true, stdio: 'ignore', windowsHide: true });
+                // windowsHide 禁用（2026-08-25 实测复现）：libuv 会设 STARTF_USESHOWWINDOW=SW_HIDE，
+                // VLC(Qt) 主窗口以 SW_SHOWDEFAULT 显示时继承 SW_HIDE → 进程存活但主窗口永久
+                // 隐藏（PotPlayer 忽略该标志，故此前仅 VLC 暴露）。GUI 播放器本无控制台可闪，
+                // 该开关无必要；证据与回归测试见 tests/js/external-player-spawn.test.js。
+                const child = spawn(execPath, spawnArgs, { detached: true, stdio: 'ignore' });
                 child.unref();
                 lastExtLaunchPid = child.pid;
-                console.log(`[外部播放器] 已启动 pid=${child.pid}`);
-                return { ok: true, via: execPath, kind, launchedPid: child.pid };
-            } catch (e) { return { ok: false, reason: e.message }; }
+                extWatch.attach(child);
+                console.log(`[外部播放器] 已启动 pid=${child.pid} 观看会话=${sessionId}`);
+                return { ok: true, via: execPath, kind, launchedPid: child.pid, sessionId };
+            } catch (e) {
+                if (sessionId) extWatch.cancel(sessionId); // spawn 抛错：作废会话，不留僵尸开账
+                return { ok: false, reason: e.message };
+            }
         });
         extLaunchChain = p.then(() => {}, () => {});
         return p;
     }
 
-    /** （兼容保留）单 URL 直启：VLC/mpv 弹窗按钮等仍走开关直传路径。
-     *  同样接入 pid 收敛——dl-play/file-push/外部播放器按钮等所有 spawn 路径
-     *  必须共享同一收敛点，否则任一路径漏网即双窗口（实测）。 */
-    function launchExternalPlayer(execPath, url, header, label) {
-        const kind = externalPlayerKind(execPath);
-        const { args } = buildExternalPlayerArgs(kind, url, header || {}, label);
-        try {
-            const { spawn } = require('child_process');
-            if (lastExtLaunchPid) killPrevExtPlayer(lastExtLaunchPid);
-            const child = spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true });
-            child.unref();
-            lastExtLaunchPid = child.pid;
-            return { ok: true, via: execPath, kind };
-        } catch (e) { return { ok: false, reason: e.message }; }
-    }
-
     /** 按播放器类型拼 spawn 参数（仅剩 VLC/mpv 使用命令行 header 开关；
-     *  PotPlayer 一律走静态管道，不再生成任何开关参数）。 */
+      * PotPlayer 一律走静态管道，不再生成任何开关参数）。 */
     function buildExternalPlayerArgs(kind, url, header, label) {
         const referer = header && (header.Referer || header.referer);
         const ua = header && (header['User-Agent'] || header.ua);
         if (kind === 'vlc') {
-            const args = [url];
-            const pairs = [];
-            if (referer) pairs.push(`Referer: ${referer}`);
-            if (ua) pairs.push(`User-Agent: ${ua}`);
-            if (pairs.length) args.push(`--http-header-fields=${pairs.join(',')}`);
+            // VLC 真实 HTTP 开关（wiki.videolan.org Documentation:Modules/http）：
+            // --http-user-agent / --http-referrer（注意 referrer 双写 r，发送的是
+            // HTTP "Referer" 头）。旧实现误用 mpv 的 --http-header-fields——VLC 对
+            // 未知开关直接报「unknown option」并拒绝加载（非静默忽略），防盗链头
+            // 从未真正生效过；R22 起改用正确语法。
+            const args = [];
+            if (ua) args.push(`--http-user-agent=${ua}`);
+            if (referer) args.push(`--http-referrer=${referer}`);
             args.push('--no-video-title-show');
+            args.push(url);
             return { args, headerSupported: true };
         }
         if (kind === 'mpv') {
-            const args = [url];
+            const args = [];
             const pairs = [];
             if (referer) pairs.push(`Referer: ${referer}`);
             if (ua) pairs.push(`User-Agent: ${ua}`);
@@ -3626,11 +3667,26 @@ app.whenReady().then(() => {
                 const t = String(label).replace(/["$]/g, '');
                 args.push(`--title=yuki · ${t}`, `--force-media-title=yuki · ${t}`);
             }
+            args.push(url);
             return { args, headerSupported: true };
         }
         // PotPlayer/其他：命令行开关实测不可靠（见区块头注释），仅传 URL。
         // 带鉴权头的场景已在 launchExternalPlayerItems 里管道化。
         return { args: [url], headerSupported: false };
+    }
+
+    /** 本地文件路径转为外部播放器可识别的形态：
+     *  VLC 对原生 Windows 路径的正斜杠形式处理不可靠（实测只拉窗口不播），
+     *  改用 file:// URI（带盘符、百分号编码）确保带空格/中文路径可播；
+     *  其他播放器维持正斜杠路径以保持既有兼容。 */
+    function toExternalLocalUrl(abs, kind) {
+        if (String(kind) === 'vlc') {
+            try {
+                const { pathToFileURL } = require('url');
+                return pathToFileURL(String(abs)).href;
+            } catch (e) { return String(abs); }
+        }
+        return String(abs).replace(/\\/g, '/');
     }
 
     /** 已指定的外部播放器路径（未指定则尝试自动探测 PATH 中的 VLC）。返回 '' 表示无可用外部播放器。 */
@@ -3650,19 +3706,33 @@ app.whenReady().then(() => {
         return extPlayer;
     }
 
-    /** 用指定外部播放器起播：拼对应 header 参数后 spawn。返回 { ok, via, kind, headerDropped } 或 { ok:false, reason }。 */
+    /** 用指定外部播放器起播：拼对应 header 参数后 spawn。
+     *  返回 { ok, via, kind, headerDropped, sessionId } 或 { ok:false, reason }；
+     *  sessionId 为观看会话号（ext-watch），渲染层据此登记元信息做观看统计/历史。 */
     function launchExternalPlayer(execPath, url, header, label) {
         const kind = externalPlayerKind(execPath);
         const hasHeader = !!(header && Object.keys(header).some((key) =>
             ['user-agent', 'referer', 'origin', 'cookie', 'authorization'].includes(String(key).toLowerCase())));
         const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {}, label);
+        let sessionId = 0;
         try {
             const { spawn } = require('child_process');
             // 非 verbatim：libuv 自动为含空格的 exe 路径与参数加引号——
             // PotPlayer/VLC/mpv 的命令行解析均兼容该形态（2026-08-25 实测）。
-            spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-            return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported };
-        } catch (e) { return { ok: false, reason: e.message }; }
+            // windowsHide 禁用：libuv 的 SW_HIDE 继承会让 VLC(Qt) 主窗口永久隐藏
+            // （进程存活不可见，2026-08-25 实测复现；详见 launchExternalPlayerItems 注）。
+            // 观看会话开账：beginSession 显式结清上一条在播会话（本路径无 taskkill 收敛，
+            // 更依赖这一兜底），attach 后进程退出回传墙钟时长供渲染层记账。
+            sessionId = extWatch.beginSession({ kind, execPath, titles: [String(label || '')] });
+            const child = spawn(execPath, args, { detached: true, stdio: 'ignore' });
+            child.unref();
+            lastExtLaunchPid = child.pid;
+            extWatch.attach(child);
+            return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported, sessionId };
+        } catch (e) {
+            if (sessionId) extWatch.cancel(sessionId); // spawn 抛错：作废会话，不留僵尸开账
+            return { ok: false, reason: e.message };
+        }
     }
 
     /** 当前是否以外部播放器为主播放器（已指定且不是 mpv —— mpv 走内置引擎，功能更全）。
@@ -3688,7 +3758,12 @@ app.whenReady().then(() => {
                 return { ok: true, via: 'system-default' };
             } catch (e) { return { ok: false, reason: 'no-external-player' }; }
         }
-        return launchExternalPlayer(extPlayer, u, header);
+        // PotPlayer + m3u8 直链同样需要静态管道规范化（R23，与主播放链路同因同解；
+        // 非 PotPlayer / 非 HLS 时 pipeWrapAuthUrl 内部原样返回）
+        const target = /^https?:\/\//i.test(u)
+            ? await pipeWrapAuthUrl(u, header, '', { kind: externalPlayerKind(extPlayer) })
+            : u;
+        return launchExternalPlayer(extPlayer, target, header);
     });
 
     // ---- 统一播放器指定（内置 mpv vs 外部播放器合并入口）----

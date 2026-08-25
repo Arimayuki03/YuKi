@@ -10,6 +10,7 @@
     <script src="js/jquery.min.js" defer></script>
     <script src="js/common.js" defer></script>
     <script src="js/cache.js" defer></script>
+    <script src="js/ui-state.js" defer></script>
     <script src="js/panels.js" defer></script>
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
@@ -112,11 +113,26 @@
                     <span class="class-tab" data-stab="bangumi">Bangumi</span>
                     <span class="class-tab" data-stab="image">以图搜番</span>
                 </div>
-                <!-- 聚合搜索 / Kazumi 源 共用搜索栏 -->
-                <div class="search-bar" id="search-bar-agg">
-                    <input id="search-keyword" class="md-input" type="text" placeholder="输入关键字，多源聚合搜索…" />
-                    <button id="search-go" class="md-btn md-btn-filled">搜索</button>
+                <!-- 聚合搜索 独立面板（与 Kazumi 源页签互不覆盖，各自保留关键词/进度/筛选/结果） -->
+                <div id="aggregate-search-panel">
+                    <div class="search-bar">
+                        <input id="search-keyword" class="md-input" type="text" placeholder="输入关键字，多源聚合搜索…" />
+                        <button id="search-go" class="md-btn md-btn-filled">搜索</button>
                     </div>
+                    <div id="search-filters" class="class-tabs" style="display:none"></div>
+                    <div id="search-status" class="search-status" style="display:none"></div>
+                    <div id="search-results"></div>
+                </div>
+                <!-- Kazumi 源 独立面板（独立搜索栏/进度条/来源筛选/结果，切页签不丢结果） -->
+                <div id="kazumi-search-panel" style="display:none">
+                    <div class="search-bar">
+                        <input id="kazumi-search-keyword" class="md-input" type="text" placeholder="输入关键字，检索已启用的 Kazumi 规则源…" />
+                        <button id="kazumi-search-go" class="md-btn md-btn-filled">搜索</button>
+                    </div>
+                    <div id="kazumi-search-filters" class="class-tabs" style="display:none"></div>
+                    <div id="kazumi-search-status" class="search-status" style="display:none"></div>
+                    <div id="kazumi-search-results"></div>
+                </div>
                 <!-- 以图搜番 输入区 -->
                 <div id="image-search-panel" style="display:none">
                     <div class="search-bar">
@@ -139,9 +155,6 @@
                     <div id="bgm-search-results"></div>
                     <div id="bgm-search-pager" class="pager"></div>
                 </div>
-                <div id="search-filters" class="class-tabs" style="display:none"></div>
-                <div id="search-status" class="search-status" style="display:none"></div>
-                <div id="search-results"></div>
                 <!-- 以图搜番结果 -->
                 <div id="image-search-results" style="display:none"></div>
             </section>
@@ -340,7 +353,7 @@
                     </div>
                 </div>
             </section>
-            <!-- 本地文件（原工具面板；源配置已迁入设置→源设置，页签删除直显本地文件） -->
+            <!-- 本地文件（原工具面板；源配置已迁入设置→CatVod源设置，页签删除直显本地文件） -->
             <section id="view-tools" class="view">
                 <div class="tools-wrap">
                     <div class="tools-body">
@@ -354,7 +367,6 @@
                                         <div class="info-detail local-desc">
                                             <p>· 管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹</p>
                                             <p>· 仅展示文件夹与视频/音频文件；单击视频/音频弹出确认框后交给播放器播放，单击文件夹进入，按 Esc 返回上层；视频卡片自动截帧生成预览图（缺 ffmpeg 时显示占位图）；文件较多时底部有分页条（每页 100 项）。</p>
-                                            <p>· 「上传文件」：把本机其他位置的文件复制到当前目录（弹窗可选多个，列表仅展示其中的视频/音频）。</p>
                                             <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
                                             <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
                                             <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
@@ -362,7 +374,6 @@
                                     </div>
                                 </div>
                                 <div class="md-toolbar">
-                                    <button class="md-btn md-btn-tonal" onclick="uploadFile()">上传文件</button>
                                     <button class="md-btn md-btn-tonal" onclick="showNewFolderDialog()">新建文件夹</button>
                                     <button class="md-btn md-btn-tonal" onclick="pickRoot()">更换根目录</button>
                                     <button class="md-btn md-btn-tonal" onclick="openLocalDir()" title="在系统资源管理器中打开当前浏览的目录">打开目录</button>
@@ -390,8 +401,8 @@
                         <span class="settings-nav-item" data-cat="hotkey">快捷键</span>
                         <span class="settings-nav-item" data-cat="download">下载</span>
                         <span class="settings-nav-item" data-cat="storage">缓存</span>
-                        <span class="settings-nav-item" data-cat="source">源设置</span>
-                        <span class="settings-nav-item" data-cat="kazumi">Kazumi 规则</span>
+                        <span class="settings-nav-item" data-cat="source">CatVod源设置</span>
+                        <span class="settings-nav-item" data-cat="kazumi">Kazumi规则</span>
                         <span class="settings-nav-item" data-cat="sync">同步</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
                         <span class="settings-nav-item" data-cat="about">关于</span>
@@ -432,6 +443,7 @@
                         <div class="set-group">界面</div>
                         <label class="md-switch" title="界面字体使用内置 MiSans；关闭则回退系统字体"><input type="checkbox" id="set_use_misans" checked><span class="md-switch-track"></span><span class="md-switch-label">MiSans 界面字体</span></label>
                         <label class="md-switch" title="界面动画（视图切换/卡片悬停等过渡动效）"><input type="checkbox" id="set_anim" checked><span class="md-switch-track"></span><span class="md-switch-label">界面动画</span></label>
+                        <label class="md-switch" title="记住各页面的浏览状态：首页的源/分类/页码、搜索关键词与结果、推荐的标签、时间表的星期/季度/排序/筛选、直播选中的源与分组、我的页签，以及详情子页的导航记忆；关闭后切页/重启回到初始状态"><input type="checkbox" id="set_uistate_memory" checked><span class="md-switch-track"></span><span class="md-switch-label">页面状态记忆</span></label>
                         <label class="md-switch" title="使用操作系统原生标题栏；关闭则使用无边框窗口"><input type="checkbox" id="set_system_titlebar"><span class="md-switch-track"></span><span class="md-switch-label">系统标题栏</span></label>
                         <div class="tip-line pad0" title="调整整体大小">界面缩放</div>
                         <select id="set_fontsize" class="md-select">
@@ -462,7 +474,7 @@
                         </div>
                         <div class="wall-row">
                             <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
-                            <button id="clear_wallpaper" class="md-btn md-btn-tonal">移除背景</button>
+                            <button id="clear_wallpaper" class="md-btn md-btn-tonal" style="display:none;">移除背景</button>
                         </div>
                         <div class="set-group">列表</div>
                         <div class="tip-line pad0">每页影片数量</div>
@@ -544,6 +556,9 @@
                     <div class="tool-card" data-setcat="play">
                         <div class="tool-card-title">播放</div>
                         <div class="set-group">基础</div>
+                        <label class="md-switch" title="一集播完自动播下一集"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播</span></label>
+                        <label class="md-switch" title="下次播放同一影片自动跳转上次位置"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置</span></label>
+                        <label class="md-switch" title="关闭窗口时不停止正在播放的影片"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放</span></label>
                         <div class="tip-line pad0" title="0 = 不设定，100 = 最大">预设音量</div>
                         <div class="md-field short-num">
                             <input id="set_volume" class="md-input" type="number" min="0" max="100" placeholder="0" />
@@ -558,9 +573,6 @@
                             <option value="2">2.0 倍</option>
                             <option value="3">3.0 倍</option>
                         </select>
-                        <label class="md-switch" title="一集播完自动播下一集"><input type="checkbox" id="set_autonext" checked><span class="md-switch-track"></span><span class="md-switch-label">自动连播</span></label>
-                        <label class="md-switch" title="下次播放同一影片自动跳转上次位置"><input type="checkbox" id="set_resumepos" checked><span class="md-switch-track"></span><span class="md-switch-label">记忆播放位置</span></label>
-                        <label class="md-switch" title="关闭窗口时不停止正在播放的影片"><input type="checkbox" id="set_bgplay" checked><span class="md-switch-track"></span><span class="md-switch-label">后台播放</span></label>
                         <div class="set-group">行为</div>
                         <label class="md-switch" title="开启后记录播放时长和次数统计（我的页面展示）"><input type="checkbox" id="set_watchstats" checked><span class="md-switch-track"></span><span class="md-switch-label">观看统计</span></label>
                         <label class="md-switch" title="播放时自动把当前集下载到下载目录（网盘资源不支持，始终跳过）"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
@@ -636,15 +648,10 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">更换目录会重启下载引擎</div>
-                                <div class="info-detail">进行中任务的文件（含断点控制文件）会自动迁移到新目录并断点续传。</div>
-                                <div class="info-detail"><div class="tip-line pad0" id="set_dl_dir_line" style="margin-top:12px;">下载目录：默认（系统下载目录）</div></div>
+                                <div class="info-detail">更换目录会重启下载引擎，进行中任务的文件（含断点控制文件）会自动迁移到新目录并断点续传。
+                                    <div class="tip-line pad0" id="set_dl_dir_line" style="margin-top:8px;">下载目录：默认（系统下载目录）</div>
+                                </div>
                             </div>
-                        </div>
-                        <div class="wall-row">
-                            <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
-                            <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
-                            <button id="set_dl_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认下载目录（文件一并迁移）">恢复默认位置</button>
                         </div>
                         <div class="tip-line pad0" >并发任务数</div>
                         <select id="set_dl_concurrency" class="md-select">
@@ -663,39 +670,10 @@
                             <option value="8">8 个</option>
                             <option value="16">16 条</option>
                         </select>
-                    </div>
-                    <!-- 应用缓存（爬虫/下载临时文件） -->
-                    <div class="tool-card" data-setcat="storage">
-                        <div class="tool-card-title">应用缓存</div>
-                        <div class="tip-line pad0 info-tip">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">
-                                    <div class="tip-line pad0" id="cache_dir_line" style="margin-top:12px;">缓存位置：默认</div>
-                                </div>
-                                <div class="info-detail">更换位置会重启后端。</div>
-                                <div class="info-detail">旧目录里的缓存不会自动迁移。</div>
-                                <div class="info-detail">清理范围：影片爬虫缓存、下载临时文件、本地预览图、解析会话缓存与推荐榜单/时间表等本地缓存；不影响已载入的源与已下载的文件。</div>
-                            </div>
-                        </div>
                         <div class="wall-row">
-                            <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
-                            <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
-                            <button id="cache_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认缓存位置">恢复默认位置</button>
-                        </div>
-                    </div>
-                    <!-- Cookie 持久化（PluginCookieManager，T46） -->
-                    <div class="tool-card" data-setcat="storage">
-                        <div class="tool-card-title">Cookie 管理</div>
-                        <div class="tip-line pad0 info-tip" >
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail" id="kazumi_cookie_line">Kazumi 规则引擎验证/解析会话产生的 Cookie 会持久化到本机，规则引擎请求自动带上，避免重启后重新验证（与「网盘账号」保存的 Cookie 相互独立）。</div>
-                            </div>
-                        </div>
-                        <div class="wall-row">
-                            <button id="kazumi_cookie_view" class="md-btn md-btn-tonal">查看 Cookie</button>
-                            <button id="kazumi_cookie_clear" class="md-btn md-btn-tonal">清除 Cookie</button>
+                            <button id="set_dl_dir_pick" class="md-btn md-btn-tonal">更换下载目录</button>
+                            <button id="set_dl_open" class="md-btn md-btn-tonal">打开下载目录</button>
+                            <button id="set_dl_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认下载目录（文件一并迁移）" style="display:none;">恢复默认位置</button>
                         </div>
                     </div>
                     <!-- Bangumi 封面缓存（搜索页 Kazumi 结果封面，T73） -->
@@ -704,11 +682,43 @@
                         <div class="tip-line pad0 info-tip" >
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">封面按片名从 Bangumi 拉取并缓存（内存 + 本机 localStorage，保留最近 500 条）：成功匹配长期复用，失败条目约 1 分钟后自动重试；匹配错误时可点下方清空。</div>
+                                <div class="info-detail">封面按片名从 Bangumi 拉取并在本机缓存（内存 + localStorage，最多保留最近 500 条）：匹配成功的长期复用，失败的条目约 1 分钟后自动重试；发现匹配错误时可点下方「清空封面缓存」。</div>
                             </div>
                         </div>
                         <div class="wall-row">
                             <button id="kazumi_bgm_cover_clear" class="md-btn md-btn-tonal">清空封面缓存</button>
+                        </div>
+                    </div>
+                    <!-- Cookie 持久化（PluginCookieManager，T46） -->
+                    <div class="tool-card" data-setcat="storage">
+                        <div class="tool-card-title">Cookie 管理</div>
+                        <div class="tip-line pad0 info-tip" >
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail" id="kazumi_cookie_line">Kazumi 规则引擎在验证 / 解析会话中产生的 Cookie 会持久化到本机，后续规则请求自动携带，避免重启后重新验证；与「网盘账号」保存的 Cookie 相互独立。</div>
+                            </div>
+                        </div>
+                        <div class="wall-row">
+                            <button id="kazumi_cookie_view" class="md-btn md-btn-tonal">查看 Cookie</button>
+                            <button id="kazumi_cookie_clear" class="md-btn md-btn-tonal">清除 Cookie</button>
+                        </div>
+                    </div>
+                    <!-- 应用缓存（爬虫/下载临时文件） -->
+                    <div class="tool-card" data-setcat="storage">
+                        <div class="tool-card-title">应用缓存</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">
+                                    <div class="tip-line pad0" id="cache_dir_line" style="margin-bottom:6px;">缓存位置：默认</div>
+                                    更换位置会重启后端，且旧目录里的缓存不会自动迁移。「清理缓存」的范围包括影片爬虫缓存、下载临时文件、本地预览图、解析会话缓存与推荐榜单/时间表等本地缓存，不影响已载入的源与已下载的文件。
+                                </div>
+                            </div>
+                        </div>
+                        <div class="wall-row">
+                            <button id="cache_clear" class="md-btn md-btn-tonal">清理缓存</button>
+                            <button id="cache_dir_pick" class="md-btn md-btn-tonal">更换缓存位置</button>
+                            <button id="cache_dir_reset" class="md-btn md-btn-tonal" title="恢复为系统默认缓存位置" style="display:none;">恢复默认位置</button>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="source">
@@ -716,7 +726,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置；载入后会自动做站点健康检查，结果见下方「站点诊断」。</div>
+                                <div class="info-detail">粘贴配置地址（TVBox / 猫影视格式接口）或直接填入 JSON 配置均可；载入后会自动对站点做健康检查，结果见下方「站点诊断」。</div>
                             </div>
                         </div>
                         <div class="md-field">
@@ -725,31 +735,31 @@
                         <button onclick="setting()" class="md-btn md-btn-filled">载入配置</button>
                     </div>
                     <div class="tool-card" data-setcat="source">
-                        <div class="tool-card-title">站点诊断</div>
-                        <div class="tip-line pad0 info-tip">
-                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
-                            <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">首页只展示健康检查通过的站点；此处按站点列出未建成、初始化失败或需要 Android 运行时等原因，并附配置/运行时/错误统计。</div>
-                            </div>
-                        </div>
-                        <div id="config_diagnostics" class="history-list"></div>
-                    </div>
-                    <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">视频历史源</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">成功载入的配置会自动记录；点击条目重新载入，点 ✕ 删除。</div>
+                                <div class="info-detail">成功载入过的配置会自动记录在这里；点击条目即可重新载入，点 ✕ 删除记录。</div>
                             </div>
                         </div>
                         <div id="config_history" class="history-list"></div>
+                    </div>
+                    <div class="tool-card" data-setcat="source">
+                        <div class="tool-card-title">站点诊断</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">首页只展示健康检查通过的站点；这里按站点列出未建成、初始化失败、需要 Android 运行时等原因，并附配置 / 运行时 / 错误统计，方便定位源不可用的原因。</div>
+                            </div>
+                        </div>
+                        <div id="config_diagnostics" class="history-list"></div>
                     </div>
                     <div class="tool-card" data-setcat="source">
                         <div class="tool-card-title">直播源</div>
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取 lives）；配置里自带的直播源会自动载入。添加成功的直播源记录在下方「直播历史源」板块。</div>
+                                <div class="info-detail">支持 txt / m3u 直播源地址，也支持 TVBox 式配置（粘贴 JSON 或 .json 配置地址，自动提取其中的 lives）；配置里自带的直播源会一并自动载入，添加成功的直播源记录在下方「直播历史源」板块。</div>
                             </div>
                         </div>
                         <div class="md-field">
@@ -762,7 +772,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">添加成功的自定义直播源会自动记录；点 ✕ 删除，删除后直播页同步更新。</div>
+                                <div class="info-detail">添加成功的自定义直播源会自动记录在这里；点 ✕ 删除，删除后直播页同步更新。</div>
                             </div>
                         </div>
                         <div id="live_src_list" class="history-list"></div>
@@ -772,19 +782,9 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">夸克 / UC / 天翼 / 百度 / 123 / 迅雷等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致。
-                                    <br><b>夸克网盘</b>：点「夸克扫码登录」用夸克 App 扫码，登录后自动保存，无需手动复制。
-                                    <br><b>其他网盘</b>：浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 →
-                                    点任意请求 → 「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）→ 粘贴到对应输入框保存。
-                                    <br>注意：只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效。
-                                    <br>未配置 Cookie 时，网盘源详情页照常显示，但播放会快速失败并提示原因。
-                                    <br><b>夸克网盘快路径</b>：开启（默认）且已扫码登录时，夸克源优先走本机直连解析（不经 JAR）；关闭后先调用 JAR，再在结果退化时使用本地代理兜底，适合排查不同影视仓 JAR 的兼容性。
-                                    <br><b>起播前媒体探测 (HEAD/Range)</b>：起播前校验视频流有效性，拦截 HTML/403/过期链接并防止播放器黑屏崩溃。
-                                    <br><b>同影片多线路自动回退</b>：当前线路解析或起播失败时，自动按顺序尝试同影片其他可用线路。
-                                    <br><b>简易解析器与 iframe 跟随</b>：允许旧版规则使用 MutationObserver 提取并跟随嵌套 iframe 媒体直链。</div>
+                                <div class="info-detail">夸克 / UC / 天翼 / 百度 / 123 / 迅雷等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致：夸克点「夸克扫码登录」用夸克 App 扫码即可，登录后自动保存，无需手动复制；其他网盘先在浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 → 点任意请求 → 在「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）粘贴到对应输入框保存——注意只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效；未配置 Cookie 时详情页照常显示，但播放会快速失败并提示原因。「夸克网盘快路径」开启（默认）且已扫码登录时，夸克源优先走本机直连解析（不经 JAR），关闭后先调用 JAR、结果退化时再用本地代理兜底，适合排查不同影视仓 JAR 的兼容性；「起播前媒体探测 (HEAD/Range)」在起播前校验视频流有效性，拦截 HTML/403/过期链接并防止播放器黑屏崩溃；「同影片多线路自动回退」在当前线路解析或起播失败时，自动按顺序尝试同影片其他可用线路；「简易解析器与 iframe 跟随」允许旧版规则使用 MutationObserver 提取并跟随嵌套 iframe 媒体直链。</div>
                             </div>
                         </div>
-                        <div id="pan_cookie_fields"></div>
                         <label class="md-switch" style="margin-top:10px;">
                             <input type="checkbox" id="set_pan_fast_path">
                             <span class="md-switch-track"></span>
@@ -805,6 +805,7 @@
                             <span class="md-switch-track"></span>
                             <span class="md-switch-label">简易解析器与 iframe 跟随</span>
                         </label>
+                        <div id="pan_cookie_fields"></div>
                         <div class="wall-row" style="margin-top:10px;">
                             <button id="pan_cookie_qr" class="md-btn md-btn-filled">夸克扫码登录</button>
                             <button id="pan_cookie_save" class="md-btn md-btn-tonal">保存网盘 Cookie</button>
@@ -837,7 +838,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「后台自动检测源」后，首页会在后台检测源是否有内容：首页与所有分类均无内容的源会被自动屏蔽，无影片的分类也会隐藏；连续多次探测无响应的失效源也会被屏蔽。已屏蔽源会定期复查，恢复内容后自动解除；关闭检测后不会自动探测、隐藏或屏蔽源，历史上被屏蔽的源也会全部恢复显示。也可在下方手动查看或恢复。
+                                <div class="info-detail">开启「后台自动检测源」后，应用会在后台检查每个源是否有内容：首页与所有分类均无内容的空源、连续多次探测无响应的死源都会被自动屏蔽，无影片的分类也会随之隐藏；被屏蔽的源会定期复查，恢复内容后自动解除。关闭检测则不再自动探测、隐藏或屏蔽任何源，历史上被屏蔽的源会全部恢复显示；也可随时在下方手动查看或恢复。
                                     <div class="tip-line pad0" id="blocked_line">自动屏蔽首页和分类均无内容的源与连续探测无响应的死源，避免下拉里出现空源。</div>
                                 </div>
                             </div>
@@ -854,7 +855,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">粘贴 Kazumi 规则 JSON（api 小于等于 8）或 kazumi:// 分享链接；规则用于补充 CatVod 源不足时的番剧搜索与播放。</div>
+                                <div class="info-detail">粘贴 Kazumi 规则 JSON（api ≤ 8）或 kazumi:// 分享链接导入；Kazumi 规则用于在 CatVod 源覆盖不足时补充番剧的搜索与播放。</div>
                             </div>
                         </div>
                         <div class="md-field">
@@ -873,7 +874,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">启用后可在详情页「Kazumi 规则源」与聚合搜索中使用；禁用后不再出现。</div>
+                                <div class="info-detail">规则启用后可在详情页「Kazumi 规则源」与聚合搜索中使用，禁用后即不再出现；下方还可检测规则有效性或批量更新。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="启动应用时自动检查已安装规则的更新，有更新则后台批量更新"><input type="checkbox" id="set_kazumi_autoupdate"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动检查规则更新</span></label>
@@ -890,7 +891,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">将收藏、历史、观看统计、规则与应用设置同步到 WebDAV 服务器（如坚果云、Nextcloud）；恢复时会覆盖本地数据，覆盖前会自动备份本机数据。子开关控制哪些数据参与同步，「测试连接」可在同步前验证地址与账号，也可开启定时自动同步按所选间隔上传。</div>
+                                <div class="info-detail">把收藏、历史、观看统计、规则与应用设置同步到你的 WebDAV 服务器（如坚果云、Nextcloud）；「从云端恢复」会用云端数据覆盖本地，覆盖前会自动备份本机数据。子开关决定哪些数据参与同步，「测试连接」可在同步前验证地址与账号；也可开启定时自动同步，按所选间隔自动上传。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
@@ -932,7 +933,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">前往 Bangumi「设置 → 开发」页创建 Access Token，粘贴后点保存；用于把详情页的番剧收藏/追番同步到你的 Bangumi 账号。token 仅保存在本机设置中。</div>
+                                <div class="info-detail">用于把详情页的番剧收藏 / 追番同步到你的 Bangumi 账号：前往 Bangumi「设置 → 开发」页创建 Access Token，粘贴到下方保存即可；token 仅保存在本机设置中。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="即时同步时是否弹出提示"><input type="checkbox" id="bangumi_immediate_toast"><span class="md-switch-track"></span><span class="md-switch-label">即时同步提示</span></label>
@@ -949,11 +950,11 @@
                             </div>
                         </div>
                         <div class="md-field" ><input id="bangumi_token" class="md-input" type="password" placeholder="粘贴你的 Bangumi Access Token（仅保存在本机）" /></div>
-                        <a id="bangumi_token_link" href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener" style="font-size:12px;color:var(--md-primary);text-decoration:none;">获取 Bangumi Access Token →</a>
                         <div class="wall-row" >
                             <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
                             <button id="bangumi_test" class="md-btn md-btn-tonal">测试连接</button>
                             <button id="bangumi_sync_now" class="md-btn md-btn-tonal" title="拉取 Bangumi 收藏并刷新「我的收藏」">立即同步</button>
+                            <a id="bangumi_token_link" class="md-btn md-btn-tonal" href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener" title="前往 Bangumi「设置 → 开发」页创建并复制 Access Token" style="text-decoration:none;">获取 Access Token</a>
                         </div>
                         <div class="tip-line pad0" id="bangumi_status" style="display:none;"></div>
                     </div>
@@ -980,12 +981,10 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索/时间表/榜单/详情/角色/收藏同步等）走全域名反代 api.bangumi.pro / next.bangumi.pro（对应 api.bgm.tv / next.bgm.tv，免签名）。规则仓库镜像用于规则更新拉取。</div>
+                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索 / 时间表 / 榜单 / 详情 / 角色 / 收藏同步等）改走全域名反代 api.bangumi.pro / next.bangumi.pro（对应 api.bgm.tv / next.bgm.tv，免签名）；「规则仓库镜像」则在拉取规则更新时使用镜像仓库。</div>
                             </div>
                         </div>
-                        <div class="wall-row">
-                            <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
-                        </div>
+                        <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
                         <label class="md-switch" title="Bangumi 接口走全域名反代 api.bangumi.pro / next.bangumi.pro"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
                         <label class="md-switch" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
                         <div class="tip-line pad0">网络代理</div>
@@ -1011,7 +1010,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">日志存于 ~/.yuki/logs，单文件 5 MiB，保留 5 份历史。</div>
+                                <div class="info-detail">日志存放于 ~/.yuki/logs，单个文件最大 5 MiB，滚动保留 5 份历史；开启下方「定时清空日志」可按周期清理，避免长期运行堆积。</div>
                             </div>
                         </div>
                         <label class="md-switch" title="按周期自动清空日志目录，避免长期运行堆积"><input type="checkbox" id="set_log_autocleanup"><span class="md-switch-track"></span><span class="md-switch-label">定时清空日志</span></label>
@@ -1041,7 +1040,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">YuKi 的实现站在诸多开源项目的肩膀上。完整第三方组件清单与许可证见仓库内 docs/THIRD_PARTY.md。</div>
+                                <div class="info-detail">YuKi 的实现离不开下列开源项目；完整的第三方组件清单与许可证见仓库内 docs/THIRD_PARTY.md。</div>
                             </div>
                         </div>
                         <div class="about-credits">
@@ -1058,10 +1057,10 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">应用依赖的本地组件（播放器 / 下载引擎等）就绪情况。</div>
-                                <div class="info-detail">缺失播放器时可点「下载内置播放器」一键补装 mpv，或「指定播放器」选择本机已装的 mpv/VLC/PotPlayer；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 安装；Anime4K 着色器启动时自动补齐。</div>
-                                <div class="info-detail">播放器：<span id="player_line">mpv（自动发现）</span></div>
-                                <div class="info-detail" style="color:var(--md-secondary);font-size:0.85em">外部播放器模式（VLC/PotPlayer）下弹幕、自动连播、观看统计不生效。</div>
+                                <div class="info-detail">
+                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下弹幕、自动连播、观看统计不生效。
+                                    <div class="tip-line pad0" style="margin-top:6px;">播放器：<span id="player_line">mpv（自动发现）</span></div>
+                                </div>
                             </div>
                         </div>
                         <div id="asset-status-list" class="asset-status-list" >
@@ -1251,11 +1250,10 @@
             <div class="md-dialog-body" style="line-height:1.8;">
                 <p><strong>YuKi</strong> 是一个基于 CatVod 架构的影视聚合桌面端，现已整合 Kazumi 规则引擎。</p>
                 <p><strong>快速上手：</strong></p>
-                <p>1. 在「设置 → 源设置」粘贴配置地址载入视频源</p>
-                <p>2. 在「设置 → Kazumi 规则」管理番剧规则源（已内置 3 个默认规则）</p>
-                <p>3. 在「时间表」查看每日番剧更新</p>
-                <p>4. 搜索影片后在详情页选择「Kazumi 规则源」播放</p>
-                <p>5. 收藏影片可追踪观看进度，播放窗口由 mpv 独立承载</p>
+                <p>1. 在「设置 → CatVod源设置」粘贴配置地址载入视频源</p>
+                <p>2. 在「设置 → Kazumi 规则」添加番剧规则源（已内置 3 个默认规则）</p>
+                <p>3. 如没有可以访问国外网络的环境，请在「设置 → 系统 → 网络」打开Bangumi镜像开关，此镜像为第三方镜像网站，非本作者提供，开启Bangumi同步功能理论上该镜像站可获取你的Bangumi账号及密码，如担心隐私泄露，请勿使用Bangumi同步功能，或在可以访问国外网络的环境下关闭Bangumi镜像开关，此时Bangumi同步功能走官方接口</p>
+                <p>4. 没有安装内置mpv播放器时请在「设置 → 系统 → 组件状态」点击指定播放器按钮选择外部播放器（mpv/VLC/PotPlayer)，优先选择mpv以获得最佳兼容性</p>
                 <p style="color:var(--md-on-surface-variant);font-size:12px;margin-top:16px;">本项目不收集任何用户数据。使用产生的数据和缓存应在 24 小时内清除。</p>
             </div>
             <div class="md-dialog-actions">

@@ -92,6 +92,10 @@ const Player = {
                 window.yuki.onEpisodeSkip((info) => this._onEpisodeSkip(info));
             }
         }
+        // 外部播放器（PotPlayer/VLC 等）进程退出：墙钟时长记账（独立于 mpv 事件通道）
+        if (window.yuki && window.yuki.onExternalPlayerExit) {
+            window.yuki.onExternalPlayerExit((info) => this._onExtPlayerExit(info));
+        }
     },
 
     /** 单集播完（end-file eof，附会话号）：按会话记录时间戳；旧集延迟 ended 不误判新集。 */
@@ -218,6 +222,53 @@ const Player = {
             if (typeof meta.chainId !== 'number') meta.chainId = ++this._watchChain;
             this._watchSessions.set(info.sessionId, { ...meta });
         }
+    },
+
+    /** 外部播放器会话登记：起播响应带 viaExternal+sessionId 时把元信息挂到会话号上，
+     *  供进程退出事件（_onExtPlayerExit）安全读取。与 mpv 的 _rememberSession 分流：
+     *  不写 this._session（外部退出走独立通道，不参与连播判定/断流重连），每条会话
+     *  独立观看链——外部播放器无重连复用场景，墙钟全额累计、次数计一次。 */
+    _rememberExtSession(result) {
+        if (!result || !result.viaExternal || typeof result.sessionId !== 'number' || result.sessionId <= 0) return false;
+        const base = this._curMeta || {};
+        // 无有效影片身份（弹窗随手交系统默认程序等）：不登记，避免产生垃圾历史
+        if (!base.title) return false;
+        const meta = { ...base };
+        // 封面/来源名尽量从详情页取（同 _rememberSession 口径；Kazumi 源用自身数据）
+        if (String(meta.site).startsWith('kazumi:')) {
+            meta.siteName = meta.siteName || String(meta.site).slice(7);
+            if (!meta.pic && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) {
+                meta.pic = Kazumi.getCachedBangumiCover(base.title) || '';
+            }
+        } else {
+            try {
+                if (typeof Detail !== 'undefined' && Detail.site) {
+                    meta.siteName = meta.siteName || (Detail._siteName ? Detail._siteName(Detail.site) : '');
+                    if (!meta.pic && Detail._lastVod) meta.pic = Detail._lastVod.vod_pic || '';
+                }
+            } catch (e) { /* ignore */ }
+        }
+        meta.chainId = ++this._watchChain;
+        this._watchSessions.set(result.sessionId, meta);
+        return true;
+    },
+
+    /** 外部播放器进程退出：wallSec=播放器运行墙钟秒数，口径同 mpv 的 wallWatched
+     *  （「打开播放器后运行了多久」）。<15s 短播不计（误触秒关/VLC 单实例模式把地址
+     *  转交既有实例后立即退出的场景不会误计）；统计/最近观看/历史全部复用 _writeWatch
+     *  （隐身模式与统计开关门槛在其内部兜底）。无 pos/duration——外部播放器查询不到
+     *  播放位置，最近观看卡进度显示 0% 属如实呈现。 */
+    _onExtPlayerExit(info) {
+        if (!info || typeof info.sessionId !== 'number') return;
+        const meta = this._watchSessions.get(info.sessionId);
+        if (!meta) return;
+        this._watchSessions.delete(info.sessionId);
+        const watched = Number(info.wallSec) || 0;
+        if (watched < 15) return;
+        const progress = { wallWatched: watched };
+        this._watchWrite = this._watchWrite
+            .catch(() => { /* 上一次失败不阻塞后续统计 */ })
+            .then(() => this._writeWatch(progress, { ...meta }, watched));
     },
 
     /** 「看完」判定：退出时剩余 <8s 视为播完；进度取不到（IPC 已断）时按会话匹配 ended（10s 内），
@@ -621,7 +672,7 @@ const Player = {
         try { externalPrimary = ((await window.yuki.playerConfig()) || {}).mode === 'external'; } catch (e) { /* 读失败按内置处理 */ }
         if (autoNext && Array.isArray(episodes) && episodes.length > 1 && window.yuki.buildPlaylist) {
             const isKazumi = String(site || '').startsWith('kazumi:');
-            if (this._playContext === trace && !playAbort.signal.aborted) showLoading('构建播放列表…');
+            if (this._playContext === trace && !playAbort.signal.aborted) showLoading('构建播放列表…', { blocking: true });
             const vip = await this.getVipFlags().catch(() => []);
             // Kazumi：确保 Bangumi 分集缓存就绪（未打开过分集页签时按详情页 subjectId 拉取一次），
             // 集名优先级 = Bangumi（集数+名称）→ 规则 identifier → 第N集
@@ -685,7 +736,7 @@ const Player = {
                 const entry = built.entries[built.startIndex] || built.entries[0];
                 // 加载文案推进：建表是瞬时的，真正的等待发生在首集解析——别让文案停在「构建播放列表」
                 if (this._playContext === trace && !playAbort.signal.aborted) {
-                    showLoading(`正在打开 ${entry.title || '第1集'}…`);
+                    showLoading(`正在打开 ${entry.title || '第1集'}…`, { blocking: true });
                 }
                 const r = await this._playDirect(entry.url, {
                     // 副标题置空：队列会话的 OSD 标题只显示片名——每集集名由 m3u 的
@@ -707,6 +758,9 @@ const Player = {
                 // launched 即已 spawn 成功，必须在此收口返回——若按失败继续走下方回退，
                 // 会再 spawn 一次外部播放器弹出双窗口（用户实测）。
                 if (r && (r.ok || r.launched)) {
+                    // 外部主播放器（launched=已 spawn）：登记观看会话，退出事件另通道回传
+                    // （_onExtPlayerExit）；mpv 队列会话已在 _mpvSuccess→_rememberSession 登记
+                    if (!r.ok) this._rememberExtSession(r);
                     // 逐集历史需要集名表：把 entries 标题挂到本会话的观看元信息上
                     if (typeof r.sessionId === 'number') {
                         const wm = this._watchSessions.get(r.sessionId);
@@ -745,7 +799,7 @@ const Player = {
 
         const updatePlayState = (stageName) => {
             if (this._playContext !== trace || playAbort.signal.aborted) return;
-            showLoading(`播放进度：${stageName}…`);
+            showLoading(`播放进度：${stageName}…`, { blocking: true });
         };
 
         updatePlayState('获取播放地址');
@@ -871,7 +925,7 @@ const Player = {
                         hideLoading();
                         return this._mpvSuccess(r, resolved.url, `解析成功（${resolved.via || ''}），已在 mpv 播放`);
                     }
-                    if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
+                    if (r && r.launched) { this._seq = null; hideLoading(); this._rememberExtSession(r); this._mpvToast(r, ''); return r; }
                     if (r && !r.ok) {
                         hideLoading();
                         return this._mpvFailure(r, {
@@ -883,7 +937,7 @@ const Player = {
             }
             hideLoading();
             const note = (resolved && resolved.reason === 'no-parses') || (data.warning && data.warning.code === 'L4_PARSE_UNAVAILABLE')
-                ? '当前配置未含解析接口：请在”设置 → 源设置”载入含 parses 的配置后重试'
+                ? '当前配置未含解析接口：请在”设置 → CatVod源设置”载入含 parses 的配置后重试'
                 : `解析失败：${(resolved && resolved.reason) || '未知错误'}`;
             this._seq = null; // 本集未起播，连播链终止
             const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, note, trace);
@@ -917,7 +971,7 @@ const Player = {
                 hideLoading();
                 return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
             }
-            if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
+            if (r && r.launched) { this._seq = null; hideLoading(); this._rememberExtSession(r); this._mpvToast(r, ''); return r; }
             if (r && !r.ok) {
                 hideLoading();
                 return this._mpvFailure(r, { title, subtitle, url, header: playHeader });
@@ -1228,7 +1282,7 @@ const Player = {
         trace, signal) {
         const pluginName = String(site).slice(7); // 去掉 kazumi: 前缀
         if (!pluginName) { this._seq = null; return { ok: false, reason: '规则名为空' }; }
-        showLoading();
+        showLoading('', { blocking: true }); // Kazumi 解析链路必须挡输入；文案维持默认「载入中…」，进度提示见下方 toast
         warnToast('正在解析 Kazumi 源播放地址…');
         let resolved = null;
         try {
@@ -1261,7 +1315,7 @@ const Player = {
                     ...trace,
                 }), 45000, trace);
                 if (r && r.ok) return this._mpvSuccess(r, resolved.url, `Kazumi 源「${pluginName}」已在 mpv 播放`);
-                if (r && r.launched) { this._seq = null; hideLoading(); this._mpvToast(r, ''); return r; }
+                if (r && r.launched) { this._seq = null; hideLoading(); this._rememberExtSession(r); this._mpvToast(r, ''); return r; }
                 if (r && !r.ok) {
                     return this._mpvFailure(r, {
                         title, subtitle, url: resolved.url, header: resolved.header,
@@ -1294,6 +1348,7 @@ const Player = {
             if (r && r.launched) {
                 this._seq = null;
                 hideLoading();
+                this._rememberExtSession(r); // 外部播放器已接管：登记观看会话（墙钟统计）
                 this._mpvToast(r, '');
                 return r;
             }
@@ -1390,6 +1445,9 @@ const Player = {
             r = await window.yuki.externalPlayer(url, { header: this._extHeader || undefined });
         } catch (e) { warnToast('调用外部播放器失败'); return; }
         if (r && r.ok) {
+            // 弹窗按钮路径同样登记观看会话：sessionId 仅在经外部播放器进程 spawn 时返回
+            // （系统默认程序走 shell.openExternal，无进程句柄，不追踪）
+            this._rememberExtSession(r);
             if (r.via === 'system-default') warnToast('已交系统默认程序打开');
             else warnToast(`已交外部播放器打开${r.headerDropped ? '（该播放器无法传递鉴权头，若播放失败请改用 VLC/mpv）' : ''}`);
             return;

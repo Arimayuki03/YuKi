@@ -84,20 +84,6 @@ class FileManager {
         return path.relative(this.root, dir);
     }
 
-    /** 把 sources（绝对路径列表）复制到 rel 目录下，返回成功复制数。 */
-    uploadFiles(rel, sources) {
-        const dest = this.resolveSafe(rel);
-        if (!fs.existsSync(dest) || !fs.statSync(dest).isDirectory()) throw new Error('not a directory');
-        let ok = 0;
-        for (const src of sources || []) {
-            const s = path.resolve(String(src));
-            if (!fs.existsSync(s) || !fs.statSync(s).isFile()) continue;
-            fs.copyFileSync(s, path.join(dest, path.basename(s)));
-            ok += 1;
-        }
-        return ok;
-    }
-
     /** 删除文件（仅限白名单内的普通文件）。 */
     delFile(rel) {
         const p = this.resolveSafe(rel);

@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, renderStatusBar, localCacheGet, localCacheSet, errorTextOf */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, errorTextOf */
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
@@ -196,6 +196,11 @@ const Home = {
             if (!visible.length) return; // 全部被屏蔽/隐藏：不预渲染，等网络刷新给引导态
             this._allSites = sites;      // 探测用全量（与 loadSites 的 _allSites 语义一致）
             this.sites = visible;
+            // 冷启动预渲染也用上次的源（UI 状态持久化）：网络回来 loadSites 会再校验一次
+            if (!this.site) {
+                const st = this._viewState();
+                if (st && st.site && visible.some((s) => s.key === st.site)) this.site = st.site;
+            }
             if (!this.site || !this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
             this._renderSiteSelect();
             $('#site-select').val(this.site);
@@ -357,14 +362,34 @@ const Home = {
         this._renderSiteSelect();
         if (!this.sites.length) {
             $('#home-class').empty();
-            $('#home-grid').html('<div class="tip-line">尚未载入任何配置。请到“设置 → 源设置”，粘贴配置 URL 或 JSON 后点“载入配置”。</div>');
+            $('#home-grid').html('<div class="tip-line">尚未载入任何配置。请到“设置 → CatVod源设置”，粘贴配置 URL 或 JSON 后点“载入配置”。</div>');
             $('#home-pager').empty();
             return;
         }
         if (!this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
         $('#site-select').val(this.site);
         if (!isCurrentSitesLoad()) return;
-        await this.loadHome(undefined, { silent });
+        // 页面状态恢复（切页/重启不回初始态）：回到上次离开时的源 + 视图模式。
+        // 分类栏先用该源的持久化分类缓存渲染（homeContent 未返回前分类不空白），
+        // 缓存缺失或分类已不存在时退回「全部」feed，不为恢复多发一次阻塞请求。
+        const savedView = this._viewState();
+        const savedWord = (savedView && savedView.mode === 'search') ? String(savedView.word || '').trim() : '';
+        if (savedWord) $('#home-search').val(savedWord);
+        if (savedView && savedView.mode === 'category' && savedView.tid !== '') {
+            const cls = this._loadClassCache(this.site);
+            const match = Array.isArray(cls) ? cls.find((c) => String(c.type_id) === String(savedView.tid)) : null;
+            if (match) {
+                this.classes = cls;
+                this.renderClass(match.type_id); // 原始 type_id 渲染高亮（可能为数字）
+                await this.loadCategory(String(savedView.tid), Number(savedView.page) || 1);
+            } else {
+                await this.loadHome(undefined, { silent });
+            }
+        } else if (savedView && savedView.mode === 'search' && savedWord) {
+            await this.searchCurrent(Number(savedView.page) || 1);
+        } else {
+            await this.loadHome(undefined, { silent });
+        }
         if (!isCurrentSitesLoad()) return;
         if (this._autoProbeEnabled) {
             // 探测延迟启动：先让首页 feed/分类上屏（避免 8 并发探测与首屏内容
@@ -383,7 +408,7 @@ const Home = {
     _renderSiteSelect() {
         const sel = $('#site-select').empty();
         if (!this.sites.length) {
-            sel.append('<option value="">（无可用站点 · 请在设置→源设置载入可移植源）</option>');
+            sel.append('<option value="">（无可用站点 · 请在设置→CatVod源设置载入可移植源）</option>');
             return;
         }
         const nowSec = Date.now() / 1000;
@@ -544,7 +569,9 @@ const Home = {
         }[p.stage] || '正在载入配置';
         const current = Number(p.current || 0);
         const total = Number(p.total || 0);
-        renderStatusBar(el, { text: stageText, recv: current, total, done: false });
+        // 加载期间明确告知用户不要切源/切分类（中途切换会作废本次拉取，表现为「加载不完」）
+        const text = `${stageText} · 正在加载，请勿切换源或分类，耐心等待加载完成`;
+        renderStatusBar(el, { text, recv: current, total, done: false });
         el.show();
     },
 
@@ -853,6 +880,7 @@ const Home = {
         this.mode = 'home';
         this.tid = '';
         this.page = pg || 1;
+        this._saveView(); // 状态快照：源 + 「全部」feed 模式 + 页码
         this._userRefresh = !!(opts && opts.userRefresh); // 刷新按钮触发：失败保留内容时提示
         this._pageSizeDirty = false; // 完整重载后清除脏标记
         $('#home-search').val(''); // 退出搜索态
@@ -1100,6 +1128,7 @@ const Home = {
         this.mode = 'category';
         this.tid = tid;
         this.page = pg || 1;
+        this._saveView(); // 状态快照：源 + 分类 + 页码
         $('#home-search').val(''); // 切分类退出搜索态
         const token = this._nextLoadToken();
         const size = await this._pageSize();
@@ -1329,6 +1358,27 @@ const Home = {
     },
 
     /**
+     * 页面选择态持久化（切页/重启不回初始态）：记录当前源、视图模式、分类、页码与
+     * 搜索词。loadHome/loadCategory/searchCurrent 在状态落定后各存一次快照；
+     * loadSites 就绪后按快照恢复（_prerenderFromCache 也用它预选上次的源）。
+     */
+    _viewState() {
+        try { return (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('home') : null; } catch (e) { return null; }
+    },
+    _saveView() {
+        try {
+            if (typeof UIState === 'undefined' || !UIState.set) return;
+            UIState.set('home', {
+                site: this.site || '',
+                mode: this.mode || 'home',
+                tid: String(this.tid == null ? '' : this.tid),
+                page: this.page || 1,
+                word: this.mode === 'search' ? String($('#home-search').val() || '').trim() : '',
+            });
+        } catch (e) { /* 持久化失败不影响主流程 */ }
+    },
+
+    /**
      * T80：回到首页视图时调用——设置里改过每页条数则按当前模式用新条数重载，
      * 无需手动切换页面/点刷新。
      */
@@ -1352,6 +1402,7 @@ const Home = {
         this.mode = 'search';
         this.searchWord = wd;
         this.page = pg || 1;
+        this._saveView(); // 状态快照：源 + 搜索模式 + 关键词 + 页码
         const token = this._nextLoadToken();
         showLoading();
         try {

@@ -402,6 +402,23 @@ function bangumiCard(item) {
     </div>`;
 }
 
+/**
+ * Bangumi 网络引导空状态（推荐页/时间表共用）：
+ * 数据为空时引导用户到「设置 → 系统 → 网络」开启 Bangumi 镜像，
+ * 并附完整隐私说明（第三方镜像风险与官方接口回退方式）。
+ */
+function bangumiNetGuide() {
+    return '<div class="tip-line">暂无内容，可能是当前网络无法访问 Bangumi（api.bgm.tv）</div>'
+        + '<div style="text-align:center;padding:4px 16px 0;line-height:1.8;font-size:13px;">'
+        + '请到「设置 → 系统 → 网络」打开 <strong>Bangumi 镜像</strong> 开关后重试</div>'
+        + '<div style="text-align:left;display:inline-block;max-width:640px;padding:12px 24px 16px;line-height:1.7;'
+        + 'font-size:12px;color:var(--md-on-surface-variant);white-space:normal;">'
+        + '如没有可以访问国外网络的环境，请在「设置 → 系统 → 网络」打开Bangumi镜像开关，'
+        + '此镜像为第三方镜像网站，非本作者提供，开启Bangumi同步功能理论上该镜像站可获取你的Bangumi账号及密码，'
+        + '如担心隐私泄露，请勿使用Bangumi同步功能，或在可以访问国外网络的环境下关闭Bangumi镜像开关，'
+        + '此时Bangumi同步功能走官方接口</div>';
+}
+
 /** 去除富文本简介中的 HTML 标签（源数据常带 <p>/<br> 等），保留段落换行与文字。 */
 function stripHtml(s) {
     return String(s || '')
@@ -834,11 +851,14 @@ function setErrorToastEnabled(on) { _errorToastOn = !!on; }
 /** 错误提示：受「应用内错误提示」设置控制，关闭时静默。 */
 function errToast(msg) { if (!_errorToastOn) return; warnToast(msg); }
 
-// T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐
+// T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐。
+// 全局遮罩改造：默认被动指示器（无 scrim、不挡点击），日常载入不再冻结界面；
+// 必须挡输入的关键路径（后端启动、播放链路）传 {blocking:true} 恢复全屏遮罩。
 let _loadingHideT = null;
-function showLoading(text) {
+function showLoading(text, opts) {
     clearTimeout(_loadingHideT);
     const el = $('#loadingToast');
+    el.toggleClass('blocking', !!(opts && opts.blocking));
     if (text) {
         el.find('.md-progress-text').text(String(text));
     } else {
@@ -851,7 +871,7 @@ function hideLoading() {
     if (!el.is(':visible')) return;
     el.addClass('out');
     _loadingHideT = setTimeout(() => {
-        el.hide().removeClass('out');
+        el.hide().removeClass('out blocking');
         el.find('.md-progress-text').text('载入中…');
     }, 160);
 }

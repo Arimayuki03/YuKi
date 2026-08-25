@@ -369,6 +369,22 @@ class TestPluginManager(unittest.TestCase):
         self.assertEqual(by_name['cap']['validity'], 'captcha')
         self.assertNotIn('disabled', by_name)  # 禁用规则不检测
 
+    def test_searchable_plugins_excludes_invalid(self):
+        """检索源列表：invalid 不参与检索；unknown/captcha 正常；禁用规则始终排除。"""
+        for name in ('ok', 'bad', 'cap', 'off'):
+            self.mgr.add(Plugin.from_json({'api': '5', 'name': name, 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
+        # 模拟有效性检测写回的状态
+        self.mgr.get('bad').validity = 'invalid'
+        self.mgr.get('cap').validity = 'captcha'
+        self.mgr.toggle('off', False)
+        names = [p.name for p in self.mgr.searchable_plugins()]
+        self.assertIn('ok', names)      # unknown（未检测过）正常检索
+        self.assertNotIn('bad', names)  # 已判定失效的源不参与检索
+        self.assertIn('cap', names)     # captcha 仅需人工验证，仍参与检索
+        self.assertNotIn('off', names)  # 禁用规则排除
+        # enabled_plugins 不过滤 validity（单源重查依赖它触达全部启用规则）
+        self.assertIn('bad', [p.name for p in self.mgr.enabled_plugins()])
+
     def test_start_validity_check_background(self):
         self.mgr.add(Plugin.from_json({'api': '5', 'name': 'good', 'searchList': '//div', 'searchName': '//a', 'searchResult': '//a', 'chapterRoads': '//ul', 'chapterResult': '//li/a'}))
         engine = self._FakeEngine(valid=('good',))

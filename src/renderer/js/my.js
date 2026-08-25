@@ -10,7 +10,7 @@
  * 我的收藏：复用 records.js makeRecordView 工厂（容器 #my-panel-favorites）。
  * 埋点在 player.js _recordWatch（mpv 退出时累计）。
  */
-/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel */
+/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel, UIState */
 
 // Bangumi 账号收藏本地持久缓存（cache.js）：切页/重启即时上屏，只在收藏状态变动或手动同步时刷新。
 // 无 TTL（0=永久）——账号收藏仅由「本地收藏变更(FavHub)/同步按钮」触发失效，不靠时间过期。
@@ -19,6 +19,8 @@ const MY_BGMCOL_KEY = 'my::bgmcol::v1';
 const My = {
     _inited: false,
     _tab: 'stats',
+    _shownTab: null,   // 最近一次完成渲染的页签：切回同页签且数据未变时复用现有内容
+    _dirty: false,     // 离开本页期间收藏有变更（FavHub 置脏）：切回时强制重渲染
     _favorites: null,
 
     init() {
@@ -36,7 +38,10 @@ const My = {
                 this._bgmCache = null;                     // 失效内存缓存
                 if (typeof localCacheDel === 'function') { try { localCacheDel(MY_BGMCOL_KEY); } catch (e) { /* ignore */ } }
                 await this._getBangumiItems(true);         // 强制重拉并回写持久缓存（收藏状态已更新）
-                if (typeof App === 'undefined' || App.currentView !== 'my') return;
+                if (typeof App === 'undefined' || App.currentView !== 'my') {
+                    this._dirty = true;                    // 不在「我的」页：标记脏，切回时重渲染收藏网格
+                    return;
+                }
                 if (this._tab === 'favorites' && this._favorites) this._favorites.render();
                 else if (this._tab === 'stats') this.render(); // 统计页「我的收藏」部数同步刷新
             });
@@ -152,13 +157,31 @@ const My = {
 
     async enter(tab) {
         this.init();
+        if (!tab) {
+            // 无显式页签入参时恢复持久化的活动页签（切页/重启不回「统计」初始态）；
+            // favorites/history 路由（App.showView('favorites')→My.enter('favorites')）仍显式优先
+            const st = this._viewState();
+            if (st && st.tab) tab = st.tab;
+        }
         if (tab) this._tab = tab;
         this.selectTab(this._tab, false);
+        // 收藏页签且数据无变更（离开期间的收藏改动由 FavHub 置脏）：直接复用已渲染
+        // 的网格，切回零重建；统计页每次轻量重渲（innerHTML 原位替换），保持观看
+        // 时长等数据最新（mpv 退出写统计无广播事件，不能跳过）。
+        if (this._shownTab === 'favorites' && this._tab === 'favorites' && !this._dirty) return;
         await this.render();
+        this._shownTab = this._tab;
+        this._dirty = false;
+    },
+
+    /** 活动页签存档读取（ui-state.js 未加载的沙箱静默降级）。 */
+    _viewState() {
+        try { return (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('my') : null; } catch (e) { return null; }
     },
 
     selectTab(tab, rerender = true) {
         this._tab = ['stats', 'favorites'].includes(tab) ? tab : 'stats';
+        try { if (typeof UIState !== 'undefined' && UIState.set) UIState.set('my', { tab: this._tab }); } catch (e) { /* 存档失败不影响切换 */ }
         $('#view-my [data-my-tab]').removeClass('active');
         $(`#view-my [data-my-tab="${this._tab}"]`).addClass('active');
         $('#my-panel-stats').toggle(this._tab === 'stats');

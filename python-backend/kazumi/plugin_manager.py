@@ -332,6 +332,15 @@ class PluginManager:
         with self._lock:
             return [p for p in self._plugins if p.enabled]
 
+    def searchable_plugins(self):
+        """参与影片检索的规则：启用且未被有效性检测判定为失效。
+
+        validity == 'invalid' 的规则源跳过检索（unknown/valid/captcha 均正常检索），
+        显式单源重查（kazumiSearch 带 plugin 参数）不受此限，保证修复后的源可手动恢复。
+        有效性检测仍覆盖全部启用规则，invalid 源可被重新检测翻回 valid。"""
+        with self._lock:
+            return [p for p in self._plugins if p.enabled and p.validity != 'invalid']
+
     def has_enabled(self):
         with self._lock:
             return any(p.enabled for p in self._plugins)

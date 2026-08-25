@@ -9,7 +9,7 @@
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId,
-          applyMisansFont, localPlayToast */
+          applyMisansFont, localPlayToast, UIState */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -181,7 +181,7 @@ function applyConfigResult(sm, text) {
     if (jarN) parts.push(`含 ${jarN} 个 JAR 源${sm.javaOk ? '' : '（需安装 JRE）'}`);
 
     const panN = sm.panSites || 0;
-    if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→源设置→网盘账号）`);
+    if (panN) parts.push(`含 ${panN} 个网盘源（播放需配置 Cookie，见设置→CatVod源设置→网盘账号）`);
 
     const build = sm.build_errors || {};
     const diagnostics = [
@@ -829,18 +829,6 @@ function listFile(relPath, silent) {
     });
 }
 
-// 上传由主进程系统文件对话框选择 + 复制（无需经渲染层 FormData）
-function uploadFile() {
-    window.yuki.fileUpload(currentRoot || '').then((r) => {
-        if (r && r.ok) {
-            warnToast(`已复制 ${r.copied} 个文件`);
-            listFile(currentRoot);
-        } else if (r && r.reason !== 'canceled') {
-            warnToast('上传失败');
-        }
-    }).catch(() => warnToast('上传失败'));
-}
-
 function showNewFolderDialog() {
     openDialog('newFolder');
 }
@@ -907,7 +895,7 @@ function confirmDelFile(yes) {
 
 function initAuxPanels() {
     // T28：工具面板改本地文件独立板块，页签与 showToolPanel 已删；
-    // 源配置迁入设置→源设置，控件 id 不变，绑定维持原位
+    // 源配置迁入设置→CatVod源设置，控件 id 不变，绑定维持原位
     // 历史源：点击载入 / ✕ 删除
     $('#config_history')
         .on('click', '.history-del', function (e) {
@@ -1211,9 +1199,22 @@ function initSettingsPanel() {
         $('#view-settings').scrollTop(0);
         $('#settings-nav .settings-nav-item').removeClass('active')
             .filter(`[data-cat="${cat}"]`).addClass('active');
+        let visIdx = 0;
         $('#view-settings .tool-card[data-setcat]').each(function () {
-            $(this).toggle(String($(this).data('setcat')) === cat);
+            const on = String($(this).data('setcat')) === cat;
+            $(this).toggle(on);
+            // 错峰延迟按「可见序号」内联计算：display:none 的卡片不占错峰位，
+            // 各分类首卡均从 0 起跳（纯 CSS nth-child 会把隐藏卡也计入序号导致基准漂移）；
+            // 封顶第 8 张，源设置等大类不再拖沓
+            this.style.animationDelay = on ? `${Math.min(visIdx++, 7) * 45}ms` : '';
         });
+        // 重触发分类切换入场动画：移除→强制 reflow→重挂（同 detail.js _swapTabContent
+        // 的 tab-enter 手法）；动画本体在 ui.css，仅非毛玻璃启用（T54：毛玻璃下
+        // tool-card 携带 backdrop-filter，opacity/transform 动画会重建模糊采样层致闪烁）
+        const grid = document.querySelector('#view-settings .settings-grid');
+        grid.classList.remove('set-enter');
+        void grid.offsetWidth; // 强制 reflow 以重启动画
+        grid.classList.add('set-enter');
         if (cat === 'about' && typeof About !== 'undefined' && About.enter) About.enter();
     };
     showSetCat('appearance'); // 先按默认分类收纳，回填后切到记忆分类
@@ -1252,6 +1253,7 @@ function initSettingsPanel() {
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
         $('#set_system_titlebar').prop('checked', s.systemTitleBar === true);
         $('#set_anim').prop('checked', s.animEnabled !== false); // 界面动画（T73：改为与 MiSans 一致的开关）
+        $('#set_uistate_memory').prop('checked', s.uiStateMemory !== false); // 页面状态记忆（默认开）
         $('#set_glass').prop('checked', s.glass === true); // 毛玻璃效果（默认关）
         // 每页条数（T39：首页/搜索/收藏/历史各自一项；首页兼容旧键 listPageSize）
         if (s.pageSizeHome || s.listPageSize) $('#set_pagesize_home').val(s.pageSizeHome || s.listPageSize);
@@ -1264,9 +1266,10 @@ function initSettingsPanel() {
         $('#set_media_probe').prop('checked', s.mediaProbe !== false);
         $('#set_auto_line_fallback').prop('checked', s.autoLineFallback !== false);
         $('#set_legacy_parser').prop('checked', s.legacyParser !== false);
-        // 源设置：后台自动检测/屏蔽无内容源（默认沿用旧行为）
+        // CatVod源设置：后台自动检测/屏蔽无内容源（默认沿用旧行为）
         $('#set_source_autodetect').prop('checked', s.sourceAutoDetect !== false);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
+        $('#clear_wallpaper').toggle(!!s.wallpaper); // 未设置壁纸时隐藏「移除背景」
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
         if (s.playerAlang) $('#set_alang').val(s.playerAlang);
@@ -1287,7 +1290,7 @@ function initSettingsPanel() {
         $('#set_startup_view').val(s.startupView || 'home');
         $('#set_error_toast').prop('checked', s.errorToast !== false);
         $('#set_use_misans').prop('checked', s.useMisansFont !== false);
-        // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
+        // CatVod源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
         $('#set_catvod_bgm_match').prop('checked', s.catvodBgmMatch === true);
         // 系统：网络代理
         $('#set_proxy_url').val(s.proxyUrl || '');
@@ -1569,6 +1572,14 @@ function initSettingsPanel() {
         window.yuki.settingsSet('animEnabled', on);
         applySkin({ animEnabled: on });
     });
+    // 页面状态记忆开关：关闭后各页不再记录/恢复浏览状态（首页源与模式、搜索关键词
+    // 与结果快照、推荐标签、时间表筛选、直播选中源、我的页签、详情导航记忆），
+    // 切页/重启回初始态。已落盘的状态保留不删——重新开启后自动恢复生效。
+    $('#set_uistate_memory').on('change', function () {
+        const on = this.checked;
+        window.yuki.settingsSet('uiStateMemory', on);
+        if (typeof UIState !== 'undefined' && UIState.setEnabled) UIState.setEnabled(on);
+    });
     // 毛玻璃效果开关：卡片/面板背景启用 backdrop-filter 模糊，透出下层内容
     $('#set_glass').on('change', function () {
         const on = this.checked;
@@ -1604,7 +1615,7 @@ function initSettingsPanel() {
         window.yuki.settingsSet('useMisansFont', this.checked);
         await applyMisansFont(this.checked);
     });
-    // 源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
+    // CatVod源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
     $('#set_catvod_bgm_match').on('change', function () {
         window.yuki.settingsSet('catvodBgmMatch', this.checked);
     });
@@ -1671,7 +1682,7 @@ function initSettingsPanel() {
         try {
             const r = await window.yuki.pickCacheDir('__default__');
             if (r && r.ok) {
-                $('#cache_dir_line').text('缓存位置：默认');
+                refreshCacheDirLine('');
                 warnToast('已恢复默认缓存位置（后端已重启）');
             } else if (r && r.reason && r.reason !== 'cancelled') {
                 warnToast(`恢复失败：${r.reason}`);
@@ -1967,13 +1978,28 @@ async function playDirectLink() {
             Player._rememberSession(r);
         }
     };
+    // 外部主播放器接管（ok:false+launched）：同样登记观看会话——此前该响应被当「播放失败」
+    // 误报且不统计；_rememberExtSession 内部按 viaExternal+sessionId 判别
+    const regExtSession = (r, playedUrl) => {
+        if (r && typeof Player !== 'undefined' && Player._curMeta !== undefined && Player._rememberExtSession) {
+            Player._curMeta = { site: 'direct', siteName: '直链', title: playTitle, subtitle: '', vodId: String(playedUrl || url) };
+            Player._rememberExtSession(r);
+        }
+    };
+    const settlePlayResult = (r, playedUrl) => {
+        if (!r) { warnToast('播放失败：未知错误'); return; }
+        if (r.launched) { regExtSession(r, playedUrl); warnToast('已交外部播放器播放'); return; }
+        if (r.ok) {
+            if (r.viaExternal) warnToast('已交外部播放器播放');
+            else { regSession(r, playedUrl); warnToast('已在 mpv 窗口播放'); }
+            return;
+        }
+        warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
+    };
     // rtmp/rtsp 与媒体直链无需解析
     if (/^(rtmp:|rtsp:)/i.test(url) || /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i.test(url.split('?')[0])) {
         const r = await window.yuki.playUrl(url, { title: playTitle });
-        if (r && r.ok) {
-            if (r.viaExternal) warnToast('已交外部播放器播放');
-            else { regSession(r, url); warnToast('已在 mpv 窗口播放'); }
-        } else warnToast('播放失败：' + ((r && r.reason) || '未知错误'));
+        settlePlayResult(r, url);
         return;
     }
     showLoading();
@@ -1989,11 +2015,7 @@ async function playDirectLink() {
     hideLoading();
     if (resolved && resolved.ok) {
         const r = await window.yuki.playUrl(resolved.url, { title: playTitle, header: resolved.header });
-        if (r && r.ok) {
-            if (r.viaExternal) warnToast('已交外部播放器播放');
-            else { regSession(r, resolved.url); warnToast('已在 mpv 窗口播放'); }
-            return;
-        }
+        if (r && (r.ok || r.launched)) { settlePlayResult(r, resolved.url); return; }
     }
     warnToast('未能解析该链接，请确认链接有效');
 }
@@ -2006,6 +2028,7 @@ async function chooseWallpaper() {
     window.yuki.settingsSet('wallpaper', r.path);
     window._wallpaperUrl = toFileUrl(r.path);
     applySkin({ wallpaperUrl: window._wallpaperUrl });
+    $('#clear_wallpaper').show(); // 已设置壁纸，显示「移除背景」
     warnToast('壁纸已设置');
 }
 
@@ -2015,6 +2038,7 @@ async function clearWallpaper() {
     window.yuki.settingsSet('wallpaper', '');
     window._wallpaperUrl = '';
     applySkin({ wallpaperUrl: '' });
+    $('#clear_wallpaper').hide(); // 已无壁纸，隐藏「移除背景」
     warnToast('壁纸已移除');
 }
 
@@ -2023,6 +2047,7 @@ function refreshCacheDirLine(dir) {
     const el = $('#cache_dir_line');
     if (dir) el.text(`缓存位置：${dir}`).attr('title', dir);
     else el.text('缓存位置：默认（用户目录下 .yuki）').attr('title', '');
+    $('#cache_dir_reset').toggle(!!dir); // 未自定义缓存位置时隐藏「恢复默认位置」
 }
 
 /** 下载目录展示行（设置页「下载」卡片）。 */
@@ -2030,6 +2055,7 @@ function refreshDlDirLine(dir) {
     const el = $('#set_dl_dir_line');
     if (dir) el.text(`下载目录：${dir}`).attr('title', dir);
     else el.text('下载目录：默认（系统下载目录）').attr('title', '');
+    $('#set_dl_dir_reset').toggle(!!dir); // 未自定义下载目录时隐藏「恢复默认位置」
 }
 
 /** 更换缓存目录：主进程弹目录选择框，确认后重启后端生效。 */
