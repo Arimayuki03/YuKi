@@ -34,6 +34,7 @@ function loadPopular() {
         closeDialog: () => {},
         Kazumi: {},
         fitVodTitles: () => {},
+        playCardsEnter: () => {},
     };
     context.globalThis = context;
     vm.createContext(context);

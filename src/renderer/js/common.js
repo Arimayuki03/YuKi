@@ -161,6 +161,44 @@ function fitVodTitles(container) {
     $box.find('.vod-name').each(function () { fitVodTitle(this); });
 }
 
+/* ---------------- 卡片网格入场错峰动画（ui.css @keyframes vodCardIn / .cards-enter） ---------------- */
+
+/** 错峰延迟上限：第 9 张起统一压在 7×45ms，避免长网格尾卡等待过久（同设置页 set-enter 语义）。 */
+const CARDS_ENTER_MAX_IDX = 7;
+const CARDS_ENTER_STEP_MS = 45;
+
+/**
+ * 全量重渲染后的入场触发：按「可见序号」给子卡内联写 animationDelay，
+ * 移除→reflow→重挂 .cards-enter 强制重启动画（同 panels.js showSetCat 手法）。
+ * 仅适用于整格重写（grid.html(...)）的渲染点；渐进追加批次用 stageAppendedCards。
+ */
+function playCardsEnter(container) {
+    const $box = $(container);
+    if (!$box.length || !$box.children('.vod-card').length) return;
+    $box.removeClass('cards-enter');
+    let visIdx = 0;
+    $box.children('.vod-card').each(function () {
+        this.style.animationDelay = `${Math.min(visIdx++, CARDS_ENTER_MAX_IDX) * CARDS_ENTER_STEP_MS}ms`;
+    });
+    void $box[0].offsetWidth; // 强制 reflow 后重挂，重启动画
+    $box.addClass('cards-enter');
+}
+
+/**
+ * 渐进加载增量追加的入场：网格保持 .cards-enter 时新插入卡自动起播，
+ * 这里只按批内序号给新增卡补延迟（旧卡不重播）；首挂时补 reflow 再挂类。
+ * countBefore 为追加前网格内已有的卡片数。
+ */
+function stageAppendedCards(container, countBefore) {
+    const $box = $(container);
+    if (!$box.length) return;
+    const cards = $box.children('.vod-card').get().slice(countBefore);
+    if (!cards.length) return;
+    let visIdx = 0;
+    cards.forEach((card) => { card.style.animationDelay = `${Math.min(visIdx++, CARDS_ENTER_MAX_IDX) * CARDS_ENTER_STEP_MS}ms`; });
+    if (!$box.hasClass('cards-enter')) { void $box[0].offsetWidth; $box.addClass('cards-enter'); }
+}
+
 /**
  * 全量重适配卡片标题（窗口缩放/响应式断点/字号调整后调用）：
  * .vod-name 的 title 属性恒为完整标题，先据其恢复完整文本，再按当前
@@ -1153,5 +1191,6 @@ $(document).on('click', '.info-dot', function () {
     root.YUKI.common = {
         escHtml, normalizePic, vodCoverImg, vodCoverChain, coverChainNext,
         coverFadeIn, confirmDialog, showLoading, hideLoading,
+        playCardsEnter, stageAppendedCards,
     };
 }(typeof window !== 'undefined' ? window : globalThis));

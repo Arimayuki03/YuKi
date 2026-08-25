@@ -284,9 +284,15 @@ html, body {
 .local-card {
     position:relative; border-radius:12px; overflow:hidden; cursor:pointer;
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
-    transition:transform 0.15s, box-shadow 0.15s;
+    transition:transform 0.15s, box-shadow 0.15s, border-color .15s;
 }
-.local-card:hover { transform:translateY(-2px); box-shadow:0 6px 18px rgba(0,0,0,0.25); }
+.local-card:hover { transform:translateY(-2px); box-shadow:0 6px 18px rgba(0,0,0,0.25); border-color:var(--md-primary); }
+/* 按压回落 + 键盘焦点环（与 vod-card 同语义）：按下缩沉即时反馈，focus-visible 才显示 */
+.local-card:active { transform:translateY(0) scale(.98); box-shadow:0 3px 10px rgba(0,0,0,0.2); }
+.local-card:focus-visible { border-color:var(--md-primary); box-shadow:0 0 0 3px color-mix(in srgb, var(--md-primary) 22%, transparent); }
+/* 悬停封面微缩放：overflow:hidden 裁切，探出画框感（占位图 .ph 不参与） */
+.local-thumb { transition:transform .3s cubic-bezier(.2,.7,.3,1); }
+.local-card:hover .local-thumb:not(.ph) { transform:scale(1.04); }
 .local-thumb {
     display:block; width:100%; aspect-ratio:16/9; object-fit:cover;
     background:var(--md-surface-container-high);
@@ -777,35 +783,70 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
 /* 快捷键/语言偏好网格：auto-fill 自适应折列 */
 .hotkey-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; }
 /* mpv 键位自定义表（T8 紧凑重构）：芯片网格 —— 动作标签在上、键位按钮在下，
-   auto-fill 多列自适应折列，替代原全宽单列行；捕获中/冲突态整卡高亮 */
+   auto-fill 多列自适应折列，替代原全宽单列行；捕获中/冲突态整卡高亮。
+   视觉升级：芯片改 surface-container-high 浮起底 + hover 主色描边；
+   键位按钮做实体键帽质感 —— surface 反差底、底部厚度阴影、等宽字体、按下沉降；
+   捕获中主色容器底 + 呼吸脉冲光环（reduced-motion 关闭）；冲突整卡红染。 */
 #hotkey_rows {
     display:grid;
-    grid-template-columns:repeat(auto-fill, minmax(104px, 1fr));
-    gap:8px;
+    grid-template-columns:repeat(auto-fill, minmax(112px, 1fr));
+    gap:10px;
     margin-top:8px;
 }
 .hk-chip {
-    display:flex; flex-direction:column; gap:5px;
-    padding:9px 10px;
-    border:1px solid var(--md-outline-variant); border-radius:10px;
-    background:var(--md-surface);
+    display:flex; flex-direction:column; gap:6px;
+    padding:10px 11px;
+    border:1px solid var(--md-outline-variant); border-radius:12px;
+    background:var(--md-surface-container-high);
+    transition:border-color .15s, background .15s;
 }
+.hk-chip:hover { border-color:color-mix(in srgb, var(--md-primary) 45%, var(--md-outline-variant)); }
 .hk-label {
     font-size:12px; line-height:1.2; color:var(--md-on-surface-variant);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
+/* 键帽：与芯片底形成反差的 surface 面 + 黑色透明度厚度边模拟立体按键；
+   等宽字体强化 kbd 语义；hover 主色描边，按下时下沉减薄 */
 .hk-key {
-    width:100%; min-width:0; height:28px; padding:0 8px; font-size:12.5px; font-family:inherit;
-    border:1px solid var(--md-outline); border-radius:7px;
-    background:var(--md-surface-container); color:var(--md-on-surface); cursor:pointer;
-    transition:border-color .15s, background .15s, color .15s;
+    width:100%; min-width:0; height:30px; padding:0 8px;
+    font-size:12px; font-weight:600; letter-spacing:.03em;
+    font-family:ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    border:1px solid var(--md-outline-variant); border-radius:7px;
+    background:var(--md-surface); color:var(--md-on-surface); cursor:pointer;
+    box-shadow:0 2px 0 rgba(0,0,0,.20);
+    transition:border-color .15s, background .15s, color .15s, box-shadow .15s, transform .1s;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
-.hk-key:hover { border-color:var(--md-primary); }
-.hk-key.capturing { border-color:var(--md-primary); background:var(--md-primary-container); color:var(--md-on-primary-container); }
-.hk-chip.conflict { border-color:var(--md-error); }
-.hk-chip.conflict .hk-key { border-color:var(--md-error); color:var(--md-error); }
-.hk-chip.conflict .hk-label { color:var(--md-error); }
+.hk-key:hover { border-color:var(--md-primary); color:var(--md-primary); }
+.hk-key:focus-visible { outline:none; border-color:var(--md-primary); box-shadow:0 2px 0 rgba(0,0,0,.20), 0 0 0 3px color-mix(in srgb, var(--md-primary) 22%, transparent); }
+.hk-key:active { transform:translateY(1px); box-shadow:0 1px 0 rgba(0,0,0,.14); }
+.hk-key.capturing { border-color:var(--md-primary); background:var(--md-primary-container); color:var(--md-on-primary-container); animation:hk-capture-pulse 1.4s ease-in-out infinite; }
+@keyframes hk-capture-pulse {
+    0%,100% { box-shadow:0 2px 0 rgba(0,0,0,.20), 0 0 0 0 color-mix(in srgb, var(--md-primary) 38%, transparent); }
+    50% { box-shadow:0 2px 0 rgba(0,0,0,.20), 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .hk-key.capturing { animation:none; } }
+/* 冲突（同一键绑多个动作）：整卡淡红染 + 键帽描红，hover 加深边界 */
+.hk-chip.conflict { border-color:color-mix(in srgb, var(--md-error) 55%, transparent); background:color-mix(in srgb, var(--md-error-container) 42%, var(--md-surface-container-high)); }
+.hk-chip.conflict:hover { border-color:var(--md-error); }
+.hk-chip.conflict .hk-key { border-color:color-mix(in srgb, var(--md-error) 60%, transparent); color:var(--md-error); }
+.hk-chip.conflict .hk-label { color:var(--md-error); font-weight:600; }
+/* 捕获中整行提示：跨全部网格列，说明「按新键生效 / Esc 退出编辑」；
+   Esc 用小键帽样式与上方键位按钮呼应 */
+.hk-capture-hint {
+    grid-column:1 / -1;
+    display:flex; align-items:center; gap:5px;
+    padding:2px 2px 0;
+    font-size:12px; line-height:1.4; color:var(--md-on-surface-variant);
+}
+.hk-hint-esc {
+    flex:none; padding:1px 7px;
+    font-family:ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    font-size:11px; font-weight:600; letter-spacing:.03em;
+    border:1px solid var(--md-outline-variant); border-radius:5px;
+    background:var(--md-surface); color:var(--md-on-surface);
+    box-shadow:0 1.5px 0 rgba(0,0,0,.18);
+}
 .tool-card {
     background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
     border-radius:16px; padding:18px 20px; margin-bottom:16px;
@@ -882,14 +923,29 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
 .vod-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(172px,1fr)); gap:18px; }
 .vod-card { cursor:pointer; border-radius:14px; overflow:hidden; outline:none; background:var(--md-surface-container);
     border:1px solid var(--md-outline-variant);
-    transition:transform .12s, box-shadow .12s; }
+    transition:transform .12s, box-shadow .12s, border-color .15s; }
 .vod-card:hover, .vod-card:focus { transform:translateY(-3px); box-shadow:0 6px 16px var(--md-shadow); }
+/* 按压回落（T 卡片动效）：:active 在 :hover 之后声明，按下瞬间覆盖上浮态，
+    给「点击生效」的即时触觉反馈；位移收窄 + 轻微缩沉，松手即回弹 */
+.vod-card:active { transform:translateY(-1px) scale(.98); box-shadow:0 3px 10px var(--md-shadow); }
+/* 键盘焦点光环：卡片 tabindex=0 可聚焦，focus-visible 仅键盘导航触发
+   （鼠标点击不显示环）；用 box-shadow 而非 outline，避免与选择模式
+   .vod-grid.selecting .vod-card.sel 的 outline 高亮互相覆盖 */
+.vod-card:focus-visible { border-color:var(--md-primary);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--md-primary) 22%, transparent), 0 6px 16px var(--md-shadow); }
 .vod-cover { width:100%; aspect-ratio:160/220; background:var(--md-surface-container-high); overflow:hidden; }
-.vod-cover img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .25s ease; }
+/* 封面双动效：① 加载完成从轻微放大（1.04）回落到原尺寸，与透明度淡入叠出
+   「落定」感；② 卡片悬停时封面同向放大 1.05，配合 overflow:hidden 裁出
+   「探出画框」效果。只动 transform/opacity，不触发布局 */
+.vod-cover img { width:100%; height:100%; object-fit:cover; display:block; opacity:0;
+    transform:scale(1.04); transition:opacity .25s ease, transform .35s cubic-bezier(.2,.7,.3,1); }
 /* 横屏封面（T41）：不再裁成竖版中间细条，改完整显示（居中留底色） */
 .vod-cover img.landscape { object-fit:contain; }
-/* 封面淡入（T14）：加载完成前由占位底色托底，完成后渐显，避免刷新闪烁 */
-.vod-cover img.loaded, .detail-cover img.loaded { opacity:1; }
+/* 封面淡入（T14）：加载完成前由占位底色托底，完成后渐显，避免刷新闪烁。
+   loaded 后 transform 归零（回落收尾）；详情页大封面不参与缩放动效，仅淡入 */
+.vod-cover img.loaded { opacity:1; transform:none; }
+.detail-cover img.loaded { opacity:1; }
+.vod-card:hover .vod-cover img, .vod-card:focus .vod-cover img { transform:scale(1.05); }
 /* 卡片标题限行（两行省略）：-webkit-line-clamp:2 强制最多两行，超出自动省略号。
    网格标题区统一对齐——padding 上下各留固定量，min-height 固定为两行高+上下 padding
    （不同字号档只有 line-height 变化，高度计算在各媒体查询内同步维护）。 */
@@ -919,6 +975,26 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
     .vod-remarks { font-size:11px; line-height:16px; min-height:16px; }
     .rec-epline { font-size:11px; line-height:16px; }
     .rec-playinfo { font-size:11px; line-height:16px; padding:0 10px 8px; }
+}
+
+/* ===== 卡片网格入场错峰动画（T 卡片动效）=====
+   common.js playCardsEnter 以 .cards-enter 重触发（移除→reflow→重挂，同设置页
+   set-enter 手法），错峰延迟由 JS 按「可见序号」内联写入 animationDelay
+   （上限 8 张防长尾）。仅非毛玻璃启用（T54 同因）：glass-on 下模糊采样层
+   会随 opacity/transform 入场动画反复重建致闪烁；悬停/按压微交互为纯过渡，
+   不在此限。 */
+@keyframes vodCardIn {
+    from { opacity:0; transform:translateY(12px); }
+    to { opacity:1; transform:none; }
+}
+html:not(.glass-on) .vod-grid.cards-enter > .vod-card { animation:vodCardIn .32s cubic-bezier(.2,.7,.3,1) both; }
+/* 减少动态效果偏好：关闭所有位移/缩放类卡片动效（入场、上浮、封面缩放），
+   保留颜色/阴影过渡；设置页 tool-card 入场一并覆盖 */
+@media (prefers-reduced-motion: reduce) {
+    html:not(.glass-on) .vod-grid.cards-enter > .vod-card,
+    html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { animation:none; }
+    .vod-card, .local-card, .detail-char-card,
+    .vod-cover img, .local-thumb:not(.ph), .detail-char-avatar { transition-property:none; }
 }
 
 /* 分页（T6 统一分页器：首页/上一页/页码/下一页/末页 + 跳转输入） */
@@ -1175,6 +1251,11 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-char-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:12px; }
 .detail-char-card { display:flex; flex-direction:column; border:1px solid var(--md-outline-variant); border-radius:14px; background:var(--md-surface-container); overflow:hidden; cursor:pointer; transition:transform .15s, border-color .15s, box-shadow .15s; }
 .detail-char-card:hover { transform:translateY(-2px); border-color:var(--md-primary); box-shadow:0 6px 16px color-mix(in srgb, var(--md-shadow) 45%, transparent); }
+/* 按压回落 + 键盘焦点环 + 头像悬停微缩放（与 vod-card 同语义） */
+.detail-char-card:active { transform:translateY(0) scale(.98); }
+.detail-char-card:focus-visible { border-color:var(--md-primary); box-shadow:0 0 0 3px color-mix(in srgb, var(--md-primary) 22%, transparent); }
+.detail-char-avatar { transition:transform .3s cubic-bezier(.2,.7,.3,1); }
+.detail-char-card:hover .detail-char-avatar { transform:scale(1.05); }
 .detail-char-avatar-wrap { position:relative; width:100%; aspect-ratio:3 / 4; background:var(--md-surface-container-high); display:flex; align-items:center; justify-content:center; }
 .detail-char-avatar { width:100%; height:100%; object-fit:cover; }
 .detail-char-avatar-wrap.noimg .detail-char-noimg, .detail-char-noimg { font-size:34px; color:var(--md-on-surface-variant); opacity:.6; }
@@ -1728,28 +1809,77 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
 
 /* ===== 「我的」页面：观看统计 + 最近观看 ===== */
-.my-stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; }
-.my-stat-box { text-align:center; padding:14px 8px; border-radius:12px;
-    background:var(--md-surface-container); border:1px solid var(--md-outline-variant); }
-.my-stat-value { font-size:22px; font-weight:700; color:var(--md-primary); line-height:1.2; }
-.my-stat-label { font-size:12px; color:var(--md-on-surface-variant); margin-top:4px; }
-.my-bar-chart { display:flex; align-items:flex-end; gap:6px; height:96px; margin-top:10px; padding-top:6px; }
+/* 概览磁贴：图标章 + 大数字 + 标签，每格独立主题色（与收藏分类色板同源） */
+.my-stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+.my-stat-box { display:flex; flex-direction:column; gap:8px; padding:16px; border-radius:14px;
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
+    border-top:3px solid var(--tile, var(--md-primary));
+    transition:transform .15s ease, box-shadow .15s ease; }
+.my-stat-box:hover { transform:translateY(-2px); box-shadow:0 6px 16px var(--md-shadow); }
+html:not(.dark) .my-stat-box[data-accent="primary"] { --tile:#006C4C; }
+html:not(.dark) .my-stat-box[data-accent="blue"]    { --tile:#1565C0; }
+html:not(.dark) .my-stat-box[data-accent="purple"]  { --tile:#6A1B9A; }
+html:not(.dark) .my-stat-box[data-accent="orange"]  { --tile:#EF6C00; }
+html.dark .my-stat-box[data-accent="primary"] { --tile:#6CDBA4; }
+html.dark .my-stat-box[data-accent="blue"]    { --tile:#90CAF9; }
+html.dark .my-stat-box[data-accent="purple"]  { --tile:#CE93D8; }
+html.dark .my-stat-box[data-accent="orange"]  { --tile:#FFB74D; }
+.my-stat-icon { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    background:color-mix(in srgb, var(--tile, var(--md-primary)) 13%, transparent);
+    color:var(--tile, var(--md-primary)); }
+.my-stat-icon svg { width:20px; height:20px; fill:currentColor; }
+.my-stat-value { font-size:26px; font-weight:700; color:var(--tile, var(--md-primary)); line-height:1.15; }
+.my-stat-label { font-size:12px; color:var(--md-on-surface-variant); }
+
+/* 卡片内小节标题（小图标 + 文本）与小节双列布局 */
+.my-sec-title { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:600;
+    color:var(--md-on-surface); margin-bottom:12px; }
+.my-sec-title svg { width:16px; height:16px; fill:var(--md-primary); flex:none; }
+.my-two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px 32px; }
+.my-card-footer { display:flex; justify-content:flex-end; margin-top:14px; }
+
+/* 条形图：柱体落在基线上，今天实心高亮，悬浮显示时长气泡 */
+.my-bar-chart { display:flex; align-items:flex-end; gap:6px; height:110px; margin-top:2px; padding-top:16px;
+    border-bottom:1px solid var(--md-outline-variant); }
 .my-bar-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end;
     height:100%; min-width:0; }
-.my-bar { width:100%; max-width:28px; background:var(--md-primary-container); border-radius:4px 4px 0 0;
-    transition:height .3s; }
-.my-bar-col:first-child .my-bar { background:var(--md-primary); }
-.my-bar-label { font-size:11px; color:var(--md-on-surface-variant); margin-top:4px; white-space:nowrap; }
-/* 分来源 / 最常观看：横向条形排行（片名/源名 + 占比条 + 数值） */
-.my-rank-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
-.my-rank-row { display:flex; align-items:center; gap:10px; }
-.my-rank-name { flex:none; width:34%; max-width:180px; font-size:13px; color:var(--md-on-surface);
+.my-bar { position:relative; width:100%; max-width:30px; background:var(--md-primary); opacity:.4;
+    border-radius:6px 6px 2px 2px; transition:height .3s ease, opacity .15s ease; }
+.my-bar-col:hover .my-bar { opacity:.75; }
+.my-bar-col.is-today .my-bar { opacity:1; }
+.my-bar-val { position:absolute; bottom:calc(100% + 5px); left:50%; transform:translateX(-50%);
+    font-size:10.5px; line-height:1.4; white-space:nowrap; color:var(--md-on-surface);
+    background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant);
+    border-radius:6px; padding:1px 7px; opacity:0; pointer-events:none; transition:opacity .15s ease; z-index:2; }
+.my-bar-col:hover .my-bar-val, .my-bar-col.is-today .my-bar-val { opacity:1; }
+.my-bar-label { font-size:11px; color:var(--md-on-surface-variant); margin-top:6px; white-space:nowrap; }
+.my-bar-col.is-today .my-bar-label { color:var(--md-primary); font-weight:600; }
+
+/* 分来源 / 最常观看：名次徽章 + 名称 + 占比条 + 数值 */
+.my-rank-list { display:flex; flex-direction:column; gap:8px; margin-top:2px; }
+.my-rank-row { display:flex; align-items:center; gap:10px; padding:3px 6px; margin:-3px -6px;
+    border-radius:8px; transition:background .15s ease; }
+.my-rank-row:hover { background:var(--md-surface-container-high); }
+.my-rank-idx { flex:none; width:20px; height:20px; border-radius:6px; font-size:11px; font-weight:700;
+    display:flex; align-items:center; justify-content:center;
+    color:var(--md-on-surface-variant); background:var(--md-surface-container-high); }
+.my-rank-row:nth-child(1) .my-rank-idx { color:var(--md-on-primary); background:var(--md-primary); }
+.my-rank-row:nth-child(2) .my-rank-idx { color:var(--md-on-surface);
+    background:color-mix(in srgb, var(--md-primary) 45%, var(--md-surface-container-high)); }
+.my-rank-row:nth-child(3) .my-rank-idx { color:var(--md-on-surface);
+    background:color-mix(in srgb, var(--md-primary) 22%, var(--md-surface-container-high)); }
+.my-rank-name { flex:none; width:32%; max-width:170px; font-size:13px; color:var(--md-on-surface);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .my-rank-track { flex:1; min-width:40px; height:12px; border-radius:6px;
     background:var(--md-surface-container-high); overflow:hidden; }
-.my-rank-fill { display:block; height:100%; border-radius:6px; background:var(--md-primary-container);
+.my-rank-fill { display:block; height:100%; border-radius:6px;
+    background:linear-gradient(90deg, color-mix(in srgb, var(--md-primary) 55%, transparent), var(--md-primary));
     transition:width .3s ease; }
-.my-rank-row:first-child .my-rank-fill { background:var(--md-primary); }
+.my-rank-val { flex:none; font-size:12px; font-weight:600; color:var(--md-on-surface);
+    white-space:nowrap; min-width:56px; text-align:right; }
+.my-stats-empty { font-size:13px; color:var(--md-on-surface-variant); padding:18px 12px;
+    text-align:center; border:1px dashed var(--md-outline-variant); border-radius:10px; }
+
 /* 我的收藏分类部数（在看/想看/看过/抛弃/搁置）：彩色统计块，对齐 Kazumi 统计页风格 */
 .my-stats-collections { margin-top:4px; }
 .my-stats-coll-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr)); gap:10px; }
@@ -1773,8 +1903,6 @@ html.dark .my-stats-coll-box[data-tag="want"]    { --cat-color:#90CAF9; }
 html.dark .my-stats-coll-box[data-tag="seen"]    { --cat-color:#CE93D8; }
 html.dark .my-stats-coll-box[data-tag="dropped"] { --cat-color:#E57373; }
 html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
-.my-rank-val { flex:none; font-size:12px; color:var(--md-on-surface-variant); white-space:nowrap; min-width:52px; text-align:right; }
-.my-stats-empty { font-size:13px; color:var(--md-on-surface-variant); padding:8px 0; }
 /* 最近观看卡片：封面右下角时长角标 */
 .my-watch-dur { position:absolute; right:6px; bottom:6px; z-index:2;
     background:rgba(0,0,0,.65); color:#fff; font-size:11px; padding:1px 6px;

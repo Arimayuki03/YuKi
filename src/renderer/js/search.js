@@ -15,7 +15,7 @@
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  * Kazumi 源页签独立走 /search/kazumi-stream SSE（2.3，T73 边搜边加载）。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter */
 
 const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
 
@@ -421,6 +421,8 @@ function createSearchPage(cfg) {
             $(`#${gid}-grid`).html(cards);
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(`#${gid}-grid`);
+            // 入场错峰：每个来源组各自独立错峰入场（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
+            playCardsEnter(`#${gid}-grid`);
             // 记录本组渲染模式/页码，供切源时判断是否可保留 DOM（不销毁已加载图片）
             this._grpRendered[gid] = { mode: focused ? 'single' : 'all', page: focused ? page : 1 };
             // 每个来源到达后立即低并发补视口附近封面；全部来源结束后提升到 6 并补齐当前页。
@@ -682,6 +684,8 @@ const Search = {
         });
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
+        // 入场错峰：识别结果一次性渲染完再整体错峰入场（common.js playCardsEnter）
+        playCardsEnter(grid);
         // 点结果回填 Kazumi 源页关键词并切到该页签搜索（从 Kazumi 规则源找片源；
         // 两页签结果相互独立，不影响聚合搜索页已有内容）
         grid.on('click', '.image-search-result', (e) => {

@@ -51,6 +51,7 @@ function loadHome(sharedStore) {
         ;localCacheSet = (typeof window.localCacheSet === 'function') ? window.localCacheSet : (() => {});
         ;warnToast = () => {}; showLoading = () => {}; hideLoading = () => {};
         ;fillMissingCovers = () => {}; fitVodTitles = () => {}; renderStatusBar = () => {}; renderPagerBox = () => {};
+        ;playCardsEnter = () => {}; stageAppendedCards = () => {};
         ;confirmDialog = async () => true; doAction = async () => ({ list: [] }); pageSizeOf = async () => 20;`, context);
     context.__ls = ls;
     context.__lsStore = lsStore;

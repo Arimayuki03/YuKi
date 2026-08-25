@@ -108,6 +108,7 @@ function loadSearchModule($) {
         renderPagerBox: () => {},
         renderStatusBar: () => {},
         fitVodTitles: () => {},
+        playCardsEnter: () => {},
         errorTextOf: (e) => String(e),
         doAction: async () => ({}),
     };

@@ -966,14 +966,21 @@ function hkConflicts() {
     return dup;
 }
 
-/** 紧凑芯片网格：动作标签在上、键位按钮在下（T8 布局重构，见 ui.css .hk-chip）。 */
+/** 紧凑芯片网格：动作标签在上、键位按钮在下（T8 布局重构，见 ui.css .hk-chip）。
+ *  捕获中在网格末尾追加整行提示（grid-column 跨全列）：按新键生效、Esc 退出编辑。 */
 function renderHotkeyRows() {
     const dup = hkConflicts();
-    $('#hotkey_rows').html(HK_UI_ACTIONS.map(([id, label]) => `
+    const chips = HK_UI_ACTIONS.map(([id, label]) => `
         <div class="hk-chip${dup.has(_hkKeys[id]) ? ' conflict' : ''}">
             <span class="hk-label">${label}</span>
             <button type="button" class="hk-key${_hkCapturing === id ? ' capturing' : ''}" data-action="${id}" title="点击修改键位">${_hkCapturing === id ? '按新键…' : _hkEsc(_hkKeys[id])}</button>
-        </div>`).join(''));
+        </div>`).join('');
+    let hint = '';
+    if (_hkCapturing) {
+        const capLabel = (HK_UI_ACTIONS.find((a) => a[0] === _hkCapturing) || [])[1] || '';
+        hint = `<div class="hk-capture-hint">正在修改「${_hkEsc(capLabel)}」：直接按下新键生效，<span class="hk-hint-esc">Esc</span> 退出编辑</div>`;
+    }
+    $('#hotkey_rows').html(chips + hint);
 }
 
 /** 浏览器键盘事件 → mpv 键名；不支持的键返回 null。Shift+字母按 mpv 习惯转大写。 */

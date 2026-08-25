@@ -6,7 +6,7 @@
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
  */
-/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast */
+/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter */
 
 async function recGet(key) {
     try {
@@ -665,6 +665,8 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             grid.html(slice.map((v) => recCard(v, editable, withTags, playCountByName)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
+            // 入场错峰：收藏/历史整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
+            playCardsEnter(grid);
             // 本地文件卡：异步抓帧封面（ffmpeg 截帧，替代占位图；失败/未就绪保持占位图）
             if (typeof fillLocalCovers === 'function') fillLocalCovers(grid);
             // 缺封面后台补拉（T73：历史/收藏 Kazumi 卡按片名从 Bangumi 拉封面并缓存，其余走 detailContent；

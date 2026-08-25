@@ -7,7 +7,7 @@
  * 标签筛选仿 Kazumi PopularPage：下拉菜单选择预设标签，选定后服务端拉取该标签番剧。
  * 卡片复用 common.js bangumiCard；点击进二级详情页（Kazumi.openBangumiInfoPage）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState */
+/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState, playCardsEnter */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const POPULAR_TAGS = [
@@ -199,6 +199,8 @@ const Popular = {
         grid.html(this._items.map((item) => bangumiCard(item)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
+        // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
+        playCardsEnter(grid);
     },
 
     _renderPager() {

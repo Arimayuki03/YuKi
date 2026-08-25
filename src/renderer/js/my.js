@@ -223,9 +223,10 @@ const My = {
             days.push({ key, label: `${d.getMonth() + 1}/${d.getDate()}`, seconds: daily[key] || 0 });
         }
         const max = Math.max(1, ...days.map((d) => d.seconds));
-        $('#my-stats-daily').html(days.map((d) => `
-            <div class="my-bar-col" title="${escHtml(`${d.label} ${this._fmtDur(d.seconds)}`)}">
-                <div class="my-bar" style="height:${Math.round(d.seconds / max * 100)}%"></div>
+        // 最后一根柱=今天：实心高亮（is-today），柱顶悬浮气泡显示紧凑时长；零数据保留 2% 短柱占位
+        $('#my-stats-daily').html(days.map((d, i) => `
+            <div class="my-bar-col${i === days.length - 1 ? ' is-today' : ''}" title="${escHtml(`${d.label} ${this._fmtDur(d.seconds)}`)}">
+                <div class="my-bar" style="height:${Math.max(2, Math.round(d.seconds / max * 100))}%"><span class="my-bar-val">${escHtml(this._fmtDurCompact(d.seconds))}</span></div>
                 <span class="my-bar-label">${escHtml(d.label)}</span>
             </div>`).join(''));
         this._renderWeekday(daily);
@@ -295,7 +296,7 @@ const My = {
         const max = Math.max(1, ...buckets);
         $('#my-stats-weekday').html(buckets.map((sec, i) => `
             <div class="my-bar-col" title="${escHtml(`${names[i]} ${this._fmtDur(sec)}`)}">
-                <div class="my-bar" style="height:${Math.round(sec / max * 100)}%"></div>
+                <div class="my-bar" style="height:${Math.max(2, Math.round(sec / max * 100))}%"><span class="my-bar-val">${escHtml(this._fmtDurCompact(sec))}</span></div>
                 <span class="my-bar-label">${escHtml(names[i])}</span>
             </div>`).join(''));
     },
@@ -348,7 +349,8 @@ const My = {
         return String(name || '').toLowerCase().replace(/[\s·・:：\-—_,，。.、!！?？]/g, '').trim();
     },
 
-    /** 通用横向排行渲染：rows=[{label,value}]，fmt(value)->字符串。value 最大者为满条。 */
+    /** 通用横向排行渲染：rows=[{label,value}]，fmt(value)->字符串。value 最大者为满条。
+     *  行首带名次徽章（CSS 按 nth-child 给前三名着色）。 */
     _renderRankList(sel, rows, fmt) {
         const $el = $(sel);
         if (!rows || !rows.length) {
@@ -356,8 +358,9 @@ const My = {
             return;
         }
         const max = Math.max(1, ...rows.map((r) => r.value));
-        $el.html(rows.map((r) => `
+        $el.html(rows.map((r, i) => `
             <div class="my-rank-row">
+                <span class="my-rank-idx">${i + 1}</span>
                 <span class="my-rank-name" title="${escHtml(String(r.label))}">${escHtml(String(r.label))}</span>
                 <span class="my-rank-track"><span class="my-rank-fill" style="width:${Math.round(r.value / max * 100)}%"></span></span>
                 <span class="my-rank-val">${escHtml(fmt(r.value))}</span>
@@ -371,6 +374,15 @@ const My = {
         if (h > 0) return `${h} 小时 ${m} 分`;
         if (m > 0) return `${m} 分钟`;
         return `${s} 秒`;
+    },
+
+    /** 秒数 → 紧凑时长（图表气泡用）：X时X分 / X小时 / X分钟 / X秒。 */
+    _fmtDurCompact(sec) {
+        sec = Math.max(0, Math.round(sec || 0));
+        const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+        if (h > 0) return m > 0 ? `${h}时${m}分` : `${h}小时`;
+        if (m > 0) return `${m}分钟`;
+        return `${s}秒`;
     },
 
     // ---------------------------------------------- Bangumi 同步进度对话框

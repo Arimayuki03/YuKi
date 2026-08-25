@@ -244,25 +244,55 @@
                     <span class="class-tab" data-my-tab="favorites">我的收藏</span>
                 </div>
                 <div id="my-panel-stats" class="my-panel">
-                    <div class="tool-card my-stats-card">
+                    <div class="tool-card">
                         <div class="tool-card-title">观看统计</div>
                         <div class="my-stats-grid">
-                            <div class="my-stat-box"><div class="my-stat-value" id="my-stat-hours">0</div><div class="my-stat-label">累计观看</div></div>
-                            <div class="my-stat-box"><div class="my-stat-value" id="my-stat-sessions">0</div><div class="my-stat-label">观看次数</div></div>
-                            <div class="my-stat-box"><div class="my-stat-value" id="my-stat-titles">0</div><div class="my-stat-label">观看部数</div></div>
-                            <div class="my-stat-box"><div class="my-stat-value" id="my-stat-week">0</div><div class="my-stat-label">近 30 天时长</div></div>
+                            <div class="my-stat-box" data-accent="primary">
+                                <div class="my-stat-icon"><svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></div>
+                                <div class="my-stat-value" id="my-stat-hours">0</div><div class="my-stat-label">累计观看</div>
+                            </div>
+                            <div class="my-stat-box" data-accent="blue">
+                                <div class="my-stat-icon"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg></div>
+                                <div class="my-stat-value" id="my-stat-sessions">0</div><div class="my-stat-label">观看次数</div>
+                            </div>
+                            <div class="my-stat-box" data-accent="purple">
+                                <div class="my-stat-icon"><svg viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12V6l5.5 4-5.5 4z"/></svg></div>
+                                <div class="my-stat-value" id="my-stat-titles">0</div><div class="my-stat-label">观看部数</div>
+                            </div>
+                            <div class="my-stat-box" data-accent="orange">
+                                <div class="my-stat-icon"><svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg></div>
+                                <div class="my-stat-value" id="my-stat-week">0</div><div class="my-stat-label">近 30 天时长</div>
+                            </div>
                         </div>
-                        <div class="tip-line pad0" style="margin-top:14px;">我的收藏</div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="my-two-col">
+                            <section>
+                                <div class="my-sec-title"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg><span>近 7 天观看时长</span></div>
+                                <div id="my-stats-daily" class="my-bar-chart"></div>
+                            </section>
+                            <section>
+                                <div class="my-sec-title"><svg viewBox="0 0 24 24"><path d="M20 3h-1V1h-2v2H7V1H5v2H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H4V8h16v11z"/></svg><span>按星期分布（近 30 天）</span></div>
+                                <div id="my-stats-weekday" class="my-bar-chart"></div>
+                            </section>
+                        </div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="my-two-col">
+                            <section>
+                                <div class="my-sec-title"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM11 19.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg><span id="my-stats-source-tip">来源统计</span></div>
+                                <div id="my-stats-source" class="my-rank-list"></div>
+                            </section>
+                            <section>
+                                <div class="my-sec-title"><svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg><span>最常观看</span></div>
+                                <div id="my-stats-top" class="my-rank-list"></div>
+                            </section>
+                        </div>
+                    </div>
+                    <div class="tool-card">
+                        <div class="tool-card-title">我的收藏</div>
                         <div id="my-stats-collections" class="my-stats-collections"></div>
-                        <div class="tip-line pad0" style="margin-top:12px;">近 7 天观看时长</div>
-                        <div id="my-stats-daily" class="my-bar-chart"></div>
-                        <div class="tip-line pad0" style="margin-top:14px;">按星期分布（近 30 天）</div>
-                        <div id="my-stats-weekday" class="my-bar-chart"></div>
-                        <div class="tip-line pad0" style="margin-top:14px;" id="my-stats-source-tip">来源统计</div>
-                        <div id="my-stats-source" class="my-rank-list"></div>
-                        <div class="tip-line pad0" style="margin-top:14px;">最常观看</div>
-                        <div id="my-stats-top" class="my-rank-list"></div>
-                        <div style="margin-top:16px;">
+                        <div class="my-card-footer">
                             <button id="my-stats-clear" class="md-btn md-btn-sm md-btn-danger-tonal" title="清空全部观看统计数据">清空播放统计</button>
                         </div>
                     </div>
@@ -648,7 +678,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">更换目录会重启下载引擎，进行中任务的文件（含断点控制文件）会自动迁移到新目录并断点续传。
+                                <div class="info-detail">更换目录会重启下载引擎，进行中任务的文件（含断点控制文件）会自动迁移到新目录并断点续传；同一「站点 | 剧名 | 集名」的重复下载任务会自动去重，命中进行中/已完成任务时跳过并提示。
                                     <div class="tip-line pad0" id="set_dl_dir_line" style="margin-top:8px;">下载目录：默认（系统下载目录）</div>
                                 </div>
                             </div>
@@ -782,7 +812,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">夸克 / UC / 天翼 / 百度 / 123 / 迅雷等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致：夸克点「夸克扫码登录」用夸克 App 扫码即可，登录后自动保存，无需手动复制；其他网盘先在浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 → 点任意请求 → 在「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）粘贴到对应输入框保存——注意只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效；未配置 Cookie 时详情页照常显示，但播放会快速失败并提示原因。「夸克网盘快路径」开启（默认）且已扫码登录时，夸克源优先走本机直连解析（不经 JAR），关闭后先调用 JAR、结果退化时再用本地代理兜底，适合排查不同影视仓 JAR 的兼容性；「起播前媒体探测 (HEAD/Range)」在起播前校验视频流有效性，拦截 HTML/403/过期链接并防止播放器黑屏崩溃；「同影片多线路自动回退」在当前线路解析或起播失败时，自动按顺序尝试同影片其他可用线路；「简易解析器与 iframe 跟随」允许旧版规则使用 MutationObserver 提取并跟随嵌套 iframe 媒体直链。</div>
+                                <div class="info-detail">夸克 / UC / 天翼 / 百度 / 123 / 迅雷等网盘影视源（JAR 源）播放时需要对应网盘的登录凭据，与 TVBox 一致：夸克点「夸克扫码登录」用夸克 App 扫码即可，登录后自动保存、会话过期自动续期，无需手动复制；其他网盘先在浏览器登录网盘网页 → F12 开发者工具 → 「网络」→ 刷新页面 → 点任意请求 → 在「请求头」复制整行 Cookie（形如 <code>__puus=xxx; __pus=xxx; …</code>）粘贴到对应输入框保存——注意只粘贴 Cookie 内容本身（不要带「Cookie: 」前缀），且必须是完整的「字段=值; 」组合，单个 token 无效；未配置 Cookie 时详情页照常显示，但播放会快速失败并提示原因。「夸克网盘快路径」开启（默认）且已扫码登录时，夸克源优先走本机直连解析（不经 JAR），关闭后先调用 JAR、结果退化时再用本地代理兜底，适合排查不同影视仓 JAR 的兼容性；「起播前媒体探测 (HEAD/Range)」在起播前校验视频流有效性，拦截 HTML/403/过期链接并防止播放器黑屏崩溃；「同影片多线路自动回退」在当前线路解析或起播失败时，自动按顺序尝试同影片其他可用线路；「简易解析器与 iframe 跟随」允许旧版规则使用 MutationObserver 提取并跟随嵌套 iframe 媒体直链。</div>
                             </div>
                         </div>
                         <label class="md-switch" style="margin-top:10px;">
@@ -838,7 +868,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「后台自动检测源」后，应用会在后台检查每个源是否有内容：首页与所有分类均无内容的空源、连续多次探测无响应的死源都会被自动屏蔽，无影片的分类也会随之隐藏；被屏蔽的源会定期复查，恢复内容后自动解除。关闭检测则不再自动探测、隐藏或屏蔽任何源，历史上被屏蔽的源会全部恢复显示；也可随时在下方手动查看或恢复。
+                                <div class="info-detail">开启「后台自动检测源」后，应用会在后台检查每个源是否有内容：首页与所有分类均无内容的空源、连续两轮探测无响应的死源都会被自动屏蔽，无影片的分类也会随之隐藏；被屏蔽的源会定期复查，恢复内容后自动解除。关闭检测则不再自动探测、隐藏或屏蔽任何源，历史上被屏蔽的源会全部恢复显示；也可随时在下方手动查看或恢复。
                                     <div class="tip-line pad0" id="blocked_line">自动屏蔽首页和分类均无内容的源与连续探测无响应的死源，避免下拉里出现空源。</div>
                                 </div>
                             </div>
@@ -1058,7 +1088,7 @@
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">
-                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下弹幕、自动连播、观看统计不生效。
+                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer（手动指定的自定义 mpv 使用其自身原生配置，不注入 YuKi 外观与中文菜单资源，「恢复默认」切回引擎样式）；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下弹幕与自动连播不生效；观看统计按播放器运行时长计入（运行 ≥15 秒记一次，VLC 开启「仅允许一个实例」时的秒退转交不计），播放进度无法获取（历史条目进度显示 0%）。
                                     <div class="tip-line pad0" style="margin-top:6px;">播放器：<span id="player_line">mpv（自动发现）</span></div>
                                 </div>
                             </div>

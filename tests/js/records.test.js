@@ -46,6 +46,7 @@ function loadRecords(settings) {
         closeDialog: () => {},
         fillMissingCovers: () => {},
         fitVodTitles: () => {},
+        playCardsEnter: () => {},
     };
     context.globalThis = context;
     vm.createContext(context);

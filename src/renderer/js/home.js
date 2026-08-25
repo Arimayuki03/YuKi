@@ -5,7 +5,7 @@
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, errorTextOf */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, errorTextOf, playCardsEnter, stageAppendedCards */
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
@@ -1078,9 +1078,12 @@ const Home = {
         const grid = $('#home-grid');
         if (grid.children('.tip-line').length) grid.empty();
         // T65：新增卡片拼串后单次 append（替代逐条 append）
+        const before = grid.children('.vod-card').length;
         grid.append(items.map((v) => vodCard(v, this.site)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
+        // 入场错峰：渐进批次只给新卡补延迟（旧卡不重播，common.js stageAppendedCards）
+        stageAppendedCards(grid, before);
         this._fillCovers();
     },
 
@@ -1631,6 +1634,8 @@ const Home = {
         grid.html(list.map((v) => vodCard(v, this.site)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
+        // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
+        playCardsEnter(grid);
         this._fillCovers();
     },
 
