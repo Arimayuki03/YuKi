@@ -102,6 +102,15 @@ let playlistProxyRef = null;
 // 「页面解析型」线路黑名单（site|flag）：代理解析出 parse=1 时精确记录，
 // 后续该线路不再建队列——只有这一类被禁止，m3u8 等直连线路不受影响。
 const pageQueueBan = new Set();
+// 外部播放器最近一次启动的子进程 pid：新启动前 kill 旧进程收敛为单窗口
+// （外部播放器无 stop 句柄；kill 位于 spawn 前一刻的同步段，见 launchExternalPlayerItems）。
+let lastExtLaunchPid = 0;
+// 外部启动 single-flight：同播放意图（kind|site|title）的并发 yuki:play 复用
+// 同一次在途启动——static 包装含 await（register/探测），渲染层竞态双发的两次
+// IPC 在 await 间隙交错时，仅靠「spawn 前 kill 上一个 pid」仍可能各 spawn 一窗
+// （A 完成记录 pid1 → B kill(pid1) → B spawn；但 A 的 spawn 若晚于 B 的 kill
+// 检查则逃逸）。flight 保证同意图串行化，从源头消除并发第二窗。
+let extLaunchFlight = { key: '', promise: null };
 
 // Anime4K 实时超分着色器链（v4.1，动漫向）三档位（设置项 anime4kMode，T8）：
 // 均衡 Mode A：高光钳制→恢复→2x 升频→再恢复（默认）；细节 Mode A+A：先升频再恢复再升频（低清片源）；
@@ -1094,7 +1103,37 @@ app.whenReady().then(() => {
                 return withPlayerTrace({ ok: false, reason: 'bad url', via: 'external' }, meta);
             }
             const extLabel = [meta.title, meta.subtitle].filter(Boolean).join(' · ');
-            const r = launchExternalPlayer(extPrimary, firstUrl, meta.header, extLabel);
+            // 组装条目：整季队列（meta.playlist=管道代理地址列表）→ 写 m3u 播放列表
+            // 文件交给 PotPlayer 原生列表连播；单集/逐集回退 → 单条目直启。
+            // 鉴权头传递（launchExternalPlayerItems 内统一决策）：管道地址入站免鉴权；
+            // 带鉴权头真实直链包 static 管道；VLC/mpv 开关可靠维持直传。
+            // 双窗口收敛在 launchExternalPlayerItems 的 spawn 前一刻执行（见其注释）。
+            // 多条目 m3u 列表：EXTINF 集名 + 纯 ASCII 代理地址；catvod 无头/UA-only
+            // 条目经代理 302 直连（探测零等待，总时长即时），强防盗链条目 pipe 预取
+            // 加速——整季列表与时长体验兼得。
+            const isQueue = Array.isArray(meta.playlist) && meta.playlist.length > 1;
+            const items = isQueue
+                ? meta.playlist.map((e) => ({
+                    url: String((e && e.url) || ''), title: String((e && e.title) || ''),
+                    header: isPlaylistProxyUrl(String((e && e.url) || '')) ? (meta.header || null) : null,
+                })).filter((it) => it.url)
+                : [{ url: firstUrl, title: extLabel, header: meta.header || null }];
+            // single-flight：同播放意图（kind|site|title）的并发双发复用在途启动，
+            // 从源头消除「两次 IPC 各自走到 spawn」的并发第二窗（kill 收敛兜底其余场景）。
+            const flightKey = `${externalPlayerKind(extPrimary)}|${meta.site || ''}|${meta.title || ''}`;
+            if (extLaunchFlight.key === flightKey && extLaunchFlight.promise) {
+                console.log(`[外部播放器] single-flight 复用在途启动（${flightKey}）`);
+                const r0 = await extLaunchFlight.promise.catch((e) => ({ ok: false, reason: e.message }));
+                return withPlayerTrace(r0.ok
+                    ? { ok: false, launched: true, started: false,
+                        reason: 'external-start-unverified', viaExternal: true, via: r0.via, kind: r0.kind }
+                    : { ...r0, viaExternal: true }, meta);
+            }
+            const p = (async () => launchExternalPlayerItems(extPrimary, items))();
+            extLaunchFlight = { key: flightKey, promise: p };
+            const r = await p.finally(() => {
+                if (extLaunchFlight.promise === p) extLaunchFlight = { key: '', promise: null };
+            });
             // A detached external process has no file-loaded/first-frame
             // acknowledgement. Report launched separately; ok=true remains
             // reserved for a verified mpv session.
@@ -3304,6 +3343,21 @@ app.whenReady().then(() => {
 
     // ---- 外部播放器 ----
 
+    /** 是否本机「原生播放列表」代理地址（pipe 管道会话条目 /pl/<token>/<n> 及其
+     *  清单重写产物 /seg/...）。这类 URL 交外部播放器时必须省略鉴权开关：
+     *  1) 管道模式数据面由代理带会话头转发上游，入站请求无需任何鉴权；
+     *  2) PotPlayer 对无扩展名 URL 走「未知内容」路径，会把命令行开关原样并入
+     *     HTTP 请求行（GET /pl/x/0 /user_agent=... HTTP/1.0，2026-08-25 抓包实锤），
+     *     Node 解析器报 HPE_INVALID_CONSTANT 直接拒收 → PotPlayer 报「打不开」。 */
+    function isPlaylistProxyUrl(u) {
+        try {
+            const url = new URL(String(u || ''));
+            if (!/^https?:$/i.test(url.protocol)) return false;
+            if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)) return false;
+            return /^\/(?:pl|seg)\/[A-Za-z0-9_-]{8,64}(?:\/|$)/.test(url.pathname);
+        } catch (e) { return false; }
+    }
+
     /** 按可执行文件名识别播放器类型（决定命令行传参格式：header/标题各家语法不同）。 */
     function externalPlayerKind(execPath) {
         const base = String(execPath || '').toLowerCase().replace(/\\/g, '/').split('/').pop();
@@ -3313,11 +3367,233 @@ app.whenReady().then(() => {
         return 'other';
     }
 
-    /** 按播放器类型拼 spawn 参数（各家 HTTP header 传参语法不同）。返回 { args, headerSupported }。
-     *  - VLC：--http-header-fields=Referer: x,User-Agent: y（逗号分隔）
-     *  - mpv：--http-header-fields=Referer: x, User-Agent: y（逗号+空格，与内置 mpv-player.js 一致）
-     *  - PotPlayer：/referer="x" /user_agent="y"（斜杠开关，各参数独立，需带引号）
-     *  - 其他：无通用 header 传参，仅 URL（带鉴权直链可能 403） */
+    const EXT_HEADER_KEYS = ['user-agent', 'referer', 'origin', 'cookie', 'authorization'];
+    function hasAuthHeader(header) {
+        return !!(header && Object.keys(header).some((key) => EXT_HEADER_KEYS.includes(String(key).toLowerCase())));
+    }
+
+    /**
+     * 外部播放器启动层（2026-08-25 重写）。
+     *
+     * 设计原则：**PotPlayer 的命令行鉴权开关与裸 URL 处理均不可靠**——
+     *  - /referer= /user_agent= 开关时灵时不灵，失败时开关被并入 HTTP 请求行
+     *    （GET url /user_agent=... HTTP/1.0）致上游收到畸形请求；
+     *  - 无扩展名 URL 被当 ICY 音频流/顺序流：只出声音、不能 seek、时长随缓冲增长；
+     *  - 多次 spawn 无收敛语义（detached 句柄不可 stop），渲染层竞态双发即双窗口。
+     *
+     * 因此统一为「本地 m3u8 播放列表文件」单一入口：
+     *  1. 所有带鉴权头的 http(s) 媒体一律经 playlist-proxy 静态管道转发
+     *     （kind='static'，会话头由代理注入上游），播放器只见 127.0.0.1 干净地址；
+     *  2. 条目 URL 携带内容一致的扩展名提示，引导正确解码路径与时长计算；
+     *  3. 整季写入 .m3u8 播放列表文件交给 PotPlayer——原生列表可切集连播，
+     *     单一文件入口天然杜绝多窗口；单条目直接 spawn URL 不落盘；
+     *  4. 同播放意图短窗内二次启动：kill 旧进程再起新的（对齐内置 mpv 收敛语义），
+     *     渲染层竞态双发也只剩一个存活窗口。
+     * VLC/mpv 的 header 开关语法可靠且各自支持 #EXTVLCOPT/--http-header-fields，
+     * 维持命令行直传，不走管道。
+     */
+
+    /** 外部播放列表临时目录（userData 下，写入前清理 1 小时前的残留）。 */
+    function extPlaylistDir() {
+        const dir = path.join(app.getPath('userData'), 'ext-playlists');
+        try {
+            fs.mkdirSync(dir, { recursive: true });
+            for (const f of fs.readdirSync(dir)) {
+                const p = path.join(dir, f);
+                try { if (Date.now() - fs.statSync(p).mtimeMs > 3600e3) fs.rmSync(p, { force: true }); } catch (e) { /* 单文件失败忽略 */ }
+            }
+        } catch (e) { /* 目录失败由 writeFileSync 抛出 */ }
+        return dir;
+    }
+
+    /** 从直链 URL 提取已知的媒体扩展名（无法识别返回 ''）。 */
+    function knownMediaExt(url) {
+        try {
+            const ext = path.extname(new URL(String(url)).pathname).toLowerCase();
+            return /^\.(m3u8?|mp4|m4v|mkv|flv|ts|webm|mov|avi)$/.test(ext) ? ext : '';
+        } catch (e) { return ''; }
+    }
+
+    /** 容器魔数 → 扩展名提示（对齐 media-probe.hasMediaMagic 的判定面）。 */
+    function extFromMagic(buf) {
+        if (!buf || !buf.length) return '';
+        const head4 = buf.subarray(0, 4).toString('ascii');
+        if (head4 === 'FLV\x01') return '.flv';
+        if (head4.equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return '.mkv';
+        if (buf.length >= 8 && buf.subarray(4, 8).toString('ascii') === 'ftyp') return '.mp4';
+        if (['OggS'].includes(head4)) return '.webm';
+        if (head4 === 'RIFF') return '.avi';
+        const text = buf.toString('utf8', 0, Math.min(buf.length, 64)).replace(/^\uFEFF/, '').trimStart();
+        if (text.startsWith('#EXTM3U')) return '.m3u8';
+        return '';
+    }
+
+    /**
+     * 扩展名提示嗅探（决定代理地址的伪扩展名，直接影响 PotPlayer 解码路径）：
+     * 1. URL 自带已知扩展名 → 直接用；
+     * 2. Range 取首块字节做容器魔数判定（100% 反映真实内容——CDN 的
+     *    Content-Type 常是 application/octet-stream、page 源直链常无扩展名，
+     *    盲猜 .m3u8 会把 mp4 内容误导进 HLS 路径致「只有音轨」黑屏，实测）；
+     * 3. 均失败回退 '.m3u8'（带鉴权在线源绝大多数为 HLS）。
+     */
+    async function sniffMediaExt(url, header) {
+        const known = knownMediaExt(url);
+        if (known) return known;
+        try {
+            const u = new URL(url);
+            const mod = u.protocol === 'https:' ? require('https') : require('http');
+            const reqHeaders = { Range: 'bytes=0-63', ...(header || {}) };
+            if (!reqHeaders['User-Agent']) reqHeaders['User-Agent'] = 'Mozilla/5.0';
+            const magic = await new Promise((resolve) => {
+                let settled = false;
+                const done = (v) => { if (!settled) { settled = true; try { rq.destroy(); } catch (e) {} resolve(v); } };
+                const rq = mod.request({
+                    hostname: u.hostname,
+                    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+                    path: u.pathname + u.search, method: 'GET', headers: reqHeaders, timeout: 6000,
+                }, (rs) => {
+                    // 3xx：直链即重定向页（少见），交给默认值；4xx/5xx 同理
+                    if (rs.statusCode >= 300 || rs.statusCode < 200) { rs.resume(); return done(''); }
+                    const chunks = [];
+                    rs.on('data', (c) => { chunks.push(c); if (chunks.reduce((n, x) => n + x.length, 0) >= 64) rs.destroy(); });
+                    rs.on('end', () => done(Buffer.concat(chunks)));
+                    rs.on('close', () => done(Buffer.concat(chunks)));
+                    rs.on('error', () => done(Buffer.concat(chunks)));
+                });
+                rq.on('timeout', () => done(''));
+                rq.on('error', () => done(''));
+                rq.end();
+            });
+            const byMagic = extFromMagic(magic);
+            if (byMagic) return byMagic;
+        } catch (e) { /* 嗅探失败走默认 */ }
+        return '.m3u8';
+    }
+
+    /** 把带鉴权头的真实直链包成 static 管道代理地址。失败时返回原 URL（退回旧行为）。 */
+    async function pipeWrapAuthUrl(url, header, title) {
+        if (!playlistProxyRef || !/^https?:\/\//i.test(url)) return url;
+        if (isPlaylistProxyUrl(url)) return url;
+        if (!hasAuthHeader(header)) return url;
+        try {
+            const hint = await sniffMediaExt(url, header);
+            const reg = await playlistProxyRef.register({
+                kind: 'static', title: String(title || ''), site: '', flag: '',
+                eps: [{ id: url, name: String(title || ''), hint }],
+                start: 0, pipe: true, headers: { ...header },
+            });
+            if (reg && reg.ok && Array.isArray(reg.entries) && reg.entries.length === 1) {
+                console.log(`[外部播放器] 带鉴权直链包静态管道(${hint})：${url.slice(0, 80)}`);
+                return reg.entries[0].url;
+            }
+        } catch (e) { /* 注册失败退回直传 */ }
+        return url;
+    }
+
+    /**
+     * 归一化并解析外部播放条目通道。
+     * items: [{ url, title, header }] → [{ url(最终地址), title }]，顺序保持。
+     */
+    async function resolveExternalItems(items) {
+        const out = [];
+        for (const it of items) {
+            let url = String(it.url || '');
+            const header = (it.header && typeof it.header === 'object') ? it.header : null;
+            if (/^https?:\/\//i.test(url)) {
+                // 管道地址已是最终形态；带鉴权头直链包静态管道；无鉴权头直连 CDN
+                url = await pipeWrapAuthUrl(url, header, it.title);
+            }
+            out.push({ url, title: String(it.title || '') });
+        }
+        return out;
+    }
+
+    /**
+     * 写临时 m3u 播放列表文件（外部播放器启动的**唯一**条目载体）。
+     * EXTINF 携带集名（UTF-8 文件内容，不经过 HTTP → 无请求行编码问题）；
+     * 条目 URL 纯 ASCII（代理地址序号+扩展名）。PotPlayer 原生列表按 EXTINF
+     * 显示集名、F8 可见可切集连播。扩展名用 .m3u（纯播放列表语义）。
+     */
+    function writeExtPlaylistFile(items) {
+        const lines = ['#EXTM3U'];
+        for (const it of items) {
+            const name = String(it.title || '').replace(/[\r\n\t]/g, ' ').trim() || '未命名';
+            lines.push(`#EXTINF:-1,${name}`, it.url);
+        }
+        const dir = extPlaylistDir();
+        const file = path.join(dir, `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.m3u`);
+        fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+        return file;
+    }
+
+    /** kill 上一次外部播放器进程（收敛语义：同意图重播只保留最新窗口）。 */
+    function killPrevExtPlayer(pid) {
+        if (!pid || process.platform !== 'win32') return;
+        try {
+            const { execSync } = require('child_process');
+            execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
+        } catch (e) { /* 已退出则忽略 */ }
+    }
+
+    /** 外部启动串行链：所有 launchExternalPlayerItems 调用在此队列上严格依次执行。
+     *  并发双发（渲染层竞态/切线路回退）的两次启动各自含 await（static 注册等），
+     *  「spawn 前 kill」在并发交错下仍有逃逸窗口——串行化后 kill→spawn 原子有序，
+     *  任何时刻至多一个存活窗口，最后到达的启动胜出。 */
+    let extLaunchChain = Promise.resolve();
+
+    /**
+     * 用指定外部播放器起播一批条目（重写后的统一入口）。
+     * items: [{ url, title, header }]；
+     * 返回 { ok, via, kind, launchedPid } 或 { ok:false, reason }。
+     * **统一走临时 .m3u 文件单参数启动**（含单条目）：集名经 EXTINF 显示、
+     * 条目 URL 纯 ASCII——命令行多 content 与 /switch 开关两条路都已被实测证伪
+     * （开关被当 content 假末集/双窗；中文集名内嵌 URL 未经编码进请求行致
+     * HPE_INVALID_URL 双窗），文件是唯一显示与合法性兼得的通道。
+     */
+    function launchExternalPlayerItems(execPath, items) {
+        const p = extLaunchChain.then(async () => {
+            const kind = externalPlayerKind(execPath);
+            const resolved = await resolveExternalItems(items);
+            if (!resolved.length || resolved.some((it) => !it.url)) return { ok: false, reason: 'bad item' };
+            try {
+                const { spawn } = require('child_process');
+                // 此刻位于串行链头部：kill 上一个 pid 后立刻 spawn，中间无 await，
+                // 与任何并发交错都不可能产生第二个存活窗口。
+                if (lastExtLaunchPid) {
+                    console.log(`[外部播放器] 收敛：kill 旧进程 pid=${lastExtLaunchPid}`);
+                    killPrevExtPlayer(lastExtLaunchPid);
+                }
+                const file = writeExtPlaylistFile(resolved);
+                console.log(`[外部播放器] spawn ${kind} pid目标 m3u=${path.basename(file)} 条目=${resolved.length} 首=${String(resolved[0].url).slice(0, 70)}`);
+                const child = spawn(execPath, [file], { detached: true, stdio: 'ignore', windowsHide: true });
+                child.unref();
+                lastExtLaunchPid = child.pid;
+                console.log(`[外部播放器] 已启动 pid=${child.pid}`);
+                return { ok: true, via: execPath, kind, launchedPid: child.pid };
+            } catch (e) { return { ok: false, reason: e.message }; }
+        });
+        extLaunchChain = p.then(() => {}, () => {});
+        return p;
+    }
+
+    /** （兼容保留）单 URL 直启：VLC/mpv 弹窗按钮等仍走开关直传路径。
+     *  同样接入 pid 收敛——dl-play/file-push/外部播放器按钮等所有 spawn 路径
+     *  必须共享同一收敛点，否则任一路径漏网即双窗口（实测）。 */
+    function launchExternalPlayer(execPath, url, header, label) {
+        const kind = externalPlayerKind(execPath);
+        const { args } = buildExternalPlayerArgs(kind, url, header || {}, label);
+        try {
+            const { spawn } = require('child_process');
+            if (lastExtLaunchPid) killPrevExtPlayer(lastExtLaunchPid);
+            const child = spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true });
+            child.unref();
+            lastExtLaunchPid = child.pid;
+            return { ok: true, via: execPath, kind };
+        } catch (e) { return { ok: false, reason: e.message }; }
+    }
+
+    /** 按播放器类型拼 spawn 参数（仅剩 VLC/mpv 使用命令行 header 开关；
+     *  PotPlayer 一律走静态管道，不再生成任何开关参数）。 */
     function buildExternalPlayerArgs(kind, url, header, label) {
         const referer = header && (header.Referer || header.referer);
         const ua = header && (header['User-Agent'] || header.ua);
@@ -3344,16 +3620,8 @@ app.whenReady().then(() => {
             }
             return { args, headerSupported: true };
         }
-        if (kind === 'potplayer') {
-            // PotPlayer 官方命令行开关：/referer="..." /user_agent="..."（http(s) 打开时生效）。
-            // 值必须带双引号，因为 Referer/UA 含 :// ? & 空格等特殊字符，不带引号会被解析器截断。
-            // L-4:头值转义引号("→""),防第三方源数据闭合参数注入 PotPlayer 开关
-            const args = [url];
-            if (referer) args.push(`/referer="${String(referer).replace(/"/g, '""')}"`);
-            if (ua) args.push(`/user_agent="${String(ua).replace(/"/g, '""')}"`);
-            return { args, headerSupported: true };
-        }
-        // 其他播放器：命令行无通用 header 传参，仅传 URL
+        // PotPlayer/其他：命令行开关实测不可靠（见区块头注释），仅传 URL。
+        // 带鉴权头的场景已在 launchExternalPlayerItems 里管道化。
         return { args: [url], headerSupported: false };
     }
 
@@ -3382,6 +3650,8 @@ app.whenReady().then(() => {
         const { args, headerSupported } = buildExternalPlayerArgs(kind, url, header || {}, label);
         try {
             const { spawn } = require('child_process');
+            // 非 verbatim：libuv 自动为含空格的 exe 路径与参数加引号——
+            // PotPlayer/VLC/mpv 的命令行解析均兼容该形态（2026-08-25 实测）。
             spawn(execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
             return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported };
         } catch (e) { return { ok: false, reason: e.message }; }

@@ -326,6 +326,23 @@ test('_screenshotArgs(): 未设目录时不注入任何截图参数', () => {
     assert.deepEqual(p._screenshotArgs(), []);
 });
 
+// ---------------------------------------------------------------- ytdl_hook（默认排除）
+
+// 本应用不打包 yt-dlp：放任 mpv 内置 ytdl_hook 探测会在无扩展名直链（CDN 签名链接，
+// 不命中旧的后缀白名单）上逐一 spawn 6 个候选名全落空，起播拖慢 ~5s 并刷
+// "Subprocess failed: init" 错误日志。默认整体排除，仅 opts.ytdl 显式开启时保留。
+test('_ytdlArgs(): 默认排除 ytdl_hook（含无扩展名直链场景）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    assert.deepEqual(p._ytdlArgs({}), ['--script-opt=ytdl_hook-exclude=.*']);
+    // 调用方未传 opts（历史签名兼容）同样默认排除
+    assert.deepEqual(p._ytdlArgs(undefined), ['--script-opt=ytdl_hook-exclude=.*']);
+});
+
+test('_ytdlArgs(): opts.ytdl===true 是逃生口，不注入排除参数', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    assert.deepEqual(p._ytdlArgs({ ytdl: true }), []);
+});
+
 // ---------------------------------------------------------------- HTTP 请求头（--http-header-fields 逗号转义）
 
 // mpv 的 --http-header-fields 是逗号分隔列表：值内逗号不转义会被拆成多个头，

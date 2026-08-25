@@ -610,6 +610,15 @@ const Player = {
         // 边下边播开启时不走原生队列：下载需要真实直链，逐集链路才能同步入队
         // 边下边播与原生队列兼容：代理每解析成功一集，主进程即静默入队下载
         // （集名含 Bangumi 名，去重键与手动一致）；队列起播失败仍回退本链路兜底。
+        // 外部主播放器（VLC/PotPlayer）同样走队列且**必须走**，并启用代理管道
+        // （pipe）：PotPlayer 对 302 后的 CDN 直连无法可靠携带鉴权头（命令行开关在
+        // 闭源解析器上不可靠、也不支持 #EXTVLCOPT），管道模式由代理在上游注入会话头、
+        // HLS 清单重写回本地分片端点——播放器只与 127.0.0.1 通信。内置 mpv 不开管道：
+        // 全局 --http-header-fields 已覆盖重定向后的每个请求，302 零拷贝直连。
+        // 连播由 PotPlayer/VLC 对导入 m3u 的原生列表推进；下方 launched 视同起播成功，
+        // 杜绝回退二次 spawn 弹双窗口。
+        let externalPrimary = false;
+        try { externalPrimary = ((await window.yuki.playerConfig()) || {}).mode === 'external'; } catch (e) { /* 读失败按内置处理 */ }
         if (autoNext && Array.isArray(episodes) && episodes.length > 1 && window.yuki.buildPlaylist) {
             const isKazumi = String(site || '').startsWith('kazumi:');
             if (this._playContext === trace && !playAbort.signal.aborted) showLoading('构建播放列表…');
@@ -664,6 +673,8 @@ const Player = {
                 vipFlags: JSON.stringify(vip || []),
                 eps: qEps,
                 start: epIndex || 0,
+                // 外部主播放器会话：数据面走代理管道（见上方注）
+                pipe: externalPrimary || undefined,
                 }).catch(() => null),
                 new Promise((res) => setTimeout(() => res(null), 20000)),
             ]).catch(() => null);
@@ -692,7 +703,10 @@ const Player = {
                     // 用户主动关闭仍经 mpv.stop() 生效，与此通道无关。
                     requestId: '', playSessionId: '',
                 }).catch((e) => ({ ok: false, reason: String(e) }));
-                if (r && r.ok) {
+                // 外部主播放器：yuki:play 固定返回 ok:false+launched（无 file-loaded 可验证）。
+                // launched 即已 spawn 成功，必须在此收口返回——若按失败继续走下方回退，
+                // 会再 spawn 一次外部播放器弹出双窗口（用户实测）。
+                if (r && (r.ok || r.launched)) {
                     // 逐集历史需要集名表：把 entries 标题挂到本会话的观看元信息上
                     if (typeof r.sessionId === 'number') {
                         const wm = this._watchSessions.get(r.sessionId);

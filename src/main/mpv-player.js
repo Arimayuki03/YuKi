@@ -259,6 +259,23 @@ class MpvPlayer extends EventEmitter {
     }
 
     /**
+     * ytdl_hook 参数（起播时拼入 argv）：**默认整体排除**。
+     *
+     * YuKi 交给 mpv 的全部是已解析媒体直链或本地文件——推送/解析的非直链 URL 也先经
+     * 隐藏窗口抓到真实媒体请求（captureDirect），失败即报 resolve-failed，页面 URL 从不
+     * 原样进 mpv。而本应用不打包 yt-dlp、用户 PATH 通常也没有：mpv 内置 ytdl_hook 会对
+     * 每个 URL 先尝试 yt-dlp/youtube-dl（6 个候选名 × 配置目录逐一探测 + PATH spawn），
+     * 全部落空报 "Subprocess failed: init"。带扩展名直链历史上靠后缀白名单排除；
+     * 无扩展名直链（CDN 签名链接如 .../video/tos/.../<token>/）不命中白名单，实测起播
+     * 被拖慢 ~5s 且错误刷满日志尾部。故改为默认排除：
+     * opts.ytdl === true 是逃生口——调用方明确要让 yt-dlp 参与解析时显式开启。
+     */
+    _ytdlArgs(opts) {
+        if (opts && opts.ytdl === true) return [];
+        return ['--script-opt=ytdl_hook-exclude=.*'];
+    }
+
+    /**
      * 右键中文菜单参数（起播时拼入 argv）：menu.conf 无条件注入——script-opts 对脚本而言
      * 是不透明键值表，旧版 select.lua 不认识 menu_conf_path 键时静默忽略，无副作用；
      * 新版则用它加载中文菜单定义。路径统一正斜杠，规避 mpv keyvalue 列表值中反斜杠的
@@ -319,18 +336,9 @@ class MpvPlayer extends EventEmitter {
         if (WIN && !this.externalStyle) args.push('--osd-font=Microsoft YaHei');
         const headerFields = MpvPlayer.headerFieldsValue(opts.header);
         if (headerFields) args.push(`--http-header-fields=${headerFields}`);
-        // 直链媒体（m3u8/mp4/ts 等）永远不需要 ytdl 解析：显式排除 ytdl_hook。
-        // 旧版 mpv 的 ytdl_hook 会对所有 URL 先尝试 youtube-dl/yt-dlp，二进制缺失时
-        // 反复 spawn 失败（"Subprocess failed: init"），既拖慢起播约 1s，又把无信息量
-        // 的错误刷满日志尾部、淹没真实失败原因。非直链（推送的分享页等）保留 ytdl：
-        // 安装了 yt-dlp 的用户仍可受益。
-        {
-            const firstUrl = String((episodes[0] && episodes[0].url) || '');
-            const firstPath = firstUrl.split(/[?#]/)[0];
-            if (/\.(m3u8|mp4|flv|mov|mkv|webm|ts)$/i.test(firstPath)) {
-                args.push('--script-opt=ytdl_hook-exclude=.*');
-            }
-        }
+        // ytdl_hook 默认整体排除（见 _ytdlArgs 注）：本应用不打包 yt-dlp，放任 mpv 探测
+        // 只会在无扩展名直链上白白拖慢起播并刷错误日志。opts.ytdl===true 时保留。
+        args.push(...this._ytdlArgs(opts));
         // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
         // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
         // 原生配置模式（手动指定的自定义 mpv，如 mpv.lite）：不注入 YuKi OSD/外观
