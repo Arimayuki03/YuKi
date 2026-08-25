@@ -1111,13 +1111,17 @@ app.whenReady().then(() => {
             // 多条目 m3u 列表：EXTINF 集名 + 纯 ASCII 代理地址；catvod 无头/UA-only
             // 条目经代理 302 直连（探测零等待，总时长即时），强防盗链条目 pipe 预取
             // 加速——整季列表与时长体验兼得。
-            const isQueue = Array.isArray(meta.playlist) && meta.playlist.length > 1;
+            // Page 借鉴 mpv：单集直连，不经过 playlist-proxy 队列与静态管道
+            // （mpv 亦如此）。page 直链自带有效签名且 CDN 实测仅 UA 即 200，
+            // 管道重写反而引入相对路径签名丢失与 mpeg ts 误判风险。
+            const isPageRoute = pageQueueBan.has(`${meta.site || ''}|${meta.flag || ''}`);
+            const isQueue = !isPageRoute && Array.isArray(meta.playlist) && meta.playlist.length > 1;
             const items = isQueue
                 ? meta.playlist.map((e) => ({
                     url: String((e && e.url) || ''), title: String((e && e.title) || ''),
                     header: isPlaylistProxyUrl(String((e && e.url) || '')) ? (meta.header || null) : null,
                 })).filter((it) => it.url)
-                : [{ url: firstUrl, title: extLabel, header: meta.header || null }];
+                : [{ url: firstUrl, title: extLabel, header: isPageRoute ? null : meta.header || null, site: meta.site || '', flag: meta.flag || '', vipFlags: meta.vipFlags || '[]' }];
             // single-flight：同播放意图（kind|site|title）的并发双发复用在途启动，
             // 从源头消除「两次 IPC 各自走到 spawn」的并发第二窗（kill 收敛兜底其余场景）。
             const flightKey = `${externalPlayerKind(extPrimary)}|${meta.site || ''}|${meta.title || ''}`;
@@ -3470,15 +3474,17 @@ app.whenReady().then(() => {
         return '.m3u8';
     }
 
-    /** 把带鉴权头的真实直链包成 static 管道代理地址。失败时返回原 URL（退回旧行为）。 */
-    async function pipeWrapAuthUrl(url, header, title) {
+    /** 把带鉴权头的真实直链包成 static 管道代理地址。失败时返回原 URL（退回旧行为）。
+     *  ctx 可选：{ site, flag, vipFlags }，供上游 403 时重解析刷新签名直链。 */
+    async function pipeWrapAuthUrl(url, header, title, ctx) {
         if (!playlistProxyRef || !/^https?:\/\//i.test(url)) return url;
         if (isPlaylistProxyUrl(url)) return url;
         if (!hasAuthHeader(header)) return url;
         try {
             const hint = await sniffMediaExt(url, header);
             const reg = await playlistProxyRef.register({
-                kind: 'static', title: String(title || ''), site: '', flag: '',
+                kind: 'static', title: String(title || ''), site: String((ctx && ctx.site) || ''), flag: String((ctx && ctx.flag) || ''),
+                vipFlags: String((ctx && ctx.vipFlags) || '[]'),
                 eps: [{ id: url, name: String(title || ''), hint }],
                 start: 0, pipe: true, headers: { ...header },
             });
@@ -3501,7 +3507,8 @@ app.whenReady().then(() => {
             const header = (it.header && typeof it.header === 'object') ? it.header : null;
             if (/^https?:\/\//i.test(url)) {
                 // 管道地址已是最终形态；带鉴权头直链包静态管道；无鉴权头直连 CDN
-                url = await pipeWrapAuthUrl(url, header, it.title);
+                // 传递 site/flag/vipFlags：page 源直链签名时效短，403 时代理可凭此重解析刷新
+                url = await pipeWrapAuthUrl(url, header, it.title, { site: it.site, flag: it.flag, vipFlags: it.vipFlags });
             }
             out.push({ url, title: String(it.title || '') });
         }
@@ -3545,10 +3552,9 @@ app.whenReady().then(() => {
      * 用指定外部播放器起播一批条目（重写后的统一入口）。
      * items: [{ url, title, header }]；
      * 返回 { ok, via, kind, launchedPid } 或 { ok:false, reason }。
-     * **统一走临时 .m3u 文件单参数启动**（含单条目）：集名经 EXTINF 显示、
-     * 条目 URL 纯 ASCII——命令行多 content 与 /switch 开关两条路都已被实测证伪
-     * （开关被当 content 假末集/双窗；中文集名内嵌 URL 未经编码进请求行致
-     * HPE_INVALID_URL 双窗），文件是唯一显示与合法性兼得的通道。
+     * 多条目走临时 .m3u 文件（EXTINF 集名，不经 HTTP → 无请求行编码问题；
+     * PotPlayer 原生列表可切集）；单条目直接 spawn URL（page 源单集经 .m3u
+     * 间接会被部分版本误判容器类型，实测直链更稳）。
      */
     function launchExternalPlayerItems(execPath, items) {
         const p = extLaunchChain.then(async () => {
@@ -3563,9 +3569,11 @@ app.whenReady().then(() => {
                     console.log(`[外部播放器] 收敛：kill 旧进程 pid=${lastExtLaunchPid}`);
                     killPrevExtPlayer(lastExtLaunchPid);
                 }
-                const file = writeExtPlaylistFile(resolved);
-                console.log(`[外部播放器] spawn ${kind} pid目标 m3u=${path.basename(file)} 条目=${resolved.length} 首=${String(resolved[0].url).slice(0, 70)}`);
-                const child = spawn(execPath, [file], { detached: true, stdio: 'ignore', windowsHide: true });
+                // 单条目直链、列表走文件：兼顾 page 源兼容性与多集列表显示
+                const isSingle = resolved.length === 1;
+                const target = isSingle ? resolved[0].url : writeExtPlaylistFile(resolved);
+                console.log(`[外部播放器] spawn ${kind} pid目标 ${isSingle ? 'url' : 'm3u'}=${String(target).slice(0, 70)} 条目=${resolved.length}`);
+                const child = spawn(execPath, [target], { detached: true, stdio: 'ignore', windowsHide: true });
                 child.unref();
                 lastExtLaunchPid = child.pid;
                 console.log(`[外部播放器] 已启动 pid=${child.pid}`);
