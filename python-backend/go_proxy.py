@@ -239,7 +239,7 @@ def _quark_session_keeper_loop():
             cookie = (load_pan_cookies_safe() or {}).get('quark', '').strip()
             if not cookie:
                 continue
-            headers = {'User-Agent': BROWSER_UA,
+            headers = {'User-Agent': QUARK_API_UA,
                        'Referer': 'https://pan.quark.cn/', 'Cookie': cookie}
             healthy = _quark_keepalive_once(headers)
             if healthy:
@@ -305,6 +305,16 @@ PORT = 9978
 EXTRA_PORTS = [7944, 1314]
 BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
+# 夸克 PC 客户端 UA：drive.quark.cn / drive-pc.quark.cn 接口族（pr=ucpro&fr=pc）
+# 的社区事实标准——AList/OpenList/gopeed/quark-auto-save/TVBox 系全部使用。
+# 关键差异（2026-08-26「转存失败」复盘）：写操作（sharepage/save 转存）按
+# 客户端签名做风控，普通 Chrome UA 读接口（token/v2play）可过、save 必回
+# HTTP 403；同一账号在手机 TVBox（JAR 自带同款 UA）转存正常。
+# 取流下载也必须用同一 UA：直链签名与请求身份绑定，混用 UA 会复现 412 风控。
+QUARK_API_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) quark-cloud-drive/2.5.20 '
+                'Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 '
+                'Safari/537.36 Channel/pckk_other_ch')
 # 并发上限：与官方 thread=32 一致；32 连接即可跑满带宽
 MAX_THREADS = 32
 SEG_CHUNK = 262144
@@ -540,7 +550,7 @@ def _quark_detail_url(pwd_id, stoken, pdir_fid=''):
     code:14001「非法token」。编码后才能正确取到分享文件列表。
     """
     import urllib.parse as _up
-    u = ('https://drive.quark.cn/1/clouddrive/share/sharepage/detail'
+    u = ('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail'
          '?pr=ucpro&fr=pc&pwd_id=%s&stoken=%s' % (pwd_id, _up.quote(stoken, safe='')))
     if pdir_fid:
         u += '&pdir_fid=%s' % pdir_fid
@@ -559,7 +569,7 @@ def _quark_resolve_share(pwd_id, headers):
     for attempt in range(3):
         try:
             r = _qpost(
-                'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+                'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                 headers={**headers, 'Content-Type': 'application/json'},
                 data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
                 timeout=20, verify=True)
@@ -765,10 +775,18 @@ def _quark_personal_play_url(fid, headers, retries=1, quality=''):
     return None
 
 
+class _QuarkSaveDenied(Exception):
+    """转存被夸克明确拒绝（HTTP 4xx：风控/权限/配额）。
+
+    与瞬时网络错误不同，这类失败不会在 1-2s 的重试间隔内恢复；继续重试
+    只会密集触发 sharepage/save，把临时风控打成持续 403（2026-08-26
+    「转存失败」实测）。调用方的重试循环必须捕获后立即上抛。"""
+
+
 def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
     """转存分享文件：sharepage/save → 轮询任务 → 新 fid（网盘内）。
 
-    返回转存后的 fid；失败抛异常。
+    返回转存后的 fid；失败抛异常（明确被拒时抛 _QuarkSaveDenied）。
     """
     import json as _json
     import time as _time
@@ -779,9 +797,25 @@ def _quark_save_share(pwd_id, stoken, fid, fid_token, headers):
         % int(_time.time() * 1000),
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps(body), timeout=25, verify=True)
-    tid = ((r.json() or {}).get('data') or {}).get('task_id', '')
+    status = getattr(r, 'status_code', 0) or 0
+    try:
+        body = r.json() or {}
+    except Exception:
+        body = {}
+    tid = ((body.get('data') or {}) or {}).get('task_id', '')
     if not tid:
-        raise ValueError('save task id empty')
+        # 按业务码区分，不能只看 HTTP 状态（2026-08-26 实测复盘）：
+        # - code=41020「转存文件token校验异常」以 HTTP 403 包装，但它是
+        #   「JAR vodId 快照令牌过期」的可自愈错误——调用方拉实时目录树
+        #   换新令牌重转存即可成功；判成硬拒绝会杀死自愈路径；
+        # - 其余 401/403（权限/配额/真风控）才是不可自愈的硬拒绝。
+        body_code = body.get('code')
+        if status in (401,) or (status == 403 and body_code != 41020):
+            raise _QuarkSaveDenied(
+                'save denied (HTTP %s code=%s msg=%s)'
+                % (status, body_code, str(body.get('message') or '')[:80]))
+        raise ValueError('save token mismatch (HTTP %s code=%s)'
+                         % (status, body_code))
     for _ in range(12):
         _time.sleep(1)
         try:
@@ -837,7 +871,7 @@ def _quark_share_play_url(pwd_id, headers, quality=''):
                 stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
             else:
                 r = _qpost(
-                    'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+                    'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                     headers={**headers, 'Content-Type': 'application/json'},
                     data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
                     timeout=20, verify=True)
@@ -885,6 +919,9 @@ def _quark_share_play_url(pwd_id, headers, quality=''):
             if playable:
                 return playable
             raise ValueError('saved file has no playable URL')
+        except _QuarkSaveDenied:
+            # 转存被明确拒绝：立即上抛，不再重试（重试只会加深风控）。
+            raise
         except Exception as e:
             last_err = e
             if attempt < 2:
@@ -908,7 +945,7 @@ def _quark_share_stoken(pwd_id, headers):
         return str(cached['stoken'])
     _SHARE_CACHE.pop(pwd_id, None)
     r = _qpost(
-        'https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+        'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
         headers={**headers, 'Content-Type': 'application/json'},
         data=_json.dumps({'pwd_id': pwd_id, 'passcode': ''}),
         timeout=20, verify=True)
@@ -990,6 +1027,8 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
             try:
                 new_fid = _quark_save_share(pwd_id, stoken, eff_fid, eff_token,
                                             headers)
+            except _QuarkSaveDenied:
+                raise
             except Exception:
                 # 元数据过期自愈：JAR/聚合站 vodId 携带的 fid/share_fid_token 是
                 # 页面缓存的快照，分享者更新文件后夸克轮换令牌——直接转存会报
@@ -1035,6 +1074,10 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
                     pass
                 return playable
             raise ValueError('saved share file has no playable URL')
+        except _QuarkSaveDenied:
+            # 转存被明确拒绝：跳过剩余重试与个人盘兜底（文件未转存成功，
+            # 兜底只会再多打两轮 v2/play/download），直接上抛。
+            raise
         except Exception as e:
             last_err = e
             # stoken 可能已失效（分享被重开/会话过期）：清缓存后重申请一次。
@@ -1312,7 +1355,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     cookie = load_pan_cookies().get('quark', '') or ''
                 except Exception:
                     cookie = ''
-            headers = {'User-Agent': BROWSER_UA, 'Referer': 'https://pan.quark.cn/'}
+            headers = {'User-Agent': QUARK_API_UA, 'Referer': 'https://pan.quark.cn/'}
             if cookie:
                 headers['Cookie'] = cookie
 
@@ -1486,7 +1529,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 cookie = (load_pan_cookies() or {}).get('quark', '') or ''
             except Exception:
                 cookie = ''
-        headers = {'User-Agent': BROWSER_UA, 'Referer': 'https://pan.quark.cn/'}
+        # 夸克接口统一身份：QUARK_API_UA（PC 客户端 UA，写操作风控放行的
+        # 关键）+ Referer/Origin（与网页端一致）。UA 与后续 CDN 取流保持
+        # 同一身份，避免签名请求与下载 UA 不一致触发 412。
+        headers = {'User-Agent': QUARK_API_UA,
+                   'Referer': 'https://pan.quark.cn/',
+                   'Origin': 'https://pan.quark.cn'}
         if cookie:
             headers['Cookie'] = cookie
         if site != 'quark':
@@ -1599,6 +1647,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self._stream_forward(url, headers, head_only)
+        except _QuarkSaveDenied as e:
+            # 转存被夸克明确拒绝：与笼统失败区分，日志与响应体都带语义，
+            # 渲染层/排查时能直接定位到「账号转存额度/风控」而非链路故障。
+            logger.warning('quark save denied: %s (pwd=%s file=%s)',
+                           e, bool(pwd_id or share_url), file_id[:80])
+            if getattr(self, '_headers_sent', False):
+                self.close_connection = True
+                return
+            body = 'quark save denied: 今日转存次数已达上限或触发风控，请稍后再试'.encode('utf-8')
+            try:
+                self.send_response(502)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+            except Exception:
+                pass
         except Exception as e:
             logger.warning('go-proxy pan request failed: %s', e)
             if getattr(self, '_headers_sent', False):

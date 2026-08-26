@@ -25,6 +25,7 @@ const PythonBridge = require('./python-bridge');
 const MpvPlayer = require('./mpv-player');
 const { extWatch } = require('./ext-watch');
 const { PlaylistProxy } = require('./playlist-proxy');
+const { PAN_SOURCE_RE, isPanQueueRequest } = require('./pan-source');
 
 // 模块级注册：无论 setup 流程走到哪里，渲染层调用都不会悬空 pending
 ipcMain.handle('yuki:playlist-build', (_e, queue) => {
@@ -33,6 +34,13 @@ ipcMain.handle('yuki:playlist-build', (_e, queue) => {
     // 页面解析型线路（曾解析出 parse=1）：直接拒绝建队，渲染层静默回退逐集
     if (pageQueueBan.has(`${q.site || ''}|${q.flag || ''}`)) {
         return { ok: false, reason: 'page-route' };
+    }
+    // 网盘类源（夸克等）禁用原生播放列表（2026-08-26）：网盘解析慢且依赖
+    // Cookie 会话、直链短时效，整季装载放大风控且切集卡顿——拒绝建队，
+    // 渲染层静默回退逐集连播。任何播放器一致：外部主播放器的整季 m3u
+    // 同样源自此建队请求，此处拦截后自然退化为单条目直启。
+    if (isPanQueueRequest(q)) {
+        return { ok: false, reason: 'pan-source' };
     }
     return playlistProxyRef.register(q).then((r) => {
         console.log(`[播放列表] 构建：ok=${!!(r && r.ok)} entries=${(r && r.entries && r.entries.length) || 0}` +
@@ -493,7 +501,8 @@ function traceLocalProxy(url, meta = {}) {
  *     上游可能回转码 m3u8 播放列表文本或短时效签名地址，交给下载引擎只能
  *     得到转发包装/残缺分片；
  *  2) 站点名命中网盘特征——兜底捕获蜘蛛直接回 CDN 签名直链的形态
- *     （正则与 player.js 原生队列的 isPanSource 排除规则保持一致）。 */
+ *     （正则与 pan-source.js 的 PAN_SOURCE_RE 保持一致，原生播放列表
+ *     排除同源）。 */
 function isDynamicProxyStream(url, meta = {}) {
     try {
         const parsed = new URL(String(url || ''));
@@ -503,8 +512,7 @@ function isDynamicProxyStream(url, meta = {}) {
             if (parsed.searchParams.has('siteKey') || parsed.searchParams.has('url')) return true;
         }
     } catch (e) { /* 非 URL 形态：仅按站点名判断 */ }
-    return /pan|quark|uc网盘|aliyun|ali|115|123|天翼|移动|网盘/i
-        .test(`${String(meta.site || '')}|${String(meta.source || '')}`);
+    return PAN_SOURCE_RE.test(`${String(meta.site || '')}|${String(meta.source || '')}`);
 }
 
 function createWindow() {
@@ -524,6 +532,7 @@ function createWindow() {
             preload: path.join(__dirname, '..', 'preload', 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            spellcheck: false, // 关闭所有输入框的拼写检查红波浪线
         },
     });
     win.setMenuBarVisibility(false);
@@ -1638,7 +1647,7 @@ app.whenReady().then(() => {
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
         'probeSourceUrl', 'probeFailStreak', 'probedAt', 'probedSites', 'probeFp', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
-        'useMisansFont', 'wallpaper', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
+        'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
         // WebDAV 同步全量键。此前 EnableSettings/EnableStats/AutoEnable/AutoMinutes
         // 漏在白名单外，四个开关的写入被静默忽略（重启后回退），此处一并补齐。
         // RestoreBackup 为恢复前本机备份快照，需可写以便误恢复后找回数据。

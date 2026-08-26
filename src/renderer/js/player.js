@@ -35,6 +35,20 @@ function mergePlayHeaders(...sources) {
     return out;
 }
 
+/** 网盘类源判定（原生播放列表排除项，2026-08-26）：site/flag 或任一集
+ *  id/url 命中网盘特征即算。正则与主进程 pan-source.js 的 PAN_SOURCE_RE
+ *  保持一致（渲染层无法 require 主进程模块，改动时两处同步）。
+ *  Kazumi 规则引擎不过滤——规则名含「ali/移动」等子串会被误伤。
+ *  网盘资源禁用播放列表的原因：解析慢且依赖 Cookie 会话、直链短时效，
+ *  整季装载放大风控概率——回退逐集连播（_onExit 推进）才是可靠形态。 */
+function isPanQueueSource(site, flag, episodes) {
+    if (String(site || '').startsWith('kazumi:')) return false;
+    const epsText = Array.isArray(episodes)
+        ? episodes.map((e) => String((e && (e.url ?? e.id)) || '')).join('|') : '';
+    return /pan|quark|夸克|uc网盘|网盘|云盘|aliyun|ali|115|123|天翼|移动/i.test(
+        `${String(site || '')}|${String(flag || '')}|${epsText}`);
+}
+
 const Player = {
     _mpvMissingToastShown: false,
     _playAbort: null,
@@ -656,8 +670,10 @@ const Player = {
         // （vodId 已在上方声明并赋值，此处不再重复声明——曾因重复 let 引发 SyntaxError。）
         // 原生整季队列：整季以本地代理地址装载进 mpv 播放列表——右键菜单可见可切、
         // 同进程连播推进；代理在 mpv 打开每集时才解析（直链零过期）。
-        // 排除项：网盘类源仅针对 CatVod（夸克等解析慢且依赖 Cookie 会话）；
-        // Kazumi 是番剧规则引擎——规则名含「ali/移动」等子串会被误伤，故不做网盘过滤。
+        // 排除项：网盘类源（夸克等）不走原生播放列表（isPanQueueSource，与主进程
+        // yuki:playlist-build 的 isPanQueueRequest 同口径）——解析慢且依赖 Cookie
+        // 会话、直链短时效，回退逐集连播；Kazumi 是番剧规则引擎——规则名含
+        // 「ali/移动」等子串会被误伤，故不做网盘过滤。
         // 边下边播开启时不走原生队列：下载需要真实直链，逐集链路才能同步入队
         // 边下边播与原生队列兼容：代理每解析成功一集，主进程即静默入队下载
         // （集名含 Bangumi 名，去重键与手动一致）；队列起播失败仍回退本链路兜底。
@@ -667,11 +683,12 @@ const Player = {
         // HLS 清单重写回本地分片端点——播放器只与 127.0.0.1 通信。内置 mpv 不开管道：
         // 全局 --http-header-fields 已覆盖重定向后的每个请求，302 零拷贝直连。
         // 连播由 PotPlayer/VLC 对导入 m3u 的原生列表推进；下方 launched 视同起播成功，
-        // 杜绝回退二次 spawn 弹双窗口。
+        // 杜绝回退二次 spawn 弹双窗口。（网盘源被上方排除后自然退化为单条目直启。）
         let externalPrimary = false;
         try { externalPrimary = ((await window.yuki.playerConfig()) || {}).mode === 'external'; } catch (e) { /* 读失败按内置处理 */ }
-        if (autoNext && Array.isArray(episodes) && episodes.length > 1 && window.yuki.buildPlaylist) {
-            const isKazumi = String(site || '').startsWith('kazumi:');
+        const isKazumi = String(site || '').startsWith('kazumi:');
+        if (autoNext && !isPanQueueSource(site, flag, episodes)
+            && Array.isArray(episodes) && episodes.length > 1 && window.yuki.buildPlaylist) {
             if (this._playContext === trace && !playAbort.signal.aborted) showLoading('构建播放列表…', { blocking: true });
             const vip = await this.getVipFlags().catch(() => []);
             // Kazumi：确保 Bangumi 分集缓存就绪（未打开过分集页签时按详情页 subjectId 拉取一次），
@@ -1000,6 +1017,13 @@ const Player = {
     /** U6.4 自动回退：当前线路失败时尝试同影片其他可用线路（受次数和总时间限制） */
     async _tryFallbackRoute(currentPlayback, reason, trace) {
         if (!currentPlayback || this._fallbackActive) return null;
+        // 网盘类源禁用线路回退（2026-08-26 转存风暴修复）：网盘解析失败多为
+        // Cookie 失效/夸克风控，自动换线路只会对同一分享再打一轮完整链路
+        // （token → v2/play → download → detail → sharepage/save），与后端
+        // 自身的重试循环叠加后，几秒内十余次 save 密集打出会被夸克风控
+        // 打成持续 403（「转存失败」）。失败即收口，交用户手动重试。
+        if (isPanQueueSource(currentPlayback.site, currentPlayback.flag,
+            currentPlayback.episodes)) return null;
         let s = {};
         try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { /* default settings */ }
         // R8.1 功能开关 auto_line_fallback（支持 autoLineFallback / autoFallbackRoute）
@@ -1242,7 +1266,7 @@ const Player = {
         if (panStreamFailed && reason !== 'play-cancelled') {
             note = note.includes('Cookie')
                 ? note
-                : `${note}（网盘资源常见原因：夸克 Cookie 缺失或过期——请在设置中重新扫码；若已登录仍失败，多为夸克侧直链被拒（风控），请重新扫码后再试或稍后换线路播放）`;
+                : `${note}（网盘资源常见原因：夸克 Cookie 缺失或过期——请在设置中重新扫码；若已登录仍失败，多为夸克侧直链被拒（风控）或今日转存额度已满（转存被拒 403），请重新扫码后再试、稍后再试或换线路播放）`;
         }
         // 旧请求等待起播期间用户可能已经点了新剧集；旧请求返回取消时不能
         // 清掉新请求刚建立的连播上下文，也不能弹出旧地址的失败窗口。

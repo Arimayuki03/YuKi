@@ -77,9 +77,9 @@ class WebdavConnTests(unittest.TestCase):
         r = pm.PluginManager.webdav_test(None, self.URL, '', '')
         self.assertTrue(r['ok'])
         self.assertEqual([(m, u) for m, u in self.calls], [
-            ('PROPFIND', f'{self.URL}/kazumiSync'),
-            ('MKCOL', f'{self.URL}/kazumiSync'),
-            ('PROPFIND', f'{self.URL}/kazumiSync'),
+            ('PROPFIND', f'{self.URL}/YuKiSync'),
+            ('MKCOL', f'{self.URL}/YuKiSync'),
+            ('PROPFIND', f'{self.URL}/YuKiSync'),
         ])
 
     def test_mkcol_recheck_still_fails(self):

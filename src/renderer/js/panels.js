@@ -1072,7 +1072,7 @@ async function loadPanCookieFields() {
                 `<div class="tip-line pad0 pan-cookie-hint">${escHtml(hint)}</div>` +
                 `<div class="pan-cookie-input-wrap">` +
                 `<textarea id="pan_cookie_${key}" class="md-input pan-cookie-input pan-cookie-masked" rows="2"></textarea>` +
-                `<button type="button" class="pan-cookie-eye" data-for="pan_cookie_${key}" title="显示/隐藏 Cookie">👁</button>` +
+                `<button type="button" class="pan-cookie-eye" data-for="pan_cookie_${key}" title="显示/隐藏 Cookie">👁️</button>` +
                 `</div>` +
                 '</div>');
             $(`#pan_cookie_${key}`).val(_panCookies[key] || '');
@@ -1114,6 +1114,13 @@ async function savePanCookies() {
     }
 }
 
+/** 眼睛按钮图标随明文状态切换：遮蔽中 👁️（点击查看）、显示中 🙈（再点隐藏），对齐 WebDAV 密码框。 */
+function _syncPanEyeIcon($t) {
+    const id = String($t.attr('id') || '');
+    if (!id) return;
+    $(`.pan-cookie-eye[data-for="${id}"]`).text($t.hasClass('pan-cookie-masked') ? '👁️' : '🙈');
+}
+
 function initPanCookiePanel() {
     loadPanCookieFields();
     $('#pan_cookie_save').on('click', savePanCookies);
@@ -1135,17 +1142,20 @@ function initPanCookiePanel() {
     // 编辑，失焦自动重新遮蔽；右上角眼睛按钮手动切换。焦点转移到眼睛时不触发遮蔽。
     $('#pan_cookie_fields').on('focusin', 'textarea', (e) => {
         $(e.currentTarget).removeClass('pan-cookie-masked');
+        _syncPanEyeIcon($(e.currentTarget));
     });
     $('#pan_cookie_fields').on('focusout', 'textarea', (e) => {
         const to = e.relatedTarget;
         if (to && to.closest && $(to).closest('.pan-cookie-eye').length) return;
         $(e.currentTarget).addClass('pan-cookie-masked');
+        _syncPanEyeIcon($(e.currentTarget));
     });
     $('#pan_cookie_fields').on('click', '.pan-cookie-eye', (e) => {
         const $t = $('#' + String($(e.currentTarget).data('for') || ''));
         if (!$t.length) return;
         if ($t.hasClass('pan-cookie-masked')) $t.removeClass('pan-cookie-masked').trigger('focus');
         else $t.blur(); // blur → focusout → 重新遮蔽
+        _syncPanEyeIcon($t);
     });
     $('#pan_cookie_qr').on('click', openQuarkQrLogin);
     $('#pan_qr_refresh').on('click', () => {
@@ -1276,6 +1286,7 @@ function initSettingsPanel() {
         // CatVod源设置：后台自动检测/屏蔽无内容源（默认沿用旧行为）
         $('#set_source_autodetect').prop('checked', s.sourceAutoDetect !== false);
         window._wallpaperUrl = s.wallpaper ? toFileUrl(s.wallpaper) : '';
+        window._wallAdjust = (s.wallpaperAdjust && typeof s.wallpaperAdjust === 'object') ? s.wallpaperAdjust : null;
         $('#clear_wallpaper').toggle(!!s.wallpaper); // 未设置壁纸时隐藏「移除背景」
         // 播放偏好：默认倍速 / 连播 / 续播 / 后台播放
         $('#set_speed').val(String(s.playerSpeed || '1'));
@@ -1750,10 +1761,16 @@ function initSettingsPanel() {
     });
     $('#set_walldim').on('change', function () {
         window.yuki.settingsSet('wallpaperDim', this.value);
-        applySkin({ dim: this.value });
+        // 遮罩强度下拉变更时清除透明度数值覆写（弹窗滑杆），让下拉档位重新生效
+        const adj = Object.assign({ x: 0, y: 0, zoom: 100, veil: null, blur: 0 }, window._wallAdjust || {});
+        adj.veil = null;
+        window._wallAdjust = adj;
+        window.yuki.settingsSet('wallpaperAdjust', adj);
+        applySkin({ dim: this.value, adjust: adj });
     });
     $('#set_wallpaper').on('click', chooseWallpaper);
     $('#clear_wallpaper').on('click', clearWallpaper);
+    initWallAdjustDialog();
     // 网盘 Cookie（JAR 网盘源播放）
     initPanCookiePanel();
     // 系统标题栏开关：保存设置后提示重启
@@ -2027,26 +2044,123 @@ async function playDirectLink() {
     warnToast('未能解析该链接，请确认链接有效');
 }
 
-/** 选择本地图片作壁纸（主进程文件对话框），路径持久化。 */
+// ---------------------------------------------------------------- 背景图片选择与调整
+// 选图后弹出自定义弹窗（预览可拖动定位，缩放/透明度/模糊可调），保存才落盘生效。
+// adjust 结构：{ x, y（拖动位移百分比数值）, zoom（缩放百分比）, veil（遮罩不透明度数值
+// 覆写，null=跟随遮罩强度下拉离散档）, blur（模糊 px） }。
+
+/** 遮罩强度下拉档位 → veil 数值（弹窗透明度滑杆初值用）。 */
+const WALL_DIM_VEIL = { '': 80, min: 20, low: 62, high: 90 };
+
+/** 默认微调值：透明度初值跟随当前遮罩档位，其余归零。 */
+function _wallDefaultAdjust() {
+    const dim = $('#set_walldim').val() || '';
+    return { x: 0, y: 0, zoom: 100, veil: null, blur: 0, _dimVeil: WALL_DIM_VEIL[dim] != null ? WALL_DIM_VEIL[dim] : 80 };
+}
+
+let _wallPending = null; // 待保存：{ path, adjust }；取消即丢弃
+
+/** 把 adjust 同步到预览框 CSS 变量（与实际壁纸层同一套变量数学，预览即所得）。 */
+function _wallSyncPreview() {
+    if (!_wallPending) return;
+    const a = _wallPending.adjust;
+    const bs = $('#wall_prev_box')[0].style;
+    bs.setProperty('--wall-x', (a.x || 0) + '%');
+    bs.setProperty('--wall-y', (a.y || 0) + '%');
+    bs.setProperty('--wall-zoom', String((a.zoom || 100) / 100));
+    bs.setProperty('--wall-blur', (a.blur || 0) + 'px');
+    // 透明度滑杆语义为「遮罩透明度」（越高背景越清晰），与 veil（遮罩不透明度）互补
+    const veil = typeof a.veil === 'number' ? a.veil : (a._dimVeil != null ? a._dimVeil : 80);
+    // veil 落到预览框：明暗层（::after，系数见 ui.css --wall-dim）随滑杆即时联动
+    bs.setProperty('--wall-veil', Math.max(0, Math.min(100, veil)) + '%');
+    $('#wall_adj_zoom').val(a.zoom || 100);
+    $('#wall_adj_veil').val(Math.max(0, Math.min(100, 100 - veil)));
+    $('#wall_adj_blur').val(a.blur || 0);
+}
+
+/** 打开调整弹窗：载入待保存图片与初值。 */
+function _wallOpenAdjustDialog() {
+    if (!_wallPending) return;
+    $('#wall_prev_img').attr('src', toFileUrl(_wallPending.path));
+    _wallSyncPreview();
+    openDialog('wallpaperDialog');
+}
+
+/** 选择本地图片作壁纸（主进程文件对话框）：选完先弹调整弹窗，保存才持久化。 */
 async function chooseWallpaper() {
     let r;
     try { r = await window.yuki.pickWallpaper(); } catch (e) { return; }
     if (!r || !r.ok || !r.path) return;
-    window.yuki.settingsSet('wallpaper', r.path);
-    window._wallpaperUrl = toFileUrl(r.path);
-    applySkin({ wallpaperUrl: window._wallpaperUrl });
-    $('#clear_wallpaper').show(); // 已设置壁纸，显示「移除背景」
-    warnToast('壁纸已设置');
+    _wallPending = { path: r.path, adjust: _wallDefaultAdjust() };
+    _wallOpenAdjustDialog();
 }
 
 /** 移除壁纸（T40：二次确认）。 */
 async function clearWallpaper() {
     if (!await confirmDialog('移除当前背景壁纸？', { okText: '移除' })) return;
     window.yuki.settingsSet('wallpaper', '');
+    window.yuki.settingsSet('wallpaperAdjust', null);
     window._wallpaperUrl = '';
-    applySkin({ wallpaperUrl: '' });
+    window._wallAdjust = null;
+    applySkin({ wallpaperUrl: '', adjust: null });
     $('#clear_wallpaper').hide(); // 已无壁纸，隐藏「移除背景」
     warnToast('壁纸已移除');
+}
+
+/** 绑定调整弹窗交互（拖动定位 / 三滑杆 / 保存 / 取消），initSettings 时执行一次。 */
+function initWallAdjustDialog() {
+    const box = $('#wall_prev_box')[0];
+    // 拖动定位：位移换算为预览框宽高百分比（与实际壁纸层的视口百分比同一语义）
+    let drag = null;
+    box.addEventListener('mousedown', (e) => {
+        if (!_wallPending || e.button !== 0) return;
+        drag = { sx: e.clientX, sy: e.clientY, ox: _wallPending.adjust.x || 0, oy: _wallPending.adjust.y || 0 };
+        e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (!drag || !_wallPending) return;
+        const rc = box.getBoundingClientRect();
+        if (!rc.width || !rc.height) return;
+        const clamp50 = (v) => Math.max(-50, Math.min(50, v));
+        _wallPending.adjust.x = clamp50(Math.round((drag.ox + (e.clientX - drag.sx) / rc.width * 100) * 10) / 10);
+        _wallPending.adjust.y = clamp50(Math.round((drag.oy + (e.clientY - drag.sy) / rc.height * 100) * 10) / 10);
+        _wallSyncPreview();
+    });
+    window.addEventListener('mouseup', () => { drag = null; });
+    // 三滑杆：即时联动预览
+    $('#wall_adj_zoom').on('input', function () { if (_wallPending) { _wallPending.adjust.zoom = parseInt(this.value, 10) || 100; _wallSyncPreview(); } });
+    $('#wall_adj_veil').on('input', function () {
+        if (!_wallPending) return;
+        const t = Math.max(0, Math.min(100, parseInt(this.value, 10) || 0));
+        _wallPending.adjust.veil = Math.max(0, 100 - t); // 透明度 → 遮罩不透明度（上限 100）
+        _wallSyncPreview();
+    });
+    $('#wall_adj_blur').on('input', function () { if (_wallPending) { _wallPending.adjust.blur = Math.max(0, parseInt(this.value, 10) || 0); _wallSyncPreview(); } });
+    // 取消：丢弃待保存图片，页面保持原状（预览只在弹窗内，无需回滚）
+    $('#wall_adj_cancel').on('click', () => { _wallPending = null; closeDialog('wallpaperDialog'); });
+    // 保存：持久化图片路径与微调值并应用；veil 恰为离散档位值时归位到下拉档
+    $('#wall_adj_save').on('click', async () => {
+        if (!_wallPending) { closeDialog('wallpaperDialog'); return; }
+        const adj = _wallPending.adjust;
+        delete adj._dimVeil;
+        const stops = { 20: 'min', 62: 'low', 80: '', 90: 'high' };
+        let dim;
+        if (adj.veil != null && stops[adj.veil] !== undefined) { dim = stops[adj.veil]; adj.veil = null; }
+        try {
+            await window.yuki.settingsSet('wallpaper', _wallPending.path);
+            await window.yuki.settingsSet('wallpaperAdjust', adj);
+            if (dim !== undefined) { await window.yuki.settingsSet('wallpaperDim', dim); $('#set_walldim').val(dim); }
+        } catch (e) { warnToast('背景保存失败'); return; }
+        window._wallpaperUrl = toFileUrl(_wallPending.path);
+        window._wallAdjust = adj;
+        const skinOpts = { wallpaperUrl: window._wallpaperUrl, adjust: adj };
+        if (dim !== undefined) skinOpts.dim = dim;
+        applySkin(skinOpts);
+        $('#clear_wallpaper').show(); // 已设置壁纸，显示「移除背景」
+        _wallPending = null;
+        closeDialog('wallpaperDialog');
+        warnToast('背景已保存');
+    });
 }
 
 /** 缓存位置展示行。 */

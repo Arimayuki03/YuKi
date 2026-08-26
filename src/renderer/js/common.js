@@ -960,10 +960,11 @@ function toFileUrl(p) {
  * - textSize → 仅文字等比缩放数值百分比（80~200），不改布局尺寸；
  * - textColor → 自定义主文字颜色（覆写 on-surface 变量，空为默认）；
  * - animEnabled → 界面动画开关（false 时 html.no-anim 禁用全部过渡）；
- * - wallpaperUrl → body 铺图，dim 控制内容遮罩强度。
+ * - wallpaperUrl → 壁纸层（body.has-wallpaper::before，经 --wall-url 变量）铺图，
+ *   dim 控制内容遮罩强度。
  * 传入部分字段即可，未传字段沿用上次值。
  */
-const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true, glass: false };
+const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true, glass: false, adjust: null };
 
 // ---- 自定义主题色：由单个基色推导 Material 浅色/深色两套变量 ----
 
@@ -1151,14 +1152,41 @@ function applySkin(opts) {
         el.style.removeProperty('--md-on-surface-variant');
     }
     if (_skin.wallpaperUrl) {
-        document.body.style.backgroundImage = `url("${_skin.wallpaperUrl}")`;
+        // 壁纸图经 --wall-url 变量只进 body.has-wallpaper::before 一层（根因见 ui.css
+        // 壁纸段注释）：body 自身背景绘制在负 z-index 伪元素之上，且 body 铺图是
+        // 原始尺寸+平铺——写 body.backgroundImage 会让可见「壁纸」变成平铺图，
+        // 4K 等视口大于原图时表现为壁纸没铺满屏幕。
+        document.body.style.setProperty('--wall-url', `url("${_skin.wallpaperUrl}")`);
+        document.body.style.backgroundImage = ''; // 清理旧版本遗留的内联铺图
         document.body.classList.add('has-wallpaper');
         if (_skin.dim) document.body.dataset.dim = _skin.dim;
         else delete document.body.dataset.dim;
+        // 壁纸微调（wallpaperAdjust：拖动定位 x/y 百分比、zoom 缩放百分比、blur 模糊 px、
+        // veil 透明度数值覆写）：落成 CSS 变量供 body.has-wallpaper::before 使用，
+        // 与调整弹窗预览框共用同一套数学。veil 为数值时内联覆写 data-dim 离散档位。
+        const adj = (_skin.adjust && typeof _skin.adjust === 'object') ? _skin.adjust : null;
+        const bs = document.body.style;
+        if (adj) {
+            bs.setProperty('--wall-x', (adj.x || 0) + '%');
+            bs.setProperty('--wall-y', (adj.y || 0) + '%');
+            bs.setProperty('--wall-zoom', String((adj.zoom || 100) / 100));
+            bs.setProperty('--wall-blur', (adj.blur || 0) + 'px');
+            if (typeof adj.veil === 'number') bs.setProperty('--wall-veil', Math.max(0, Math.min(100, adj.veil)) + '%');
+            else bs.removeProperty('--wall-veil');
+        } else {
+            bs.removeProperty('--wall-x'); bs.removeProperty('--wall-y');
+            bs.removeProperty('--wall-zoom'); bs.removeProperty('--wall-blur');
+            bs.removeProperty('--wall-veil');
+        }
     } else {
+        document.body.style.removeProperty('--wall-url');
         document.body.style.backgroundImage = '';
         document.body.classList.remove('has-wallpaper');
         delete document.body.dataset.dim;
+        const bs = document.body.style;
+        bs.removeProperty('--wall-x'); bs.removeProperty('--wall-y');
+        bs.removeProperty('--wall-zoom'); bs.removeProperty('--wall-blur');
+        bs.removeProperty('--wall-veil');
     }
     _applyColorMode();
     // 字号/界面缩放变化会改变卡片列宽与文字宽度：按新布局重新精确截断标题（T74 收尾）。

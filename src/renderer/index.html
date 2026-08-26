@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -395,7 +395,7 @@
                                     <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                                     <div class="info-body"><span class="info-label">说明</span>
                                         <div class="info-detail local-desc">
-                                            <p>· 管理并播放本机视频：出于安全仅能访问你指定的根目录，首次使用请先点「更换根目录」选择文件夹</p>
+                                            <p>· 管理并播放本机视频：默认本机下载文件夹</p>
                                             <p>· 仅展示文件夹与视频/音频文件；单击视频/音频弹出确认框后交给播放器播放，单击文件夹进入，按 Esc 返回上层；视频卡片自动截帧生成预览图（缺 ffmpeg 时显示占位图）；文件较多时底部有分页条（每页 100 项）。</p>
                                             <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
                                             <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
@@ -498,12 +498,13 @@
                         <div class="wall-row">
                             <select id="set_walldim" class="md-select">
                                 <option value="">遮罩强度 · 标准</option>
+                                <option value="min">遮罩 · 极弱（接近透明）</option>
                                 <option value="low">遮罩 · 弱（背景更醒目）</option>
                                 <option value="high">遮罩 · 强（内容更清晰）</option>
                             </select>
                         </div>
                         <div class="wall-row">
-                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择本地图片</button>
+                            <button id="set_wallpaper" class="md-btn md-btn-tonal">选择背景图片</button>
                             <button id="clear_wallpaper" class="md-btn md-btn-tonal" style="display:none;">移除背景</button>
                         </div>
                         <div class="set-group">列表</div>
@@ -947,9 +948,9 @@
                         </div>
                         <div class="tip-line pad0" id="webdav_auto_status"></div>
                         <div class="md-field"><input id="webdav_url" class="md-input" placeholder="WebDAV 地址（如 https://dav.jianguoyun.com/dav/）" /></div>
-                        <div class="md-field"><input id="webdav_remote_dir" class="md-input" placeholder="远程目录（可选，默认 kazumiSync）" /></div>
+                        <div class="md-field"><input id="webdav_remote_dir" class="md-input" placeholder="远程目录（可选，默认 YuKiSync）" /></div>
                         <div class="md-field"><input id="webdav_username" class="md-input" placeholder="用户名" /></div>
-                        <div class="md-field"><div class="webdav-pwd-wrap"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /><button type="button" id="webdav_pwd_eye" class="pan-cookie-eye" title="显示/隐藏密码">👁</button></div></div>
+                        <div class="md-field"><div class="webdav-pwd-wrap"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /><button type="button" id="webdav_pwd_eye" class="pan-cookie-eye" title="显示/隐藏密码">👁️</button></div></div>
                         <div class="wall-row">
                             <button id="webdav_save" class="md-btn md-btn-filled">保存配置</button>
                             <button id="webdav_test" class="md-btn md-btn-tonal">测试连接</button>
@@ -963,7 +964,7 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">用于把详情页的番剧收藏 / 追番同步到你的 Bangumi 账号：前往 Bangumi「设置 → 开发」页创建 Access Token，粘贴到下方保存即可；token 仅保存在本机设置中。</div>
+                                <div class="info-detail">用于把详情页的番剧收藏 / 追番同步到你的 Bangumi 账号：前往 Bangumi「设置 → 开发」页创建 Access Token，或点击下方按钮跳转到网页获取，粘贴到下方保存即可；token 仅保存在本机设置中。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="即时同步时是否弹出提示"><input type="checkbox" id="bangumi_immediate_toast"><span class="md-switch-track"></span><span class="md-switch-label">即时同步提示</span></label>
@@ -1429,6 +1430,7 @@
     </div>
 
     <!-- Dialog: 主题风格确认框（替代系统 window.confirm，与整体 UI 一致） -->
+    <!-- Dialog: 确认操作 -->
     <div id="confirmDialog" class="md-dialog-overlay">
         <div class="md-dialog">
             <div class="md-dialog-title">确认操作</div>
@@ -1436,6 +1438,26 @@
             <div class="md-dialog-actions">
                 <button id="confirm_cancel" class="md-dialog-btn">取消</button>
                 <button id="confirm_ok" class="md-dialog-btn">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: 背景图片调整（选图后弹出：预览可拖动定位，缩放/透明度/模糊可调，保存才生效） -->
+    <div id="wallpaperDialog" class="md-dialog-overlay">
+        <div class="md-dialog wall-adj-dialog">
+            <div class="md-dialog-title">自定义背景</div>
+            <div class="md-dialog-body">
+                <div id="wall_prev_box" title="按住拖动调整图片位置">
+                    <img id="wall_prev_img" alt="" draggable="false" referrerpolicy="no-referrer">
+                </div>
+                <div class="wall-adj-row"><span class="wall-adj-label">图片缩放</span><input type="range" id="wall_adj_zoom" min="100" max="300" step="5" value="100"></div>
+                <div class="wall-adj-row"><span class="wall-adj-label">透明度</span><input type="range" id="wall_adj_veil" min="0" max="100" step="5" value="20"></div>
+                <div class="wall-adj-row"><span class="wall-adj-label">模糊度</span><input type="range" id="wall_adj_blur" min="0" max="20" step="1" value="0"></div>
+                <div class="wall-adj-hint">*鼠标按住图片可拖动调整位置；「透明度」调节背景明暗程度（越高越亮、越低越暗）</div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="wall_adj_cancel" class="md-dialog-btn">取消</button>
+                <button id="wall_adj_save" class="md-dialog-btn" style="background:var(--md-primary);color:var(--md-on-primary);">保存</button>
             </div>
         </div>
     </div>

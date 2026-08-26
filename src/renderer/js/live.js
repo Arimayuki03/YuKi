@@ -68,7 +68,11 @@ const Live = {
                 subtitle: ch.group && ch.group !== '未分组' ? ch.group : '',
                 source: 'live', // 直播是无限流，主进程据此跳过边下边播
             }).then((r) => {
-                if (r && r.ok) warnToast(`正在播放：${ch.name}`);
+                // 外部播放器为主时起播成功也返回 {ok:false, launched:true, viaExternal:true,
+                // reason:'external-start-unverified'}（分离进程无回执可校验，ok:true 保留给
+                // 已验证的 mpv 会话）——launched 即已交给播放器，勿落入下方失败分支，
+                // 否则外部播放器正常播放仍会弹「直播播放失败」（与 panels settlePlayResult 同判据）。
+                if (r && (r.ok || r.launched)) warnToast(r.viaExternal ? `已交外部播放器播放：${ch.name}` : `正在播放：${ch.name}`);
                 else if (r && r.reason === 'mpv-missing') warnToast('直播播放失败：mpv 未安装（node scripts/download-binaries.js mpv）');
                 else if (r && r.reason === 'resolve-failed') warnToast('直播播放失败：频道地址解析失败，换条线路试试');
                 else if (r && r.reason === 'empty playlist') warnToast('直播播放失败：频道地址无效');

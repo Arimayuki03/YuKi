@@ -481,3 +481,18 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **夸克会话自动续期（go_proxy.py）**：2026-08 夸克 412 事故复盘落地——L-18「每次请求后清空共享 jar」把服务端 Set-Cookie 轮换整体丢弃，Cookie 单向陈旧直至全量 412 仅重新扫码可解。现在清 jar 前同锁内取走夸克域 cookie 节流合并回加密存储；6h±抖动保活探针一举两得（保活 + 触发轮换捕获）；412 标记可疑供自愈评估；并发不变量不变（显式 headers 携带凭据）。
 - **Bangumi 分页聚合（plugin_manager.py）**：`_aggregate_pages` 自动翻页补足单次总量（页间 0.3s 限速防风控、首页异常原样抛、后续页降级返回部分、单页钳制 50、单次总量上限 120），修复渲染层每页数量 60/120 触发上游拒绝致整页空白；`_webdav_sync_dir` 远程子路径拒绝 `..` 防穿越写穿盘根。
 - 测试：`tests/js/dl-dedupe.test.js` 10 例、`playlist-proxy.test.js`、`mpv-menu-conf.test.js`、`player-watch.test.js` 扩充；Python 侧 `test_circuit.py`、`test_quark_session_refresh.py`、`test_webdav_conn.py`、`test_kazumi_cover_proxy.py` 新增接入 run_all.py（40 阶段）。JS 单元 365/365、lint 0 错、check-js 44 文件 0 错。打包/实机 QA 待用户验证。
+
+## 11. 2026-08-26 UI 视觉升级与网盘播放策略批次（未提交）
+
+### 11.1 UI 视觉系统升级与壁纸自定义
+
+- 新增根目录 `DESIGN.md` 视觉系统契约（色彩/排版/圆角/描边/阴影/间距/动效令牌 + 禁改清单：类名、DOM、皮肤挂钩、布局度量），气质参考 Linear/Vercel/Arc——中性灰阶骨架 + 主题色点睛，派生色一律 `color-mix(in srgb, var(--md-primary) N%, …)` 现场计算保证自定义取色器照常生效。`ui.css` 按契约整体重制（+543/−320）：圆角/阴影阶梯令牌、半透明描边、渐变底 + SVG feTurbulence 微噪点、卡片入场错峰（nth-child stagger 封顶 10 张）/悬浮抬升/按压反馈、网格空态纯 CSS 骨架屏、`prefers-reduced-motion` 全局尊重。
+- 壁纸渲染层重构：壁纸图改经 `--wall-url` 只进 `body.has-wallpaper::before` 单层按视口缩放绘制（旧版 body 平铺铺图在大分辨率视口表现为「壁纸没铺满」）；新增「自定义背景」调整弹窗——预览框拖动定位、缩放/透明度/模糊滑杆即时联动（预览与实际层同一套 CSS 变量数学），保存才持久化（新设置键 `wallpaperAdjust`，纳入 WebDAV 同步白名单）；遮罩强度新增「极弱」档位并与弹窗透明度滑杆双向归位。
+- 小修：主窗口/网盘扫码登录窗/解析窗口统一 `spellcheck:false`（关闭输入框拼写检查红波浪线）；网盘 Cookie 与 WebDAV 密码眼睛图标随明文状态切换（`_syncPanEyeIcon`）；index.html 去 BOM。
+
+### 11.2 夸克转存失败修复与网盘源播放策略收敛
+
+- **夸克「转存失败」**（go_proxy.py，复盘详见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md) R28）：写操作 sharepage/save 按客户端签名做风控，Chrome UA 必回 403——接口与 CDN 取流统一 `QUARK_API_UA`（PC 客户端 UA 社区事实标准）并切 `drive-pc.quark.cn` 域名；新增 `_QuarkSaveDenied` 硬拒绝立即上抛不重试（code=41020 快照令牌过期除外，走实时目录树自愈重转存）；502 响应带语义化中文提示。
+- **网盘源策略收敛**：新增 `src/main/pan-source.js` 统一网盘源判定（`PAN_SOURCE_RE`，Kazumi 规则引擎豁免防误伤）——原生播放列表对网盘源全局禁用（主进程拒建队 → 渲染层静默回退逐集连播，外部主播放器整季 m3u 同源拦截）、自动线路回退禁用（防止转存风暴把临时风控打成持续 403）。正则以注释互引保持主进程/渲染层三处同步。
+- 直播页起播判据改 `launched`：外部主播放器分离进程无回执可校验，返回 `{ok:false, launched:true, viaExternal:true}` 时不再落入失败分支误报「直播播放失败」。
+- 测试：`tests/js/pan-source-playlist.test.js` 新增 7 例全过；`python-backend/tests/test_quark_pan.py` 扩至 24 例全过（`_QuarkSaveDenied` 不重试、41020 自愈等回归）。全量回归与实机视觉 QA 待跑。

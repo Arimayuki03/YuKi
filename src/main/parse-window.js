@@ -473,6 +473,7 @@ class ParseWindow {
                         contextIsolation: true,
                         nodeIntegration: false,
                         sandbox: true,
+                        spellcheck: false,
                     },
                 });
             } catch (e) { this._release(slot); return resolve(null); }
@@ -641,6 +642,7 @@ class ParseWindow {
                         contextIsolation: true,
                         nodeIntegration: false,
                         sandbox: true,
+                        spellcheck: false, // 验证码输入框关闭拼写检查
                     },
                 });
             } catch (e) { this._release(slot); return resolve({ ok: false }); }

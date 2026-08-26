@@ -307,6 +307,7 @@ $(async function bootstrap() {
             textSize: s.textSize || '',
             textColor: s.textColor || '',
             dim: s.wallpaperDim || '',
+            adjust: (s.wallpaperAdjust && typeof s.wallpaperAdjust === 'object') ? s.wallpaperAdjust : null,
             animEnabled: s.animEnabled !== false,
             wallpaperUrl: s.wallpaper ? toFileUrl(s.wallpaper) : '',
             glass: s.glass === true,

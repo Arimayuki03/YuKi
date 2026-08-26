@@ -76,6 +76,12 @@ FastAPI Python 后端
   按需解析代理条目 `http://127.0.0.1:<port>/pl/<token>/<index>`——mpv 打开哪集才解析哪集
   （playerContent / Kazumi captureDirect 二段解析），302 交真实 CDN，直链零过期；
   parse=1/DRM/空地址的集目返回 502 并回调 toast 停队。静态直链批量直接入原生队列。
+- **网盘类源排除**（`src/main/pan-source.js`）：站点/线路名或集地址命中 `PAN_SOURCE_RE`
+  （pan/quark/夸克/网盘/云盘/aliyun/115/123/天翼/移动等，Kazumi 规则引擎豁免防误伤）的
+  源全局禁用原生播放列表——主进程 `yuki:playlist-build` 拒建队（reason=pan-source），
+  渲染层静默回退逐集连播，外部主播放器整季 m3u 同源拦截自然退化为单条目直启；自动线路
+  回退对网盘源同样禁用。原因：网盘解析慢且依赖 Cookie 会话、直链短时效，整季装载与失败
+  自动重试都会放大风控概率（详见 [RUNTIME_ISSUES](RUNTIME_ISSUES.md) R28）。
 - 原生队列不逐集退出进程：观看统计/历史改为逐集 `ended` 记账，每集开独立观看链
   （链内去重是给断流重连重播同一集用的，整季共用一条链会把时长扣成约一集）。
 - mpv 外观资源由主进程生成注入（`writeMpvAssets`）：快捷键提示 hints.lua、步长 input.conf、
@@ -97,7 +103,9 @@ FastAPI Python 后端
 - JAR 网盘 Provider 是首选实现；native Quark Provider 只在显式快路径开启且 JAR 降级时接管。
   网盘直链代理（`go_proxy.py`）维护夸克会话生命周期：清共享 jar 前捕获响应滚动的
   `Set-Cookie` 会话字段并节流合并回加密存储（轮换不再被整体丢弃），6h±抖动低频保活探针
-  维持会话活跃，412 标记可疑供自愈评估。
+  维持会话活跃，412 标记可疑供自愈评估；接口与 CDN 取流统一夸克 PC 客户端 UA
+  （`QUARK_API_UA`，写操作转存按客户端签名做风控），转存被明确拒绝抛 `_QuarkSaveDenied`
+  立即收口不重试（业务码 41020 除外——快照令牌过期走实时目录树自愈）。
 - DRM 策略：当前明确不支持，不实现绕过（原 ADR-0002 已归档，结论保留）。
 
 ## 5. 下载数据流

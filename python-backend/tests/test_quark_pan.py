@@ -479,5 +479,157 @@ class TestQuarkShareStaleMetadataRefresh(unittest.TestCase):
         self.assertIn('pdir_fid=fid-ok', qget_calls[0])
 
 
+class TestQuarkSaveDenied(unittest.TestCase):
+    """转存被夸克明确拒绝（HTTP 403）时必须立即终止重试循环。
+
+    回归背景（2026-08-26「转存失败」）：v2/play 被拒后的兜底转存收到 403
+    时，旧逻辑仍按瞬时错误重试整条链路——_quark_share_play_url 3 次 ×
+    _quark_share_file_play_url 2 次，几秒内密集 sharepage/save 把临时风控
+    打成持续 403。现在 save 收到 4xx 必须抛 _QuarkSaveDenied 并立即上抛。
+    """
+
+    def setUp(self):
+        go_proxy._SHARE_CACHE.clear()
+        go_proxy._SAVE_CACHE.clear()
+
+    def tearDown(self):
+        go_proxy._SHARE_CACHE.clear()
+        go_proxy._SAVE_CACHE.clear()
+
+    @staticmethod
+    def _fake_qget_share_list(url, **kwargs):
+        # 夸克 file_type 非 0 才是文件（0 为目录）
+        return _FakeResponse({'data': {'list': [
+            {'fid': 'fid-1', 'share_fid_token': 'tok-1', 'file_type': 3},
+        ]}})
+
+    def test_share_play_url_aborts_on_save_denied(self):
+        save_calls = []
+
+        def fake_qpost(url, **kwargs):
+            url = str(url)
+            if 'sharepage/save' in url:
+                save_calls.append(url)
+                return _FakeResponse({'status': 403, 'message': 'forbidden'},
+                                     status=403)
+            if 'sharepage/token' in url:
+                return _FakeResponse({'data': {'stoken': 'st-1'}})
+            raise AssertionError('unexpected POST: %s' % url)
+
+        with patch.object(go_proxy, '_qpost', side_effect=fake_qpost), \
+                patch.object(go_proxy, '_qget',
+                             side_effect=self._fake_qget_share_list), \
+                patch.object(go_proxy, '_quark_v2play',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='': ''):
+            with self.assertRaises(go_proxy._QuarkSaveDenied):
+                go_proxy._quark_share_play_url('pwd-denied', {}, quality='')
+        # 关键断言：save 只打一次，重试循环被立即终止（旧行为会打满 3 次）
+        self.assertEqual(len(save_calls), 1)
+
+    def test_share_file_play_url_aborts_on_save_denied(self):
+        """指定文件路径：save 403 时跳过令牌自愈与个人盘兜底，直接上抛。"""
+        save_calls = []
+
+        def fake_qpost(url, **kwargs):
+            url = str(url)
+            if 'sharepage/save' in url:
+                save_calls.append(url)
+                return _FakeResponse({'status': 403}, status=403)
+            raise AssertionError('unexpected POST: %s' % url)
+
+        with patch.object(go_proxy, '_qpost', side_effect=fake_qpost), \
+                patch.object(go_proxy, '_qget',
+                             side_effect=lambda url, **kwargs:
+                                 _FakeResponse({'data': {'list': []}})), \
+                patch.object(go_proxy, '_quark_share_stoken',
+                             lambda pwd_id, headers: 'st-1'), \
+                patch.object(go_proxy, '_quark_v2play',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_download_url',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='': ''):
+            with self.assertRaises(go_proxy._QuarkSaveDenied):
+                go_proxy._quark_share_file_play_url(
+                    'pwd-denied', 'fid-1', 'tok-1', {})
+        self.assertEqual(len(save_calls), 1)
+
+    def test_save_token_error_keeps_tree_refresh_heal(self):
+        """save 返回 HTTP 403 + code=41020（令牌校验异常）不是硬拒绝：必须
+        保留目录树刷新令牌的自愈重试。
+
+        回归锚点（2026-08-26 生产日志实证）：JAR vodId 携带的 share_fid_token
+        是页面缓存快照，分享者更新文件后令牌轮换，save 以「HTTP 403 +
+        code=41020」形态失败——它可经实时目录树换新令牌治愈。曾误把全部
+        403 判成硬拒绝而杀死自愈路径。"""
+        save_calls = []
+
+        def fake_qpost(url, **kwargs):
+            url = str(url)
+            if 'sharepage/save' in url:
+                save_calls.append(url)
+                # 生产实况：HTTP 403 包装的 41020（令牌过期）
+                return _FakeResponse(
+                    {'status': 403, 'code': 41020,
+                     'message': '转存文件token校验异常[fid token校验失败]'},
+                    status=403)
+            if 'sharepage/token' in url:
+                return _FakeResponse({'data': {'stoken': 'st-1'}})
+            raise AssertionError('unexpected POST: %s' % url)
+
+        def fake_qget(url, **kwargs):
+            url = str(url)
+            if 'sharepage/detail' in url:
+                # 目录树刷新能拿到当前有效令牌的条目
+                return _FakeResponse({'data': {'list': [
+                    {'fid': 'fid-1', 'share_fid_token': 'tok-new',
+                     'file_type': 3},
+                ]}})
+            return _FakeResponse({'data': {}})
+
+        with patch.object(go_proxy, '_qpost', side_effect=fake_qpost), \
+                patch.object(go_proxy, '_qget', side_effect=fake_qget), \
+                patch.object(go_proxy, '_quark_v2play',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_download_url',
+                             lambda *a, **k: ''), \
+                patch.object(go_proxy, '_quark_personal_play_url',
+                             lambda fid, headers, retries=1, quality='': ''):
+            # 自愈后二次转存仍失败：以普通 ValueError 收场，而非 _QuarkSaveDenied
+            with self.assertRaises(ValueError) as ctx:
+                go_proxy._quark_share_file_play_url(
+                    'pwd-heal', 'fid-1', 'tok-stale', {})
+            self.assertNotIsInstance(ctx.exception, go_proxy._QuarkSaveDenied)
+        # 关键断言：自愈触发了树刷新后的重试转存（首次 + 至少一次自愈重试；
+        # 外层重试轮还会再发一次初始转存，故总数 ≥ 3）。旧误判行为下首次
+        # save 即抛 _QuarkSaveDenied，save_calls 只会是 1。
+        self.assertGreaterEqual(len(save_calls), 3)
+
+
+    def test_share_session_endpoints_share_one_host(self):
+        """stoken 与 save 必须同域（drive-pc）。
+
+        分享会话按域名作用域隔离：用 drive.quark.cn 签发的 stoken 打
+        drive-pc 的 sharepage/save 必回 403 code=41020「转存文件token校验
+        异常」；同域签发+使用则 200（2026-08-26 A/B 实测，转存失败根因）。
+        """
+        url = go_proxy._quark_detail_url('pwd-x', 'st/x+y=')
+        self.assertTrue(url.startswith('https://drive-pc.quark.cn/'), url)
+
+        captured = {}
+
+        def fake_qpost(url, **kwargs):
+            captured['url'] = str(url)
+            return _FakeResponse({'data': {'stoken': 'st-1'}})
+
+        with patch.object(go_proxy, '_qpost', side_effect=fake_qpost):
+            st = go_proxy._quark_share_stoken('pwd-x', {})
+        self.assertEqual(st, 'st-1')
+        self.assertTrue(captured['url'].startswith('https://drive-pc.quark.cn/'),
+                        captured['url'])
+
+
 if __name__ == '__main__':
     unittest.main()

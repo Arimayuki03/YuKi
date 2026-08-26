@@ -170,7 +170,7 @@ const Kazumi = {
             const $p = $('#webdav_password');
             const show = $p.attr('type') === 'password';
             $p.attr('type', show ? 'text' : 'password');
-            this.textContent = show ? '🙈' : '👁';
+            this.textContent = show ? '🙈' : '👁️';
         });
         // 定时自动同步：开关/间隔变更即时重排调度（无需重启）
         $('#webdav_auto_enable').on('change', function () {

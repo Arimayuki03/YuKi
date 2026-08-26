@@ -111,6 +111,7 @@ function openLoginWindow() {
                 contextIsolation: true,
                 nodeIntegration: false,
                 sandbox: true,
+                spellcheck: false, // 登录页输入框同样关闭拼写检查
             },
         });
         win.setMenuBarVisibility(false);

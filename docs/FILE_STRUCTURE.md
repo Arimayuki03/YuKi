@@ -27,6 +27,7 @@ YuKi/
 ├── LICENSE                 GPLv3
 ├── README.md               项目入口
 ├── PROGRESS.md             当前开发状态（跨会话首要入口）
+├── DESIGN.md               视觉系统契约（色彩/排版/圆角/阴影/动效令牌与禁改清单）
 ├── CHANGELOG.md            版本变更记录
 ├── CONTRIBUTING.md / CODE_OF_CONDUCT.md  社区文档
 └── .gitignore              构建产物、运行时目录、网盘 Cookie 目录等
@@ -36,7 +37,7 @@ YuKi/
 
 ```
 src/
-├── main/                   主进程（26 文件）
+├── main/                   主进程（28 文件）
 │   ├── index.js            入口：窗口/托盘/Python 生命周期/mpv/aria2c/ffmpeg/解析窗口
 │   │                       （含 writeMpvAssets：hints.lua/input.conf/menu.conf 注入、Anime4K 档位消费）
 │   ├── async-session.js    AsyncSingleFlight / AsyncSerialQueue
@@ -46,6 +47,7 @@ src/
 │   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键）
 │   ├── parse-window.js     隐藏 BrowserWindow 真实流提取
 │   ├── playlist-proxy.js   在线整季原生播放列表本地按需解析代理
+│   ├── pan-source.js       网盘类源识别（PAN_SOURCE_RE：原生播放列表禁用/边下边播排除同源判定）
 │   └── ...                 downloads.js, cache.js, downloader.js 等
 ├── preload/
 │   └── preload.js          渲染层 IPC 桥（yuki:*）
@@ -125,7 +127,7 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`，35 文件），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、下载去重、右键菜单定义、设置、记录、封面链、下载等。
+`tests/js/*.test.js`（`node --test`，41 文件），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重、右键菜单定义、设置、记录、封面链、下载等。
 
 ## 构建产物（不入库）
 

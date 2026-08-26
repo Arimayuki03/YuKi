@@ -49,7 +49,7 @@ DANDAN_APPID = os.environ.get('DANDANAPI_APPID', '')
 DANDAN_KEY = os.environ.get('DANDANAPI_KEY', '')
 
 # WebDAV 同步（对齐 Kazumi webdav_client）
-WEBDAV_SYNC_ROOT = '/kazumiSync'
+WEBDAV_SYNC_ROOT = '/YuKiSync'
 
 
 def _webdav_sync_dir(webdav_url, remote_dir=''):
