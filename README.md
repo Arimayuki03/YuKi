@@ -19,6 +19,16 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 
 当前版本为 `0.2.0`，主要开发和验证平台是 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`/`yuki`，仅显示名为 YuKi。
 
+## 界面预览
+
+| 首页 · CatVod 聚合源浏览 | 推荐 · Bangumi 热门番组 |
+|---|---|
+| ![首页：CatVod 聚合源分类浏览](assets/screenshots/home.png) | ![推荐：Bangumi 热门番组](assets/screenshots/recommend.png) |
+| **Bangumi 详情 · 评分与收藏同步** | **设置 · CatVod 源配置与站点诊断** |
+| ![Bangumi 详情：评分、排名与收藏同步](assets/screenshots/bangumi-detail.png) | ![设置：CatVod 源配置与站点诊断](assets/screenshots/settings-catvod.png) |
+| **设置 · Kazumi 规则管理** | |
+| ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | |
+
 ## 当前状态
 
 - CatVod 配置、Python/JavaScript/CMS 爬虫、聚合搜索、详情与播放链路已经完成。
