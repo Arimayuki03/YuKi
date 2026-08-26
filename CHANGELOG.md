@@ -4,7 +4,9 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.2.0] - 2026-08-26
+
+UI 视觉系统升级、壁纸自定义与网盘源播放策略收敛。
 
 ### Added
 
@@ -25,7 +27,7 @@
 
 - **UI 视觉系统升级**：按新增的 [DESIGN.md](DESIGN.md) 视觉契约整体重制 `ui.css`——中性灰阶做骨架、主题色只做点睛（默认绿改祖母绿系），一切派生色用 `color-mix` 现场计算（自定义取色器照常生效）；圆角/描边/阴影/动效令牌化，渐变底 + 微噪点质感；卡片入场错峰、悬浮抬升与按压反馈动效；网格空态 CSS 骨架屏。动画只动 transform/opacity，尊重 `prefers-reduced-motion` 与应用内动画开关。
 - **壁纸渲染层重构**：壁纸图改经 `--wall-url` 变量只进 `body.has-wallpaper::before` 单层按视口缩放绘制，修复旧版 body 平铺铺图在大分辨率视口下「壁纸没铺满屏幕」；`wallpaperAdjust`（定位/缩放/模糊/透明度）纳入设置持久化与 WebDAV 同步白名单。
-- **WebDAV 同步远程目录默认值**：`kazumiSync` → `YuKiSync`（后端 `WEBDAV_SYNC_ROOT` 与设置页文案同步）。
+- **WebDAV 同步远程目录默认值**：`kazumiSync` → `YuKiSync`（后端 `WEBDAV_SYNC_ROOT` 与设置页文案同步）。**升级提示**：旧版本备份位于远程 `/kazumiSync`，升级后如需继续读写旧备份，请在「设置 → WebDAV → 远程目录」手动填回 `kazumiSync`；新备份默认写入 `/YuKiSync`。
 
 ### Fixed
 
@@ -75,5 +77,6 @@
 - 自动更新已接入 electron-updater 基础链路，但首版没有自动升级路径，升级需重新安装。
 - P2P/P3P、ed2k、thunder 协议不在支持范围。
 
-[unreleased]: https://github.com/Arimayuki03/YuKi/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/Arimayuki03/YuKi/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Arimayuki03/YuKi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Arimayuki03/YuKi/releases/tag/v0.1.0
