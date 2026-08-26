@@ -22,12 +22,12 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 ## 界面预览
 
 | 首页 · CatVod 聚合源浏览 | 推荐 · Bangumi 热门番组 |
-|---|---|
+|:--:|:--:|
 | ![首页：CatVod 聚合源分类浏览](assets/screenshots/home.png) | ![推荐：Bangumi 热门番组](assets/screenshots/recommend.png) |
 | **Bangumi 详情 · 评分与收藏同步** | **设置 · CatVod 源配置与站点诊断** |
 | ![Bangumi 详情：评分、排名与收藏同步](assets/screenshots/bangumi-detail.png) | ![设置：CatVod 源配置与站点诊断](assets/screenshots/settings-catvod.png) |
-| **设置 · Kazumi 规则管理** | |
-| ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | |
+| **设置 · Kazumi 规则管理** | **我的收藏 · 番剧列表与状态筛选** |
+| ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | ![我的收藏：番剧列表与状态筛选](assets/screenshots/favorites.png) |
 
 ## 当前状态
 
