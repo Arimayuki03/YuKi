@@ -7,7 +7,7 @@
  * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, UIState */
+/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, UIState, showLoading, hideLoading */
 
 const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
@@ -36,6 +36,9 @@ const Timeline = {
     _colCache: null,
     _colCacheToken: '',
     _colCacheTs: 0,
+    // 无缓存命中时的加载遮罩状态（防闪现：延迟弹出，快响应直接上屏不闪）
+    _maskTimer: null,
+    _maskShown: false,
 
     async init() {
         if (this._inited) return;
@@ -335,6 +338,17 @@ const Timeline = {
 
     // ---------------------------------------------------------------- 数据加载
 
+    /** 加载遮罩（对齐 Home 防闪现模式）：延迟 300ms 弹出，仅真正进入网络等待才可见；
+     *  数据上屏/失败后收起。缓存在手时不弹（即时上屏，后台静默刷新不打断已见内容）。 */
+    _showLoadMask() {
+        this._hideLoadMask();
+        this._maskTimer = setTimeout(() => { this._maskTimer = null; this._maskShown = true; showLoading(); }, 300);
+    },
+    _hideLoadMask() {
+        if (this._maskTimer) { clearTimeout(this._maskTimer); this._maskTimer = null; }
+        if (this._maskShown) { this._maskShown = false; hideLoading(); }
+    },
+
     async load() {
         if (this._season === 'current') await this._loadCurrent();
         else await this._loadSeason(this._season);
@@ -366,8 +380,9 @@ const Timeline = {
 
     async _loadCurrent() {
         this._mode = 'current';
-        // 命中缓存即时上屏，后台静默刷新；不弹全局加载遮罩，数据到达后直接上屏
+        // 命中缓存即时上屏，后台静默刷新；无缓存才弹加载遮罩（延迟弹出防闪现）
         const hit = this._tryCache();
+        if (!hit) this._showLoadMask();
         try {
             const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action');
             const cal = (rsp && rsp.calendar) || [];
@@ -385,6 +400,8 @@ const Timeline = {
             if (!hit) warnToast('时间表载入失败');
             // 无缓存兜底且日历为空：渲染网络/镜像引导空态（多为无法直连 Bangumi）
             if (!hit && !this._calendar.length) this._renderGrid();
+        } finally {
+            if (!hit) this._hideLoadMask();
         }
     },
 
@@ -393,6 +410,7 @@ const Timeline = {
         if (!range) { this._loadCurrent(); return; }
         this._mode = 'season';
         const hit = this._tryCache();
+        if (!hit) this._showLoadMask();
         try {
             const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action');
             const cal = (rsp && rsp.calendar) || [];
@@ -410,6 +428,8 @@ const Timeline = {
             if (!hit) warnToast('该季度数据载入失败');
             // 无缓存兜底且日历为空：渲染网络/镜像引导空态
             if (!hit && !this._calendar.length) this._renderGrid();
+        } finally {
+            if (!hit) this._hideLoadMask();
         }
     },
 
