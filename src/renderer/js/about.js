@@ -21,7 +21,7 @@ const About = {
     async render() {
         let version = null;
         try { version = await window.yuki.appVersion(); } catch (e) { /* 使用内置版本兜底 */ }
-        $('#about-version').text(version || '0.2.0');
+        $('#about-version').text(version || '0.2.1');
     },
 };
 

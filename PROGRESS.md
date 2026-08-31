@@ -9,7 +9,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 应用版本 | `0.2.0` |
+| 应用版本 | `0.2.1` |
 | 桌面宿主 | Electron 31，JavaScript |
 | 后端 | FastAPI，Python 3.14 独立进程 |
 | 内容引擎 | CatVod + Kazumi 双引擎 |
