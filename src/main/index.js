@@ -1639,7 +1639,7 @@ app.whenReady().then(() => {
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
         'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
-        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'enableBangumiProxy', 'enableGitProxy',
+        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'enableBangumiProxy', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
         'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
         // 各列表页每页条数（panels.js 动态 key 写入）
@@ -2876,7 +2876,7 @@ app.whenReady().then(() => {
                 }
             }
         } catch (e) { console.warn(`[dl] 补扩展名失败：${e && e.message}`); }
-        if (Notification.isSupported()) {
+        if (Notification.isSupported() && settings.get('dlNotify') !== false) {
             const n = new Notification({ title: '下载完成', body: task.name || task.gid });
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
@@ -2898,7 +2898,7 @@ app.whenReady().then(() => {
     });
     // m3u8 合成任务完成/失败：与 aria2 同一套通知链路
     hls.on('completed', (task) => {
-        if (Notification.isSupported()) {
+        if (Notification.isSupported() && settings.get('dlNotify') !== false) {
             const n = new Notification({ title: '下载完成（m3u8 已合成）', body: task.name });
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();

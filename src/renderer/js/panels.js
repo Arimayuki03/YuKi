@@ -1325,6 +1325,7 @@ function initSettingsPanel() {
         refreshDlDirLine(s.dlDir);
         $('#set_dl_concurrency').val(String(s.dlConcurrency || '3'));
         $('#set_dl_split').val(String(s.dlSplitConcurrency || '5'));
+        $('#set_dl_notify').prop('checked', s.dlNotify !== false); // 下载完成系统通知（默认开）
         // 快捷键步长回填
         const hk = s.playerHotkeys || {};
         if (hk.seek) $('#set_hotkey_seek').val(hk.seek);
@@ -1752,6 +1753,11 @@ function initSettingsPanel() {
         const r = await window.yuki.download.control('setSplit', { n: parseInt(this.value, 10) || 5 });
         if (r && r.ok) warnToast(`分片并发数已设为 ${r.n}`);
         else warnToast('已保存，将在下载引擎启动后生效');
+    });
+    // 下载完成通知：仅持久化，主进程完成回调读取（下一个完成任务生效）
+    $('#set_dl_notify').on('change', function () {
+        window.yuki.settingsSet('dlNotify', this.checked);
+        warnToast(this.checked ? '已开启下载完成通知' : '已关闭下载完成通知');
     });
     // 恢复默认设置（二次确认：先说明范围，再最终确认；应用自动重启）
     $('#set_reset').on('click', async () => {
