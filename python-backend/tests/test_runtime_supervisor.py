@@ -23,7 +23,7 @@ if BASE not in sys.path:
 import hoststate  # noqa: E402
 import runtime  # noqa: E402
 import server  # noqa: E402
-from runtime.contracts import RuntimeRequest  # noqa: E402
+from runtime.contracts import RuntimeRequest, bind_runtime_request  # noqa: E402
 from runtime.errors import RuntimeError  # noqa: E402
 from runtime.supervised_runner import SupervisedRunner  # noqa: E402
 from runtime.supervisor import (  # noqa: E402
@@ -87,7 +87,9 @@ def _port_is_open(port):
 def _wait_resources_gone(state, timeout=4):
     pids = [state.get('workerPid'), state.get('pythonPid'), state.get('nodePid')]
     ports = [state.get('pythonPort'), state.get('nodePort')]
-    deadline = time.monotonic() + timeout
+    # tasklist 轮询与端口释放在 CI 上都可能拖过 4s：加 CI 余量放宽等待，
+    # 语义不变（资源最终必须全部回收）。
+    deadline = time.monotonic() + timeout + _BUDGET_ASSERT_SLACK
     while time.monotonic() < deadline:
         if (all(not _pid_exists(pid) for pid in pids if pid)
                 and all(not _port_is_open(port) for port in ports if port)):
@@ -444,12 +446,17 @@ class RuntimeSupervisorTest(unittest.TestCase):
         })
         try:
             try:
-                runner.init(json.dumps({
-                    'pidFile': pid_file,
-                    'pythonPort': _reserve_port(),
-                    'nodePort': _reserve_port(),
-                    'nodeExe': node_exe,
-                }))
+                # 夹具 init 要等两个真实子进程的监听端口就绪；CI runner 冷启动可能
+                # 吃掉大半默认 30s init 截止，放宽为 60s 专属 deadline 防慢机误判。
+                with bind_runtime_request(RuntimeRequest.create(
+                        site_key='resource-fixture-direct', method='init',
+                        deadline_ms=60000)):
+                    runner.init(json.dumps({
+                        'pidFile': pid_file,
+                        'pythonPort': _reserve_port(),
+                        'nodePort': _reserve_port(),
+                        'nodeExe': node_exe,
+                    }))
             except RuntimeError as error:
                 self.fail('resource fixture init failed: %s' % error.raw_error)
             with open(pid_file, encoding='utf-8') as stream:

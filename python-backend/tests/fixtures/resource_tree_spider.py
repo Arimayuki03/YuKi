@@ -48,7 +48,10 @@ class Spider(BaseSpider):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, creationflags=flags,
         )
-        deadline = time.monotonic() + 5
+        # CI runner 上双子进程（python/node）冷启动受 Defender 扫描与冷文件缓存
+        # 影响，5s 窗口曾把「就绪慢」误判为失败；等待放宽不改变测试语义
+        # （destroy 后资源仍必须被 Supervisor 进程树边界强制回收）。
+        deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if _port_ready(python_port) and _port_ready(node_port):
                 break
