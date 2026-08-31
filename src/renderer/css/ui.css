@@ -1480,6 +1480,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 
 /* 角色卡中文名（T75）：在原名下方小字展示中文译名 */
 .detail-char-name-cn { padding:0 10px 8px; font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border-radius:0 0 13px 13px; }
+.detail-char-cv { padding:0 10px 6px; font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* 评论头像 + 回复区（T75）：圆形小头像，回复缩进展示 */
 .detail-comment-avatar { flex:none; width:28px; height:28px; border-radius:50%; object-fit:cover; background:var(--md-surface-container-high); flex-shrink:0; }
@@ -1519,7 +1520,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
     .detail-char-grid { grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); }
     .detail-staff-grid, .detail-relation-grid { grid-template-columns:1fr; }
     /* 窄窗下长日文/中文角色卡名溢出兜底（T75）：双行名字 + 角色行用 min-width:0 收缩，防止撑破卡片 */
-    .detail-char-card :where(.detail-char-name, .detail-char-name-cn, .detail-char-role) { max-width:100%; }
+    .detail-char-card :where(.detail-char-name, .detail-char-name-cn, .detail-char-cv, .detail-char-role) { max-width:100%; }
     .char-float-info-row { flex-direction:column; }
     .char-float-img { width:120px; align-self:center; }
 }
@@ -1786,6 +1787,7 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .kazumi-detail-avatar { width:48px; height:64px; object-fit:cover; border-radius:6px; flex:none; cursor:zoom-in; }
 .kazumi-detail-char-info { flex:1; min-width:0; }
 .kazumi-detail-char-name { font-size:13px; font-weight:600; color:var(--md-on-surface); }
+.kazumi-detail-char-cv { font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kazumi-detail-char-role { font-size:12px; color:var(--md-on-surface-variant); }
 .kazumi-detail-char-more { flex:none; font-size:12px; color:var(--md-primary); }
 /* 角色详情（4.1：点击角色进详情） */

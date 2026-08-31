@@ -1168,6 +1168,18 @@ const Detail = {
         return '';
     },
 
+    /** 角色卡片 CV 文案：v0 接口 actors 为 [{name,name_cn?}]，部分镜像兼容 actor 字符串；
+     *  多位 CV 用「/」连接，无 CV 返回空串（卡片不渲染该行）。 */
+    _charCvText(c) {
+        if (!c) return '';
+        const names = (Array.isArray(c.actors) ? c.actors : [])
+            .map((a) => (a && (a.name_cn || a.name)) ? String(a.name_cn || a.name).trim() : '')
+            .filter(Boolean);
+        if (names.length) return names.join(' / ');
+        if (typeof c.actor === 'string' && c.actor.trim()) return c.actor.trim();
+        return '';
+    },
+
     /** 构建角色「基本信息」多行文本：名称类字段（简体中文名 → 第二中文名 → 日文名 → 别名 → 其它名）
      *  排到最前，其余 infobox 字段按原顺序跟随。数组值（如「别名」多条）展开为多行子项。
      *  infobox 项形如 {key, value}，value 可能是字符串或 [{k, v}]。 */
@@ -1225,6 +1237,7 @@ const Detail = {
             const cn = c.name_cn || '';
             const mainName = cn || orig;
             const subName = (cn && orig && cn !== orig) ? orig : ''; // 中文名打头，原名作副行（相同则不重复）
+            const cv = this._charCvText(c);
             return {
                 role: String(c.relation || c.role_name || ''),
                 html: `<div class="detail-char-card" data-char-id="${escHtml(c.id || '')}" tabindex="0" title="点击查看人物详情与吐槽">
@@ -1233,6 +1246,7 @@ const Detail = {
                         : '<span class="detail-char-noimg">🎭</span>'}</div>
                     <div class="detail-char-name">${escHtml(mainName)}</div>
                     ${subName ? `<div class="detail-char-name-cn">${escHtml(subName)}</div>` : ''}
+                    ${cv ? `<div class="detail-char-cv">CV：${escHtml(cv)}</div>` : ''}
                     <div class="detail-char-role">${escHtml(c.relation || c.role_name || '')}</div>
                 </div>`,
             };

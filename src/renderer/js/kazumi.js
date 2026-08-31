@@ -1898,14 +1898,19 @@ const Kazumi = {
                 if (token !== this._dlgToken) return;
                 box.html(list.length
                     ? '<div class="tip-line pad0" style="margin-bottom:8px;">点击角色查看详情</div>'
-                      + list.map((c) => `<div class="kazumi-detail-char" data-char-id="${escHtml(c.id)}" tabindex="0">
+                      + list.map((c) => {
+                        // CV 文案复用 Detail 的提取助手（actors 数组/actor 字符串兼容）
+                        const cv = (typeof Detail !== 'undefined' && Detail._charCvText) ? Detail._charCvText(c) : '';
+                        return `<div class="kazumi-detail-char" data-char-id="${escHtml(c.id)}" tabindex="0">
                         <img class="kazumi-detail-avatar" src="${escHtml((c.images && c.images.medium) || '')}" referrerpolicy="no-referrer" onerror="this.style.display='none'">
                         <div class="kazumi-detail-char-info">
                             <div class="kazumi-detail-char-name">${escHtml(c.name_cn || c.name || '')}</div>
+                            ${cv ? `<div class="kazumi-detail-char-cv">CV：${escHtml(cv)}</div>` : ''}
                             <div class="kazumi-detail-char-role">${escHtml(c.role_name || '')}</div>
                         </div>
                         <span class="kazumi-detail-char-more">详情 ›</span>
-                    </div>`).join('')
+                    </div>`;
+                    }).join('')
                     : '<div class="tip-line">暂无角色信息</div>');
                 // 角色点击进详情（资料/简介）
                 box.find('.kazumi-detail-char').on('click', async (e) => {
