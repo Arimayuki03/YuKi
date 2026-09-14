@@ -64,6 +64,8 @@ npm run test:all
 npm run build:win
 ```
 
+> 安装时杀软报毒提示：打包钩子已剔除两类「系统自带冗余 DLL」误报源——Electron 自带的 `d3dcompiler_47.dll` 与 PyInstaller 后端捆绑的 UCRT（`ucrtbase.dll` + `api-ms-win-*` 转发器）；Win10+ 系统 System32 自带这些运行库，剔除不影响运行与渲染（VC++ 运行库与 Python 本体保留）。若仍被误报，可在杀软中加白并向上游提交误报申诉；开发诊断可用 `YUKI_KEEP_SYSTEM_DLLS=1` 保留全部以便对比。
+
 更完整的环境、架构与构建说明见 [开发状态](PROGRESS.md)、[架构说明](docs/ARCHITECTURE.md)与[文件结构](docs/FILE_STRUCTURE.md)。
 
 ## 文档导航
@@ -115,7 +117,7 @@ YuKi 坚持 **本地优先、无追踪** 原则：
 | **数据存储** | 所有个人数据（收藏、历史、观看统计、配置、本地文件索引、日志）仅保存在本机：`%APPDATA%/yuki`（Electron `userData`）与 `~/.yuki/`。不上传至开发者服务器，无云端账号体系。可随时在“设置 → 缓存”或文件管理器中查看/清理。 |
 | **遥测与追踪** | **无埋点、无统计、无崩溃上报、无广告 SDK**。不会收集设备指纹、观看行为或个人信息并对外发送。 |
 | **网络请求** | 仅在以下情形发起出站请求：① 用户触发的搜索/详情/播放解析请求，目标为用户已配置的源地址；② 用户主动使用的“以图搜番”将图片上传至 `api.trace.moe` 进行识别；③ 用户主动配置并授权的 Bangumi 同步与元数据访问（默认直连官方 `api.bgm.tv` / `next.bgm.tv`，也可在设置中改走第三方反代镜像，见下表行）与 WebDAV 备份（用户指定的自建地址）；④ 构建时下载的受信二进制（mpv/ffmpeg/aria2/Anime4K/MiSans，见 `docs/THIRD_PARTY.md`）。除此之外不主动连接任何第三方服务。 |
-| **Bangumi 镜像（当前状态）** | “设置 → Bangumi 镜像”**默认关闭**。关闭时所有 Bangumi 请求直连官方域名。开启后，元数据检索、每日放送、趋势榜单以及收藏/进度等鉴权接口（含 `access_token`）会整体改经社区运营的全域名反代镜像 `api.bangumi.pro` / `next.bangumi.pro` 转发——该镜像由第三方社区维护，非 Bangumi 官方或 YuKi 作者运营，镜像运营方技术上可见转发的请求内容与 Token，建议仅在官方域名不可达的网络环境下开启。此外，番剧封面始终按「本地后端图片代理（host 白名单限定 `lain.bgm.tv` / `lain.bangumi.tv` / `lain.bangumi.pro`）→ 直连官方图床 → 失败自动回退社区镜像 `lain.bangumi.pro`」的链路加载，因此无论开关与否，封面请求都可能在兜底时命中镜像域。镜像开关状态仅保存在本机（`%APPDATA%/yuki/kazumi/mirror.json` 与本地设置文件）。 |
+| **Bangumi 镜像（当前状态）** | “设置 → Bangumi 镜像”**默认关闭**。关闭时所有 Bangumi 请求直连官方域名。开启后，元数据检索、每日放送、趋势榜单以及收藏/进度等鉴权接口（含 `access_token`）会整体改经社区运营的全域名反代镜像（默认根域名 `bangumi.vip`，即 `api.bangumi.vip` / `next.bangumi.vip`，`*.bgm.tv` → `*.bangumi.vip`）转发——该镜像由第三方社区维护，非 Bangumi 官方或 YuKi 作者运营，镜像运营方技术上可见转发的请求内容与 Token，建议仅在官方域名不可达的网络环境下开启。镜像根域名可在「设置 → 系统 → 网络 → Bangumi 镜像域名」手动替换（镜像站域名失效时填入新根域名，子域自动映射）。此外，番剧封面始终按「本地后端图片代理（host 白名单限定 `lain.bgm.tv` / `lain.bangumi.tv` / `lain.{镜像根域名}`，另放行历史镜像 `lain.bangumi.pro` 以兼容存量记录）→ 直连官方图床 → 失败自动回退社区镜像 `lain.{镜像根域名}`」的链路加载，因此无论开关与否，封面请求都可能在兜底时命中镜像域。镜像开关与根域名仅保存在本机（`%APPDATA%/yuki/kazumi/mirror.json` 与本地设置文件）。 |
 | **Cookie / Token** | 部分源的 Cookie、Bangumi `access_token`、WebDAV 账号密码仅明文/加密保存在本地配置文件中，用于后续请求鉴权，不会回传给 YuKi 作者（开启 Bangumi 镜像时，Token 会随鉴权请求一并发送至所选镜像域名，见上表）。卸载或删除数据目录即可彻底清除。 |
 | **本地文件访问** | “本地文件”功能仅在用户授予的白名单根目录内读写，通过主进程校验防路径穿越，不会扫描或上传目录外文件。 |
 | **日志** | 应用日志（`~/.yuki/logs/`）仅存于本地，用于问题排查；提交 Issue 时请自行脱敏后再贴出。 |

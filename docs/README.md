@@ -27,6 +27,7 @@
 |---|---|---|
 | [TVBox/FongMi 功能一致性详细任务书](TVBOX_FONGMI_PARITY_TASKS.md) | 运行时隔离、drpy、Android Worker、播放收敛与发布验收 | 当前唯一执行入口 |
 | [WebDAV 同步冲突策略与双向合并设计](WEBDAV_SYNC_MERGE_DESIGN.md) | 多设备同步的合并算法、策略选择与硬约束（无墓碑/全量快照/200 上限） | 暂缓实现；动工前先按此文档核对「待确认项」 |
+| [开发路线图](ROADMAP.md) | 对标 Kazumi/Animeko 最新版本的差距分析与 P0/P1/P2 立项（含下载分文件夹、应用内 GitHub 更新） | 立项与排期参考；执行状态仍以 PROGRESS.md 为准 |
 
 ## 文档状态优先级
 

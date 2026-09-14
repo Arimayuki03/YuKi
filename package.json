@@ -25,9 +25,15 @@
   "build": {
     "appId": "com.yuki.app",
     "productName": "YuKi",
+    "publish": {
+      "provider": "github",
+      "owner": "Arimayuki03",
+      "repo": "YuKi"
+    },
     "directories": {
       "output": "dist"
     },
+    "afterPack": "scripts/after-pack.js",
     "extraResources": [
       {
         "from": "python-dist",

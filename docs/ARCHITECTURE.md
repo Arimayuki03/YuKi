@@ -47,6 +47,11 @@ FastAPI Python 后端
 - 支持 XPath 与受限 JSONPath/API 两种规则模式。
 - 规则只负责找到番剧详情页和剧集播放页，真实媒体地址由 Electron 隐藏窗口提取。
 - 规则搜索、商店、编辑、测试、有效性检测、批量更新和 Bangumi 元数据均属于 Kazumi 子系统。
+- Bangumi 同步：收藏类型（想看/在看/看过等）经 `kazumiBangumiCollectionSet` 走手动/自动收藏同步闭环；
+  观看进度自动上报（RM-5，开关 `bangumiProgressSync` 默认关）由渲染层「看完」事件触发，经
+  `kazumiBangumiEpisodeWatched`（分集批量打点，服务端重算条目完成度）与
+  `kazumiBangumiEpisodeCollections`（分集收藏查询，驱动看完全部自动「看过」联动）落地，
+  无 Token / 匹配不到条目或分集时静默跳过，失败提醒 5 分钟节流，不影响播放链路。
 
 详细说明与差距对照见 [KAZUMI.md](KAZUMI.md)。
 
@@ -84,6 +89,15 @@ FastAPI Python 后端
   自动重试都会放大风控概率（详见 [RUNTIME_ISSUES](RUNTIME_ISSUES.md) R28）。
 - 原生队列不逐集退出进程：观看统计/历史改为逐集 `ended` 记账，每集开独立观看链
   （链内去重是给断流重连重播同一集用的，整季共用一条链会把时长扣成约一集）。
+- **解析结果三级缓存**（RM-4，对标 Animeko 6.1.0「在线源查询缓存」）：`playerContent`
+  稳定结果的供数层级为 ① server.py 60s 内存缓存（会话内换线路往返）→ ②
+  `play_cache.py` 持久缓存（`<cache_dir>/play-cache/`，TTL 2h，跨重启生效，重开同一集
+  /重启应用跳过查源加速开播）→ ③ playlist-proxy 会话级缓存（2h TTL，进程内）。只缓存
+  `_is_ephemeral_play_result` 判定为「稳定」的结果（签名 CDN/网盘一次性地址/显式过期
+  标记不落盘，读侧复检防中毒回流）；`refresh=1` 同时淘汰内存层与持久层。失效兜底闭环：
+  渲染层 `_onExit` 对「起播即失败」（mpv end-file reason=error 且几乎零进度）自动以
+  refresh=1 重解析一次（经 `yuki:player-exit` 新增 `endReason` 字段），TTL 内源站侧
+  失效的缓存直链不再表现为用户可见的播放失败。
 - mpv 外观资源由主进程生成注入（`writeMpvAssets`）：快捷键提示 hints.lua、步长 input.conf、
   中文右键菜单 menu.conf（`mpv-menu-conf.js` 译制）；Anime4K 档位经 lua 写
   `user-data/yuki/a4k-request`，主进程消费后运行时替换 glsl-shaders 链、持久化设置并广播
@@ -134,6 +148,7 @@ FastAPI Python 后端
 | 数据 | 位置 |
 |---|---|
 | Python 缓存、Spider 与日志 | `~/.yuki/` |
+| 解析结果持久缓存（play_cache，TTL 2h） | `<cache>/play-cache/`（默认 `~/.yuki/cache/play-cache/`） |
 | Kazumi 规则 | `~/.yuki/kazumi/plugins.json` |
 | Kazumi Cookie | `~/.yuki/kazumi/cookies.json` |
 | Electron 设置 | `<userData>/settings.json` |

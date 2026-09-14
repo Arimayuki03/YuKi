@@ -13,7 +13,7 @@ YuKi/
 ├── build/                  electron-builder 额外资源
 │   ├── icon.png            安装包图标
 │   └── installer.nsh       NSIS 自定义安装页
-├── docs/                   项目文档（本文所在目录，共 9 份）
+├── docs/                   项目文档（本文所在目录，共 10 份）
 ├── python-backend/         FastAPI 独立后端（CatVod + Kazumi 双引擎）
 ├── scripts/                构建、下载、验收与诊断脚本
 ├── src/                    Electron 主进程与渲染进程
@@ -37,11 +37,12 @@ YuKi/
 
 ```
 src/
-├── main/                   主进程（28 文件）
+├── main/                   主进程（29 文件）
 │   ├── index.js            入口：窗口/托盘/Python 生命周期/mpv/aria2c/ffmpeg/解析窗口
 │   │                       （含 writeMpvAssets：hints.lua/input.conf/menu.conf 注入、Anime4K 档位消费）
 │   ├── async-session.js    AsyncSingleFlight / AsyncSerialQueue
 │   ├── dl-dedupe.js        同源同集下载去重登记（站点|剧名|集名 稳定 key）
+│   ├── dl-layout.js        下载番剧子目录布局（路径段清洗 + <dlDir>/<番剧名>/<集名> 合成）
 │   ├── hls-downloader.js   HLS 下载与广告过滤
 │   ├── mpv-menu-conf.js    mpv 右键菜单中文定义（menu.conf 译制）
 │   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键）
@@ -81,6 +82,7 @@ python-backend/
 ├── js_spider.py            JS Spider 桥
 ├── pan*.py                 网盘（quark/uc 等）与 Cookie
 ├── play_contract.py / proxy_contract.py  播放/代理契约
+├── play_cache.py           playerContent 解析结果持久缓存（RM-4：<cache>/play-cache/，TTL 2h）
 ├── requirements.txt        锁定依赖（26 包，pip-compile 生成）
 ├── requirements.in         顶层依赖声明
 ├── js-engine/              QuickJS 宿主
@@ -107,9 +109,10 @@ python-backend/
 │   └── runner.jar          构建产物（不入库）
 ├── spike/                  探针与 Spike 报告
 └── tests/ (45+ 文件)
-    ├── run_all.py          全量回归入口（40 阶段，串行）
+    ├── run_all.py          全量回归入口（42 阶段，串行）
     ├── smoke.py            冒烟测试
     ├── test_kazumi.py / test_phase3.py / test_config_snapshot.py 等
+    ├── test_play_cache.py  解析结果持久缓存单测（RM-4）
     ├── fixtures/           配置/媒体夹具（single.json 等确定性生成）
     └── offline_config_server.py  loopback 夹具服务器
 ```
@@ -120,6 +123,7 @@ python-backend/
 |---|---|
 | `download-binaries.js` | 下载 mpv/aria2c/ffmpeg/Anime4K/MiSans（`binaries.lock.json` 锁定） |
 | `build-python.js` | PyInstaller 打包后端 → `python-dist/` |
+| `after-pack.js` | electron-builder afterPack 钩子：剔除系统自带冗余 DLL（Electron d3dcompiler_47.dll 与后端捆绑 UCRT，杀软误报源；`YUKI_KEEP_SYSTEM_DLLS=1` 保留） |
 | `check-js.js` | JS 语法门禁 |
 | `binaries.lock.json` | 二进制完整性清单 |
 | `acceptance-*.js` (10 个) | 真实界面验收（CDP，独立 userData 副本） |
@@ -127,7 +131,7 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`，41 文件），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重、右键菜单定义、设置、记录、封面链、下载等。
+`tests/js/*.test.js`（`node --test`，48 文件），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）等。
 
 ## 构建产物（不入库）
 
@@ -140,4 +144,4 @@ python-backend/
 
 ## 文档
 
-`docs/` 顶层 9 份 + `README.md` 索引，详见 [文档索引](README.md)：`ARCHITECTURE`、`KAZUMI`（合并）、`RUNTIME_ISSUES`、`TEST_REPORT`、`DEVELOPMENT_HISTORY`、`THIRD_PARTY`、`TVBOX_FONGMI_PARITY_TASKS`、`WEBDAV_SYNC_MERGE_DESIGN`。
+`docs/` 顶层 10 份 + `README.md` 索引，详见 [文档索引](README.md)：`ARCHITECTURE`、`KAZUMI`（合并）、`RUNTIME_ISSUES`、`TEST_REPORT`、`DEVELOPMENT_HISTORY`、`THIRD_PARTY`、`TVBOX_FONGMI_PARITY_TASKS`、`WEBDAV_SYNC_MERGE_DESIGN`、`ROADMAP`。

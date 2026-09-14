@@ -259,6 +259,65 @@ test('断流等待期间用户发起新操作会取消重连', async () => {
     assert.equal(calls, 0);
 });
 
+test('起播即失败（endReason=error 零进度）自动 refresh 重解析一次（RM-4 失效兜底）', async () => {
+    const player = loadPlayer({});
+    player._curMeta = { title: '影片 D' };
+    player._rememberSession({ ok: true, sessionId: 904 });
+    player._session = 904;
+    player._playToken = 7;
+    player._lastUrl = 'https://x.example.com/ep1.m3u8';
+    player._seq = { site: 's', flag: 'f', title: '影片 D', episodes: [{ name: '第1集', url: 'u1' }, { name: '第2集', url: 'u2' }], index: 0 };
+    player._currentPlayback = { site: 's', flag: 'f', id: 'episode-id', title: '影片 D',
+        subtitle: '第1集', episodes: player._seq.episodes, epIndex: 0, kazumiSrc: '' };
+    const calls = [];
+    player.play = async (...args) => { calls.push(args); return { ok: true }; };
+    // pos=0/duration=0 + endReason=error：mpv 打开已失效的缓存直链立即退出
+    await player._onExit({ sessionId: 904, pos: 0, duration: 0, quit: false, endReason: 'error' });
+    assert.equal(calls.length, 1, '起播失败应自动重解析一次');
+    assert.equal(calls[0][2], 'episode-id', '必须重用 episode id 重新走 playerContent');
+    assert.equal(calls[0][8].reconnectAttempt, 1, '重解析必须携带 reconnectAttempt（refresh=1）');
+    assert.equal(player._reconnectAttempts, 1);
+    // 重试后的会话再次起播失败：不无限重试
+    player._rememberSession({ ok: true, sessionId: 905 });
+    player._session = 905;
+    await player._onExit({ sessionId: 905, pos: 0, duration: 0, quit: false, endReason: 'error' });
+    assert.equal(calls.length, 1, '重试仍失败不再重连');
+});
+
+test('起播失败重连只在 error 且零进度时触发：用户关闭/Kazumi 源/正常播完不触发', async () => {
+    // ① 用户主动关闭（quit）即使 endReason=error 也不重连
+    let player = loadPlayer({});
+    player._rememberSession({ ok: true, sessionId: 906 });
+    player._session = 906;
+    player._playToken = 8;
+    player._currentPlayback = { site: 's', flag: 'f', id: 'e', title: 't', subtitle: '', episodes: [], epIndex: 0, kazumiSrc: '' };
+    let calls = 0;
+    player.play = async () => { calls += 1; return { ok: true }; };
+    await player._onExit({ sessionId: 906, pos: 0, duration: 0, quit: true, endReason: 'error' });
+    assert.equal(calls, 0, '用户关闭不自动重连');
+
+    // ② Kazumi 源无 _currentPlayback（解析链不同）不触发
+    player = loadPlayer({});
+    player._rememberSession({ ok: true, sessionId: 907 });
+    player._session = 907;
+    player._playToken = 9;
+    let calls2 = 0;
+    player.play = async () => { calls2 += 1; return { ok: true }; };
+    await player._onExit({ sessionId: 907, pos: 0, duration: 0, quit: false, endReason: 'error' });
+    assert.equal(calls2, 0, '无解析上下文不触发');
+
+    // ③ endReason=eof（播完/正常结束）不触发起播重连
+    player = loadPlayer({});
+    player._rememberSession({ ok: true, sessionId: 908 });
+    player._session = 908;
+    player._playToken = 11;
+    player._currentPlayback = { site: 's', flag: 'f', id: 'e', title: 't', subtitle: '', episodes: [], epIndex: 0, kazumiSrc: '' };
+    let calls3 = 0;
+    player.play = async () => { calls3 += 1; return { ok: true }; };
+    await player._onExit({ sessionId: 908, pos: 0, duration: 0, quit: false, endReason: 'eof' });
+    assert.equal(calls3, 0, 'eof 不按起播失败处理');
+});
+
 test('_awaitTimeout：解析 IPC 挂起时超时返回 null（loading 不会卡死）', async () => {
     const player = loadPlayer({});
     const never = new Promise(() => { /* 永不 resolve，模拟 IPC 挂起 */ });
@@ -428,4 +487,68 @@ test('原生队列无 vodId（Kazumi 源）不触碰收藏进度', async () => {
         playlistPos: 0, pos: 600, duration: 900, itemWallSec: 600, speed: 1 });
     await player._watchWrite;
     assert.equal(favCalled, 0);
+});
+
+// ---- RM-5：看完一集 → Bangumi 观看进度自动上报触发点 ----
+
+test('逐集会话看完退出 → 上报本集（含末集：_seq 为 null 也触发）', async () => {
+    const reports = [];
+    const player = loadPlayer({}, {
+        Kazumi: { reportWatchProgress: (meta, epIndex) => reports.push({ meta, epIndex }) },
+    });
+    player._curMeta = { site: 'site-a', vodId: 'vod-a', title: '测试剧', subtitle: '第12集', totalEps: 12 };
+    player._rememberSession({ ok: true, sessionId: 1201 });
+    player._session = 1201;
+    player._playToken = 1;
+    player._seq = null; // 末集/单集播完：连播链为空
+    // 剩余 <8s 判「看完」
+    await player._onExit({ sessionId: 1201, pos: 1180, duration: 1185, quit: false });
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].meta.title, '测试剧');
+    assert.equal(reports[0].meta.subtitle, '第12集');
+    assert.equal(reports[0].meta.vodId, 'vod-a');
+});
+
+test('提前退出（未看完）不上报', async () => {
+    const reports = [];
+    const player = loadPlayer({}, {
+        Kazumi: { reportWatchProgress: (meta, epIndex) => reports.push({ meta, epIndex }) },
+    });
+    player._curMeta = { site: 'site-a', vodId: 'vod-a', title: '测试剧', subtitle: '第2集' };
+    player._rememberSession({ ok: true, sessionId: 1202 });
+    player._session = 1202;
+    player._playToken = 2;
+    await player._onExit({ sessionId: 1202, pos: 60, duration: 120, quit: false });
+    assert.equal(reports.length, 0);
+});
+
+test('原生队列：逐集 ended 上报当集名，最终退出不重复上报', async () => {
+    const reports = [];
+    const player = loadPlayer({}, {
+        Kazumi: { reportWatchProgress: (meta, epIndex) => reports.push({ meta, epIndex }) },
+        Records: { recordPlay: async () => {} },
+        Favorites: { updateProgress: async () => {} },
+    });
+    rememberNative(player, 1203, ['第01集', '第02集']);
+    player._onEnded({ sessionId: 1203, nativeQueue: true, queueLen: 2,
+        playlistPos: 0, pos: 700, duration: 1180, itemWallSec: 700, speed: 1 });
+    player._onEnded({ sessionId: 1203, nativeQueue: true, queueLen: 2,
+        playlistPos: 1, pos: 700, duration: 1180, itemWallSec: 700, speed: 1 });
+    await player._watchWrite;
+    assert.equal(reports.length, 2);
+    assert.equal(reports[0].meta.subtitle, '第01集');
+    assert.equal(reports[1].meta.subtitle, '第02集');
+    // mpv 进程最终退出：已播完的集不重复上报
+    await player._onExit({ sessionId: 1203, nativeQueue: true, playlistPos: 1, pos: 700 });
+    assert.equal(reports.length, 2);
+});
+
+test('Kazumi 模块缺失/无 reportWatchProgress 时静默不抛错', async () => {
+    const player = loadPlayer({});
+    player._curMeta = { site: 'site-a', vodId: 'vod-a', title: '测试剧', subtitle: '第1集' };
+    player._rememberSession({ ok: true, sessionId: 1204 });
+    player._session = 1204;
+    player._playToken = 3;
+    // 未注入 Kazumi 全局（typeof 检查分支）
+    await player._onExit({ sessionId: 1204, pos: 1180, duration: 1185, quit: false });
 });

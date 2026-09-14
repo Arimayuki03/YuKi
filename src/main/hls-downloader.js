@@ -19,6 +19,7 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { findFfmpeg } = require('./ffmpeg');
 const { proxyEnv, proxyFetch } = require('./system-proxy');
+const { relUnderRoot } = require('./dl-layout');
 
 let _seq = 0;
 
@@ -129,6 +130,7 @@ class HlsDownloader extends EventEmitter {
      *  已结束（complete/error）任务的成品文件同样随迁。 */
     migrateDir(newDir) {
         if (!newDir) return 0;
+        const oldDir = this.dir; // 番剧子目录相对路径以旧引擎目录为基准，须先于 this.dir 覆盖捕获
         this.dir = newDir;
         try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { /* ignore */ }
         const move = (src, dest) => {
@@ -149,15 +151,22 @@ class HlsDownloader extends EventEmitter {
                 } catch (e2) { return false; }
             }
         };
+        /** 番剧子目录布局（RM-1）：产物相对旧引擎目录的路径原样带到新目录（保持两级
+         *  结构）；相对路径异常（旧目录为空/产物在旧目录外）回退按 basename 平铺。 */
+        const destFor = (oldDest) => {
+            const rel = relUnderRoot(oldDir, oldDest);
+            return rel ? path.join(newDir, rel) : path.join(newDir, path.basename(oldDest));
+        };
         let moved = 0;
         for (const t of this._tasks.values()) {
-            const name = path.basename(t._dest);
-            const newDest = path.join(newDir, name);
+            const newDest = destFor(t._dest);
+            try { fs.mkdirSync(path.dirname(newDest), { recursive: true }); } catch (e) { /* move 的 copy 分支同样依赖父目录存在 */ }
             const oldDest = t._dest;
             const finished = ['complete', 'error', 'removed'].includes(t.status);
             if (finished) {
                 if (move(oldDest, newDest)) moved++;
                 t._dest = newDest;
+                t.dir = path.dirname(newDest); // RM-1：任务级目录随迁（含平铺回退时落新根目录）
                 t.files = [newDest];
                 continue;
             }
@@ -174,6 +183,7 @@ class HlsDownloader extends EventEmitter {
             if (move(t._segsDir, newSegs)) moved++;
             t._dest = newDest;
             t._segsDir = newSegs;
+            t.dir = path.dirname(newDest);
             t.files = [newDest];
             t._adTemp = null;
             t._input = null;
@@ -269,25 +279,27 @@ class HlsDownloader extends EventEmitter {
      *  concurrency > 1 时走分片并发模式（解析 m3u8 → 并行拉取分片 → ffmpeg 合并）；
      *  concurrency <= 1 或加密流/解析失败时回退 ffmpeg 顺序拉流模式。
      *  adFilter=true 时先过滤广告分段（CUE-OUT/CUE-IN + 广告路径特征）。
+     *  dir 为任务级输出目录（RM-1 番剧子目录），缺省沿用引擎全局目录（向后兼容）。
      *  M-2：url 仅接受 http(s)，非 http(s)（file:// 等）直接拒绝。 */
-    add({ url, out, header, adFilter, concurrency }) {
+    add({ url, out, header, adFilter, concurrency, dir }) {
         if (!/^https?:\/\//i.test(String(url || ''))) throw new Error('bad url protocol');
         const bin = findFfmpeg();
         if (!bin) throw new Error('ffmpeg-missing');
         const gid = `hls-${++_seq}-${Date.now().toString(36)}`;
-        fs.mkdirSync(this.dir, { recursive: true });
+        const baseDir = dir || this.dir;
+        fs.mkdirSync(baseDir, { recursive: true });
         // M-10：文件名须为纯文件名——sanitize 已去分隔符，再挡 '.'/'..'/空串等
         // 会 path.join 逃逸或指向目录本身的取值，非法一律回落默认名
         let name = (out || '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 150);
         if (!name || path.basename(name) !== name || name === '.' || name === '..') name = 'video.mp4';
         // 防御：无扩展名时补 .mp4，避免 ffmpeg 因无法推断格式而合成失败（边下边播等调用方漏传扩展名）
         if (!path.extname(name)) name += '.mp4';
-        const dest = path.join(this.dir, name);
+        const dest = path.join(baseDir, name);
         const conc = Math.max(1, Math.min(32, parseInt(concurrency, 10) || 1));
         // 并发任务数已满则排队（waiting），任一活跃任务终态后由 _pump 补位启动
         const queued = this._activeCount() >= this.maxActive;
         const task = {
-            gid, kind: 'hls', name, url, header: header || null,
+            gid, kind: 'hls', name, url, header: header || null, dir: baseDir,
             status: queued ? 'waiting' : 'active', percent: 0, done: 0, total: 0, speed: 0,
             errorMessage: '', files: [dest], _dest: dest, _bin: bin, _proc: null, _retried: false, _transcodeRetried: false,
             adFilter: !!adFilter, _adTemp: null, _input: null,

@@ -66,6 +66,8 @@ test('2.4/2.8/2.9/2.10/2.11/3.1/3.2/4.1: 新增设置控件与镜像开关存在
         'webdav_save',         // 3.2 保存配置
         'set_bangumi_mirror',  // 4.1 Bangumi 镜像
         'set_git_mirror',      // 4.1 规则仓库镜像
+        'set_bangumi_mirror_root', // 镜像根域名手动替换
+        'set_bangumi_mirror_root_save',
         'search-tabs',         // 2.3 搜索页签
         'image-search-panel',  // 2.3 以图搜番
         'popular-tags',        // 2.1 推荐标签

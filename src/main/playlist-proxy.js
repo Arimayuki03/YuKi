@@ -33,6 +33,9 @@ const UPSTREAM_TIMEOUT_MS = 15000;
 // 却永不发终止块）时，idle 超时永远不触发——必须有与活动无关的总死线兜底。
 const MANIFEST_COLLECT_DEADLINE_MS = 30 * 1000;
 const MANIFEST_MAX_BYTES = 6 * 1024 * 1024;
+// 清单短时缓存 TTL：读取命中判定与写入时的惰性淘汰共用一个阈值，避免两侧漂移
+// （淘汰阈值大于命中阈值时，过期条目会白留在 Map 里占内存）。
+const MANIFEST_CACHE_TTL_MS = 2000;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_SESSIONS = 8;
 
@@ -543,12 +546,12 @@ class PlaylistProxy extends EventEmitter {
     async _pipeRemote(sess, index, upstreamUrl, req, res) {
         // 清单短时缓存：PotPlayer 拖动时会反复拉取同一媒体清单计算时长/分片映射，
         // 每次重取上游（367 分片、38 个 DISCONTINUITY 的大清单）引入 300-800ms 往返，
-        // 拖动卡顿主因。缓存 8 秒内复用重写结果，拖动即时响应，音画重同步等待缩短。
+        // 拖动卡顿主因。MANIFEST_CACHE_TTL_MS 内复用重写结果，拖动即时响应，音画重同步等待缩短。
         const cacheKey = `${sess.token}:${index}:${upstreamUrl}`;
         if (!sess._manifestCache) sess._manifestCache = new Map();
         const cached = sess._manifestCache.get(cacheKey);
         const now = Date.now();
-        if (cached && now - cached.ts < 2000 && !String(req.headers.range || '')) {
+        if (cached && now - cached.ts < MANIFEST_CACHE_TTL_MS && !String(req.headers.range || '')) {
             try {
                 res.writeHead(200, {
                     'Content-Type': 'application/vnd.apple.mpegurl',
@@ -683,7 +686,10 @@ class PlaylistProxy extends EventEmitter {
         // 估算、暂停后停更）；定长完整清单让它一次性确认 VOD 总时长。
         const out = Buffer.from(body, 'utf8');
         try {
-            // 写入缓存供拖动复用
+            // 写入缓存供拖动复用；顺手淘汰过期项（长会话键随剧集切换线性增长）
+            for (const [k, v] of sess._manifestCache) {
+                if (Date.now() - v.ts >= MANIFEST_CACHE_TTL_MS) sess._manifestCache.delete(k);
+            }
             sess._manifestCache.set(cacheKey, { buf: out, ts: Date.now() });
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',

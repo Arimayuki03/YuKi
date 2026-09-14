@@ -5,6 +5,7 @@
 """
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -15,7 +16,25 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, 'js-engine'))
 
-PORT = 8322
+
+def _pick_port(preferred):
+    """优先用固定端口；被占用或被 Windows 保留端口区间拒绝（WinError 10013）时退回系统空闲端口。"""
+    for port in (preferred, 0):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(('127.0.0.1', port))
+            return s.getsockname()[1]
+        except OSError:
+            if port == 0:
+                raise
+        finally:
+            s.close()
+
+
+# 父进程已选定端口时直接复用：multiprocessing spawn 会把本模块顶层在 worker
+# 子进程重跑一遍（__mp_main__），若重新 _pick_port 会得到与宿主不同的端口，
+# worker 里 spider 的 HTTP 回环（setCache/getCache/代理）就会打到死端口。
+PORT = int(os.environ.get('YUKI_PORT') or 0) or _pick_port(8322)
 TOKEN = 'p3-token'
 os.environ['YUKI_PORT'] = str(PORT)
 os.environ['YUKI_TOKEN'] = TOKEN

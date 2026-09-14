@@ -355,21 +355,42 @@ function bangumiResizeUrl(url, variant) {
     return seg ? u.replace(/(\/pic\/cover\/)[lcmgs](\/)/i, `$1${seg}$2`) : u;
 }
 
-/** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像（lain.bangumi.pro）；
- *  非官方域名原样返回（第三图床不换）。 */
-function bangumiMirrorUrl(url) {
-    return String(url || '').replace(/^https?:\/\/lain\.(bgm|bangumi)\.tv\//i, 'https://lain.bangumi.pro/');
+/** Bangumi 全域名反代镜像根域名（默认 bangumi.vip；*.bgm.tv → *.{根域名}，
+ *  即 api.bgm.tv → api.bangumi.vip，lain/next/fast/doujin 同理）。
+ *  设置页可手动替换（镜像域名失效时救急）：kazumi.js 启动回填/保存时经
+ *  setBangumiMirrorRoot 更新，本文件各换域函数即时生效。 */
+let bangumiMirrorRoot = 'bangumi.vip';
+
+/** 归一化并应用镜像根域名：剥协议/路径/端口/尾点，合法主机名才生效；
+ *  返回归一化值，非法/空入参返回 ''（保持原值不变）。 */
+function setBangumiMirrorRoot(root) {
+    let s = String(root || '').trim().toLowerCase();
+    if (!s) return '';
+    s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').split('/')[0].split(':')[0].replace(/\.+$/, '');
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(s)) return '';
+    bangumiMirrorRoot = s;
+    return s;
 }
 
-/** Bangumi 官方/镜像封面域名（lain.bgm.tv / lain.bangumi.tv / lain.bangumi.pro）。
+/** 把 Bangumi 官方封面域名（lain.bgm.tv / lain.bangumi.tv）换成全域名反代镜像
+ *  （lain.{镜像根域名}，默认 lain.bangumi.vip）；非官方域名原样返回（第三图床不换）。 */
+function bangumiMirrorUrl(url) {
+    return String(url || '').replace(/^https?:\/\/lain\.(bgm|bangumi)\.tv\//i, `https://lain.${bangumiMirrorRoot}/`);
+}
+
+/** Bangumi 官方/镜像封面域名：官方 lain.bgm.tv / lain.bangumi.tv、历史镜像
+ *  lain.bangumi.pro、当前默认 lain.bangumi.vip 及自定义 lain.{镜像根域名}。
  *  历史记录持久化的 pic 可能是任一域名，渲染与补拉重渲染共用同一判定，
  *  否则镜像域封面会漏走 bangumiCoverImg 的代理/镜像兜底链。 */
 function isBangumiCoverUrl(pic) {
-    return /(^|\/)lain\.(bgm\.tv|bangumi\.tv|bangumi\.pro)\//i.test(String(pic || ''));
+    const s = String(pic || '');
+    if (/(^|\/)lain\.(bgm\.tv|bangumi\.tv|bangumi\.pro|bangumi\.vip)\//i.test(s)) return true;
+    const root = bangumiMirrorRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|\\/)lain\\.${root}\\/`, 'i').test(s);
 }
 
 /** 生成 Bangumi 封面 img：优先经本地后端代理（/kazumi/cover，host 白名单 + 镜像重试），
- *  后端不可达/代理失败再退直连官方 lain.bgm.tv → 直连镜像 lain.bangumi.pro → 占位图。
+ *  后端不可达/代理失败再退直连官方 lain.bgm.tv → 直连镜像 lain.{镜像根域名} → 占位图。
  *  （渲染层 <img> 直连 lain.bgm.tv 被墙/慢时历史页 kazumi 封面整页拉不出，T73/T76。） */
 function bangumiCoverImg(pic, eager) {
     const first = normalizePic(bangumiResizeUrl(pic, 'card') || pic);
@@ -444,17 +465,19 @@ function bangumiCard(item) {
  * Bangumi 网络引导空状态（推荐页/时间表共用）：
  * 数据为空时引导用户到「设置 → 系统 → 网络」开启 Bangumi 镜像，
  * 并附完整隐私说明（第三方镜像风险与官方接口回退方式）。
+ * 必须返回单个根节点：.bangumi-net-guide 靠 grid-column 占满网格一行
+ * 渲染成一张空态卡，各段字号/颜色统一由该类提供（此前三段兄弟节点
+ * 会各落一个 172px 网格列且 12/13px 混用）。
  */
 function bangumiNetGuide() {
-    return '<div class="tip-line">暂无内容，可能是当前网络无法访问 Bangumi（api.bgm.tv）</div>'
-        + '<div style="text-align:center;padding:4px 16px 0;line-height:1.8;font-size:13px;">'
-        + '请到「设置 → 系统 → 网络」打开 <strong>Bangumi 镜像</strong> 开关后重试</div>'
-        + '<div style="text-align:left;display:inline-block;max-width:640px;padding:12px 24px 16px;line-height:1.7;'
-        + 'font-size:12px;color:var(--md-on-surface-variant);white-space:normal;">'
-        + '如没有可以访问国外网络的环境，请在「设置 → 系统 → 网络」打开Bangumi镜像开关，'
-        + '此镜像为第三方镜像网站，非本作者提供，开启Bangumi同步功能理论上该镜像站可获取你的Bangumi账号及密码，'
-        + '如担心隐私泄露，请勿使用Bangumi同步功能，或在可以访问国外网络的环境下关闭Bangumi镜像开关，'
-        + '此时Bangumi同步功能走官方接口</div>';
+    return '<div class="bangumi-net-guide">'
+        + '<div>暂无内容，可能是当前网络无法访问 Bangumi（api.bgm.tv）</div>'
+        + '<div>请到「设置 → 系统 → 网络」打开 <strong>Bangumi 镜像</strong> 开关后重试</div>'
+        + '<div class="bangumi-net-guide-note">如没有可以访问国外网络的环境，请在「设置 → 系统 → 网络」打开 Bangumi 镜像开关，'
+        + '此镜像为第三方镜像网站，非本作者提供，开启 Bangumi 同步功能理论上该镜像站可获取你的 Bangumi 账号及密码，'
+        + '如担心隐私泄露，请勿使用 Bangumi 同步功能，或在可以访问国外网络的环境下关闭 Bangumi 镜像开关，'
+        + '此时 Bangumi 同步功能走官方接口</div>'
+        + '</div>';
 }
 
 /** 去除富文本简介中的 HTML 标签（源数据常带 <p>/<br> 等），保留段落换行与文字。 */

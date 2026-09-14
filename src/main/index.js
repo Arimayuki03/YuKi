@@ -54,6 +54,7 @@ const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
 const { DlDedupe, buildKey: buildEpisodeKey } = require('./dl-dedupe');
+const { resolveSeriesTaskLayout, relUnderRoot } = require('./dl-layout');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb, urlThumb: ffmpegUrlThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
@@ -1256,15 +1257,20 @@ app.whenReady().then(() => {
                         // M-9：命中扩展名才补「.ext」，未命中（如直播/无扩展直链）不加悬挂点号
                         out = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '视频').slice(0, 150) + (ext ? '.' + ext : '');
                     }
+                    // RM-1 番剧子目录 + 集名文件：此前所有集共用「剧名.ext」，同剧多集互相覆盖；
+                    // 无集名（单集影片）回退旧文件名，但同样入剧名子目录
+                    const simulLayout = seriesLayoutFor({ vodName: meta.title, epName: meta.subtitle, out });
+                    if (simulLayout) out = simulLayout.file;
                     if (dup) {
                         // 命中去重：不建任务，落入下方统一出口返回播放结果
                     } else if (isM3u8) {
                         syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
-                        const hlsGid = hls.add({ url: ep.url, out, header: meta.header,
+                        const hlsGid = hls.add({ url: ep.url, out, dir: simulLayout ? simulLayout.dir : undefined, header: meta.header,
                             concurrency: parseInt(settings.get('dlSplitConcurrency'), 10) || 5 });
                         if (simulKey) {
                             dlDedupe.bind(hlsGid, simulKey, {
-                                gid: hlsGid, kind: 'hls', name: out, files: [], size: 0, done: 0,
+                                gid: hlsGid, kind: 'hls', name: out, dir: simulLayout ? simulLayout.dir : undefined,
+                                files: [], size: 0, done: 0,
                                 percent: 0, status: 'active', uri: ep.url,
                                 header: (meta.header && typeof meta.header === 'object') ? meta.header : undefined,
                                 completedAt: Date.now(),
@@ -1278,6 +1284,7 @@ app.whenReady().then(() => {
                         await raceWithTimeout(
                             startDlEngine(dl.dir || settings.get('dlDir') || app.getPath('downloads')), 8000);
                         const opts = { out };
+                        if (simulLayout) opts.dir = simulLayout.dir;
                         if (meta.header && typeof meta.header === 'object') {
                             const pairs = Object.entries(meta.header)
                                 .filter(([, v]) => v != null && v !== '')
@@ -1287,7 +1294,8 @@ app.whenReady().then(() => {
                         const ariaGid = await raceWithTimeout(dl.addUri(ep.url, opts), 8000);
                         if (simulKey && ariaGid) {
                             dlDedupe.bind(ariaGid, simulKey, {
-                                gid: ariaGid, kind: 'aria2', name: out, files: [], size: 0, done: 0,
+                                gid: ariaGid, kind: 'aria2', name: out, dir: simulLayout ? simulLayout.dir : undefined,
+                                files: [], size: 0, done: 0,
                                 percent: 0, status: 'waiting', uri: ep.url,
                                 header: (opts.header && Array.isArray(opts.header))
                                     ? Object.fromEntries(opts.header.map((h) => { const i = h.indexOf(': '); return [h.slice(0, i), h.slice(i + 2)]; }))
@@ -1635,11 +1643,11 @@ app.whenReady().then(() => {
     // 敏感路径键（播放器/缓存/下载目录，可指向本地任意位置）不在此列，只能经
     // yuki:pick-player / yuki:pick-cache-dir / yuki:dl pickDir 等主进程对话框设置，走 settings-set 一律忽略。
     const SETTINGS_SET_ALLOWED = new Set([
-        'anime4k', 'anime4kMode', 'animEnabled', 'autoNext',
+        'anime4k', 'anime4kMode', 'animEnabled', 'autoNext', 'autoUpdate',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
-        'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
+        'bangumiMirrorRoot', 'bangumiProgressSync', 'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
-        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'enableBangumiProxy', 'enableGitProxy',
+        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
         'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
         // 各列表页每页条数（panels.js 动态 key 写入）
@@ -1647,7 +1655,7 @@ app.whenReady().then(() => {
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
         'probeSourceUrl', 'probeFailStreak', 'probedAt', 'probedSites', 'probeFp', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
-        'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
+        'updateNotify', 'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
         // WebDAV 同步全量键。此前 EnableSettings/EnableStats/AutoEnable/AutoMinutes
         // 漏在白名单外，四个开关的写入被静默忽略（重启后回退），此处一并补齐。
         // RestoreBackup 为恢复前本机备份快照，需可写以便误恢复后找回数据。
@@ -2155,6 +2163,38 @@ app.whenReady().then(() => {
         try { bridge.stop(); bridge.start(); } catch (e) { /* 重启失败下次自愈 */ }
         return { ok: true };
     });
+    // ---- RM-1 番剧子目录布局（设置 dlSeriesFolder，默认开） ----
+
+    /** 当前下载根目录：引擎运行目录优先，未启动用设置/系统下载目录兜底。 */
+    function dlRootDir() {
+        return dl.dir || settings.get('dlDir') || app.getPath('downloads');
+    }
+
+    /** 合成番剧子目录布局（<dlDir>/<剧名>/<集名>.<ext>）；信息不全返回 null
+     *  （调用方回退平铺旧行为，如下载页手输 URL 无剧名上下文）。 */
+    function seriesLayoutFor({ vodName, epName, out }) {
+        return resolveSeriesTaskLayout({
+            dlRoot: dlRootDir(),
+            enabled: settings.get('dlSeriesFolder') !== false,
+            vodName, epName, out,
+        });
+    }
+
+    /** dir 是否仍是当前下载根目录下的一级子目录（RM-1 布局任务的合法任务目录）。
+     *  换目录后失效/多级（BT 自建目录）/越界一律返回 ''，恢复入队回退平铺。 */
+    function validTaskDir(d) {
+        if (!d) return '';
+        const rel = relUnderRoot(dlRootDir(), d);
+        if (!rel || rel.includes(path.sep) || rel.includes('/')) return '';
+        return path.resolve(String(d));
+    }
+
+    /** 从任务产物绝对路径推导番剧子目录（仅一级）；产物未报告/平铺任务返回 ''。 */
+    function taskDirFromFiles(files) {
+        const f = (files || []).find((x) => x && x !== '.');
+        return f ? validTaskDir(path.dirname(String(f))) : '';
+    }
+
     /** 合并 aria2 实时任务 + HLS 任务 + 持久化记录（T46）：
      *  持久化记录仅补「本会话不存在的 gid」（应用重启后 aria2c 丢失 stopped 记录，
      *  更换下载目录重启引擎同理），避免与实时任务重复。
@@ -2200,6 +2240,9 @@ app.whenReady().then(() => {
                 gid: t.gid, kind: t.kind || 'aria2', name: t.name,
                 files: t.files || [], size: t.total || 0, done: t.done || 0,
                 percent: t.percent || 0, status: t.status, uri: t.uri || '',
+                // RM-1：番剧任务子目录随记录持久化（从产物路径推导），重启后恢复入队
+                // 需要 dir+out 才能落回同一子目录续传；推导失败保留旧值
+                dir: taskDirFromFiles(t.files) || (existing && existing.dir) || undefined,
                 header: t.kind === 'hls' ? (t.header || undefined) : undefined, // L-8:HLS Referer/UA 随记录持久化
                 epKey: dlDedupe.stamp(t.gid, existing), // 去重 key 随记录保留（dlRecords.add 按 gid 整条替换）
                 completedAt: now,
@@ -2296,12 +2339,18 @@ app.whenReady().then(() => {
         for (const t of inProgress) {
             try {
                 const files = (t.files || []).filter((f) => f && f !== '.');
+                // RM-1：产物相对旧根目录的路径原样带到新根目录（番剧两级结构与 BT 自建
+                // 目录均不摊平）；越界/异常路径回退按 basename 平铺
+                let taskDir = '';
                 for (const f of files) {
-                    const base = path.basename(f);
-                    if (movePathSync(f, path.join(newDir, base))) result.moved++;
-                    movePathSync(f + '.aria2', path.join(newDir, base + '.aria2'));
+                    const rel = relUnderRoot(dl.dir, f); // 引擎尚未重启，dl.dir 仍是旧根目录
+                    const dest = rel ? path.join(newDir, rel) : path.join(newDir, path.basename(f));
+                    try { fs.mkdirSync(path.dirname(dest), { recursive: true }); } catch (e) { /* ignore */ }
+                    if (movePathSync(f, dest)) result.moved++;
+                    movePathSync(f + '.aria2', dest + '.aria2');
+                    if (rel && !taskDir) taskDir = path.dirname(dest);
                 }
-                result.requeue.push({ gid: t.gid, uri: t.uri, name: t.name, header: t.header || null });
+                result.requeue.push({ gid: t.gid, uri: t.uri, name: t.name, header: t.header || null, dir: taskDir || null });
             } catch (e) { /* 单任务失败不影响其余 */ }
         }
         try { hls.migrateDir(newDir); } catch (e) { /* HLS 迁移失败不阻断引擎重启 */ }
@@ -2322,6 +2371,12 @@ app.whenReady().then(() => {
                 // 磁链不带 out（会干扰多文件种子）；HTTP 带原文件名恢复
                 if (!isMagnet && it.name && /\.[a-z0-9]{1,5}$/i.test(path.basename(it.name))) {
                     opts.out = path.basename(it.name);
+                }
+                // RM-1：番剧任务目录随迁后仍在新根目录下一级则带 dir 续传（.aria2 控制文件
+                // 已随迁到同一路径）；磁链/BT 的 dir 语义是下载根（种子自建内部结构），不能带
+                if (!isMagnet && it.dir) {
+                    const d = validTaskDir(it.dir);
+                    if (d) opts.dir = d;
                 }
                 const newGid = await dl.addUri(it.uri, opts);
                 if (it.gid) {
@@ -2434,7 +2489,16 @@ app.whenReady().then(() => {
                         if (!/\.\w{1,5}$/.test(name)) name += ext || '.mp4';
                         out = name;
                     }
-                    if (out) opts.out = out.slice(0, 150);
+                    // RM-1 番剧子目录：<dlDir>/<剧名>/<集名>.<ext>（opts.dir 为任务级选项，
+                    // aria2 覆盖全局 --dir）。无剧名上下文（下载页手输 URL）回退平铺。
+                    const layout = seriesLayoutFor({ vodName: payload.epVodName, epName: payload.epName, out });
+                    if (layout) {
+                        try { fs.mkdirSync(layout.dir, { recursive: true }); } catch (e) { /* aria2 侧也会创建 */ }
+                        opts.dir = layout.dir;
+                        opts.out = layout.file;
+                    } else if (out) {
+                        opts.out = out.slice(0, 150);
+                    }
                     if (payload.header && typeof payload.header === 'object') {
                         const pairs = Object.entries(payload.header)
                             .filter(([, v]) => v != null && v !== '')
@@ -2446,7 +2510,8 @@ app.whenReady().then(() => {
                     // （后续轮询按真实进度覆盖同 gid 记录，epKey 经 stamp 保留）
                     if (epKey) {
                         dlDedupe.bind(gid, epKey, {
-                            gid, kind: 'aria2', name: (out ? String(out).slice(0, 150) : '') || uri,
+                            gid, kind: 'aria2', name: String(opts.out || '') || uri,
+                            dir: layout ? layout.dir : undefined,
                             files: [], size: 0, done: 0, percent: 0,
                             status: 'waiting', uri,
                             header: (opts.header && Array.isArray(opts.header))
@@ -2476,10 +2541,13 @@ app.whenReady().then(() => {
                         }
                     }
                     syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
+                    // RM-1 番剧子目录：ffmpeg 产物与分片临时目录一并落 <dlDir>/<剧名>/；
+                    // 无剧名上下文回退引擎全局目录
+                    const layout = seriesLayoutFor({ vodName: payload.epVodName, epName: payload.epName, out: payload.out });
                     let gid;
                     try {
                         gid = hls.add({
-                            url: uri, out: payload.out, header: payload.header,
+                            url: uri, out: layout ? layout.file : payload.out, dir: layout ? layout.dir : undefined, header: payload.header,
                             // 广告过滤开关（设置项 hlsAdFilter，默认关；开启时过滤 CUE-OUT/CUE-IN 广告分段）
                             adFilter: payload.adFilter !== undefined ? !!payload.adFilter : settings.get('hlsAdFilter'),
                             // 分片并发数（设置项 dlSplitConcurrency，默认 5；>1 时走分片并发模式）
@@ -2492,7 +2560,8 @@ app.whenReady().then(() => {
                     }
                     if (epKey) {
                         dlDedupe.bind(gid, epKey, {
-                            gid, kind: 'hls', name: String(payload.out || '') || uri,
+                            gid, kind: 'hls', name: (layout ? layout.file : String(payload.out || '')) || uri,
+                            dir: layout ? layout.dir : undefined,
                             files: [], size: 0, done: 0, percent: 0,
                             status: 'active', uri,
                             header: (payload.header && typeof payload.header === 'object') ? payload.header : undefined,
@@ -2583,6 +2652,7 @@ app.whenReady().then(() => {
                                 syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                                 const hlsGid = hls.add({
                                     url: rec.uri, out: rec.name,
+                                    dir: validTaskDir(rec.dir) || undefined, // RM-1：落回原番剧子目录续传
                                     header: rec.header || undefined, // L-8:恢复原任务的 Referer/UA，避免重启后 403
                                     adFilter: settings.get('hlsAdFilter'),
                                     concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
@@ -2593,6 +2663,11 @@ app.whenReady().then(() => {
                                 const isMagnet = /^magnet:/i.test(rec.uri);
                                 const opts = {};
                                 if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
+                                // RM-1：番剧任务落回原子目录续传（磁链/BT 的 dir 是下载根，不能带）
+                                if (!isMagnet) {
+                                    const d = validTaskDir(rec.dir);
+                                    if (d) opts.dir = d;
+                                }
                                 const newGid = await dl.addUri(rec.uri, opts);
                                 dlDedupe.carry(rec.gid, newGid);
                             }
@@ -2620,6 +2695,7 @@ app.whenReady().then(() => {
                             try {
                                 const gid = hls.add({
                                     url: rec.uri, out: rec.name,
+                                    dir: validTaskDir(rec.dir) || undefined, // RM-1：落回原番剧子目录续传
                                     header: rec.header || undefined, // L-8:恢复原任务的 Referer/UA，避免重启后 403
                                     adFilter: settings.get('hlsAdFilter'),
                                     concurrency: Math.max(1, Math.min(32, parseInt(settings.get('dlSplitConcurrency'), 10) || 5)),
@@ -2647,6 +2723,11 @@ app.whenReady().then(() => {
                             const isMagnet = /^magnet:/i.test(rec.uri);
                             const opts = {};
                             if (!isMagnet && rec.name && /\.\w{1,5}$/.test(rec.name)) opts.out = rec.name;
+                            // RM-1：番剧任务落回原子目录续传（磁链/BT 的 dir 是下载根，不能带）
+                            if (!isMagnet) {
+                                const d = validTaskDir(rec.dir);
+                                if (d) opts.dir = d;
+                            }
                             const gid = await dl.addUri(rec.uri, opts);
                             dlDedupe.carry(payload.gid, gid);
                             dlRecords.remove(payload.gid); // 移除旧 gid 记录，新任务会重新持久化
@@ -2729,6 +2810,20 @@ app.whenReady().then(() => {
                     if (deleteFiles) rmFilesBestEffort([...delFiles, ...ctrlFiles]);
                     else rmFilesBestEffort([...ctrlFiles]);
                     for (const d of hlsSegsDirs) rmFilesBestEffort([d], true);
+                    // RM-1：番剧子目录可能已空——延迟到文件删除重试落定后清理（rmdir 仅删
+                    // 空目录，仍有残余文件/目录时静默失败，不影响用户数据）
+                    if (deleteFiles) {
+                        const seriesDirs = new Set();
+                        for (const f of [...delFiles, ...ctrlFiles, ...hlsSegsDirs]) {
+                            const d = validTaskDir(path.dirname(String(f)));
+                            if (d) seriesDirs.add(d);
+                        }
+                        if (seriesDirs.size) {
+                            setTimeout(() => {
+                                for (const d of seriesDirs) { try { fs.rmdirSync(d); } catch (e) { /* 非空/已删 */ } }
+                            }, 5500);
+                        }
+                    }
                     // 删除后立即推送刷新列表 + 重启轮询（可能有剩余活跃任务）
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
                     startDlPoll();
@@ -2921,7 +3016,7 @@ app.whenReady().then(() => {
     // 在线整季原生播放列表：本地按需解析代理（mpv 打开哪集才解析哪集，直链零过期）。
     // 集目解析失败 → toast 告知并停止队列（mpv 收 502 会跳下一集，这里主动 stop 防静默跳集）。
     /** 边下边播入队（原生队列与逐集链路共用语义）：成功/去重命中返回 true。 */
-    async function enqueueSimulDownload({ url, siteKey, fileBase, episodeName, header }) {
+    async function enqueueSimulDownload({ url, siteKey, seriesTitle, fileBase, episodeName, header }) {
         try {
             if (!settings.get('simulDownload')) return false;
             const urlPath = String(url).split('?')[0];
@@ -2936,15 +3031,19 @@ app.whenReady().then(() => {
                 out += ext ? '.' + ext : '';
             }
             if (dup) return true; // 已在下载/已下载：视为已处理
+            // RM-1 番剧子目录 + 集名文件（与手动下载/逐集链一致）；无剧名回退平铺旧文件名
+            const layout = seriesLayoutFor({ vodName: seriesTitle, epName: episodeName, out });
+            if (layout) out = layout.file;
             if (isM3u8) {
                 syncDlDir(dl.dir || settings.get('dlDir') || app.getPath('downloads'));
                 const hlsGid = hls.add({
-                    url, out, header,
+                    url, out, dir: layout ? layout.dir : undefined, header,
                     concurrency: parseInt(settings.get('dlSplitConcurrency'), 10) || 5,
                 });
                 if (simulKey) {
                     dlDedupe.bind(hlsGid, simulKey, {
-                        gid: hlsGid, kind: 'hls', name: out, files: [], size: 0, done: 0,
+                        gid: hlsGid, kind: 'hls', name: out, dir: layout ? layout.dir : undefined,
+                        files: [], size: 0, done: 0,
                         percent: 0, status: 'active', uri: url,
                         header: (header && typeof header === 'object') ? header : undefined,
                         completedAt: Date.now(),
@@ -2957,6 +3056,7 @@ app.whenReady().then(() => {
             await raceWithTimeout(
                 startDlEngine(dl.dir || settings.get('dlDir') || app.getPath('downloads')), 8000);
             const opts = { out };
+            if (layout) opts.dir = layout.dir;
             if (header && typeof header === 'object') {
                 const pairs = Object.entries(header)
                     .filter(([, v]) => v != null && v !== '')
@@ -2966,7 +3066,8 @@ app.whenReady().then(() => {
             const ariaGid = await raceWithTimeout(dl.addUri(url, opts), 8000);
             if (simulKey && ariaGid) {
                 dlDedupe.bind(ariaGid, simulKey, {
-                    gid: ariaGid, kind: 'aria2', name: out, files: [], size: 0, done: 0,
+                    gid: ariaGid, kind: 'aria2', name: out, dir: layout ? layout.dir : undefined,
+                    files: [], size: 0, done: 0,
                     percent: 0, status: 'waiting', uri: url,
                     header: (opts.header && Array.isArray(opts.header))
                         ? Object.fromEntries(opts.header.map((h) => { const i = h.indexOf(': '); return [h.slice(0, i), h.slice(i + 2)]; }))
@@ -2990,6 +3091,7 @@ app.whenReady().then(() => {
             await enqueueSimulDownload({
                 url,
                 siteKey: sess.site || '',
+                seriesTitle: sess.seriesTitle || '',
                 fileBase: [sess.seriesTitle, epName].filter(Boolean).join(' · '),
                 episodeName: epName,
                 header: sess.headers || undefined,
@@ -3095,6 +3197,9 @@ app.whenReady().then(() => {
             queueLen: (info && typeof info.queueLen === 'number') ? info.queueLen : null,
             playlistPos: (info && typeof info.playlistPos === 'number') ? info.playlistPos : -1,
             quit: userStopped, // 用户主动关闭（stop() 或 mpv 窗口关闭）：渲染层据此不等待断流重连、不连播
+            // end-file 原因（eof=播完/断流；quit/stop=用户关闭；error=打开或解码失败）：
+            // 渲染层据 error + pos≈0 识别「起播即失败」，自动 refresh=1 重解析一次
+            endReason: (info && info.endReason) || null,
         });
         // 用户主动关闭播放器：绝不自动重连（否则关窗会被误判为断流而重播）
         if (userStopped) return;
@@ -3317,7 +3422,7 @@ app.whenReady().then(() => {
     pushServer.on('push', ({ url }) => playPushedUrl(url, '局域网'));
     pushServer.start();
     createWindow();
-    setupAutoUpdater(() => win);
+    setupAutoUpdater(() => win, { settings });
     initTray();
 
     // SyncPlay 事件转发到渲染层

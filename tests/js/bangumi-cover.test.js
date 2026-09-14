@@ -20,7 +20,9 @@ function loadCommon() {
     };
     context.globalThis = context;
     vm.createContext(context);
-    vm.runInContext(`${source}\n;globalThis.__cover = bangumiCover; globalThis.__resize = bangumiResizeUrl;`,
+    vm.runInContext(`${source}\n;globalThis.__cover = bangumiCover; globalThis.__resize = bangumiResizeUrl;
+        globalThis.__mirrorUrl = bangumiMirrorUrl; globalThis.__isCover = isBangumiCoverUrl;
+        globalThis.__setRoot = setBangumiMirrorRoot;`,
         context, { filename: 'common.js' });
     return context;
 }
@@ -123,4 +125,46 @@ test('bangumiResizeUrl：已持久化的损坏组合（r 前缀+非 l 段）就�
     assert.equal(
         __resize('https://lain.bangumi.pro/r/400/pic/cover/c/3c/ec/247_MnPPU.jpg', 'card'),
         'https://lain.bangumi.pro/r/400/pic/cover/l/3c/ec/247_MnPPU.jpg');
+});
+
+// ---- 镜像根域名（2026-09-15 bangumi.pro 失效 → bangumi.vip，支持设置页手动替换）----
+
+test('bangumiMirrorUrl：默认镜像根域名 bangumi.vip（lain.bgm.tv → lain.bangumi.vip）', () => {
+    const { __mirrorUrl } = loadCommon();
+    assert.equal(
+        __mirrorUrl('https://lain.bgm.tv/r/400/pic/cover/l/a.jpg'),
+        'https://lain.bangumi.vip/r/400/pic/cover/l/a.jpg');
+    assert.equal(
+        __mirrorUrl('https://lain.bangumi.tv/pic/cover/c/a.jpg'),
+        'https://lain.bangumi.vip/pic/cover/c/a.jpg');
+    // 第三图床不换；已持久化的旧镜像域（bangumi.pro）不二次换域
+    assert.equal(__mirrorUrl('https://example.com/a.jpg'), 'https://example.com/a.jpg');
+    assert.equal(
+        __mirrorUrl('https://lain.bangumi.pro/pic/cover/c/a.jpg'),
+        'https://lain.bangumi.pro/pic/cover/c/a.jpg');
+});
+
+test('setBangumiMirrorRoot：手动替换根域名后换域与判定即时生效，非法输入保持原值', () => {
+    const { __mirrorUrl, __setRoot } = loadCommon();
+    assert.equal(__setRoot('https://My.Mirror.Example.com/path'), 'my.mirror.example.com');
+    assert.equal(
+        __mirrorUrl('https://lain.bgm.tv/pic/cover/l/a.jpg'),
+        'https://lain.my.mirror.example.com/pic/cover/l/a.jpg');
+    assert.equal(__setRoot('not a domain'), '');
+    assert.equal(__setRoot(''), '');
+    assert.equal(
+        __mirrorUrl('https://lain.bgm.tv/pic/cover/l/a.jpg'),
+        'https://lain.my.mirror.example.com/pic/cover/l/a.jpg');
+});
+
+test('isBangumiCoverUrl：官方/历史镜像/当前默认/自定义镜像域名均判定为 Bangumi 封面', () => {
+    const { __isCover, __setRoot } = loadCommon();
+    assert.ok(__isCover('https://lain.bgm.tv/pic/cover/c/a.jpg'));
+    assert.ok(__isCover('https://lain.bangumi.tv/pic/cover/c/a.jpg'));
+    assert.ok(__isCover('https://lain.bangumi.pro/pic/cover/c/a.jpg')); // 历史镜像（存量记录）
+    assert.ok(__isCover('https://lain.bangumi.vip/pic/cover/c/a.jpg'));
+    assert.ok(!__isCover('https://example.com/pic/cover/c/a.jpg'));
+    assert.ok(!__isCover(''));
+    __setRoot('mirror.example.com');
+    assert.ok(__isCover('https://lain.mirror.example.com/pic/cover/c/a.jpg'));
 });

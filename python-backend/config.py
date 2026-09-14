@@ -9,7 +9,7 @@
 }
 
 type 处理：
-- 3 = Python spider（api 为 http 地址或内联源码，走原 app.spider 协议）
+- 3 = Python spider（api 为 http 地址或内联源码，落盘到隔离目录后交子进程 Worker 加载）
 - 4 = JS spider（api 为 http 地址或内联源码，quickjs 宿主加载）
 - 其他（0/1 等）本期跳过并记录。
 """
@@ -25,7 +25,6 @@ from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-import app as spider_app
 import hoststate
 from site_manager import Site
 from js_spider import make_js_spider_class
@@ -1652,27 +1651,6 @@ class ConfigManager:
         return self._context(base_url).ext.resolve(
             ext, base_url, expand=False).canonical
 
-    def _load_python_spider(self, key, api):
-        try:
-            if api.startswith('http'):
-                return spider_app.spider(hoststate.get_plugins_dir(), api)
-            # 内联源码：直接落盘后加载（原 app.spider 对非 http 会按文件名处理，
-            # 内联源码无文件名，这里显式以 key 命名）
-            # H-4：key 来自远端配置，白名单化防路径穿越（../、..\、C:\ 等；
-            # Windows 上 os.path.join 遇绝对路径第二参数会直接采用后者）
-            import re as _re
-            safe_key = _re.sub(r'[^\w.-]', '_', str(key))[:64] or 'site'
-            path = os.path.join(hoststate.get_plugins_dir(), f'{safe_key}.py')
-            if not os.path.realpath(path).startswith(
-                    os.path.realpath(hoststate.get_plugins_dir()) + os.sep):
-                raise ValueError(f'bad site key: {key}')
-            with open(path, 'wb') as f:
-                f.write(api.encode('utf-8'))
-            from importlib.machinery import SourceFileLoader
-            return SourceFileLoader(safe_key, path).load_module().Spider()
-        except Exception as e:
-            raise ValueError(f'[L3:py] python spider load failed: {e}') from e
-
     def _materialize_python_spider(self, key, api, base_url=''):
         """只下载/落盘远程 Python 到隔离目录，不在宿主进程 import 或执行。"""
         try:
@@ -1685,6 +1663,9 @@ class ConfigManager:
 
             # 先下载获取内容，计算真实内容哈希
             if api.startswith('http'):
+                if str(api).lower().startswith('http:'):
+                    logger.warning('python spider 源为明文 http 且无完整性校验（存在被篡改/MITM 风险，'
+                                   '建议改用 https 源）: %s', api)
                 import http_client
                 rsp = http_client.fetch_follow_redirects(api, timeout=15)
                 content = rsp.content
@@ -1699,8 +1680,11 @@ class ConfigManager:
 
             os.makedirs(site_dir, exist_ok=True)
             path = os.path.join(site_dir, basename)
-            with open(path, 'wb') as f:
+            # 原子写：先写临时文件再 replace，避免并发 materialize / 子进程 import 读到半成品
+            tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
+            with open(tmp, 'wb') as f:
                 f.write(content)
+            os.replace(tmp, path)
 
             self._context(base_url).record_artifact('python', api, path)
             return path

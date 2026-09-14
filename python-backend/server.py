@@ -54,12 +54,13 @@ from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse,
 from starlette.concurrency import run_in_threadpool
 
 from cache_store import CacheStore
+import play_cache
 from site_manager import SiteManager
 from config import ConfigManager
 import app as spider_app
 
 # Kazumi 规则引擎（与 CatVod 隔离，独立模块）
-from kazumi.plugin_manager import PluginManager
+from kazumi.plugin_manager import BANGUMI_MIRROR_ROOT, BANGUMI_UA, PluginManager
 from kazumi.plugin import Plugin
 from kazumi.rule_engine import RuleEngine
 from kazumi.cookie_jar import CookieJar
@@ -673,6 +674,10 @@ def _cache_size():
         t, n = _dir_size(dl_cache)
         total += t
         items += n
+    # 播放解析结果持久缓存（RM-4）：目录按文件计入总占用
+    play_bytes, play_items, _ = play_cache.stats()
+    total += play_bytes
+    items += play_items
     return total, items
 
 
@@ -937,6 +942,7 @@ def _dispatch_action_inner(form):
                     repo_bytes = os.path.getsize(repo_path)
             except Exception:
                 repo_bytes = 0
+            play_bytes, play_items, _play_expired = play_cache.stats()
             return 200, json.dumps({
                 'code': 200,
                 'bytes': total,
@@ -947,6 +953,7 @@ def _dispatch_action_inner(form):
                     'jsLocal': js_bytes,
                     'dlCache': dl_bytes,
                     'playerCache': player_items,
+                    'playerCachePersist': play_items,
                     'repoCache': repo_bytes,
                 },
             }, ensure_ascii=False)
@@ -984,6 +991,10 @@ def _dispatch_action_inner(form):
                     _player_content_cache.clear()
             except Exception:
                 player_removed = 0
+            # 播放解析结果持久缓存（play-cache 目录文件数计入 extra）
+            play_removed = play_cache.clear_all()
+            if play_removed:
+                extra += play_removed
             # 网盘签名 URL 缓存（pan 模块可能未安装）
             signed_cleared = False
             try:
@@ -1004,11 +1015,12 @@ def _dispatch_action_inner(form):
                 'jsLocal': js_removed,
                 'dlCache': dl_removed,
                 'playerCache': player_removed,
+                'playerCachePersist': play_removed,
                 'signedUrlCache': signed_cleared,
             }
             logger.info(
-                'cache cleared: kv=%s jsLocal=%s dlCache=%s player=%s signedUrl=%s (%s bytes freed)',
-                removed, js_removed, dl_removed, player_removed, signed_cleared, freed)
+                'cache cleared: kv=%s jsLocal=%s dlCache=%s player=%s playCachePersist=%s signedUrl=%s (%s bytes freed)',
+                removed, js_removed, dl_removed, player_removed, play_removed, signed_cleared, freed)
             return 200, json.dumps({
                 'code': 200,
                 'bytes': freed,
@@ -1157,11 +1169,15 @@ def _dispatch_action_inner(form):
                 vip_key = str(vip_raw)
             cache_key = f"{site.key}|{form.get('flag', '')}|{form.get('id', '')}|{vip_key}"
             refresh = _form_flag(form, 'refresh')
-            cached = _player_content_cache.get(cache_key)
-            if refresh and cached:
+            if refresh:
+                # 失效重解析：内存层与持久层（play-cache）一起淘汰，
+                # 确保下一次拿到的是重新查源的结果而非缓存旧直链。
                 with _player_cache_lock:
                     _player_content_cache.pop(cache_key, None)
+                play_cache.invalidate(cache_key)
                 cached = None
+            else:
+                cached = _player_content_cache.get(cache_key)
             if (cached and not _is_ephemeral_play_result(cached.get('result'))
                     and (time.time() - cached['ts']) < _PLAYER_CACHE_TTL):
                 return 200, cached['result']
@@ -1170,6 +1186,14 @@ def _dispatch_action_inner(form):
             if cached and _is_ephemeral_play_result(cached.get('result')):
                 with _player_cache_lock:
                     _player_content_cache.pop(cache_key, None)
+            # 持久层命中（RM-4，TTL 2h）：重开同一集/重启应用后跳过查源直接
+            # 起播。读侧复检 ephemeral 门防历史中毒条目回流；命中后回填内存
+            # 层，保持 60s 内层热路径语义一致。
+            persisted = play_cache.get_result(cache_key)
+            if persisted and not _is_ephemeral_play_result(persisted):
+                with _player_cache_lock:
+                    _player_content_cache[cache_key] = {'result': persisted, 'ts': time.time()}
+                return 200, persisted
             raw_result = _runtime_site_call(
                 site, 'player', lambda: spider_app.playerContent(
                     ru, form.get('flag', ''), form.get('id', ''), form.get('vipFlags', '[]')))
@@ -1192,6 +1216,8 @@ def _dispatch_action_inner(form):
                                             key=lambda k: _player_content_cache[k]['ts'])[:drop]
                             for k in oldest:
                                 del _player_content_cache[k]
+                # 稳定结果同步落持久层（play_cache.py：TTL 2h，跨重启生效）
+                play_cache.store_result(cache_key, result)
             return 200, result
         if do == 'liveContent':
             return 200, _runtime_site_call(
@@ -1838,8 +1864,12 @@ def create_app():
 
     # Bangumi 封面代理转发（host 白名单，防 SSRF）：渲染层 <img> 直连 lain.bgm.tv
     # 被墙/慢时封面拉不出（历史/搜索页 kazumi 卡全是该图床），改经本地后端转发
-    # （http_client 走应用代理/系统代理配置），官方域名失败自动换镜像 lain.bangumi.pro
+    # （http_client 走应用代理/系统代理配置），官方域名失败自动换镜像 lain.{镜像根域名}
     # 重试。响应带长缓存头，重复渲染由浏览器缓存兜住不再回源。
+    # 官方 + 历史镜像域名固定放行（存量记录持久化过 lain.bangumi.pro），镜像根域名
+    # 可在设置中手动替换，故 lain.{root} 在请求时动态并入白名单。
+    # UA：镜像 lain.bangumi.vip 在 Cloudflare 后，http_client 默认 okhttp UA 被 403，
+    # 统一带浏览器前缀 UA（与渲染层 <img> 的浏览器请求同形态）。
     _bangumi_cover_hosts = frozenset(('lain.bgm.tv', 'lain.bangumi.tv', 'lain.bangumi.pro'))
 
     @fastapi_app.get('/kazumi/cover')
@@ -1847,7 +1877,8 @@ def create_app():
         import http_client
 
         def _fetch(target):
-            rsp = http_client.get(target, timeout=(5, 20), verify=True)
+            rsp = http_client.get(target, timeout=(5, 20), verify=True,
+                                  headers={'User-Agent': BANGUMI_UA})
             if rsp.status_code != 200:
                 raise RuntimeError(f'HTTP {rsp.status_code}')
             body = rsp.content or b''
@@ -1859,18 +1890,19 @@ def create_app():
             return body, (ctype or 'image/jpeg')
 
         try:
+            mirror_host = 'lain.{}'.format(kazumi_mgr.mirror_root if kazumi_mgr else BANGUMI_MIRROR_ROOT)
             # 旧渲染层曾持久化损坏组合（/r/{n}/pic/cover/{非l}/，lain CDN 对其返回
             # HTTP 400）：真实缩放由 r 宽度前缀承担，段应固定为 l——这里归一化自愈，
             # 让带病记录的封面也能经代理拉回（裸路径 /pic/cover/{lcmgs}/ 合法，不动）。
             if re.search(r'/r/\d+/pic/cover/', url, re.I):
                 url = re.sub(r'(/pic/cover/)[a-z](/)', r'\1l\2', url, flags=re.I)
             parts = urllib.parse.urlsplit(url)
-            if parts.scheme not in ('http', 'https') or parts.hostname not in _bangumi_cover_hosts:
+            if parts.scheme not in ('http', 'https') or parts.hostname not in (_bangumi_cover_hosts | {mirror_host}):
                 return JSONResponse({'code': 403, 'msg': 'host not allowed'}, status_code=403)
             candidates = [url]
-            if parts.hostname != 'lain.bangumi.pro':
+            if parts.hostname != mirror_host:
                 candidates.append(urllib.parse.urlunsplit(
-                    parts._replace(scheme='https', netloc='lain.bangumi.pro')))
+                    parts._replace(scheme='https', netloc=mirror_host)))
             last_err = None
             for target in candidates:
                 try:
@@ -1996,10 +2028,14 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiSetMirror':
             bangumi = form.get('bangumi', '')
             git = form.get('git', '')
-            state = kazumi_mgr.set_mirror(
-                bangumi=bangumi.lower() in ('1', 'true', 'yes') if bangumi != '' else None,
-                git=git.lower() in ('1', 'true', 'yes') if git != '' else None,
-            )
+            try:
+                state = kazumi_mgr.set_mirror(
+                    bangumi=bangumi.lower() in ('1', 'true', 'yes') if bangumi != '' else None,
+                    git=git.lower() in ('1', 'true', 'yes') if git != '' else None,
+                    root=form.get('root') or None,
+                )
+            except ValueError as e:
+                return 400, json.dumps({'code': 400, 'msg': str(e)}, ensure_ascii=False)
             return 200, json.dumps({'code': 200, 'mirror': state}, ensure_ascii=False)
 
         if do == 'kazumiSearch':
@@ -2304,6 +2340,25 @@ def dispatch_kazumi_action(form):
             subject_id = form.get('id', '')
             ok, msg = kazumi_mgr.bangumi_delete_collection(token, subject_id)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        # ---- RM-5 Bangumi 观看进度自动上报（分集打点 + 分集收藏查询） ----
+        if do == 'kazumiBangumiEpisodeWatched':
+            token = form.get('token', '')
+            subject_id = form.get('subjectId', '')
+            try:
+                ep_ids = json.loads(form.get('episodeIds', '[]'))
+            except Exception:
+                ep_ids = []
+            if not isinstance(ep_ids, list):
+                ep_ids = [ep_ids]
+            ok, msg = kazumi_mgr.bangumi_update_episode_collection(token, subject_id, ep_ids, episode_type=2)
+            return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
+
+        if do == 'kazumiBangumiEpisodeCollections':
+            token = form.get('token', '')
+            subject_id = form.get('subjectId', '')
+            items = kazumi_mgr.bangumi_episode_collections(token, subject_id)
+            return 200, json.dumps({'code': 200, 'items': items if items is not None else None}, ensure_ascii=False)
 
         # ---- 弹弹 play 弹幕 ----
         if do == 'kazumiDanmakuSearch':

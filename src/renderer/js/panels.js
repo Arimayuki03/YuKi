@@ -707,7 +707,7 @@ function pushFile(yes) {
 
 /** 未选根目录时的引导态（白名单未设置）。 */
 function renderNeedRoot() {
-    $('#file_list').html('<div class="tip-line">尚未选择根目录（白名单）</div>' +
+    $('#file_list').html('<div class="tip-line" style="text-align:center">尚未选择根目录（白名单）</div>' +
         '<div style="text-align:center;padding:12px">' +
         '<button class="md-btn md-btn-filled" onclick="pickRoot()">选择根目录</button></div>');
     $('#local-pager').hide();
@@ -1178,7 +1178,7 @@ let _panQrClosed = false;
 /** 打开夸克扫码登录：弹出官方登录窗口 → 等待登录 → 自动保存 Cookie。 */
 async function openQuarkQrLogin() {
     _panQrClosed = false;
-    $('#pan_qr_img').html('<span style="color:var(--md-outline);font-size:13px;">正在打开登录窗口…</span>');
+    $('#pan_qr_img').html('<span style="color:var(--md-outline);font-size:12px;">正在打开登录窗口…</span>');
     $('#pan_qr_tip').text('正在打开夸克官方登录页面，请在弹出的窗口中用「夸克 App」扫码登录…')
         .css('color', '');
     $('#pan_qr_refresh').hide();
@@ -1326,6 +1326,9 @@ function initSettingsPanel() {
         $('#set_dl_concurrency').val(String(s.dlConcurrency || '3'));
         $('#set_dl_split').val(String(s.dlSplitConcurrency || '5'));
         $('#set_dl_notify').prop('checked', s.dlNotify !== false); // 下载完成系统通知（默认开）
+        $('#set_dl_series_folder').prop('checked', s.dlSeriesFolder !== false); // 按番剧创建文件夹（默认开）
+        $('#set_auto_update').prop('checked', s.autoUpdate === true); // 自动下载更新（默认关）
+        $('#set_update_notify').prop('checked', s.updateNotify !== false); // 更新通知（默认开）
         // 快捷键步长回填
         const hk = s.playerHotkeys || {};
         if (hk.seek) $('#set_hotkey_seek').val(hk.seek);
@@ -1759,12 +1762,103 @@ function initSettingsPanel() {
         window.yuki.settingsSet('dlNotify', this.checked);
         warnToast(this.checked ? '已开启下载完成通知' : '已关闭下载完成通知');
     });
+    // 按番剧创建文件夹：仅持久化，主进程入队时读取（仅新任务生效，存量文件不迁移）
+    $('#set_dl_series_folder').on('change', function () {
+        window.yuki.settingsSet('dlSeriesFolder', this.checked);
+        warnToast(this.checked ? '已开启按番剧创建文件夹（新下载任务生效）' : '已关闭按番剧创建文件夹（新任务平铺存放）');
+    });
     // 恢复默认设置（二次确认：先说明范围，再最终确认；应用自动重启）
     $('#set_reset').on('click', async () => {
         if (!await confirmDialog('将恢复外观/播放等偏好设置为默认值。\n不会删除收藏、历史与已载入的源。继续？')) return;
         if (!await confirmDialog('最终确认：立即恢复默认设置？应用将自动重启。', { okText: '立即重启' })) return;
         try { await window.yuki.settingsReset(); } catch (e) { /* 重启即断开 IPC */ }
     });
+    // ---- 软件更新（RM-2）：状态行渲染 + 手动检查/下载/安装；downloaded 每版本 toast 一次
+    {
+        const $updateState = $('#update_state_line');
+        const $updateCheck = $('#set_update_check');
+        const $updateDownload = $('#set_update_download');
+        const $updateInstall = $('#set_update_install');
+        const $autoUpdate = $('#set_auto_update');
+        const $updateNotify = $('#set_update_notify');
+        let lastInfo = null;       // 最近一次状态（切换自动下载开关时重渲染按钮可见性）
+        let toastedVersion = '';
+        let promptedVersion = '';  // 已弹窗提示过的版本号（每版本只弹一次）
+
+        // electron-updater 错误常带完整响应体/堆栈（一大串），通知里只留首行并截断
+        const shortUpdateError = (msg) => {
+            const line = String(msg || '').split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+            return line.length > 60 ? `${line.slice(0, 60)}…` : (line || '未知原因');
+        };
+
+        // 更新通知开启且自动下载关闭时：发现新版本弹窗提示，确认后走手动下载链路
+        const maybePromptUpdate = () => {
+            if (!lastInfo || lastInfo.state !== 'available' || !lastInfo.version) return;
+            if (promptedVersion === lastInfo.version) return;
+            if (!$updateNotify.prop('checked') || $autoUpdate.prop('checked')) return;
+            promptedVersion = lastInfo.version;
+            confirmDialog(`发现新版本 v${lastInfo.version}，是否立即下载？`, { okText: '立即下载' }).then((yes) => {
+                if (yes) $updateDownload.trigger('click');
+            });
+        };
+
+        const render = (info) => {
+            if (!info || !info.state) return;
+            lastInfo = info;
+            const st = info.state;
+            let text = '';
+            if (st === 'checking') text = '正在检查更新…';
+            else if (st === 'not-available') text = '已是最新版本';
+            else if (st === 'available') {
+                text = `发现新版本 v${info.version || ''}` + ($autoUpdate.prop('checked') ? '，正在自动下载' : '');
+            } else if (st === 'downloading') text = `正在下载更新 ${info.percent || 0}%`;
+            else if (st === 'downloaded') text = `新版本 v${info.version || ''} 已就绪，重启应用后自动安装`;
+            else if (st === 'error') text = `更新失败：${shortUpdateError(info.message)}`;
+            $updateState.text(text).toggle(!!text);
+            $updateInstall.toggle(st === 'downloaded');
+            // autoUpdate 关闭时发现新版本 → 出现手动下载按钮
+            $updateDownload.toggle(st === 'available' && !$autoUpdate.prop('checked'));
+            if (st === 'downloaded' && info.version && info.version !== toastedVersion) {
+                toastedVersion = info.version;
+                warnToast(`新版本 v${info.version} 已下载完成，重启应用后自动安装`);
+            }
+            maybePromptUpdate();
+        };
+        window.yuki.onUpdateState(render);
+        $autoUpdate.on('change', function () {
+            window.yuki.settingsSet('autoUpdate', this.checked);
+            warnToast(this.checked ? '已开启自动下载更新' : '已关闭自动下载更新（发现新版本时仅提醒）');
+            if (lastInfo) render(lastInfo); // 开关变化即时刷新 available 态的按钮可见性
+            // 开启瞬间若已处于「发现新版本」态：重新检查一次，让主进程在 check 前应用
+            // 新 pref 真正开始自动下载（autoDownload 只在每次检查前生效，仅拨开关不会触发下载，
+            // 界面却已显示「正在自动下载」）
+            if (this.checked && lastInfo && lastInfo.state === 'available') {
+                window.yuki.checkForUpdates().catch(() => { /* 结果经 onUpdateState 推送 */ });
+            }
+        });
+        $updateNotify.on('change', function () {
+            window.yuki.settingsSet('updateNotify', this.checked);
+            warnToast(this.checked ? '已开启更新通知（发现新版本时弹窗提示）' : '已关闭更新通知');
+        });
+        $updateCheck.on('click', async () => {
+            const r = await window.yuki.checkForUpdates().catch(() => null);
+            if (r && !r.ok) {
+                if (r.reason === 'development') $updateState.text('开发环境不执行更新检查').toggle(true);
+                else warnToast(`检查更新失败：${shortUpdateError(r.reason)}`);
+            }
+        });
+        $updateDownload.on('click', async () => {
+            const r = await window.yuki.downloadUpdate().catch(() => null);
+            if (r && !r.ok) warnToast(`下载更新失败：${shortUpdateError(r.reason)}`);
+        });
+        $updateInstall.on('click', async () => {
+            if (!await confirmDialog('立即退出应用并安装更新？', { okText: '重启并安装' })) return;
+            await window.yuki.installUpdate().catch(() => null);
+        });
+        window.yuki.appVersion().then((v) => {
+            $('#update_current_line').text(`当前版本：v${v}`);
+        }).catch(() => { /* 主进程不可达时保持占位 */ });
+    }
     $('#set_walldim').on('change', function () {
         window.yuki.settingsSet('wallpaperDim', this.value);
         // 遮罩强度下拉变更时清除透明度数值覆写（弹窗滑杆），让下拉档位重新生效

@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-08-26
+> 更新时间：2026-09-14
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -32,6 +32,7 @@
 | 全量功能测试矩阵与测试结果 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) |
 | Phase、U/T 批次和历史决策 | [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md) |
 | TVBox 兼容性总览/执行计划 | [docs/TVBOX_FONGMI_PARITY_TASKS.md](docs/TVBOX_FONGMI_PARITY_TASKS.md) |
+| 版本路线与对标差距（P0/P1/P2 立项） | [docs/ROADMAP.md](docs/ROADMAP.md)（执行状态仍以本文件为准） |
 
 状态发生冲突时，按以下优先级判断：运行时问题记录 → 本文件 → 专项文档 → 历史开发记录 → Kazumi 原版参考文档。
 
@@ -42,7 +43,7 @@
 - CatVod Python、JavaScript、CMS 和多仓配置加载。
 - 首页、分类、当前源搜索、SSE 聚合搜索、详情、收藏和历史。
 - Kazumi XPath/API 规则导入、编辑、测试、商店、有效性检测和批量更新。
-- Bangumi 搜索、详情、日历、榜单、分集、角色、Staff、评论、关联和收藏同步。
+- Bangumi 搜索、详情、日历、榜单、分集、角色、Staff、评论、关联、收藏同步和观看进度自动上报（RM-5，看完自动打点分集看过/联动在看看过，默认关）。
 
 ### 播放与解析
 
@@ -124,8 +125,8 @@
   [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 推进。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
-- [x] 自动更新基础链路已接入 `electron-updater`（打包模式检查/下载/退出安装）；tag 发布 CI（release.yml）已就绪，GitHub 发布仓库与代码签名仍待定。
-- [ ] 创建 GitHub 公开仓库并实测 tag→安装包流水线（release.yml 已就绪）；代码签名在建仓后补齐。
+- [x] 自动更新基础链路已接入 `electron-updater`，且应用内更新闭环（RM-2）已代码完成：手动检查/自动下载开关/更新设置 UI/发布元数据（latest.yml+blockmap）全部就绪，待建仓发版后实测 v0.2.1→v0.2.2 升级链路。
+- [ ] 创建 GitHub 公开仓库并实测 tag→安装包流水线（release.yml 已就绪，含应用内更新元数据上传）；代码签名在建仓后补齐。
 
 ### 明确不作为当前待办
 
@@ -173,6 +174,51 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-09-15 安装包杀软误报修复批次：
+
+- **背景**：安装时杀软对包内「关键系统 DLL 名」文件报「程序试图修改关键程序 DLL」（360 等已知误报，见 CHANGELOG [未发布] Fixed），先后命中两处：Electron 自带的 `d3dcompiler_47.dll`、PyInstaller 后端捆绑的 UCRT（`yuki-backend/_internal/` 下 `ucrtbase.dll` + 44 个 `api-ms-win-*` API-Set 转发器）。
+- **修复**：`scripts/after-pack.js` 实现为 electron-builder `afterPack` 钩子，NSIS 打包前剔除上述系统自带冗余 DLL——Win10+ 由 System32 / API Set 加载器直接提供，包内副本仅为 Win7/8 兼容存在（Electron 31 本就不支持）；`VCRUNTIME140*.dll`（系统不保证自带）与 `python314.dll`（解释器本体）保留；`package.json` build 接线，`YUKI_KEEP_SYSTEM_DLLS=1` 逃生口可保留全部供诊断对比。
+- 验证：`tests/js/after-pack.test.js` 5/5（d3d 剔除/UCRT 剔除且 VC 运行库与 python 保留/无匹配 no-op/钩子默认剔除/环境变量保留）；剔除 UCRT 后后端 exe 两轮实机冒烟——独立副本与打包产物内 `yuki-backend.exe` 均 READY 就绪、`/health` 200（站点与 Kazumi 规则正常加载）；实机 `npx electron-builder --win --dir` 复打——afterPack 剔除 44 个（约 7MB），win-unpacked 递归检索 UCRT 文件 0 残留、其余运行时文件（YuKi.exe/ffmpeg.dll/libEGL/libGLESv2/vk_swiftshader/app.asar）齐全，打包版 CDP 冒烟（remote-debugging）启动渲染页正常加载后退出；JS 单元 487/487、ESLint 0 error。
+
+2026-09-14 RM-5 Bangumi 观看进度自动上报批次（按 [ROADMAP](docs/ROADMAP.md) §7 立项执行，属 P0）：
+
+- **分集打点**：看完一集自动把该集在 Bangumi 标记「看过」——后端 `plugin_manager.py` 新增 `bangumi_update_episode_collection`（PATCH `/v0/users/-/collections/{subject_id}/episodes` 批量端点，服务端重算条目完成度）与 `bangumi_episode_collections`（GET 分集收藏查询），沿用「`-` 通配 × 官方/镜像基址」矩阵兜底；`server.py` 接线 `kazumiBangumiEpisodeWatched` / `kazumiBangumiEpisodeCollections`。不触碰 CatVod 核心链路。
+- **触发点**：逐集会话 `_onExit`「看完」（剩余<8s 或刚 ended）按会话绑定 meta 上报（元信息取 `_watchSessions`——末集/单集播完时 `_seq` 为 null 不能用；无会话号旧协议才回退 `_currentPlayback`）；原生连播队列 `_onEnded` 逐集 ended 上报（≥15s 门槛与统计同口径），最终退出不重复上报。跳看/中途退出/外部播放器不上报。
+- **解析与联动**：片名经 `getBangumiMatch`（复用持久缓存）→ subject；分集按集数解析（第N集/第N话/Episode N/EP N/纯数字/前导数字，`第N季` 不误判）优先、Bangumi 分集名精确兜底，只认 type=0 本篇，匹配不到宁缺勿错标不发请求。打点成功后联动：未收藏/想看 → 自动「在看」（静默）；本篇最后一集看完且远端分集收藏全部「看过」→ 自动升级「看过」；搁置/抛弃/已看过不动。
+- **安全边界**：准入过滤仅 CatVod 带 vodId / kazumi: 源（直链、本地/下载文件、Bangumi 条目不做片名匹配防误标）；开关 `bangumiProgressSync` 默认关，接入 settings-set 白名单与「设置 → Kazumi 规则 → Bangumi 同步」卡；无 Token / 匹配不到静默跳过；上报串行链 fire-and-forget 不阻塞播放；失败 toast 5 分钟节流（401 给 Token 重取指引）；分集列表 10 分钟缓存避免连播逐集重复拉取；`setBangumiCollection` 新增 quiet 参数供联动静默调用。
+- 验证：`test_kazumi.py` 90/90（+5：PATCH 矩阵/回退/入参拒绝/GET 归一化/401 短路）；`tests/js/bgm-progress.test.js` 12/12（开关/打点/集名形态/名称兜底/宁缺勿错/在看联动/看过联动/搁置抛弃不动/准入过滤/无 Token/失败节流/kazumi 源）；`tests/js/player-watch.test.js` 29/29（+4：看完触发含末集/未看完不触发/原生队列逐集+退出去重/模块缺失静默）。`npm run test:all` 全绿（run_all.py 全阶段 ALL PASS、编译 108 文件 0 error、JS 单元 474/474、语法 49 文件 0 错、ESLint 0 error、Ruff 全过）。实机验收（真实 Token 连播一季的进度点亮与联动）待用户验证。
+
+2026-09-14 RM-4 解析结果持久缓存批次（按 [ROADMAP](docs/ROADMAP.md) §6 立项执行，属 P0）：
+
+- **三级缓存供数**：`playerContent` 稳定结果按 ①server.py 60s 内存缓存 → ②新增 `python-backend/play_cache.py` 持久缓存（`<cache>/play-cache/`，复用 CacheStore 内存+文件两级、原子写，TTL 2h、容量 16MB，key=`site|flag|id|vipFlags`）→ ③playlist-proxy 会话缓存分层供数。重开同一集/重启应用命中②跳过查源（实测单次解析 2~5s）；写/读两侧都过 `_is_ephemeral_play_result` 门（签名 CDN/网盘一次性地址/显式过期标记不落盘），读侧复检防历史中毒条目回流，持久层命中回填内存层保持热路径一致。
+- **失效重解析闭环**：server.py `refresh=1` 同时淘汰内存层与持久层；`yuki:player-exit` 新增 `endReason` 字段，渲染层 `_onExit` 对「起播即失败」（end-file reason=error 且几乎零进度）自动 refresh=1 重解析一次（沿用 `_reconnectAttempts<1` 单次上限，真死源重试后照常失败弹窗/连播推进，不循环）——TTL 内源站侧失效的缓存直链从「用户可见的播放失败」变为一次额外起播等待。既有断流重连（pos≥15）行为不变；Kazumi 源（`_currentPlayback=null`）与原生队列不触发。
+- **缓存可清理可观测**：`clearCache` 端点清空 play-cache（文件数计入 extra 与 detail）；`/cache` breakdown 新增 `playerCachePersist` 条目数；`_cache_size` 计入 play-cache 目录（前端「当前缓存占用」自动含）。
+- **范围边界**：Kazumi 源不在本期（二段解析产物可能是本地临时文件，不宜按 URL 缓存）；网盘 ephemeral 结果天然被门挡住；存量行为（60s 内存缓存语义）不变。
+- 验证：`tests/test_play_cache.py` 10/10（往返/跨重启/TTL 过期/失效/清空/统计/空值/损坏文件）接入 run_all.py 新阶段 `play-cache`；smoke 16/16（新增 dispatch 级集成 3 例：内存层清空后持久层供数、refresh=1 穿透并重查源、重查源结果回填持久层）；`tests/js/player-watch.test.js` +3 例（起播失败触发且单次上限/quit 不触发/Kazumi 与 eof 不触发）。`npm run test:all` 全绿（run_all.py 42 阶段含 play-cache、编译 108 文件 0 error、JS 单元 458/458、ESLint 0 error、Ruff 全过）。实机开播加速感知（重开同集/重启应用/失效直链自愈）待用户验证。
+
+2026-09-14 RM-1/RM-2 批次（按 [ROADMAP](docs/ROADMAP.md) §4/§5 立项执行，均属 P0）：
+
+**工作区安全加固批次的 smoke 回归修复（接前一轮未提交批次）**：
+
+- **现象**：smoke 阶段 `spider.setCache` 必挂（`L3_RUNTIME_CALL_FAILED`，spider 的 HTTP 回环打到死端口）。逐层定位（双绑定干扰排除 → stash 回 HEAD 对照 → spawn 子进程 `__main__` 重跑实验 → worker 侧端口实测 8734≠父进程 13679）后确认根因：前一轮给 smoke/test_phase3 加的随机端口回退 `_pick_port(8321)` 在 multiprocessing spawn 的 worker 子进程重跑模块顶层（`__mp_main__`）时**重新求值**，子进程 hoststate 被配成与宿主不同的端口。
+- **修复**：父进程选定端口后写入 `YUKI_PORT`，子进程重跑顶层时优先复用继承的环境变量（`PORT = int(os.environ.get('YUKI_PORT') or 0) or _pick_port(8321)`），端口父子确定一致。smoke 13/13、phase3 30/30 实测通过。
+- 环境备注：本机 8321 落入 Windows 保留端口区间（WinError 10013）正是该回退机制的动因；另曾遇 9978 端口被前次会话泄漏的 smoke.py 进程双绑定导致误报（应用自身有双绑定诊断日志），清理残留进程后恢复。
+
+**RM-2 应用内 GitHub 检测更新**：
+
+- **更新源闭环**：package.json `build.publish = {provider:github, Arimayuki03/YuKi}`（缺口 1）；release.yml 上传构件与挂载 Release 的文件列表增加 `dist/*.exe.blockmap` + `dist/latest.yml`（缺口 2）。Draft Release 在 publish 前无公开资产，应用内检测不到（语义安全）。
+- **updater.js 重构**：抽出可单测的纯逻辑 `createUpdaterController`（事件归一 checking/available/not-available/downloading/downloaded/error + in-flight 检查去重 + autoUpdate 设置每次检查前动态应用 `autoDownload`）；新增 `yuki:check-for-updates`/`yuki:update-download`/`yuki:update-install` IPC，开发模式返回 `{ok:false, reason:'development'}` 而非报错；系统代理经 Electron 默认 session 天然生效（electron-updater 主进程走 Electron net）。
+- **设置 → 系统「软件更新」卡片**：当前版本行、`autoUpdate` 开关（默认开）、立即检查/下载更新/重启并安装按钮、状态行全状态渲染；downloaded 每版本 toast 一次，重启并安装有二次确认；`autoUpdate` 接入设置写入白名单。
+- 验证：`tests/js/updater-controller.test.js` 6/6（状态序列/开关语义/in-flight/error 恢复/退出安装/非 Electron 语义）。真实发布链路（v0.2.1→v0.2.2 升级、Draft 语义、代理环境）待建仓发版实测。
+
+**RM-1 下载自动创建番剧文件夹**：
+
+- **布局合成**：新增 `src/main/dl-layout.js`——`sanitizeSegment` Windows 路径段清洗（非法字符→`_`、保留设备名 CON/COM1-9 等追加 `_`（含带扩展名形态）、尾点尾空格、80 码点截断、空串回退）+ `resolveSeriesTaskLayout`（`<dlDir>/<剧名>/<集名><ext>`；开关关/无剧名/无文件名返回 null 回退平铺旧逻辑）+ `relUnderRoot`（安全相对路径，迁移与恢复校验共用）。
+- **四条入队路径接入**：aria2 直链（任务级 `opts.dir`，全局 `--dir` 不动）、HLS 合成（`hls.add` 新增 `dir` 参数，产物与分片目录入夹）、边下边播逐集链、原生队列 `enqueueSimulDownload`（新增 `seriesTitle` 入参）。边下边播逐集链此前所有集共用「剧名.ext」互相覆盖的隐患一并修复（改为集名文件）。
+- **记录/恢复/迁移/删除**：持久化记录新增 `dir` 字段（产物路径推导，BT 自建多级目录不误记）；重启恢复/单个继续/全部开始/目录迁移重排均带 `dir` 落回原子目录（磁链/BT 的 dir 语义是下载根，明确不带）；`migrateDlFiles`/`hls.migrateDir` 按相对路径迁移保持两级结构（`.aria2` 控制文件、`.incomplete`、分片目录随迁）；删除任务后延迟清理空的番剧子目录（`rmdirSync` 仅删空目录）。
+- **设置**：`dlSeriesFolder`（默认开）接入设置写入白名单、设置 → 下载卡片开关（回填/持久化），说明注明仅新任务生效、存量不迁移。
+- 验证：`tests/js/dl-layout.test.js` 12 例 + `tests/js/dl-series-folder.test.js` 4 例（migrateDir 结构保持/在途分片随迁/平铺兜底/dir 参数）；`npm run test:all` 全绿（run_all.py 41 阶段、编译 107 文件 0 error、JS 单元全过、ESLint 0 error、Ruff PASS）。实机多集/断点续传/换目录迁移 QA 待用户验证。
 
 2026-08-26 UI 视觉升级 + 网盘播放策略批次：
 

@@ -174,6 +174,8 @@ const Player = {
                 this._updateFavProgress(snapshot, info.playlistPos,
                     (typeof info.pos === 'number') ? info.pos : 0,
                     (typeof info.duration === 'number') ? info.duration : 0);
+                // RM-5 Bangumi 观看进度自动上报：ended 即本集看完（≥15s 门槛同上），fire-and-forget
+                this._reportBgmProgress(snapshot, info.playlistPos);
             }
         }
     },
@@ -191,6 +193,15 @@ const Player = {
                 ts: Date.now(),
             }).catch(() => { /* 进度更新失败不影响播放 */ });
         } catch (e) { /* 进度更新失败不影响播放 */ }
+    },
+
+    /** RM-5：看完一集 → Bangumi 观看进度自动上报（开关 bangumiProgressSync 默认关，
+     *  模块缺失/未开启/失败全部静默，绝不影响播放链路）。 */
+    _reportBgmProgress(meta, epIndex) {
+        try {
+            if (typeof Kazumi === 'undefined' || !Kazumi.reportWatchProgress) return;
+            Kazumi.reportWatchProgress(meta, epIndex);
+        } catch (e) { /* 上报失败不影响播放 */ }
     },
 
     /** 原生队列退出补记「正在看的这一集」（eof 未触发的当前集）。
@@ -344,26 +355,58 @@ const Player = {
             }
             return;
         }
+        // 会话绑定的观看元信息引用（_recordWatch 会消费 _watchSessions，先取后用）
+        const exitWatchMeta = (info && typeof info.sessionId === 'number')
+            ? this._watchSessions.get(info.sessionId) : null;
         // 观看统计（「我的」页）：任何 mpv 会话真实退出都累计时长/次数，与连播链无关
         this._recordWatch(info);
         // 非当前会话的退出（切集时被杀旧进程的延迟退出/本地播放）不驱动连播
         if (info && typeof info.sessionId === 'number' && info.sessionId && info.sessionId !== this._session) return;
         const token = this._playToken;
         const done = this._isDone(info);
+        // RM-5 Bangumi 观看进度自动上报：逐集会话「看完」（剩余<8s 或刚 ended）即上报当前集。
+        // 元信息取本会话绑定的观看 meta（含集名 subtitle）——不能用 _seq：末集/单集播完时
+        // _seq 为 null（连播只在未来还有下一集时才建）。无会话号才回退 _currentPlayback
+        // （旧协议路径）；原生队列已在 _onEnded 逐集上报，此分支不会重复触发。fire-and-forget。
+        if (done) {
+            const exitMeta = exitWatchMeta
+                || ((info && typeof info.sessionId !== 'number') ? this._currentPlayback : null);
+            if (exitMeta && exitMeta.title) {
+                this._reportBgmProgress({
+                    site: exitMeta.site, title: exitMeta.title, subtitle: exitMeta.subtitle || '',
+                    vodId: exitMeta.vodId || '', kazumiSrc: exitMeta.kazumiSrc || '',
+                }, typeof exitMeta.epIndex === 'number' ? exitMeta.epIndex : -1);
+            }
+        }
         if (info && info.quit) {
             this._seq = null;
             this._currentPlayback = null;
             this._reconnectInProgress = false;
             return;
         }
+        // 断流重连两种触发形态（RM-4 失效兜底闭环）：
+        // ① 播了一段后中断（pos≥15 且剩余时长足够）——既有行为；
+        // ② 起播即失败（endReason=error 且几乎零进度）——解析结果持久缓存
+        //    的直链/清单在 TTL 内源站侧失效时，重开该集先拿到旧地址，mpv 打开
+        //    失败走到这里：自动 refresh=1 穿透缓存重查源，用户感知为一次额外
+        //    起播等待而非播放失败。_reconnectAttempts 仍限一次，真死源重试后
+        //    照常走失败弹窗/连播推进，不会循环。
+        const startupFailed = info.endReason === 'error'
+            && (typeof info.pos !== 'number' || info.pos < 15)
+            && (typeof info.duration !== 'number' || info.duration <= 0
+                // pos 缺失按 0 进度算：undefined/duration 是 NaN，直接比较恒 false 会漏判
+                || ((typeof info.pos === 'number' ? info.pos : 0) / info.duration) < 0.1);
         const canRefresh = !done && this._currentPlayback && this._reconnectAttempts < 1
-            && typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0
-            && info.pos >= 15 && (info.duration - info.pos) >= 8;
+            && (startupFailed
+                || (typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0
+                    && info.pos >= 15 && (info.duration - info.pos) >= 8));
         if (canRefresh) {
             this._reconnectAttempts += 1;
             this._reconnectInProgress = true;
             const retry = { ...this._currentPlayback };
-            warnToast('播放被中断，正在刷新播放地址并重连…');
+            warnToast(startupFailed
+                ? '播放地址可能已失效，正在重新获取…'
+                : '播放被中断，正在刷新播放地址并重连…');
             await new Promise((resolve) => setTimeout(resolve, 250));
             if (token !== this._playToken || !this._currentPlayback) {
                 this._reconnectInProgress = false;

@@ -170,6 +170,12 @@ contextBridge.exposeInMainWorld('yuki', {
     onConfigReloaded: (cb) => ipcRenderer.on('yuki:config-reloaded', (_e, info) => cb(info)),
     /** 打包版自动更新状态：checking/available/downloading/downloaded/error */
     onUpdateState: (cb) => ipcRenderer.on('yuki:update-state', (_e, info) => cb(info)),
+    /** 手动检查更新：{ok} | {ok:false, reason:'development'}（开发模式语义） */
+    checkForUpdates: () => ipcRenderer.invoke('yuki:check-for-updates'),
+    /** 手动下载新版本（autoUpdate 关闭时由设置页触发） */
+    downloadUpdate: () => ipcRenderer.invoke('yuki:update-download'),
+    /** 退出应用并安装已下载的更新 */
+    installUpdate: () => ipcRenderer.invoke('yuki:update-install'),
     /** 鼠标侧键前进/后退事件 { dir: 'back'|'forward' }（渲染层维护视图历史栈） */
     onMouseNav: (cb) => ipcRenderer.on('yuki:mouse-nav', (_e, info) => cb(info)),
     /** 直播频道探活：批量检测 HTTP/HTTPS 流地址可达性，返回布尔数组 */

@@ -344,6 +344,23 @@ def _jar_download_lock(url):
         return _jar_download_locks.setdefault(url, threading.Lock())
 
 
+# 已告警过的 jar 源（按 URL 去重）：download_jar 是**按站点**调用，而 TVBox 配置里
+# 几十个 csp_ 站点常共用一个 spider jar——不去重会刷几十条相同 WARNING 把真问题埋掉。
+_jar_integrity_warned = set()
+
+
+def _warn_jar_integrity_once(jar_url):
+    """无 md5 的 jar 源记一次完整性告警（每进程每 URL 一次）。"""
+    if jar_url in _jar_integrity_warned:
+        return
+    _jar_integrity_warned.add(jar_url)
+    if jar_url.split(':', 1)[0].lower() == 'http':
+        logger.warning('jar 源为明文 http 且未提供 md5 校验（存在被篡改/MITM 风险，'
+                       '建议改用 https 或在配置中追加 ;md5）: %s', jar_url)
+    else:
+        logger.warning('jar 源未提供 md5 校验（完整性不可验证，建议配置追加 ;md5）: %s', jar_url)
+
+
 class JarBridge:
     """按 jar 文件共享的 JVM 子进程桥。同一 jar 的所有 csp_XXX 站点共用一个 JVM 进程。
 
@@ -464,6 +481,11 @@ class JarBridge:
         base = os.path.basename(jar_url.split('?')[0]) or f'{site_key or "spider"}.jar'
         fname = hashlib.sha1(jar_url.encode('utf-8')).hexdigest()[:10] + '_' + base
         dest = os.path.join(jar_dir, fname)
+        # 完整性告警：jar 会被 JVM 当作代码执行。无 md5 时仅魔数校验，内容被篡改
+        # 无法察觉；明文 http 源更存在链路 MITM 风险。不拒绝加载（兼容存量配置），
+        # 但醒目记日志供诊断页/用户感知（同一 URL 每进程只记一次）。
+        if not md5:
+            _warn_jar_integrity_once(jar_url)
         if os.path.isfile(dest):
             if not md5 or _file_md5(dest) == md5:
                 JarBridge._require_available_runtime(dest, site_key, portable_only)

@@ -40,14 +40,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: yuki-windows-installer
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
           if-no-files-found: error
+      # latest.yml + .exe.blockmap 是 electron-updater GitHub provider 的版本元数据：
+      # 缺任一文件应用内检测必然失败（Draft Release publish 后对用户生效）
       - name: 创建 Draft Release 并挂载安装包
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true # 维护者随后替换为 CHANGELOG 提炼的正式 Notes 再 publish
-          files: dist/*.exe
+          files: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
 
   # macOS / Linux 打包与安装后冷启动验证仍在 PROGRESS.md 计划内，
   # 验证通过后再启用对应 job（build:mac = dmg / build:linux = AppImage+deb）：

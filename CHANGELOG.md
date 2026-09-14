@@ -4,6 +4,35 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### Added
+
+- **Bangumi 镜像域名手动替换**：设置 → 系统「网络」新增「Bangumi 镜像域名」输入与保存——镜像站域名失效时填入新的根域名即可整体切换（子域自动映射：`api.bgm.tv` → `api.<根域名>`，`lain`/`next`/`fast`/`doujin` 同理），封面兜底镜像与鉴权接口基址即时生效；支持粘贴完整 URL 自动归一化，非法域名拒绝保存；根域名随本地设置与 `%APPDATA%/yuki/kazumi/mirror.json` 持久化，后端重启自动恢复。
+- **Bangumi 观看进度自动上报**（RM-5）：看完一集自动把该集在 Bangumi 标记「看过」，未收藏/想看的条目自动加入「在看」，看完全部本篇分集自动把收藏升级「看过」（搁置/抛弃不改动），对标 Animeko 云同步进度——逐集会话与原生连播队列两条看完链路全覆盖，跳看/中途退出/外部播放器不上报。设置 → Kazumi 规则 → Bangumi 同步新增「看完自动上报观看进度」开关（默认关）；分集匹配按集数（第N集/EP N/Episode N/纯数字）优先、分集名精确兜底，只认本篇分集，匹配不到宁缺勿错标；无 Token / 匹配不到条目静默跳过，失败提醒 5 分钟节流，上报全程不阻塞播放。
+- **解析结果持久缓存**（RM-4）：重开同一集或重启应用后跳过查源直接起播（单次解析实测 2~5s），对标 Animeko 6.1.0「在线源查询缓存」——`playerContent` 稳定结果按「站点+线路+集」落盘持久缓存（TTL 2h、容量 16MB），与既有 60s 内存缓存、播放列表代理会话缓存构成三级供数；带签名时效的网盘/CDN 地址不入缓存（读写双侧过滤）；「立即重试」等 refresh 请求同时淘汰内存与持久层，保证拿到重新查源的结果。配套失效自愈：播放地址起播即失败时自动刷新重解析一次，TTL 内源站侧失效的缓存直链不再表现为播放失败。缓存随「设置 → 缓存 → 清理缓存」一并清空，占用计入缓存统计。
+- **应用内 GitHub 检测更新**（RM-2）：打包版应用内可检测 GitHub Releases 新版本——设置 → 系统「软件更新」卡片提供当前版本、自动下载开关（默认关：启动静默检查发现新版本仅提醒、手动下载；开：静默下载 + 退出安装）、「更新通知」开关（默认开：启动检查发现新版本时弹窗提示并可一键下载，自动下载更新开启时为静默下载、不弹窗）、立即检查/下载更新/重启并安装按钮与状态行（更新失败原因只截断展示首行，不再整串透传）；新增手动检查/下载/安装 IPC（开发模式返回明确 development 语义）；package.json 补 GitHub publish 配置，release CI 随安装包上传 `latest.yml` 与 `.exe.blockmap` 更新元数据（Draft Release publish 后才对用户可见）。
+- **下载自动创建番剧文件夹**（RM-1）：同一部作品的下载集数自动落「下载目录/番剧名/」子文件夹、文件以集名命名，不再全部平铺在下载根目录——aria2 直链/磁链任务经任务级 `dir` 选项落子目录，m3u8 合成产物与分片临时目录一并入内；边下边播逐集链此前所有集共用「剧名.ext」文件名会互相覆盖，现也改为集名入夹。设置 → 下载新增「按番剧创建文件夹」开关（默认开，仅新任务生效、存量文件不迁移）；番剧名/集名经 Windows 路径段清洗（非法字符、保留设备名、尾点尾空格、80 字符截断）；更换下载目录迁移保持两级结构、断点续传（`.aria2` 控制文件随迁）与重启后恢复入队均落回原子目录；删除任务后空的番剧子目录自动清理；无剧名上下文的下载页手输 URL 维持平铺。
+
+### Changed
+
+- **Bangumi 镜像根域名切换 bangumi.pro → bangumi.vip**：bangumi.pro 域名已失效，全域名反代镜像整体切换为 bangumi.vip（`api.bgm.tv` → `api.bangumi.vip`、`next.bgm.tv` → `next.bangumi.vip`，lain/next/fast/doujin 子域一一对应）；封面兜底镜像同步切至 `lain.bangumi.vip`，历史镜像 `lain.bangumi.pro` 保留在封面代理白名单中以兼容存量记录（失败自动落到当前镜像域）。实测镜像各子域均在 Cloudflare 后且拦截程序化 UA（okhttp/裸应用 UA 一律 403 挑战页），Bangumi 请求 UA 统一改为浏览器前缀 + 应用标识（`…Chrome/126.0 Safari/537.36 yuki/0.1.0`，官方与镜像双兼容），封面代理转发同步携带该 UA。
+- **Bangumi 同步开关改名**：设置 → Bangumi 同步的「非 Kazumi 源详情页自动匹配 Bangumi 数据」更名为「CatVod 源详情页自动匹配 Bangumi 数据」，仅界面文案调整，功能与设置键（`catvodBgmMatch`）不变。
+
+### Security
+
+- **局域网推送 token 改用加密随机源**：推送接收服务的 token 由 `Math.random()`（可预测）改为 `crypto.randomBytes` 生成，避免局域网内猜测 token 后向本机播放器推送任意 URL。
+- **验证码窗口补齐导航守卫**：验证码验证窗口与隐藏解析窗口对齐——非 http(s) scheme 的页内跳转（如 `intent://`）一律拦截不再移交系统，新开窗口改为 http(s) 转系统浏览器、其余拒绝，堵住验证页脚本拉起外部协议的口子。
+- **远程代码源完整性告警**：jar 与 Python spider 源为明文 http 或未附带 md5 校验时记醒目告警日志（该类内容会被当代码执行，存在被篡改/MITM 风险；不拒绝加载以兼容存量配置；同一源每进程只记一次，避免几十个站点共用一个 jar 时刷屏）。
+
+### Fixed
+
+- **安装包剔除系统自带冗余 DLL（杀软误报源）**：360 等杀软会在安装时对包内两类文件报「程序试图修改关键程序 DLL」（已知误报）——Electron 自带的 `d3dcompiler_47.dll`，与 PyInstaller 后端捆绑的 UCRT（`yuki-backend/_internal/` 下的 `ucrtbase.dll` 及 44 个 `api-ms-win-*` API-Set 转发器）。二者在 Win10+ 均由系统 System32 / API Set 加载器直接提供，包内副本仅为 Win7/8 兼容存在（Electron 31 本就不支持）；而 `VCRUNTIME140*.dll` 系统不保证自带、`python314.dll` 为解释器本体，均保留——新增 electron-builder `afterPack` 钩子（`scripts/after-pack.js`）在 NSIS 打包前剔除前两类（共 44 个、约 7MB），安装包不再含杀软误报源；`YUKI_KEEP_SYSTEM_DLLS=1` 可保留全部便于诊断对比。
+- **Bangumi 网络引导空态样式统一**：推荐/时间表页「暂无内容（网络无法访问 Bangumi）」引导原本是三段兄弟节点直接落进卡片网格——各占一个 172px 窄列、12/13px 字号混用、正文色与次级色混用、对齐方式也不一致。现改为单根节点 `.bangumi-net-guide` 占满网格一行，渲染成与其它「暂无内容」空态一致的虚线卡，三段文案统一 12px 次级色（大屏随既有规则放大），隐私说明段左对齐并以分隔线区分，开关名仅加粗强调。同类修正：本地文件页「尚未选择根目录」引导的提示与按钮对齐方式统一为居中，夸克扫码弹窗「正在打开登录窗口…」占位字号对齐同弹窗提示行的 12px。
+- **测试宿主端口向 spawn 子进程的确定性传递**：smoke/test_phase3 的随机端口回退（8321/8322 被占用或落入 Windows 保留区间时改绑系统空闲端口）会在 multiprocessing spawn 的 worker 子进程重跑模块顶层时**重新求值**，worker 侧 hoststate 被配成与宿主不同的端口，demo spider 的 HTTP 回环（setCache/getCache/proxy）全部打到死端口导致 smoke 阶段必挂。现改为父进程选定端口后写入 `YUKI_PORT`，子进程重跑顶层时优先复用继承的环境变量，端口父子确定一致。
+- **Python spider 落盘原子写**：删除无调用方的宿主内加载入口 `_load_python_spider`（连带其中已废弃的 `load_module` 用法）；建站 materialize 改为临时文件 + `os.replace` 原子写，杜绝并发 materialize / 子进程 import 读到半成品文件（内容 sha256 目录隔离为既有机制，保持不变）。
+- **播放列表清单缓存惰性清理**：`playlist-proxy` 清单缓存改为写入时顺手淘汰过期项（命中 TTL 与淘汰阈值统一为 `MANIFEST_CACHE_TTL_MS`），修复长会话反复切集时缓存单调增长。
+
 ## [0.2.1] - 2026-08-31
 
 角色卡片 CV 展示、时间表加载遮罩与下载完成通知开关。

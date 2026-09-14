@@ -9,6 +9,7 @@
  * （对应原版 App「推送」面板的 PC 化：收到即交 mpv 播放）
  */
 const os = require('os');
+const crypto = require('crypto');
 const http = require('http');
 const { EventEmitter } = require('events');
 
@@ -18,7 +19,7 @@ class PushServer extends EventEmitter {
         this.on('error', () => { });  // EventEmitter 约定兜底
         this.server = null;
         this.port = 0;
-        this.token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        this.token = crypto.randomBytes(24).toString('base64url');
     }
 
     /** 取局域网 IPv4 地址（展示用）。 */

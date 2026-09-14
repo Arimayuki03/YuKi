@@ -401,7 +401,7 @@ function createSearchPage(cfg) {
             const cards = slice.map((v) => {
                 // Kazumi 结果无源封面：命中 Bangumi 封面缓存直接显示，未命中用占位图并标
                 // data-cover-missing，由 fillMissingCovers 后台按片名从 Bangumi 拉取补上（T73）。
-                // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.bangumi.pro（T76）。
+                // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.{镜像根域名}（T76）。
                 if (String(grp.src).startsWith('kazumi:')) {
                     let cover = '';
                     if (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) cover = Kazumi.getCachedBangumiCover(v.name) || '';

@@ -26,6 +26,8 @@ STAGES = [
     ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('webdav-conn', [PY, os.path.join(HERE, 'test_webdav_conn.py')]),
     ('cache', [PY, os.path.join(HERE, 'test_cache_store.py')]),
+    # RM-4：playerContent 解析结果持久缓存（跨重启跳过查源 + 失效重解析）
+    ('play-cache', [PY, os.path.join(HERE, 'test_play_cache.py')]),
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
     ('runtime-contract', [PY, os.path.join(HERE, 'test_runtime_contract.py')]),
     ('runtime-supervisor', [PY, os.path.join(HERE, 'test_runtime_supervisor.py')]),
@@ -55,6 +57,9 @@ STAGES = [
     ('capability-router', [PY, os.path.join(HERE, 'test_capability_router.py')]),
     ('config-security', [PY, os.path.join(HERE, 'test_config_security.py')]),
     ('android-worker-spike', [PY, os.path.join(HERE, 'test_android_worker_spike.py')]),
+    # N3.2~N3.5 契约回归（Python spider 隔离/CMS 契约/统一数据面）。不接入 run_all
+    # 的话文件损坏（如语法错误）不会惊动任何人——2026-09 就发生过一次。
+    ('n3-runtime-parity', [PY, os.path.join(HERE, 'test_n3_runtime_parity.py')]),
     # Q7.1 ~ Q7.5 全套验收套件
     ('q7-offline-fixtures', [PY, os.path.join(HERE, 'test_q7_offline_fixtures.py')]),
     ('q7-runtime-contracts', [PY, os.path.join(HERE, 'test_q7_runtime_contracts.py')]),

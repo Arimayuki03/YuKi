@@ -533,14 +533,29 @@ class TestBangumiSync(unittest.TestCase):
     def setUp(self):
         self.mgr = PluginManager()
         self.mgr._plugins = []
+        # 归位镜像状态：mirror.json 跨用例共享（set_mirror 会落盘），显式重置保证用例独立
+        from kazumi.plugin_manager import BANGUMI_MIRROR_ROOT
+        self.mgr.enable_bangumi_proxy = False
+        self.mgr.enable_git_proxy = False
+        self.mgr.mirror_root = BANGUMI_MIRROR_ROOT
 
     def test_domain_is_official_bgm_tv(self):
-        # 2026-08-09 改回官方域名 api.bgm.tv / next.bgm.tv（对齐 Kazumi api_endpoints.dart）
-        from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT
+        # 2026-08-09 改回官方域名 api.bgm.tv / next.bgm.tv（对齐 Kazumi api_endpoints.dart）；
+        # 2026-09-15 镜像根域名切至 bangumi.vip（bangumi.pro 失效），官方基址不受影响
+        from kazumi.plugin_manager import BANGUMI_API, BANGUMI_API_NEXT, BANGUMI_MIRROR_ROOT
         self.assertIn('api.bgm.tv', BANGUMI_API)
         self.assertIn('next.bgm.tv', BANGUMI_API_NEXT)
         self.assertNotIn('bangumi.pro', BANGUMI_API)
         self.assertNotIn('bangumi.pro', BANGUMI_API_NEXT)
+        self.assertEqual(BANGUMI_MIRROR_ROOT, 'bangumi.vip')
+
+    def test_ua_browser_prefixed(self):
+        # 2026-09-15 实测：bangumi.vip 镜像在 Cloudflare 后，程序化 UA（okhttp/yuki 裸 UA）
+        # 一律 403「Just a moment...」挑战页，浏览器 UA（尾部带应用标识）放行——
+        # 防止将来把 UA 回退成裸程序化 UA 导致镜像全挂
+        from kazumi.plugin_manager import BANGUMI_UA
+        self.assertTrue(BANGUMI_UA.startswith('Mozilla/5.0'), BANGUMI_UA)
+        self.assertIn('yuki/', BANGUMI_UA)  # 保留应用自报身份
 
     def test_me_with_token(self):
         from unittest import mock
@@ -778,6 +793,103 @@ class TestBangumiSync(unittest.TestCase):
         ok, msg = self.mgr.bangumi_update_collection('', '42', 2)
         self.assertFalse(ok)
 
+    # ---- RM-5 分集收藏（观看进度自动上报） ----
+
+    def test_update_episode_collection_ok(self):
+        from unittest import mock
+
+        class FakeRsp:
+            status_code = 204
+
+        # PATCH 批量端点：首个 `-` 通配用户 2xx 即成功，body 为 {episode_id: [...], type}
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request', return_value=FakeRsp()) as m:
+            ok, msg = self.mgr.bangumi_update_episode_collection('tok', '42', [101])
+        self.assertTrue(ok)
+        self.assertEqual(m.call_args[0][0], 'PATCH')
+        self.assertIn('/collections/42/episodes', m.call_args[0][1])
+        self.assertEqual(m.call_args[1]['json'], {'episode_id': [101], 'type': 2})
+
+    def test_update_episode_collection_fallback(self):
+        from unittest import mock
+        calls = {'n': 0}
+
+        class Rsp:
+            def __init__(self, code):
+                self.status_code = code
+
+        def fake_request(method, url, **kw):
+            calls['n'] += 1
+            return Rsp(500 if calls['n'] == 1 else 204)
+
+        # 首个组合失败后回退下一组合成功
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request', side_effect=fake_request):
+            ok, _ = self.mgr.bangumi_update_episode_collection('tok', '42', [101, 102])
+        self.assertTrue(ok)
+        self.assertEqual(calls['n'], 2)
+
+    def test_update_episode_collection_invalid_input(self):
+        from unittest import mock
+        # 空 episode_id / 非法 subject_id / 无 token 直接拒绝，不发请求
+        with mock.patch.object(self.mgr, '_bangumi_username', return_value='alice'), \
+                mock.patch('requests.request') as m:
+            ok, _ = self.mgr.bangumi_update_episode_collection('tok', '42', [])
+            self.assertFalse(ok)
+            ok, _ = self.mgr.bangumi_update_episode_collection('tok', 'abc', [101])
+            self.assertFalse(ok)
+            ok, _ = self.mgr.bangumi_update_episode_collection('', '42', [101])
+            self.assertFalse(ok)
+            m.assert_not_called()
+
+    def test_update_episode_collection_unauthenticated_short_circuit(self):
+        from unittest import mock
+
+        class Rsp401:
+            status_code = 401
+
+        # 401 与 base/username 组合无关：立即失败返回固定文案，不再把
+        # `-`/真实用户名 × 双基址的组合全部空试一遍（与 GET 侧行为对齐）
+        self.mgr._username_cache = 'alice'
+        with mock.patch('requests.request', return_value=Rsp401()) as m:
+            ok, msg = self.mgr.bangumi_update_episode_collection('tok', '42', [101])
+        self.assertFalse(ok)
+        self.assertIn('401', msg)
+        self.assertIn('Token', msg)
+        self.assertEqual(m.call_count, 1)
+
+    def test_episode_collections_ok(self):
+        from unittest import mock
+        data = {'total': 2, 'data': [
+            {'episode': {'id': 101}, 'type': 2},
+            {'episode': {'id': 102}, 'type': 1},
+        ]}
+
+        class FakeRsp:
+            status_code = 200
+
+            def json(self):
+                return data
+
+        # GET 走 `-` 通配 + episode_type=0 过滤 + limit=1000；归一化 [{episode_id, type}]
+        with mock.patch('requests.get', return_value=FakeRsp()) as m:
+            items = self.mgr.bangumi_episode_collections('tok', '42', episode_type=0)
+        self.assertEqual(items, [{'episode_id': 101, 'type': 2}, {'episode_id': 102, 'type': 1}])
+        self.assertIn('/users/-/collections/42/episodes', m.call_args[0][0])
+        self.assertEqual(m.call_args[1]['params']['episode_type'], 0)
+        self.assertEqual(m.call_args[1]['params']['limit'], 1000)
+
+    def test_episode_collections_unauthenticated(self):
+        from unittest import mock
+
+        class Rsp401:
+            status_code = 401
+
+        # 401/403 直接判失败返回 None（不再尝试其余组合）
+        with mock.patch('requests.get', return_value=Rsp401()) as m:
+            self.assertIsNone(self.mgr.bangumi_episode_collections('tok', '42'))
+            self.assertEqual(m.call_count, 1)
+
     def test_all_collections_paginates_all_types(self):
         # 任务六 6.1：_bangumi_all_collections 分页遍历 5 种收藏类型，按 subject_id 去重合并
         from unittest import mock
@@ -899,7 +1011,7 @@ class TestBangumiSync(unittest.TestCase):
         # 默认官方
         self.assertEqual(self.mgr._base_api(), BANGUMI_API)
         self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
-        # 开启 Bangumi 镜像 → 全域名反代 api.bangumi.pro / next.bangumi.pro
+        # 开启 Bangumi 镜像 → 全域名反代 api.{根域名} / next.{根域名}（默认 bangumi.vip）
         self.mgr.set_mirror(bangumi=True)
         self.assertEqual(self.mgr._base_api(), BANGUMI_MIRROR_API)
         self.assertEqual(self.mgr._base_next(), BANGUMI_MIRROR_NEXT)
@@ -908,8 +1020,45 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(self.mgr._base_api(), BANGUMI_API)
         self.assertEqual(self.mgr._base_next(), BANGUMI_API_NEXT)
 
+    def test_mirror_root_custom_domain(self):
+        # 设置页手动替换镜像根域名：api.bgm.tv → api.{自定义根域名}，lain/next 同理
+        self.mgr.set_mirror(bangumi=True, root='mirror.example.com')
+        self.assertEqual(self.mgr.mirror_root, 'mirror.example.com')
+        self.assertEqual(self.mgr._base_api(), 'https://api.mirror.example.com')
+        self.assertEqual(self.mgr._base_next(), 'https://next.mirror.example.com')
+
+    def test_mirror_root_normalization(self):
+        # 用户粘贴完整 URL/大写/尾斜杠 → 归一化为主机名
+        from kazumi.plugin_manager import normalize_mirror_root
+        self.assertEqual(normalize_mirror_root('https://API.Bangumi.VIP/path'), 'api.bangumi.vip')
+        self.assertEqual(normalize_mirror_root(' Bangumi.VIP '), 'bangumi.vip')
+        self.assertEqual(normalize_mirror_root('https://bangumi.vip:443'), 'bangumi.vip')
+        self.assertIsNone(normalize_mirror_root(''))
+        self.assertIsNone(normalize_mirror_root('not a domain'))
+        self.assertIsNone(normalize_mirror_root('bad@host'))
+        self.assertIsNone(normalize_mirror_root('localhost'))
+
+    def test_mirror_root_invalid_rejected(self):
+        # 非法域名拒绝且不改动现状
+        with self.assertRaises(ValueError):
+            self.mgr.set_mirror(root='not a domain')
+        self.assertEqual(self.mgr.mirror_root, 'bangumi.vip')
+
+    def test_mirror_root_persisted(self):
+        # 根域名随 mirror.json 落盘，新实例（后端重启）恢复
+        self.mgr.set_mirror(bangumi=True, root='mirror.example.com')
+        fp = self.mgr._mirror_state_file()
+        self.assertTrue(fp and os.path.exists(fp))
+        with open(fp, encoding='utf-8') as f:
+            data = json.load(f)
+        self.assertEqual(data.get('root'), 'mirror.example.com')
+        mgr2 = PluginManager()
+        self.assertEqual(mgr2.mirror_root, 'mirror.example.com')
+        self.assertTrue(mgr2.enable_bangumi_proxy)
+        self.assertEqual(mgr2._base_api(), 'https://api.mirror.example.com')
+
     def test_mirror_enabled_trends_uses_mirror(self):
-        # 镜像开启 → 推荐走 next.bangumi.pro（全域名反代），且 nameCN 归一到 name_cn
+        # 镜像开启 → 推荐走 next.{镜像根域名}（全域名反代），且 nameCN 归一到 name_cn
         from kazumi.plugin_manager import BANGUMI_MIRROR_NEXT
         from unittest import mock
 
@@ -928,7 +1077,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(out['total'], 1)
 
     def test_mirror_enabled_search_uses_mirror(self):
-        # 镜像开启 → 搜索走 api.bangumi.pro（免签名，全路径可用）
+        # 镜像开启 → 搜索走 api.{镜像根域名}（免签名，全路径可用）
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
 
@@ -946,7 +1095,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertEqual(len(out), 1)
 
     def test_mirror_enabled_season_calendar_uses_mirror(self):
-        # 镜像开启 → 季度放送检索（v0/search/subjects POST）走 api.bangumi.pro
+        # 镜像开启 → 季度放送检索（v0/search/subjects POST）走 api.{镜像根域名}
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
 
@@ -980,7 +1129,7 @@ class TestBangumiSync(unittest.TestCase):
         self.assertIn(BANGUMI_API_NEXT + '/p1/trending/subjects', m.call_args[0][0])
 
     def test_mirror_enabled_auth_collections_uses_mirror(self):
-        # 全域名反代也代理鉴权/收藏接口（镜像开启时走 api.bangumi.pro）
+        # 全域名反代也代理鉴权/收藏接口（镜像开启时走 api.{镜像根域名}）
         from kazumi.plugin_manager import BANGUMI_MIRROR_API
         from unittest import mock
         self.mgr.enable_bangumi_proxy = True

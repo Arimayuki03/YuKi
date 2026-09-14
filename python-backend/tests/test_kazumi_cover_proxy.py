@@ -92,16 +92,18 @@ class TestKazumiCoverProxy(unittest.TestCase):
     def setUp(self):
         self._old_get = http_client.get
         self.fetched = []
+        self.ua_seen = []
         self._token_q = 'token=' + urllib.parse.quote(TOKEN)
 
     def tearDown(self):
         http_client.get = self._old_get
 
     def _mock_get(self, results):
-        """results: {host: status | (status, content, ctype)}；记录每次请求 host。"""
+        """results: {host: status | (status, content, ctype)}；记录每次请求 host 与 UA。"""
         def fake_get(url, **kw):
             host = urllib.parse.urlsplit(url).hostname
             self.fetched.append(host)
+            self.ua_seen.append((kw.get('headers') or {}).get('User-Agent', ''))
             r = results.get(host, 502)
             if isinstance(r, int):
                 return _FakeRsp(status=r)
@@ -121,18 +123,30 @@ class TestKazumiCoverProxy(unittest.TestCase):
         self.assertTrue(headers.get('Content-Type', '').startswith('image/'))
         self.assertIn('max-age', headers.get('Cache-Control', ''))
         self.assertEqual(self.fetched, ['lain.bgm.tv'])
+        # 镜像 lain.bangumi.vip 在 Cloudflare 后拦程序化 UA（okhttp 默认 UA 实测 403）：
+        # 代理转发必须带浏览器前缀 UA（与渲染层 <img> 同形态）
+        self.assertTrue(self.ua_seen[0].startswith('Mozilla/5.0'), self.ua_seen[0])
 
     def test_official_fail_falls_back_to_mirror(self):
-        self._mock_get({'lain.bgm.tv': 502, 'lain.bangumi.pro': (200, b'mirror', 'image/jpeg')})
+        # 2026-09-15 镜像根域名切至 bangumi.vip（bangumi.pro 失效）
+        self._mock_get({'lain.bgm.tv': 502, 'lain.bangumi.vip': (200, b'mirror', 'image/jpeg')})
         status, _, body = _request(self._url('https://lain.bgm.tv/r/400/pic/cover/c/a.jpg'))
         self.assertEqual(status, 200)
         self.assertEqual(body, b'mirror')
-        self.assertEqual(self.fetched, ['lain.bgm.tv', 'lain.bangumi.pro'])
+        self.assertEqual(self.fetched, ['lain.bgm.tv', 'lain.bangumi.vip'])
 
     def test_all_candidates_fail_is_502(self):
-        self._mock_get({'lain.bgm.tv': 502, 'lain.bangumi.pro': 500})
+        self._mock_get({'lain.bgm.tv': 502, 'lain.bangumi.vip': 500})
         status, _, _ = _request(self._url('https://lain.bgm.tv/r/400/pic/cover/c/a.jpg'))
         self.assertEqual(status, 502)
+
+    def test_legacy_mirror_pro_host_falls_back_to_current_mirror(self):
+        # 存量记录可能持久化旧镜像 lain.bangumi.pro：仍在白名单，失败后兜底当前镜像
+        self._mock_get({'lain.bangumi.pro': 502, 'lain.bangumi.vip': (200, b'vip', 'image/jpeg')})
+        status, _, body = _request(self._url('https://lain.bangumi.pro/r/400/pic/cover/l/a.jpg'))
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'vip')
+        self.assertEqual(self.fetched, ['lain.bangumi.pro', 'lain.bangumi.vip'])
 
     def test_host_whitelist_rejects_other_hosts(self):
         self._mock_get({})
@@ -154,11 +168,30 @@ class TestKazumiCoverProxy(unittest.TestCase):
         # 官方返回 HTML 错误页（如反爬跳转）应视为失败并走镜像
         self._mock_get({
             'lain.bgm.tv': (200, b'<html>err</html>', 'text/html'),
-            'lain.bangumi.pro': (200, b'ok', 'image/jpeg'),
+            'lain.bangumi.vip': (200, b'ok', 'image/jpeg'),
         })
         status, _, body = _request(self._url('https://lain.bgm.tv/r/400/pic/cover/c/a.jpg'))
         self.assertEqual(status, 200)
         self.assertEqual(body, b'ok')
+
+    def test_custom_mirror_root_whitelisted_and_used_as_fallback(self):
+        # 设置页手动替换镜像根域名后：lain.{自定义根域名} 入白名单并作为兜底候选
+        old_mgr = server.kazumi_mgr
+        server.kazumi_mgr = type('MgrStub', (), {'mirror_root': 'mirror.example.com'})()
+        try:
+            self._mock_get({'lain.bgm.tv': 502, 'lain.mirror.example.com': (200, b'custom', 'image/jpeg')})
+            status, _, body = _request(self._url('https://lain.bgm.tv/r/400/pic/cover/c/a.jpg'))
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b'custom')
+            self.assertEqual(self.fetched, ['lain.bgm.tv', 'lain.mirror.example.com'])
+            # 自定义镜像域 URL 本身放行且已是镜像域（不再追加候选）
+            self.fetched.clear()
+            self._mock_get({'lain.mirror.example.com': (200, b'direct', 'image/jpeg')})
+            status, _, body = _request(self._url('https://lain.mirror.example.com/pic/cover/l/a.jpg'))
+            self.assertEqual(status, 200)
+            self.assertEqual(self.fetched, ['lain.mirror.example.com'])
+        finally:
+            server.kazumi_mgr = old_mgr
 
     def test_poisoned_r_prefix_segment_normalized(self):
         """T78：旧渲染层持久化的损坏组合（/r/{n}/pic/cover/{非l}/，lain CDN 返回
@@ -171,9 +204,9 @@ class TestKazumiCoverProxy(unittest.TestCase):
 
         http_client.get = fake_get
         status, _, _ = _request(
-            self._url('https://lain.bangumi.pro/r/400/pic/cover/c/3c/ec/247_MnPPU.jpg'))
+            self._url('https://lain.bangumi.vip/r/400/pic/cover/c/3c/ec/247_MnPPU.jpg'))
         self.assertEqual(status, 200)
-        self.assertEqual(len(fetched_urls), 1)  # 已是镜像域，不再追加官方候选
+        self.assertEqual(len(fetched_urls), 1)  # 已是当前镜像域，不再追加候选
         self.assertIn('/r/400/pic/cover/l/3c/ec/247_MnPPU.jpg', fetched_urls[0])
 
         # 裸路径（无 r 前缀）的 c 段合法：原样透传

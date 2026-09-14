@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, _coverCache */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, _coverCache, setBangumiMirrorRoot */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -62,6 +62,11 @@ const Kazumi = {
             window.yuki.settingsSet('bangumiAutoSyncOnStart', this.checked);
             warnToast(this.checked ? '已开启启动时自动同步 Bangumi 收藏' : '已关闭启动时自动同步');
         });
+        // RM-5：看完自动上报观看进度（分集看过 + 收藏在看/看过联动）
+        $('#set_bangumi_progress_sync').on('change', function () {
+            window.yuki.settingsSet('bangumiProgressSync', this.checked);
+            warnToast(this.checked ? '已开启看完自动上报 Bangumi 观看进度' : '已关闭观看进度自动上报');
+        });
         // 弹幕（弹弹 play）凭据：回填 + 保存（保存后主进程重启后端注入环境变量）
         this._prefillDandan();
         $('#set_dandan_save').on('click', async () => {
@@ -100,6 +105,19 @@ const Kazumi = {
             const on = this.checked;
             window.yuki.settingsSet('enableGitProxy', on);
             doAction('kazumiSetMirror', { git: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
+        });
+        // 手动替换 Bangumi 镜像根域名（镜像站域名失效时救急）：归一化校验后
+        // 存 settings + 更新 common.js 全局（封面兜底链即时生效）+ 同步后端；
+        // 清空保存视为恢复默认 bangumi.vip，非法格式报错并保持原值
+        $('#set_bangumi_mirror_root_save').on('click', async () => {
+            const raw = $('#set_bangumi_mirror_root').val().trim();
+            const norm = raw ? setBangumiMirrorRoot(raw) : setBangumiMirrorRoot('bangumi.vip');
+            if (!norm) { warnToast('镜像域名格式不正确（示例：bangumi.vip）'); return; }
+            $('#set_bangumi_mirror_root').val(norm);
+            window.yuki.settingsSet('bangumiMirrorRoot', norm);
+            const rsp = await doAction('kazumiSetMirror', { root: norm }, '/kazumi/action').catch(() => null);
+            if (rsp && rsp.code === 200) warnToast(`Bangumi 镜像域名已保存：${norm}（api.bgm.tv → api.${norm}）`);
+            else warnToast('镜像域名保存失败：后端不可达或域名格式不正确');
         });
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
             const name = String($(e.currentTarget).data('name') || '');
@@ -611,6 +629,7 @@ const Kazumi = {
             $('#bangumi_immediate_toast').prop('checked', s.bangumiImmediateSyncToastEnable !== false);
             $('#set_bangumi_autosync_status').prop('checked', s.bangumiAutoSyncStatus === true);
             $('#set_bangumi_autosync_on_start').prop('checked', s.bangumiAutoSyncOnStart === true);
+            $('#set_bangumi_progress_sync').prop('checked', s.bangumiProgressSync === true);
         } catch (e) { /* 读取失败不阻塞 */ }
     },
 
@@ -644,18 +663,21 @@ const Kazumi = {
         } catch (e) { /* 读取失败不阻塞 */ }
     },
 
-    /** 回填镜像开关，并把已保存的镜像状态应用到后端。 */
+    /** 回填镜像开关与镜像根域名，并把已保存的镜像状态应用到后端与 common.js 全局。 */
     async _prefillMirror() {
         try {
             const s = (await window.yuki.settingsGet()) || {};
             $('#set_bangumi_mirror').prop('checked', !!s.enableBangumiProxy);
             $('#set_git_mirror').prop('checked', !!s.enableGitProxy);
-            if (s.enableBangumiProxy || s.enableGitProxy) {
-                doAction('kazumiSetMirror', {
-                    bangumi: s.enableBangumiProxy ? '1' : '0',
-                    git: s.enableGitProxy ? '1' : '0',
-                }, '/kazumi/action').catch(() => { });
-            }
+            // 镜像根域名：settings 无值（未设置过）保持默认；后端启动时也从
+            // mirror.json 自恢复，这里再同步一次保证双端一致（含封面兜底链）
+            const root = setBangumiMirrorRoot(s.bangumiMirrorRoot || 'bangumi.vip');
+            $('#set_bangumi_mirror_root').val(root || 'bangumi.vip');
+            doAction('kazumiSetMirror', {
+                bangumi: s.enableBangumiProxy ? '1' : '0',
+                git: s.enableGitProxy ? '1' : '0',
+                root: root || 'bangumi.vip',
+            }, '/kazumi/action').catch(() => { });
         } catch (e) { /* 读取失败不阻塞 */ }
     },
 
@@ -731,15 +753,16 @@ const Kazumi = {
      *  注意：后端 plugin_manager.py:858 docstring 写的是 0-4，实际透传 int 且应传 1-5，注释有误。 */
     _favTagToBangumiType: { want: 1, seen: 2, watching: 3, hold: 4, dropped: 5 },
 
-    /** 设置某 subject 的收藏类型（详情弹窗追番按钮用）。 */
-    async setBangumiCollection(subjectId, type) {
+    /** 设置某 subject 的收藏类型（详情弹窗追番按钮用）。
+     *  opts.quiet：静默成功（进度自动上报联动用，不打断观看）。 */
+    async setBangumiCollection(subjectId, type, opts = {}) {
         const token = await this._getBangumiToken();
         if (!token) { if (!this._bgmBatchActive) warnToast('请先在设置 → Kazumi 规则 → Bangumi 同步中保存 Token'); return false; }
         try {
             const rsp = await doAction('kazumiBangumiCollectionSet', { token, id: subjectId, type }, '/kazumi/action');
             if (rsp && rsp.code === 200) {
                 // 即时同步提示开关（bangumiImmediateSyncToastEnable，默认开）；批量上传内抑制单条提示
-                if (!this._bgmBatchActive) {
+                if (!this._bgmBatchActive && !(opts && opts.quiet)) {
                     try {
                         const st = (await window.yuki.settingsGet()) || {};
                         if (st.bangumiImmediateSyncToastEnable !== false) warnToast('已同步到 Bangumi');
@@ -747,7 +770,7 @@ const Kazumi = {
                 }
                 return true;
             }
-            if (!this._bgmBatchActive) {
+            if (!this._bgmBatchActive && !(opts && opts.quiet)) {
                 const msg = (rsp && rsp.msg) || '未知错误';
                 // 401 鉴权失败给出可操作指引，其余保持原样
                 if (String(msg).includes('401') || String(msg).includes('Token 无效') || String(msg).includes('token')) {
@@ -778,6 +801,164 @@ const Kazumi = {
         }
         if (!subjectId) return; // 匹配不到 Bangumi subject，静默跳过
         await this.setBangumiCollection(subjectId, type);
+    },
+
+    // ---------------------------------------------------------------- Bangumi 观看进度自动上报（RM-5）
+
+    /** 分集列表缓存：subjectId → { eps, ts }（10 分钟 TTL，连播逐集上报免重复拉取）。 */
+    _bgmEpCache: new Map(),
+    _bgmEpCacheTTL: 10 * 60 * 1000,
+
+    /** 上报串行链：同一账号的打点/收藏联动按序执行，避免连播逐集并发交错。 */
+    _bgmProgressChain: Promise.resolve(),
+
+    /** 上次失败提醒时间戳：失败 toast 5 分钟内不重复（Token 失效时连播逐集不刷屏）。 */
+    _bgmProgressLastFailToast: 0,
+
+    /** 看完一集自动上报的准入判定：仅在线源（CatVod 带 vodId / kazumi: 源）。
+     *  直链（title 是 URL 文件名）、本地/下载文件、Bangumi 自身条目不做片名匹配，防误标。 */
+    _bgmProgressEligible(meta) {
+        if (!meta || !meta.title) return false;
+        const site = String(meta.site || '');
+        if (!site || site === 'direct' || site === 'local' || site === 'download' || site === 'bangumi') return false;
+        if (site.startsWith('kazumi:')) return true;
+        return !!meta.vodId;
+    },
+
+    /** 从集名解析集数：第N集/第N话、Episode N、EP N、S01E02、纯数字、前导数字；「第一季」这类无集后缀的不误判。
+     *  特典/花絮/OVA 等番外集名不做数字推断（返回 0，交给分集名精确兜底），防把同号正片错标看过。
+     *  返回数字（支持 7.5 这类番外集号），解析不到返回 0。 */
+    _bgmParseEpNumber(name) {
+        const s = String(name || '').trim();
+        if (!s) return 0;
+        // 番外关键词直接放弃数字推断（宁缺勿错）：「特典 01」「SP 1」解析出集号会命中
+        // 同号正片导致错标；拉丁关键词用词边界匹配，避免 Whisper 之类普通单词误伤。
+        if (/特典|花絮|番外|预告|特别篇|特別篇|\b(?:sp|ova|oad|ncop|nced|pv|menu)\b/i.test(s)) return 0;
+        let m = s.match(/第\s*(\d+(?:\.\d+)?)\s*[集话話]/);
+        if (m) return parseFloat(m[1]) || 0;
+        m = s.match(/episode\s*[.\-_:：]?\s*(\d+(?:\.\d+)?)/i);
+        if (m) return parseFloat(m[1]) || 0;
+        // SxxExx（S01E02/S1-E2）：E 前是数字，通用 EP 分支的前置边界拦不住，单独识别；
+        // SP1 这类特典名 S 后无数字不会误入本分支
+        m = s.match(/(?:^|[^\dA-Za-z])S\s*\d{1,3}\s*[.\-_]?\s*E\s*(\d+(?:\.\d+)?)(?:\s*$|[^\d])/i);
+        if (m) return parseFloat(m[1]) || 0;
+        m = s.match(/(?:^|[^\dA-Za-z])EP?\s*[.\-_:：]?\s*(\d+(?:\.\d+)?)(?:\s*$|[^\d])/i);
+        if (m) return parseFloat(m[1]) || 0;
+        m = s.match(/^(\d+(?:\.\d+)?)$/);
+        if (m) return parseFloat(m[1]) || 0;
+        m = s.match(/^[「『\[\(]?\s*(\d+(?:\.\d+)?)\s*[」』\]\)]?\s*\D/);
+        if (m) return parseFloat(m[1]) || 0;
+        return 0;
+    },
+
+    /**
+     * 看完一集 → Bangumi 观看进度自动上报（fire-and-forget，由 Player 在「看完」时调用）：
+     *   1. 该集在 Bangumi 标记「看过」（分集收藏批量端点，服务端重算条目完成度）；
+     *   2. 收藏联动：未收藏/想看 → 自动「在看」；看完全部本篇集 → 自动「看过」（搁置/抛弃不动）。
+     * 开关 bangumiProgressSync（默认关）；无 Token / 匹配不到条目或分集全程静默跳过；
+     * 失败 5 分钟内只提醒一次，不阻塞播放。
+     * @param {object} meta {site, title, subtitle(集名), vodId, kazumiSrc}
+     * @param {number} epIndex 当前集下标（从 0 起，仅用于诊断日志）
+     */
+    reportWatchProgress(meta, epIndex) {
+        if (!this._bgmProgressEligible(meta)) return;
+        this._bgmProgressChain = this._bgmProgressChain.catch(() => { /* 上一次失败不阻塞本集 */ })
+            .then(() => this._bgmProgressApply(meta, Number(epIndex) || 0))
+            .catch(() => { /* 链内任何异常都吞掉：进度上报绝不影响播放 */ });
+    },
+
+    async _bgmProgressApply(meta, epIndex) {
+        const s = (await window.yuki.settingsGet()) || {};
+        if (s.bangumiProgressSync !== true) return; // 默认关
+        const token = await this._getBangumiToken();
+        if (!token) return; // 无 Token 静默跳过（设置页有显式开关与说明）
+        const title = String(meta.title || '').trim();
+        const sub = String(meta.subtitle || '').trim();
+        const match = await this.getBangumiMatch(title);
+        const subjectId = (match && Number(match.id)) || 0;
+        if (!subjectId) return; // 匹配不到 Bangumi 条目，静默跳过
+        // 分集解析：集数优先（ep 精确匹配），其次集名精确匹配；都不中则跳过（宁缺勿错标）
+        let eps = null;
+        const cached = this._bgmEpCache.get(subjectId);
+        if (cached && (Date.now() - cached.ts) < this._bgmEpCacheTTL) eps = cached.eps;
+        if (!eps) {
+            // bangumiEpisodes 返回后端透传的 Bangumi /v0/episodes 包装对象 {data, total}，
+            // 须取 .data（detail/player 页签同口径）；直接当数组用会在 .filter 抛 TypeError
+            // 被外层静默吞掉，整条上报链路零生效。数组形状也兜住，防后端将来直接透传列表。
+            const wrap = await this.bangumiEpisodes(subjectId);
+            const list = Array.isArray(wrap) ? wrap
+                : (wrap && Array.isArray(wrap.data)) ? wrap.data : null;
+            if (list === null) {
+                // 拉取失败不写缓存：空表毒化 10 分钟会让连播后续每集都静默跳过；本集跳过、下次重试
+                eps = [];
+            } else {
+                eps = list;
+                this._bgmEpCache.set(subjectId, { eps, ts: Date.now() });
+                if (this._bgmEpCache.size > 32) {
+                    const oldest = this._bgmEpCache.keys().next().value;
+                    this._bgmEpCache.delete(oldest);
+                }
+            }
+        }
+        const mainEps = eps.filter((e) => Number(e && e.type) === 0);
+        if (!mainEps.length) return;
+        const num = this._bgmParseEpNumber(sub);
+        let ep = null;
+        if (num > 0) ep = mainEps.find((e) => Number(e.ep) === num) || null;
+        if (!ep && sub) {
+            const norm = (x) => String(x || '').trim().toLowerCase();
+            ep = mainEps.find((e) => (e.name_cn && norm(e.name_cn) === norm(sub))
+                || (e.name && norm(e.name) === norm(sub))) || null;
+        }
+        if (!ep || !ep.id) {
+            console.log(`[RM-5] 进度上报跳过：匹配不到分集（${title} · ${sub || '无集名'} · epIndex ${epIndex}）`);
+            return;
+        }
+        // 名称兜底命中时用该分集自身集号参与「最后一集」判定（集名无数字也能联动看过）
+        const resolvedNum = num > 0 ? num : (Number(ep.ep) || 0);
+        const rsp = await doAction('kazumiBangumiEpisodeWatched', {
+            token, subjectId, episodeIds: JSON.stringify([ep.id]),
+        }, '/kazumi/action');
+        if (!rsp || rsp.code !== 200) {
+            this._bgmProgressFailToast((rsp && rsp.msg) || '未知错误');
+            return;
+        }
+        // 收藏联动（全部静默）：未收藏/想看 → 在看；最后一集看完且远端本篇全部看过 → 看过
+        try {
+            const col = await this.getBangumiCollection(subjectId);
+            const colType = col ? Number(col.type) : NaN;
+            if (!col || colType === 1) {
+                await this.setBangumiCollection(subjectId, 3, { quiet: true });
+            }
+            const isLastMain = resolvedNum > 0 && resolvedNum >= Math.max(...mainEps.map((e) => Number(e.ep) || 0));
+            if (isLastMain) {
+                // 仅「在看」（含刚联动成在看）才检查升级看过；已看过/搁置/抛弃/type 异常一律不动
+                const curType = (!col || colType === 1) ? 3 : colType;
+                if (curType === 3) {
+                    const epRsp = await doAction('kazumiBangumiEpisodeCollections', { token, subjectId }, '/kazumi/action');
+                    const items = (epRsp && epRsp.items) || null;
+                    if (items) {
+                        const watched = new Set(items.filter((it) => Number(it.type) === 2).map((it) => Number(it.episode_id)));
+                        if (mainEps.every((e) => watched.has(Number(e.id)))) {
+                            await this.setBangumiCollection(subjectId, 2, { quiet: true });
+                        }
+                    }
+                }
+            }
+        } catch (e) { /* 联动失败不影响打点结果 */ }
+    },
+
+    /** 上报失败提醒（5 分钟节流）。 */
+    _bgmProgressFailToast(msg) {
+        const now = Date.now();
+        if (now - this._bgmProgressLastFailToast < 300000) return;
+        this._bgmProgressLastFailToast = now;
+        const m = String(msg || '');
+        if (m.includes('401') || m.includes('Token 无效')) {
+            warnToast('Bangumi Token 无效或已过期（401），观看进度未上报，请重新获取 Token');
+        } else {
+            warnToast('Bangumi 观看进度上报失败：' + m);
+        }
     },
 
     /**

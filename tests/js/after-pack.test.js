@@ -1,0 +1,100 @@
+// 单元测试：scripts/after-pack.js — 打包后剔除系统自带冗余 DLL（杀软误报源）
+// 守住五条：Electron d3dcompiler 删除、后端 UCRT 全家删除（VCRUNTIME/python 保留）、
+// 无匹配文件 no-op、钩子默认剔除、YUKI_KEEP_SYSTEM_DLLS=1 逃生口保留。
+'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const afterPack = require('../../scripts/after-pack');
+
+const BACKEND_INTERNAL = path.join('resources', 'python-backend', 'yuki-backend', '_internal');
+
+function tempOutDir() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-afterpack-'));
+}
+
+function writeFile(p, size) {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, Buffer.alloc(size || 4096));
+}
+
+function cleanup(dir) {
+    fs.rmSync(dir, { recursive: true, force: true });
+}
+
+test('stripSystemDlls：剔除 Electron 自带 d3dcompiler_47.dll', () => {
+    const dir = tempOutDir();
+    try {
+        const dll = path.join(dir, 'd3dcompiler_47.dll');
+        writeFile(dll, 4096);
+        assert.deepEqual(afterPack.stripSystemDlls(dir), [{ rel: 'd3dcompiler_47.dll', size: 4096 }]);
+        assert.equal(fs.existsSync(dll), false);
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('stripSystemDlls：剔除后端 UCRT（ucrtbase + api-ms-win-*），保留 VCRUNTIME/python', () => {
+    const dir = tempOutDir();
+    try {
+        const internal = path.join(dir, BACKEND_INTERNAL);
+        for (const name of ['ucrtbase.dll', 'api-ms-win-crt-heap-l1-1-0.dll', 'api-ms-win-core-heap-l1-1-0.dll']) {
+            writeFile(path.join(internal, name), 8192);
+        }
+        for (const name of ['VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'python314.dll']) {
+            writeFile(path.join(internal, name), 1024);
+        }
+        const removed = afterPack.stripSystemDlls(dir);
+        assert.equal(removed.length, 3);
+        assert.ok(removed.every((r) => r.rel.startsWith(BACKEND_INTERNAL)));
+        assert.equal(fs.existsSync(path.join(internal, 'ucrtbase.dll')), false);
+        assert.equal(fs.existsSync(path.join(internal, 'api-ms-win-crt-heap-l1-1-0.dll')), false);
+        // VC++ 运行库系统不保证自带、python314 为解释器本体，剔除即坏，必须保留
+        for (const name of ['VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'python314.dll']) {
+            assert.equal(fs.existsSync(path.join(internal, name)), true, name);
+        }
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('stripSystemDlls：无匹配文件时 no-op（mac/linux 产物/纯 Electron 产物不受影响）', () => {
+    const dir = tempOutDir();
+    try {
+        assert.deepEqual(afterPack.stripSystemDlls(dir), []);
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('afterPack 钩子：默认剔除两类误报源', () => {
+    const dir = tempOutDir();
+    try {
+        writeFile(path.join(dir, 'd3dcompiler_47.dll'));
+        writeFile(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll'));
+        afterPack({ appOutDir: dir, electronPlatformName: 'win' });
+        assert.equal(fs.existsSync(path.join(dir, 'd3dcompiler_47.dll')), false);
+        assert.equal(fs.existsSync(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll')), false);
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('afterPack 钩子：YUKI_KEEP_SYSTEM_DLLS=1 保留全部（诊断逃生口）', () => {
+    const dir = tempOutDir();
+    const prev = process.env.YUKI_KEEP_SYSTEM_DLLS;
+    process.env.YUKI_KEEP_SYSTEM_DLLS = '1';
+    try {
+        writeFile(path.join(dir, 'd3dcompiler_47.dll'));
+        writeFile(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll'));
+        afterPack({ appOutDir: dir, electronPlatformName: 'win' });
+        assert.equal(fs.existsSync(path.join(dir, 'd3dcompiler_47.dll')), true);
+        assert.equal(fs.existsSync(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll')), true);
+    } finally {
+        if (prev === undefined) delete process.env.YUKI_KEEP_SYSTEM_DLLS;
+        else process.env.YUKI_KEEP_SYSTEM_DLLS = prev;
+        cleanup(dir);
+    }
+});

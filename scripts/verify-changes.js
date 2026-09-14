@@ -147,7 +147,8 @@ class CDP {
     const needIds = ['set_startup_view', 'set_error_toast', 'set_use_misans', 'set_proxy_url', 'set_proxy_enable',
         'set_dl_split', 'bangumi_token_link', 'bangumi_sync_priority', 'bangumi_immediate_toast', 'bangumi_sync_now',
         'webdav_enable', 'webdav_enable_history', 'webdav_enable_collect', 'webdav_save',
-        'set_bangumi_mirror', 'set_git_mirror', 'search-tabs', 'image-search-panel', 'popular-tags', 'log-clear'];
+        'set_bangumi_mirror', 'set_git_mirror', 'set_bangumi_mirror_root', 'set_bangumi_mirror_root_save',
+        'search-tabs', 'image-search-panel', 'popular-tags', 'log-clear'];
     out.settingsControls = await cdp.evaluate(`(() => {
         const ids = ${JSON.stringify(needIds)};
         const missing = ids.filter((id) => !document.getElementById(id));

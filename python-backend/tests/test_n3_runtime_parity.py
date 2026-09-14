@@ -76,6 +76,61 @@ class TestN33PythonSpiderIsolation(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
 
 
+    def _mgr(self):
+        from config import ConfigManager
+        from site_manager import SiteManager
+        return ConfigManager(SiteManager())
+
+    def test_materialize_content_addressed_no_overwrite(self):
+        """同 key 同 URL 的两份不同内容落在两个 sha256 子目录并存（按 key 落盘会互相覆盖）。"""
+        mgr = self._mgr()
+        api = 'https://test.com/spider.py'
+        bodies = (b'class Spider: v1', b'class Spider: v2  # different')
+        paths = []
+        for body in bodies:
+            with patch('http_client.fetch_follow_redirects') as mock_fetch:
+                mock_fetch.return_value = MagicMock(content=body)
+                paths.append(mgr._materialize_python_spider('py_iso_addr', api))
+        self.assertNotEqual(os.path.dirname(paths[0]), os.path.dirname(paths[1]))
+        # 两个内容哈希目录同属该站点目录
+        self.assertEqual(os.path.dirname(os.path.dirname(paths[0])),
+                         os.path.dirname(os.path.dirname(paths[1])))
+        for path, body in zip(paths, bodies):
+            with io.open(path, 'rb') as handle:
+                self.assertEqual(handle.read(), body)
+
+    def test_materialize_atomic_write_leaves_no_tmp(self):
+        """原子写（写 .tmp 后 os.replace）不得留下临时文件——子进程 import 会读到半成品。"""
+        mgr = self._mgr()
+        with patch('http_client.fetch_follow_redirects') as mock_fetch:
+            mock_fetch.return_value = MagicMock(content=b'class Spider: tmp')
+            path = mgr._materialize_python_spider('py_iso_tmp', 'https://test.com/spider.py')
+        leftovers = [n for n in os.listdir(os.path.dirname(path)) if n.endswith('.tmp')]
+        self.assertEqual(leftovers, [], f'原子写不应留下临时文件: {leftovers}')
+
+    def test_materialize_plain_http_warns(self):
+        """明文 http 源（无完整性校验、可被 MITM 换成任意代码）必须醒目告警；https/内联不告警。"""
+        mgr = self._mgr()
+
+        def mitm_warns(mock):
+            return [c for c in mock.call_args_list if 'MITM' in str(c)]
+
+        with (patch('http_client.fetch_follow_redirects') as mock_fetch,
+              patch('config.logger.warning') as mock_warn):
+            mock_fetch.return_value = MagicMock(content=b'class Spider: plain')
+            mgr._materialize_python_spider('py_iso_http', 'http://test.com/spider.py')
+            self.assertTrue(mitm_warns(mock_warn), '明文 http 源应告警完整性/MITM 风险')
+
+        with (patch('http_client.fetch_follow_redirects') as mock_fetch,
+              patch('config.logger.warning') as mock_warn):
+            mock_fetch.return_value = MagicMock(content=b'class Spider: tls')
+            mgr._materialize_python_spider('py_iso_https', 'https://test.com/spider.py')
+            self.assertEqual(mitm_warns(mock_warn), [], 'https 源不应告警')
+
+        with patch('config.logger.warning') as mock_warn:
+            mgr._materialize_python_spider('py_iso_inline', 'class Spider:\n    pass\n')
+            self.assertEqual(mitm_warns(mock_warn), [], '内联源码不走网络，不应告警')
+
 class TestN34CmsContract(unittest.TestCase):
     def setUp(self):
         self.spider = CmsSpider('cms_test', 'http://example.com/api', stype=1, name='测试CMS')

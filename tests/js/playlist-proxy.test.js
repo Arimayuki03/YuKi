@@ -577,3 +577,57 @@ test('R27：TS 魔串按内容识别改 .ts 标签；未知格式维持直通不
 
 
 
+
+test('清单短时缓存：TTL 内命中不重取上游；写入时惰性淘汰过期键（长会话不无界增长）', async () => {
+    const up = await makeUpstream([{
+        match: '/master.m3u8', contentType: 'application/vnd.apple.mpegurl',
+        body: '#EXTM3U\n#EXT-X-ENDLIST\n',
+    }]);
+    const proxy = new PlaylistProxy({
+        getBackend: OK_BACKEND,
+        fetchFn: async () => ({
+            json: async () => ({
+                url: `http://127.0.0.1:${up.port}/master.m3u8`, parse: 0,
+                header: { 'User-Agent': 'UA-1' },
+            }),
+        }),
+    });
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]', pipe: true,
+        eps: [{ id: 'ep0', name: '第1集' }],
+    });
+    assert.ok(reg.ok);
+    const entryUrl = reg.entries[0].url;
+    const token = new URL(entryUrl).pathname.split('/')[2];
+    const sess = proxy.sessions.get(token);
+    assert.ok(sess, '条目 URL 里的 token 应能取回会话');
+    const hits = () => up.seen.filter((s) => s.path === '/master.m3u8').length;
+
+    // 首取建缓存
+    const first = await reqFull(entryUrl);
+    assert.equal(first.status, 200);
+    assert.equal(hits(), 1);
+    assert.equal(sess._manifestCache.size, 1);
+
+    // TTL 内重复取（拖动场景）：命中缓存，上游零新增
+    const second = await reqFull(entryUrl);
+    assert.equal(second.status, 200);
+    assert.equal(second.body, first.body);
+    assert.equal(hits(), 1, 'TTL 内应命中缓存，不得重打上游');
+
+    // 手塞过期键（ts 造旧，不靠真等待避免时序抖动）→ 下一次写入把它们全清掉
+    for (let i = 0; i < 30; i++) {
+        sess._manifestCache.set(`stale:${i}`, { buf: Buffer.alloc(0), ts: Date.now() - 999999 });
+    }
+    assert.equal(sess._manifestCache.size, 31);
+    // 带 Range 绕过读命中（R22：清单会剥 Range 整取重判），强制走上游 → 触发写入淘汰
+    const third = await reqFull(entryUrl, { Range: 'bytes=0-' });
+    assert.equal(third.status, 200);
+    assert.ok(hits() > 1, '带 Range 应实际重取上游');
+    assert.equal(sess._manifestCache.size, 1, '过期键应被淘汰，只剩当前清单键');
+    assert.ok(sess._manifestCache.has(`${token}:0:http://127.0.0.1:${up.port}/master.m3u8`),
+        `当前清单键应保留，实际：${[...sess._manifestCache.keys()].join(',')}`);
+
+    await proxy.close();
+    await up.close();
+});

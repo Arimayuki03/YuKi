@@ -30,17 +30,24 @@ _BUILTIN_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'a
 
 # Bangumi API 端点（对齐 Kazumi api_endpoints.dart：bangumiAPIDomain / bangumiAPINextDomain）
 # 2026-08-09 按用户要求从旧镜像（bangumi.lol）改回官方域名 api.bgm.tv / next.bgm.tv；
-# 2026-08-21 按用户要求镜像域名整体切换为 bangumi.pro。
+# 2026-08-21 按用户要求镜像域名整体切换为 bangumi.pro；2026-09-15 bangumi.pro 失效，
+# 按用户要求切换为 bangumi.vip 并支持设置页手动替换镜像根域名。
 # （api.bangumi.tv 域名已被占用/不可达，官方 API 主机实为 api.bgm.tv）。
 # api.kazumi.fyi 为 Kazumi 官方镜像，留作签名镜像兜底。
 BANGUMI_API = 'https://api.bgm.tv'
 BANGUMI_API_NEXT = 'https://next.bgm.tv'
-# 全域名反代镜像（bangumi.pro，对齐镜像站说明：api.bgm.tv → api.bangumi.pro，next.bgm.tv → next.bangumi.pro）
-BANGUMI_MIRROR_API = 'https://api.bangumi.pro'
-BANGUMI_MIRROR_NEXT = 'https://next.bangumi.pro'
+# 全域名反代镜像根域名（对齐镜像站说明：*.bgm.tv → *.{根域名}，即 api.bgm.tv →
+# api.bangumi.vip，lain/next/fast/doujin 同理）；可在设置中手动替换，落盘 mirror.json。
+BANGUMI_MIRROR_ROOT = 'bangumi.vip'
+BANGUMI_MIRROR_API = f'https://api.{BANGUMI_MIRROR_ROOT}'
+BANGUMI_MIRROR_NEXT = f'https://next.{BANGUMI_MIRROR_ROOT}'
 BANGUMI_MIRROR = 'https://api.kazumi.fyi'  # 旧 kazumi 专属镜像（仅部分路径），保留常量向后兼容
-# bangumi 官方 API 的 WAF 会拦截 python-requests 默认 UA（部分端点直接 403），必须带应用 UA
-BANGUMI_UA = 'yuki/0.1.0 (https://github.com/); kazumi'
+# UA 策略（2026-09-15 实测）：官方 API 的 WAF 拦 python-requests 默认 UA；镜像
+# bangumi.vip 整体在 Cloudflare 后，程序化 UA（okhttp/yuki 裸 UA/curl）一律 403
+# 「Just a moment...」挑战页，浏览器 UA 放行（尾部附加应用标识不影响）。故统一用
+# 浏览器前缀 + 应用标识：官方与镜像双兼容，也保留 Bangumi API 规范的应用自报身份。
+BANGUMI_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/126.0 Safari/537.36 yuki/0.1.0')
 
 # 弹弹 play API（对齐 Kazumi danmaku_api.dart）
 DANDAN_API = 'https://api.dandanplay.net'
@@ -69,6 +76,27 @@ def _webdav_sync_dir(webdav_url, remote_dir=''):
     return f'{str(webdav_url or "").rstrip("/")}{rd}'
 
 
+# 镜像根域名合法性（如 bangumi.vip）：至少两段、每段字母数字连字符，防把
+# 用户输入拼进 URL netloc 时注入凭据（@）/路径（/）/端口（:）等成分。
+_MIRROR_ROOT_RE = re.compile(
+    r'^(?=.{4,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$')
+
+
+def normalize_mirror_root(value):
+    """归一化用户输入的镜像根域名：剥协议/路径/端口/尾点、转小写。
+
+    合法返回主机名（如 'https://API.Bangumi.VIP/path' → 'api.bangumi.vip'），
+    空值或非法格式返回 None（调用方决定回退默认或报错）。
+    """
+    s = str(value or '').strip().lower()
+    if not s:
+        return None
+    if '://' in s:
+        s = s.split('://', 1)[1]
+    s = s.split('/', 1)[0].split(':', 1)[0].rstrip('.').strip()
+    return s if _MIRROR_ROOT_RE.match(s) else None
+
+
 class PluginManager:
     """Kazumi 规则 CRUD 与持久化。"""
 
@@ -88,6 +116,8 @@ class PluginManager:
         # 镜像开关（4.1，对齐 Kazumi enableBangumiProxy/enableGitProxy）：Bangumi 公开接口走 api.kazumi.fyi
         self.enable_bangumi_proxy = False
         self.enable_git_proxy = False
+        # 全域名反代镜像根域名（默认 bangumi.vip，设置页可手动替换）
+        self.mirror_root = BANGUMI_MIRROR_ROOT
         self._load()
         self._import_builtin_rules()
         self._load_mirror_state()
@@ -99,23 +129,36 @@ class PluginManager:
 
     # ---------------------------------------------------------------- 镜像源（4.1）
 
+    def _mirror_api(self):
+        """当前镜像根域名下的 api 基址（无论开关状态，矩阵兜底用）。"""
+        return f'https://api.{self.mirror_root}'
+
     def _base_api(self):
-        """api.bgm.tv 类接口基址：镜像开启时走全域名反代 api.bangumi.pro（无需签名，全路径可用）。"""
-        return BANGUMI_MIRROR_API if self.enable_bangumi_proxy else BANGUMI_API
+        """api.bgm.tv 类接口基址：镜像开启时走全域名反代 api.{镜像根域名}（无需签名，全路径可用）。"""
+        return self._mirror_api() if self.enable_bangumi_proxy else BANGUMI_API
 
     def _base_next(self):
-        """next.bgm.tv 类接口基址：镜像开启时走 next.bangumi.pro。"""
-        return BANGUMI_MIRROR_NEXT if self.enable_bangumi_proxy else BANGUMI_API_NEXT
+        """next.bgm.tv 类接口基址：镜像开启时走 next.{镜像根域名}。"""
+        return f'https://next.{self.mirror_root}' if self.enable_bangumi_proxy else BANGUMI_API_NEXT
 
-    def set_mirror(self, bangumi=None, git=None):
-        """设置镜像开关（持久化到后端内存 + 落盘镜像状态文件）；返回当前状态。"""
+    def set_mirror(self, bangumi=None, git=None, root=None):
+        """设置镜像开关/根域名（持久化到后端内存 + 落盘镜像状态文件）；返回当前状态。
+
+        root 传 None/空串表示不改；传非法域名抛 ValueError（调用方转 400）。
+        """
         with self._lock:
             if bangumi is not None:
                 self.enable_bangumi_proxy = bool(bangumi)
             if git is not None:
                 self.enable_git_proxy = bool(git)
+            if root:
+                norm = normalize_mirror_root(root)
+                if not norm:
+                    raise ValueError(f'镜像域名格式不正确：{root}（示例：bangumi.vip）')
+                self.mirror_root = norm
             self._save_mirror_state()
-        return {'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy}
+        return {'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy,
+                'root': self.mirror_root}
 
     # ---------------------------------------------------------------- 镜像开关持久化
 
@@ -130,7 +173,7 @@ class PluginManager:
         return ''
 
     def _load_mirror_state(self):
-        """启动时恢复镜像开关（此前开关只存前端 settings，后端重启后丢失）。"""
+        """启动时恢复镜像开关与根域名（此前开关只存前端 settings，后端重启后丢失）。"""
         try:
             fp = self._mirror_state_file()
             if not fp or not os.path.exists(fp):
@@ -140,6 +183,9 @@ class PluginManager:
             if isinstance(data, dict):
                 self.enable_bangumi_proxy = bool(data.get('bangumi'))
                 self.enable_git_proxy = bool(data.get('git'))
+                root = normalize_mirror_root(data.get('root'))
+                if root:
+                    self.mirror_root = root
                 logger.info('[kazumi] mirror state restored: %s', data)
         except Exception as e:
             logger.warning('[kazumi] mirror state load failed: %s', e)
@@ -150,7 +196,8 @@ class PluginManager:
             if not fp:
                 return
             with open(fp, 'w', encoding='utf-8') as f:
-                json.dump({'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy}, f)
+                json.dump({'bangumi': self.enable_bangumi_proxy, 'git': self.enable_git_proxy,
+                           'root': self.mirror_root}, f)
         except Exception as e:
             logger.warning('[kazumi] mirror state save failed: %s', e)
 
@@ -737,7 +784,7 @@ class PluginManager:
         POST api.bgm.tv/v0/search/subjects 按 air_date 区间过滤 type=2（动画），
         sort=rank 拉取多页后按 id 去重，复用日历归一化补 name_cn/air_date，
         再按播出星期分桶为 [{weekday:{id}, items:[...]}]（与 bangumi_calendar 同形状）。
-        镜像开启时经 _base_api() 走全域名反代 api.bangumi.pro（免签名，全路径可用）。
+        镜像开启时经 _base_api() 走全域名反代 api.{镜像根域名}（免签名，全路径可用）。
         start/end 形如 YYYY-MM-DD；失败或无结果返回 []。"""
         if not start or not end:
             return []
@@ -814,7 +861,7 @@ class PluginManager:
 
     def bangumi_trends(self, limit=24, offset=0):
         """Bangumi 番剧趋势榜单（next.bgm.tv /p1/trending/subjects），返回归一化 {items,total}。
-        镜像开启时经 _base_next() 走全域名反代 next.bangumi.pro（免签名，全路径可用）。
+        镜像开启时经 _base_next() 走全域名反代 next.{镜像根域名}（免签名，全路径可用）。
         注意：该端点必须传 type/limit/offset，否则返回 400；单页 limit 上限按 ≤50 安全使用，
         超出会被上游拒绝（曾致渲染层 60/120 每页设置整页空白）。故单页钳制 ≤50，
         剩余量由 _aggregate_pages 自动翻页补足（页间限速），单次拉取总量上限 120。"""
@@ -1236,7 +1283,7 @@ class PluginManager:
         body = {'type': int(collection_type)}
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
-        alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
         if alt not in bases:
             bases.append(alt)
         usernames = ['-', username] if username != '-' else ['-']
@@ -1286,7 +1333,7 @@ class PluginManager:
             return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
-        alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
         if alt not in bases:
             bases.append(alt)
         # DELETE 操作用真实用户名优先（- 通配符对 DELETE 不可靠，会返回 404）
@@ -1316,6 +1363,108 @@ class PluginManager:
             last = other_err or '未知错误'
         logger.warning('[kazumi] bangumi collection delete failed: %s', last)
         return False, last
+
+    # ---------------------------------------------------------------- 分集收藏（RM-5 观看进度自动上报）
+
+    def bangumi_update_episode_collection(self, token, subject_id, episode_ids, episode_type=2):
+        """批量更新分集收藏状态（PATCH /v0/users/-/collections/{subject_id}/episodes）。
+
+        对齐 Bangumi API v0「章节收藏信息」批量端点：body {episode_id: [ids], type}，
+        服务端同时重算条目完成度。type: 0未收藏 1想看 2看过 3抛弃（EpisodeCollectionType）。
+        依次尝试 `-` 通配当前用户 / 真实用户名 × {当前基址, 官方/镜像另一基址}，首个 2xx 即成功
+        （成功返回 204，按 2xx 判定以兼容 202）；401/403 与组合无关，立即失败不再空试其余组合。
+        返回 (ok, msg)。"""
+        import requests
+        token = self._normalize_bangumi_token(token)
+        if not token:
+            return False, '缺少 Bangumi token'
+        try:
+            subject_id = int(subject_id)
+        except (TypeError, ValueError):
+            return False, '无效的 subject_id'
+        raw_ids = episode_ids if isinstance(episode_ids, (list, tuple)) else [episode_ids]
+        try:
+            ids = [int(x) for x in raw_ids]
+        except (TypeError, ValueError):
+            return False, '无效的 episode_id'
+        if not ids:
+            return False, '空的 episode_id'
+        body = {'episode_id': ids, 'type': int(episode_type)}
+        headers = self._bangumi_auth_headers(token)
+        bases = [self._base_api()]
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
+        if alt not in bases:
+            bases.append(alt)
+        # `-` 通配优先（打点频率高，不强制刷新用户名缓存省一次 /v0/me；Token 失效由 401 分支提示）
+        username = self._username_cache or ''
+        usernames = ['-'] + ([username] if username and username != '-' else [])
+        other_err = None
+        for base in bases:
+            for uname in usernames:
+                try:
+                    url = f'{base}/v0/users/{uname}/collections/{subject_id}/episodes'
+                    rsp = requests.request('PATCH', url, json=body, headers=headers, timeout=(5, 8), verify=True)
+                    if 200 <= rsp.status_code < 300:
+                        return True, 'ok'
+                    if rsp.status_code in (401, 403):
+                        # Token 失效与 base/username 组合无关：与 GET 侧对齐立即终止，
+                        # 不再把 `-`/真实用户名 × 双基址的组合全部空试一遍
+                        last = ('Bangumi Token 无效或已过期（401），'
+                                '请前往 https://bgm.tv/settings/token 重新获取并在设置中保存')
+                        logger.warning('[kazumi] bangumi episode collection update failed: %s', last)
+                        return False, last
+                    other_err = f'PATCH {url} -> {rsp.status_code}'
+                except Exception as e:
+                    other_err = f'PATCH {base}/v0/users/{uname}/collections/{subject_id}/episodes ERR {str(e)[:80]}'
+        last = other_err or '未知错误'
+        logger.warning('[kazumi] bangumi episode collection update failed: %s', last)
+        return False, last
+
+    def bangumi_episode_collections(self, token, subject_id, episode_type=0):
+        """当前用户对某条目的分集收藏状态（GET /v0/users/-/collections/{subject_id}/episodes）。
+
+        返回归一化 [{episode_id, type}]（type: 0未收藏 1想看 2看过 3抛弃）；仅含用户已有
+        分集收藏记录的集。limit=1000 一页拉满（单季集数量级），无记录/失败返回 None。"""
+        import requests
+        token = self._normalize_bangumi_token(token)
+        if not token:
+            return None
+        try:
+            subject_id = int(subject_id)
+        except (TypeError, ValueError):
+            return None
+        headers = self._bangumi_auth_headers(token)
+        bases = [self._base_api()]
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
+        if alt not in bases:
+            bases.append(alt)
+        usernames = ['-']
+        params = {'limit': 1000}
+        if episode_type is not None:
+            params['episode_type'] = int(episode_type)
+        for base in bases:
+            for uname in usernames:
+                try:
+                    url = f'{base}/v0/users/{uname}/collections/{subject_id}/episodes'
+                    rsp = requests.get(url, params=params, headers=headers, timeout=(5, 8), verify=True)
+                    if rsp.status_code in (401, 403):
+                        logger.warning('[kazumi] bangumi episode collections 401/403: Token 无效或已过期')
+                        return None
+                    if rsp.status_code == 404:
+                        continue  # 未收藏该条目/镜像不支持：尝试下一组合
+                    if 200 <= rsp.status_code < 300:
+                        data = rsp.json() or {}
+                        items = []
+                        for it in (data.get('data') or []):
+                            ep = (it or {}).get('episode') or {}
+                            eid = ep.get('id')
+                            if eid is None:
+                                continue
+                            items.append({'episode_id': int(eid), 'type': int(it.get('type') or 0)})
+                        return items
+                except Exception as e:
+                    logger.warning('[kazumi] bangumi episode collections failed: %s', e)
+        return None
 
     # ---------------------------------------------------------------- 收藏批量同步（任务六 6.1）
 
@@ -1519,7 +1668,7 @@ class PluginManager:
             return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'}
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
-        alt = BANGUMI_API if self._base_api() != BANGUMI_API else BANGUMI_MIRROR_API
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
         if alt not in bases:
             bases.append(alt)
         usernames = ['-', username] if username != '-' else ['-']

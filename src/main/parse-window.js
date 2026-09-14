@@ -16,7 +16,7 @@
  * - Cookie 持久化：解析/验证会话产生的 Cookie 读回推给后端 CookieJar，
  *   规则引擎发请求自动带上，重启后无需重新验证
  */
-const { BrowserWindow } = require('electron');
+const { BrowserWindow, shell } = require('electron');
 const { AsyncSingleFlight } = require('./async-session');
 
 const MEDIA_EXT = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -648,6 +648,17 @@ class ParseWindow {
             } catch (e) { this._release(slot); return resolve({ ok: false }); }
             const ses = win.webContents.session;
             win.webContents.setMaxListeners(0);
+            // 协议守卫（与隐藏捕获窗口一致）：验证页跳转/新窗若是非 http(s) scheme
+            // （如 intent://），不交系统处理；http(s) 新窗则转系统浏览器打开。
+            win.webContents.on('will-navigate', (ev, navUrl) => {
+                if (!isLoadableUrl(navUrl)) { try { ev.preventDefault(); } catch (e) { /* ignore */ } }
+            });
+            win.webContents.setWindowOpenHandler(({ url: openUrl }) => {
+                if (isLoadableUrl(openUrl)) {
+                    shell.openExternal(openUrl).catch(() => { /* ignore */ });
+                }
+                return { action: 'deny' };
+            });
             let settled = false;
             const done = (ok) => {
                 if (settled) return;

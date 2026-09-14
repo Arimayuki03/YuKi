@@ -685,6 +685,7 @@
                             </div>
                         </div>
                         <label class="md-switch" title="下载完成时弹出系统通知，点击可跳转下载页；关闭后完成仅在下载页内提示"><input type="checkbox" id="set_dl_notify" checked><span class="md-switch-track"></span><span class="md-switch-label">下载完成通知</span></label>
+                        <label class="md-switch" title="同一部作品的下载集数自动落「下载目录/番剧名/」子文件夹，文件以集名命名；关闭后新任务平铺存放（仅新任务生效，已下载文件不迁移）"><input type="checkbox" id="set_dl_series_folder" checked><span class="md-switch-track"></span><span class="md-switch-label">按番剧创建文件夹</span></label>
                         <div class="tip-line pad0">并发任务数</div>
                         <select id="set_dl_concurrency" class="md-select">
                             <option value="1">1 个</option>
@@ -853,7 +854,7 @@
                                     display:flex;align-items:center;justify-content:center;
                                     border:1px solid var(--md-outline);border-radius:8px;
                                     background:#fff;overflow:hidden;">
-                                    <span style="color:var(--md-outline);font-size:13px;">正在打开登录窗口…</span>
+                                    <span style="color:var(--md-outline);font-size:12px;">正在打开登录窗口…</span>
                                 </div>
                                 <div id="pan_qr_tip" class="tip-line pad0" style="text-align:center;">
                                     正在打开夸克官方登录页面，请在弹出的窗口中用「夸克 App」扫码登录。
@@ -971,7 +972,8 @@
                         <label class="md-switch"  title="即时同步时是否弹出提示"><input type="checkbox" id="bangumi_immediate_toast"><span class="md-switch-track"></span><span class="md-switch-label">即时同步提示</span></label>
                         <label class="md-switch"  title="收藏变动（在看/想看/看过/抛弃/搁置）时自动上传到 Bangumi，无需手动点立即同步"><input type="checkbox" id="set_bangumi_autosync_status"><span class="md-switch-track"></span><span class="md-switch-label">收藏状态变动自动同步</span></label>
                         <label class="md-switch"  title="启动时自动拉取一次 Bangumi 收藏，与本地合并（仅合并未冲突项）"><input type="checkbox" id="set_bangumi_autosync_on_start"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动同步收藏</span></label>
-                        <label class="md-switch"  title="打开 CatVod（非 Kazumi）影片详情时按片名自动匹配 Bangumi 数据（评分/吐槽/角色/收藏同步等）；关闭则仅显示源自身信息"><input type="checkbox" id="set_catvod_bgm_match"><span class="md-switch-track"></span><span class="md-switch-label">非 Kazumi 源详情页自动匹配 Bangumi 数据</span></label>
+                        <label class="md-switch"  title="看完一集自动把该集在 Bangumi 标记「看过」；首次观看自动加入「在看」，全部看完自动标记「看过」（搁置/抛弃不改动）"><input type="checkbox" id="set_bangumi_progress_sync"><span class="md-switch-track"></span><span class="md-switch-label">看完自动上报观看进度</span></label>
+                        <label class="md-switch"  title="打开 CatVod 影片详情时按片名自动匹配 Bangumi 数据（评分/吐槽/角色/收藏同步等）；关闭则仅显示源自身信息"><input type="checkbox" id="set_catvod_bgm_match"><span class="md-switch-track"></span><span class="md-switch-label">CatVod 源详情页自动匹配 Bangumi 数据</span></label>
                         <div class="hotkey-grid" >
                             <div>
                                 <div class="tip-line pad0">同步优先级</div>
@@ -1013,12 +1015,19 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索 / 时间表 / 榜单 / 详情 / 角色 / 收藏同步等）改走全域名反代 api.bangumi.pro / next.bangumi.pro（对应 api.bgm.tv / next.bgm.tv，免签名）；「规则仓库镜像」则在拉取规则更新时使用镜像仓库。</div>
+                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索 / 时间表 / 榜单 / 详情 / 角色 / 收藏同步等）改走全域名反代镜像（默认根域名 bangumi.vip，对应 api.bgm.tv → api.bangumi.vip，lain/next/fast/doujin 同理，免签名）；「Bangumi 镜像域名」可手动替换镜像根域名（镜像站域名失效时填入新根域名即可，子域自动映射）；「规则仓库镜像」则在拉取规则更新时使用镜像仓库。封面兜底镜像（lain.*）随镜像域名一同切换，且不受镜像开关影响。</div>
                             </div>
                         </div>
                         <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
-                        <label class="md-switch" title="Bangumi 接口走全域名反代 api.bangumi.pro / next.bangumi.pro"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
+                        <label class="md-switch" title="Bangumi 接口走全域名反代镜像（默认 api.bangumi.vip / next.bangumi.vip）"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
                         <label class="md-switch" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
+                        <div class="tip-line pad0">Bangumi 镜像域名</div>
+                        <div class="md-field" >
+                            <input id="set_bangumi_mirror_root" class="md-input" type="text" placeholder="镜像根域名，默认 bangumi.vip" />
+                        </div>
+                        <div class="wall-row" >
+                            <button id="set_bangumi_mirror_root_save" class="md-btn md-btn-tonal">保存镜像域名</button>
+                        </div>
                         <div class="tip-line pad0">网络代理</div>
                         <div class="md-field">
                             <input id="set_proxy_url" class="md-input" type="text" placeholder="如 http://127.0.0.1:7897" />
@@ -1060,6 +1069,18 @@
                             <button id="log-viewer-open" class="md-btn md-btn-tonal">查看应用日志</button>
                             <button id="set_reset" class="md-btn md-btn-danger-tonal">恢复默认设置</button>
                         </div>
+                    </div>
+                    <div class="tool-card" data-setcat="system">
+                        <div class="tool-card-title">软件更新</div>
+                        <label class="md-switch" title="开启后启动时静默检查新版本并自动下载，退出应用时安装；关闭（默认）后仅提醒，由你在发现新版本后手动下载"><input type="checkbox" id="set_auto_update"><span class="md-switch-track"></span><span class="md-switch-label">自动下载更新</span></label>
+                        <label class="md-switch" title="启动检查发现新版本时弹窗提示，可一键下载；自动下载更新开启时为静默下载，不弹窗"><input type="checkbox" id="set_update_notify" checked><span class="md-switch-track"></span><span class="md-switch-label">更新通知</span></label>
+                        <div class="tip-line pad0" id="update_current_line">当前版本：加载中</div>
+                        <div class="wall-row">
+                            <button id="set_update_check" class="md-btn md-btn-tonal">立即检查更新</button>
+                            <button id="set_update_download" class="md-btn md-btn-tonal" style="display:none;">下载更新</button>
+                            <button id="set_update_install" class="md-btn md-btn-tonal" style="display:none;">重启并安装</button>
+                        </div>
+                        <div class="tip-line pad0" id="update_state_line" style="display:none;"></div>
                     </div>
                     <div class="tool-card about-card" data-setcat="about">
                         <img class="about-logo" src="../../assets/icon.png" alt="YuKi" draggable="false">

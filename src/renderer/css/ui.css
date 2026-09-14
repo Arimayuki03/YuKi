@@ -689,6 +689,25 @@ body.has-wallpaper::after { display:none; }
     border-radius:var(--radius-lg);
     background:color-mix(in srgb, var(--md-surface-container) 60%, transparent);
 }
+/* Bangumi 网络/镜像引导空态（推荐/时间表共用，common.js bangumiNetGuide）：
+   该函数必须返回单根节点——靠 grid-column 占满网格一行，渲染成与上方
+   only-child 空态一致的虚线卡；三段文案统一 12px 次级色居中，隐私说明段
+   左对齐并以分隔线区分，开关名仅加粗强调（不另配色/字号） */
+.bangumi-net-guide {
+    grid-column:1 / -1;
+    text-align:center; padding:48px 32px;
+    border:1px dashed var(--md-outline-variant);
+    border-radius:var(--radius-lg);
+    background:color-mix(in srgb, var(--md-surface-container) 60%, transparent);
+    color:var(--md-on-surface-variant,#8a8a8a);
+    font-size:12px; line-height:1.8;
+}
+.bangumi-net-guide-note {
+    max-width:640px; margin:12px auto 0;
+    padding-top:12px;
+    border-top:1px dashed var(--md-outline-variant);
+    text-align:left;
+}
 /* 直播状态指示：右侧对齐（margin-left:auto）、单行不换行、padding 归零（原 inline 样式移入 CSS） */
 #live-status{margin-left:auto;padding:0;flex:none;white-space:nowrap}
 
@@ -2533,6 +2552,7 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
        按 settings-wrap 先例放大 max-width 保证单行 */
     .downloads-wrap { max-width:1200px; }
     .tip-line { font-size:15.5px; }
+    .bangumi-net-guide { font-size:15.5px; }
     .view-title { font-size:22px; }
     .tool-card { font-size:16px; }
     .tool-card-title { font-size:19px; }
