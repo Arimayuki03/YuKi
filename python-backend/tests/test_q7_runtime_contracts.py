@@ -28,7 +28,9 @@ class TestQ7RuntimeContractFixtures(unittest.TestCase):
             'site_key': 'py_norm',
             'behavior': 'normal'
         }, policy=policy)
-        req = RuntimeRequest.create(site_key='py_norm', method='homeContent', deadline_ms=2000)
+        # 首次 call 承担 worker 冷启动（spawn + 重量 import）：CI 慢机上 2s 会被
+        # 启动阶段吃光导致正常用例误判超时，加余量；超时契约用例不放宽。
+        req = RuntimeRequest.create(site_key='py_norm', method='homeContent', deadline_ms=10000)
         res, _ = sp_normal.call('homeContent', [False], request=req)
         self.assertEqual(res, {'list': []})
         sp_normal.destroy()
@@ -71,9 +73,11 @@ class TestQ7RuntimeContractFixtures(unittest.TestCase):
             'api': js_code_normal,
             'proxy_port': 18651
         }, policy=policy)
-        req_init = RuntimeRequest.create(site_key='js_norm', method='init', deadline_ms=5000)
+        # 同 py_norm：JS worker 首次调用要先经历进程 spawn + QuickJS 初始化，
+        # CI 慢机上这段可耗掉大半 5s 截止（见 run 35134582106 的启动超时误判）。
+        req_init = RuntimeRequest.create(site_key='js_norm', method='init', deadline_ms=20000)
         sp_js.call('init', [''], request=req_init)
-        req = RuntimeRequest.create(site_key='js_norm', method='homeContent', deadline_ms=5000)
+        req = RuntimeRequest.create(site_key='js_norm', method='homeContent', deadline_ms=20000)
         res, _ = sp_js.call('homeContent', [False], request=req)
         self.assertIn('class', res)
         sp_js.destroy()
