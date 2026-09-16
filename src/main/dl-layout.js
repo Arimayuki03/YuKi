@@ -61,6 +61,32 @@ function resolveSeriesTaskLayout({ dlRoot, enabled = true, vodName, epName, out 
 }
 
 /**
+ * 从任务产物路径推导展示名：产物落在 <dlRoot>/<剧名>/ 下一级（RM-1 布局）时
+ * 返回「剧名 - 文件名」——此类任务文件名只含集名，下载列表只显示 basename
+ * 会丢失影片名；平铺任务（根目录）返回 ''。BT 种子产物不做目录层级判断：
+ * 一级目录时恰好凑出「种子名 - 文件名」可读形式（顺带生效），二级及以上返回 ''
+ * （torrent 内部结构自带可读层级，强行前缀反而冗长）。
+ * @param {object} opts dlRoot 下载根目录；files 产物绝对路径数组；name 当前显示名
+ * @returns {string} 展示名；信息不足返回 ''（调用方回退原 name）
+ */
+function seriesDisplayName({ dlRoot, files, name } = {}) {
+    const f = (files || []).find((x) => x && x !== '.');
+    if (!f || !dlRoot) return '';
+    const rel = relUnderRoot(dlRoot, f);
+    if (!rel) return '';
+    const parts = rel.split(path.sep);
+    if (parts.length !== 2) return '';
+    const [folder, fileName] = parts;
+    // 文件主名已含剧名时不重复前缀：单集影片（stem === folder）与集名缺失时
+    // 落进子目录的旧 out 命名（「剧名 - xxx」形态）都会被前置命中
+    const base = path.basename(String(name || fileName));
+    if (!base) return '';
+    const stem = base.slice(0, base.length - path.extname(base).length);
+    if (!stem || stem === folder || stem.startsWith(`${folder} - `)) return base;
+    return `${folder} - ${base}`;
+}
+
+/**
  * 绝对路径 p 相对 root 的安全相对路径；root 为空、p 越界或与 root 相同返回 ''
  * （调用方以 '' 表示「平铺/不可迁移」）。分隔符统一为本平台 path.sep。
  */
@@ -73,4 +99,4 @@ function relUnderRoot(root, p) {
     } catch (e) { return ''; }
 }
 
-module.exports = { sanitizeSegment, resolveSeriesTaskLayout, relUnderRoot, DEFAULT_MAX_LEN };
+module.exports = { sanitizeSegment, resolveSeriesTaskLayout, relUnderRoot, seriesDisplayName, DEFAULT_MAX_LEN };

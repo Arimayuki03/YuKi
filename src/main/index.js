@@ -54,7 +54,7 @@ const Downloader = require('./downloader');
 const HlsDownloader = require('./hls-downloader');
 const DlRecordStore = require('./dl-record');
 const { DlDedupe, buildKey: buildEpisodeKey } = require('./dl-dedupe');
-const { resolveSeriesTaskLayout, relUnderRoot } = require('./dl-layout');
+const { resolveSeriesTaskLayout, relUnderRoot, seriesDisplayName } = require('./dl-layout');
 const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb, urlThumb: ffmpegUrlThumb } = require('./ffmpeg');
 const Settings = require('./settings');
 const PushServer = require('./push-server');
@@ -64,7 +64,6 @@ const SyncplayClient = require('./syncplay-client');
 const DlnaCaster = require('./dlna-caster');
 const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs, setLogLevel, startScheduledLogCleanup, stopScheduledLogCleanup } = require('./logger');
 const { formatAndValidateProxyUrl, setManualProxySource, invalidateCache } = require('./system-proxy');
-const PanQr = require('./pan-qr');
 const PanQrWindow = require('./pan-qr-window');
 const misans = require('./misans');
 const { setupAutoUpdater } = require('./updater');
@@ -2200,8 +2199,14 @@ app.whenReady().then(() => {
      *  更换下载目录重启引擎同理），避免与实时任务重复。
      *  T81：同时恢复进行中（active/waiting/paused）任务，保留原始状态与进度。 */
     function buildDlList(items, hlsItems) {
-        const live = [...items, ...hlsItems];
-        const liveGids = new Set(live.map((t) => t.gid));
+        // RM-1 善后：番剧子目录任务的文件名只含集名（<剧名>/第N集.mp4），列表直接
+        // 显示 basename 会丢失影片名——按产物所在子目录补「剧名 - 文件名」展示名，
+        // 仅影响列表/通知文案；磁盘文件名与恢复入队用的 name 保持不变。
+        const withDisplay = (t) => {
+            const dn = seriesDisplayName({ dlRoot: dlRootDir(), files: t.files, name: t.name });
+            return dn ? { ...t, name: dn } : t;
+        };
+        const liveGids = new Set([...items, ...hlsItems].map((t) => t.gid));
         const restored = dlRecords.all()
             .filter((r) => !liveGids.has(r.gid))
             .map((r) => {
@@ -2224,7 +2229,7 @@ app.whenReady().then(() => {
                     addedAt: r.completedAt || 0,
                 };
             });
-        return [...live, ...restored];
+        return [...items, ...hlsItems, ...restored].map(withDisplay);
     }
 
     /** 持久化进行中任务（T81）：重启后恢复未完成的下载卡片。
@@ -2954,6 +2959,13 @@ app.whenReady().then(() => {
 
     // ---- Phase 6 下载管理（aria2c JSON-RPC） ----
 
+    // 通知/事件用展示名：番剧子目录任务补「剧名 - 文件名」（列表同款逻辑），
+    // 落盘记录的 name 保持纯文件名——恢复入队拿它当 aria2 out 参数。
+    const dlDisplayName = (task) => {
+        const dn = seriesDisplayName({ dlRoot: dlRootDir(), files: task.files, name: task.name });
+        return dn || task.name;
+    };
+
     dl.on('completed', (task) => {
         // 无后缀产物兜底补 .mp4（视频应用语境）：旧版任务/特殊直链可能存出无扩展名文件，
         // 下载页与播放均按扩展名识别导致「下载完播不了」。只动单文件任务且仅缺扩展名时重命名。
@@ -2972,7 +2984,7 @@ app.whenReady().then(() => {
             }
         } catch (e) { console.warn(`[dl] 补扩展名失败：${e && e.message}`); }
         if (Notification.isSupported() && settings.get('dlNotify') !== false) {
-            const n = new Notification({ title: '下载完成', body: task.name || task.gid });
+            const n = new Notification({ title: '下载完成', body: dlDisplayName(task) || task.gid });
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
@@ -2981,7 +2993,7 @@ app.whenReady().then(() => {
         dlRecords.add({ gid: task.gid, kind: 'aria2', name: task.name, files: task.files,
             size: task.total || 0, status: 'complete', epKey: dlDedupe.stamp(task.gid, prevRec),
             completedAt: Date.now() });
-        send('yuki:dl-event', { type: 'completed', task });
+        send('yuki:dl-event', { type: 'completed', task: { ...task, name: dlDisplayName(task) } });
     });
     dl.on('error', (task) => {
         const prevErr = dlRecords.all().find((x) => x.gid === task.gid);
@@ -2989,12 +3001,12 @@ app.whenReady().then(() => {
             size: task.total || 0, status: 'error', errorMessage: task.errorMessage || '',
             epKey: dlDedupe.stamp(task.gid, prevErr),
             completedAt: Date.now() });
-        send('yuki:dl-event', { type: 'error', task });
+        send('yuki:dl-event', { type: 'error', task: { ...task, name: dlDisplayName(task) } });
     });
     // m3u8 合成任务完成/失败：与 aria2 同一套通知链路
     hls.on('completed', (task) => {
         if (Notification.isSupported() && settings.get('dlNotify') !== false) {
-            const n = new Notification({ title: '下载完成（m3u8 已合成）', body: task.name });
+            const n = new Notification({ title: '下载完成（m3u8 已合成）', body: dlDisplayName(task) });
             n.on('click', () => { if (win) { win.show(); win.focus(); send('yuki:dl-goto', {}); } });
             n.show();
         }
@@ -3002,7 +3014,7 @@ app.whenReady().then(() => {
         dlRecords.add({ gid: task.gid, kind: 'hls', name: task.name, files: task.files,
             size: 0, status: 'complete', epKey: dlDedupe.stamp(task.gid, prevHls),
             completedAt: Date.now() });
-        send('yuki:dl-event', { type: 'completed', task });
+        send('yuki:dl-event', { type: 'completed', task: { ...task, name: dlDisplayName(task) } });
     });
     hls.on('error', (task) => {
         const prevHlsErr = dlRecords.all().find((x) => x.gid === task.gid);
@@ -3010,7 +3022,7 @@ app.whenReady().then(() => {
             size: 0, status: 'error', errorMessage: task.errorMessage || '',
             epKey: dlDedupe.stamp(task.gid, prevHlsErr),
             completedAt: Date.now() });
-        send('yuki:dl-event', { type: 'error', task });
+        send('yuki:dl-event', { type: 'error', task: { ...task, name: dlDisplayName(task) } });
     });
 
     // 在线整季原生播放列表：本地按需解析代理（mpv 打开哪集才解析哪集，直链零过期）。

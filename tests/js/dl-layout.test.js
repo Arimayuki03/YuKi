@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { sanitizeSegment, resolveSeriesTaskLayout, relUnderRoot } = require('../../src/main/dl-layout');
+const { sanitizeSegment, resolveSeriesTaskLayout, relUnderRoot, seriesDisplayName } = require('../../src/main/dl-layout');
 
 // ------------------------------------------------------------ sanitizeSegment
 
@@ -105,4 +105,55 @@ test('relUnderRoot: 根内子路径返回相对路径；越界/平级/相同返�
     assert.equal(relUnderRoot(root, path.resolve('/dl2/x.mp4')), '');
     assert.equal(relUnderRoot('', '/x'), '');
     assert.equal(relUnderRoot(root, ''), '');
+});
+
+// -------------------------------------------------------------- seriesDisplayName
+
+test('seriesDisplayName: 番剧子目录一级产物补「剧名 - 文件名」前缀', () => {
+    const root = path.resolve('/dl');
+    const r = seriesDisplayName({
+        dlRoot: root,
+        files: [path.join(root, '葬送のフリーレン', '第01集.mp4')],
+        name: '第01集.mp4',
+    });
+    assert.equal(r, '葬送のフリーレン - 第01集.mp4');
+    // name 缺失时回退产物 basename
+    assert.equal(seriesDisplayName({ dlRoot: root, files: [path.join(root, '剧B', '第2集.mp4')] }), '剧B - 第2集.mp4');
+});
+
+test('seriesDisplayName: 平铺/BT 多级目录返回空串（保持原 name）', () => {
+    const root = path.resolve('/dl');
+    // 平铺（一级）
+    assert.equal(seriesDisplayName({ dlRoot: root, files: [path.join(root, 'movie.mp4')], name: 'movie.mp4' }), '');
+    // BT 自建多级目录
+    assert.equal(seriesDisplayName({
+        dlRoot: root,
+        files: [path.join(root, '种子包', 'Season 1', 'ep1.mkv')],
+        name: '种子包',
+    }), '');
+    // 产物在根目录外 / 无产物 / 无根目录
+    assert.equal(seriesDisplayName({ dlRoot: root, files: [path.resolve('/elsewhere/a.mp4')], name: 'a.mp4' }), '');
+    assert.equal(seriesDisplayName({ dlRoot: root, files: [], name: 'a.mp4' }), '');
+    assert.equal(seriesDisplayName({ dlRoot: '', files: [path.join(root, '剧', 'a.mp4')], name: 'a.mp4' }), '');
+});
+
+test('seriesDisplayName: BT 种子仅一级目录时凑出「种子名 - 文件名」（顺带生效）', () => {
+    const root = path.resolve('/dl');
+    assert.equal(seriesDisplayName({
+        dlRoot: root,
+        files: [path.join(root, '种子包', 'ep1.mkv')],
+        name: 'ep1.mkv',
+    }), '种子包 - ep1.mkv');
+});
+
+test('seriesDisplayName: 文件主名已含剧名时不重复前缀', () => {
+    const root = path.resolve('/dl');
+    // 单集影片：stem === 剧名
+    assert.equal(seriesDisplayName({
+        dlRoot: root, files: [path.join(root, '星际穿越', '星际穿越.mp4')], name: '星际穿越.mp4',
+    }), '星际穿越.mp4');
+    // 集名缺失回退旧 out 命名（「剧名 - xxx」已落子目录）
+    assert.equal(seriesDisplayName({
+        dlRoot: root, files: [path.join(root, '剧A', '剧A - 特别篇.mp4')], name: '剧A - 特别篇.mp4',
+    }), '剧A - 特别篇.mp4');
 });
