@@ -2190,7 +2190,7 @@ app.whenReady().then(() => {
         return dl.dir || settings.get('dlDir') || app.getPath('downloads');
     }
 
-    /** 合成番剧子目录布局（<dlDir>/<剧名>/<集名>.<ext>）；信息不全返回 null
+    /** 合成番剧子目录布局（<dlDir>/<剧名>/<剧名> - <集名>.<ext>）；信息不全返回 null
      *  （调用方回退平铺旧行为，如下载页手输 URL 无剧名上下文）。 */
     function seriesLayoutFor({ vodName, epName, out }) {
         return resolveSeriesTaskLayout({
@@ -2220,9 +2220,9 @@ app.whenReady().then(() => {
      *  更换下载目录重启引擎同理），避免与实时任务重复。
      *  T81：同时恢复进行中（active/waiting/paused）任务，保留原始状态与进度。 */
     function buildDlList(items, hlsItems) {
-        // RM-1 善后：番剧子目录任务的文件名只含集名（<剧名>/第N集.mp4），列表直接
+        // RM-1 善后：存量番剧子目录任务的文件名只含集名（<剧名>/第N集.mp4），列表直接
         // 显示 basename 会丢失影片名——按产物所在子目录补「剧名 - 文件名」展示名，
-        // 仅影响列表/通知文案；磁盘文件名与恢复入队用的 name 保持不变。
+        // 仅影响列表/通知文案；新任务文件名已在主进程侧带上前缀（seriesDisplayName 判重不叠加）。
         const withDisplay = (t) => {
             const dn = seriesDisplayName({ dlRoot: dlRootDir(), files: t.files, name: t.name });
             return dn ? { ...t, name: dn } : t;
@@ -2500,7 +2500,7 @@ app.whenReady().then(() => {
                                 file: dup.file || '', gid: dup.gid || '' };
                         }
                     }
-                    await startDlEngine(dl.dir || app.getPath('downloads'));
+                    await startDlEngine(dlRootDir());
                     // 详情页批量下载可带文件名与请求头（部分源校验 Referer）
                     const opts = {};
                     let out = String(payload.out || '').replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -2515,7 +2515,7 @@ app.whenReady().then(() => {
                         if (!/\.\w{1,5}$/.test(name)) name += ext || '.mp4';
                         out = name;
                     }
-                    // RM-1 番剧子目录：<dlDir>/<剧名>/<集名>.<ext>（opts.dir 为任务级选项，
+                    // RM-1 番剧子目录：<dlDir>/<剧名>/<剧名> - <集名>.<ext>（opts.dir 为任务级选项，
                     // aria2 覆盖全局 --dir）。无剧名上下文（下载页手输 URL）回退平铺。
                     const layout = seriesLayoutFor({ vodName: payload.epVodName, epName: payload.epName, out });
                     if (layout) {
@@ -2607,7 +2607,7 @@ app.whenReady().then(() => {
                     if (r.canceled || !r.filePaths.length) return { ok: false, reason: 'cancelled' };
                     const fp = r.filePaths[0];
                     const b64 = fs.readFileSync(fp).toString('base64');
-                    await startDlEngine(dl.dir || app.getPath('downloads'));
+                    await startDlEngine(dlRootDir());
                     const gid = fp.toLowerCase().endsWith('.torrent')
                         ? await dl.addTorrent(b64)
                         : await dl.addMetalink(b64);

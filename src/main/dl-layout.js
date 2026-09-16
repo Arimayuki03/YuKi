@@ -1,7 +1,7 @@
 /**
  * dl-layout.js — RM-1 下载产物番剧子目录布局
  *
- * 目标：同一部作品的所有集数落在 <下载目录>/<番剧名>/ 下，文件以集名命名，
+ * 目标：同一部作品的所有集数落在 <下载目录>/<番剧名>/ 下，文件以「剧名 - 集名」命名，
  * 替代此前全部平铺在下载根目录的布局（且边下边播逐集链此前所有集共用
  * 「剧名.ext」文件名，同剧多集会互相覆盖）。
  *
@@ -38,6 +38,25 @@ function sanitizeSegment(input, { maxLen = DEFAULT_MAX_LEN, fallback = '' } = {}
     return s || String(fallback ?? '');
 }
 
+const SERIES_SEP = ' - ';
+
+/**
+ * 拼「<剧名> - <集名>」，超长时截剧名前缀而非集名尾部：整体交给
+ * sanitizeSegment 尾部截断会把集号截掉，同剧多集产物被截成同名互相覆盖。
+ * 剧名+分隔符完全放不下（集名本身近满段长）时放弃前缀保住集名可读。
+ */
+function withSeriesPrefix(folder, ep) {
+    const budget = DEFAULT_MAX_LEN - SERIES_SEP.length - Array.from(ep).length;
+    let prefix = '';
+    if (budget > 0) {
+        const chars = Array.from(folder);
+        prefix = chars.length > budget
+            ? chars.slice(0, budget).join('').replace(/[. ]+$/, '')   // 截断可能恰好止于点/空格
+            : folder;
+    }
+    return prefix ? sanitizeSegment(`${prefix}${SERIES_SEP}${ep}`) : ep;
+}
+
 /**
  * 合成一个番剧子目录任务的布局。
  * @returns null：开关关 / 无 dlRoot / 无剧名 / 得不到可用文件名（调用方回退平铺旧逻辑）
@@ -51,6 +70,9 @@ function resolveSeriesTaskLayout({ dlRoot, enabled = true, vodName, epName, out 
     const ext = path.extname(String(out || ''));
     let file = String(epName || '').trim() ? sanitizeSegment(epName) : '';
     if (file) {
+        // 文件名带影片名：<剧名> - <集名><ext>——产物离开子目录（复制/移动/外部
+        // 播放器recent）后仍可读；集名本身已含剧名（「剧名 第X集」形态源）不重复前缀。
+        if (file !== folder && !file.startsWith(folder)) file = withSeriesPrefix(folder, file);
         file += ext;
     } else {
         // 集名缺失：回退旧 out 文件名（清洗后），保持无集名入口（如单集影片）可用
@@ -82,7 +104,9 @@ function seriesDisplayName({ dlRoot, files, name } = {}) {
     const base = path.basename(String(name || fileName));
     if (!base) return '';
     const stem = base.slice(0, base.length - path.extname(base).length);
-    if (!stem || stem === folder || stem.startsWith(`${folder} - `)) return base;
+    // 新布局文件名自带「剧名 - 」前缀（resolveSeriesTaskLayout），同样命中此前缀判断，
+    // 展示层不再二次叠加；存量仅集名的文件走下方补前缀分支。
+    if (!stem || stem.startsWith(folder)) return base;
     return `${folder} - ${base}`;
 }
 

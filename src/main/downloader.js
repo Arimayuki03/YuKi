@@ -378,6 +378,11 @@ class Downloader extends EventEmitter {
 
     /** 全量任务列表（active + waiting + stopped），完成/出错事件顺带触发。 */
     async listAll() {
+        // 引擎从未启动（this.dir 为空）时不代拉：start() 对空 dir 回退系统下载目录，
+        // 且 _ready 一经建立就不再换目录——轮询先于 startDlEngine(设置目录) 冷启动的话，
+        // 整个会话都会烧死在默认目录里（重启/更新后自定义下载目录“被还原”的根因）。
+        // 崩溃自愈场景不受影响：proc 退出但 this.dir 保留，轮询照旧原位重拉。
+        if (!this.dir) return [];
         await this.start(this.dir);
         const [active, waiting, stopped] = await Promise.all([
             this.tellActive(), this.tellWaiting(), this.tellStopped(),

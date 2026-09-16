@@ -1,8 +1,20 @@
-// 组件测试：downloader.js 的 flatten（aria2 状态扁平化）纯函数
+// 组件测试：downloader.js 的 flatten（aria2 状态扁平化）纯函数 + 引擎冷启动约定
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Downloader = require('../../src/main/downloader');
+
+test('listAll: 引擎未启动（dir 空）不代拉 aria2，返回空列表且不留冷启动副作用', async () => {
+    // 回归：轮询的 listAll 曾在 this.dir='' 时以系统下载目录拉起引擎，
+    // 令设置页自定义目录整个会话失效（重启/更新后「下载目录被还原」）。
+    const d = new Downloader();
+    assert.equal(d.dir, '');
+    const items = await d.listAll();
+    assert.deepEqual(items, []);
+    assert.equal(d.proc, null);
+    assert.equal(d.dir, '', '未启动不得写入目录（首拉必须由 startDlEngine 带设置目录完成）');
+    d.stop();
+});
 
 test('flatten: 计算百分比', () => {
     const f = Downloader.flatten({
