@@ -9,10 +9,10 @@ const path = require('path');
 
 const bridgePath = path.join(__dirname, '../../src/main/python-bridge.js');
 
-function loadBridge(childProcessModule) {
+function loadBridge(childProcessModule, opts = {}) {
     const originalLoad = Module._load;
     Module._load = function load(request, parent, isMain) {
-        if (request === 'electron') return { app: { isPackaged: false } };
+        if (request === 'electron') return { app: { isPackaged: Boolean(opts.isPackaged) } };
         if (request === 'child_process' && childProcessModule) return childProcessModule;
         return originalLoad.call(this, request, parent, isMain);
     };
@@ -129,6 +129,62 @@ function readJsonLine(proc, timeoutMs = 15000) {
         });
     });
 }
+
+test('packaged Windows does not spawn backend when system VC++ runtime is missing', () => {
+    if (process.platform !== 'win32') return;
+    const sysRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yuki-sysroot-'));
+    const prevSystemRoot = process.env.SystemRoot;
+    process.env.SystemRoot = sysRoot; // 空目录 = 无 vcruntime140*.dll
+    try {
+        let spawnCalled = false;
+        const PythonBridge = loadBridge({
+            spawn() { spawnCalled = true; throw new Error('spawn must not happen'); },
+            spawnSync() { return { status: 0 }; },
+        }, { isPackaged: true });
+        const bridge = new PythonBridge('C:\\fixture', 'C:\\fixture');
+        const states = [];
+        let vcrtEvents = null;
+        bridge.on('state', (s) => states.push(s));
+        bridge.on('vcrt-missing', (missing) => { vcrtEvents = missing; });
+        bridge.start();
+        assert.equal(spawnCalled, false, '运行库缺失时不得 spawn（Windows 会弹系统错误框）');
+        assert.deepEqual(states, ['vcrt-missing']);
+        assert.deepEqual(vcrtEvents, ['vcruntime140.dll', 'vcruntime140_1.dll']);
+    } finally {
+        if (prevSystemRoot === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = prevSystemRoot;
+        fs.rmSync(sysRoot, { recursive: true, force: true });
+    }
+});
+
+test('packaged Windows spawns backend when system VC++ runtime present', () => {
+    if (process.platform !== 'win32') return;
+    const sysRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yuki-sysroot-'));
+    const sys32 = path.join(sysRoot, 'System32');
+    fs.mkdirSync(sys32);
+    fs.writeFileSync(path.join(sys32, 'vcruntime140.dll'), '');
+    fs.writeFileSync(path.join(sys32, 'vcruntime140_1.dll'), '');
+    const prevSystemRoot = process.env.SystemRoot;
+    process.env.SystemRoot = sysRoot;
+    try {
+        const fakeProc = { stdout: { on() {} }, stderr: { on() {} }, on() {}, pid: 4242, kill() {} };
+        let spawnCalled = false;
+        const PythonBridge = loadBridge({
+            spawn() { spawnCalled = true; return fakeProc; },
+            spawnSync() { return { status: 0 }; },
+        }, { isPackaged: true });
+        const bridge = new PythonBridge('C:\\fixture', 'C:\\fixture');
+        const states = [];
+        bridge.on('state', (s) => states.push(s));
+        bridge.start();
+        assert.equal(spawnCalled, true);
+        assert.deepEqual(states, ['starting']);
+    } finally {
+        if (prevSystemRoot === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = prevSystemRoot;
+        fs.rmSync(sysRoot, { recursive: true, force: true });
+    }
+});
 
 test('real Windows app stop releases Python Java Node descendants and ports', async () => {
     if (process.platform !== 'win32') return;

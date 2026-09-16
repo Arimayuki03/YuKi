@@ -6,6 +6,8 @@
  *
  * 打包模式（app.isPackaged）：启动 PyInstaller onedir 产物
  * （extraResources/python-backend/yuki-backend/yuki-backend.exe），无 venv 依赖。
+ * 打包版 Windows 先预检系统 VC++ 运行库（安装包不随带副本，见 after-pack），
+ * 缺失时不 spawn、发 vcrt-missing 事件由主进程弹窗引导安装。
  */
 const { app } = require('electron');
 const { spawn, spawnSync } = require('child_process');
@@ -51,6 +53,16 @@ class PythonBridge extends EventEmitter {
         return fs.existsSync(venv) ? venv : 'python';
     }
 
+    /**
+     * 打包版 Windows 预检：安装包不再随带 VCRUNTIME140*.dll（afterPack 剔除——未签名
+     * 安装包向用户目录写系统同名 DLL 是杀软行为拦截的高频触发点），后端 python314.dll
+     * 依赖系统 VC++ 2015-2022 运行库。返回缺失的 DLL 名列表（无缺失为空数组）。
+     */
+    _vcrtMissing() {
+        const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+        return ['vcruntime140.dll', 'vcruntime140_1.dll'].filter((n) => !fs.existsSync(path.join(sys, n)));
+    }
+
     start() {
         this.stopping = false;
         this._spawn();
@@ -58,6 +70,16 @@ class PythonBridge extends EventEmitter {
 
     _spawn() {
         if (this.stopping) return;
+        if (this._isPackaged && process.platform === 'win32') {
+            const missing = this._vcrtMissing();
+            if (missing.length) {
+                // 不 spawn：Windows 会弹系统错误框，且退避重启变成死循环；交给主进程
+                // 弹窗引导安装运行库（index.js 的 vcrt-missing 监听）。
+                this.emit('state', 'vcrt-missing');
+                this.emit('vcrt-missing', missing);
+                return;
+            }
+        }
         this.info = null; // info 只属于当前进程：换进程前重置，READY 行才能重新捕获新端口/token
         this.emit('state', 'starting');
         const args = this._isPackaged ? [] : ['-X', 'utf8', this.script];

@@ -1,12 +1,15 @@
 /**
  * after-pack.js — electron-builder afterPack 钩子：剔除「系统自带冗余 DLL」（杀软误报源）
  *
- * 三类已知误报，均为运行时不依赖包内副本的文件：
+ * 三类已知误报，均为运行时不依赖包内副本（或有主进程兜底）的文件：
  * 1. Electron 自带 d3dcompiler_47.dll（产物根）——360 等报「程序试图修改关键程序 DLL」；
- * 2. PyInstaller 后端捆绑的 UCRT（resources/python-backend/yuki-backend/_internal/ 下的
- *    ucrtbase.dll 与 api-ms-win-*.dll 转发器）——同为关键系统 DLL 名，同样的误报路径。
- *    Win10+ 上 API Set 由系统加载器直接解析到 System32，包内副本仅为 Win7/8 兼容存在
- *    （Electron 31 本就不支持 Win7/8）；VCRUNTIME140*.dll 系统不保证自带，必须保留。
+ * 2. PyInstaller 后端捆绑的 UCRT 与 VC++ 运行库（resources/python-backend/yuki-backend/
+ *    _internal/ 下的 ucrtbase.dll、api-ms-win-*.dll 转发器、VCRUNTIME140*.dll）——同为
+ *    关键系统 DLL 名，未签名安装包向用户可写目录落盘这类文件是火绒/360 行为拦截的高频
+ *    触发点。UCRT 在 Win10+ 由系统加载器直接解析到 System32（Electron 31 不支持 Win7/8）；
+ *    VCRUNTIME140*.dll 系统不保证自带（VC++ 2015-2022 运行库），剔除后由主进程在启动
+ *    后端前预检 System32 副本，缺失时弹窗引导安装官方运行库（见 python-bridge.js 的
+ *    vcrt-missing 链路），而不是让杀软把整个安装过程拦成报错。
  * 3. Electron 自带 vulkan-1.dll（产物根）——Windows 上 Chromium/ANGLE 默认走 D3D11，
  *    仅显式 --use-angle=vulkan 时才用到（应用代码零引用）；火绒等按「系统同名 DLL 落盘」
  *    规则拦截未签名安装包的写入，属可剔除的误报面。
@@ -22,7 +25,7 @@ const path = require('node:path');
 // （v6 布局）固定落在 _internal 根，无需递归子目录。
 const BACKEND_INTERNAL = path.join('resources', 'python-backend', 'yuki-backend', '_internal');
 const ROOT_NAMES = ['d3dcompiler_47.dll', 'vulkan-1.dll'];
-const UCRT_RE = /^(ucrtbase\.dll|api-ms-win-.+\.dll)$/i;
+const UCRT_RE = /^(ucrtbase\.dll|api-ms-win-.+\.dll|vcruntime140(_1)?\.dll)$/i;
 
 /** 剔除产物中的系统自带冗余 DLL，返回 [{rel, size}]；无匹配文件时为空数组（no-op，兼容 mac/linux）。 */
 function stripSystemDlls(appOutDir) {

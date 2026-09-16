@@ -251,6 +251,27 @@ installConsoleLogger(LOG_DIR);
 const bridge = new PythonBridge(ROOT, RESOURCES_ROOT, {
     logWriter: new RotatingLogWriter(path.join(LOG_DIR, 'python-console.log')),
 });
+// 打包版 Windows：安装包不随带 VC++ 运行库副本（杀软按系统同名 DLL 拦截未签名安装器
+// 写入，见 after-pack），后端依赖系统运行库。缺失时 bridge 不 spawn 并发 vcrt-missing，
+// 这里弹窗引导安装官方 redist；每次运行只提醒一次，装好后重启应用即恢复。
+let vcrtPrompted = false;
+bridge.on('vcrt-missing', (missing) => {
+    if (vcrtPrompted) return;
+    vcrtPrompted = true;
+    console.error(`[main] system VC++ runtime missing (${missing.join(', ')}); backend not started`);
+    dialog.showMessageBox({
+        type: 'warning',
+        title: 'YuKi',
+        message: '无法启动后端：缺少 Microsoft Visual C++ 2015-2022 运行库',
+        detail: `系统未安装 VC++ 运行库（缺少 ${missing.join('、')}），YuKi 的本地后端无法启动。\n请点击「前往官网下载」安装后重新启动 YuKi。`,
+        buttons: ['前往官网下载', '稍后提醒'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+    }).then(({ response }) => {
+        if (response === 0) shell.openExternal('https://aka.ms/vs/17/release/vc_redist.x64.exe');
+    }).catch(() => { /* 弹窗失败不阻塞主流程 */ });
+});
 const mpv = new MpvPlayer();
 const dl = new Downloader();
 const hls = new HlsDownloader();

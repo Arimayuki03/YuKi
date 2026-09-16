@@ -1,5 +1,5 @@
 // 单元测试：scripts/after-pack.js — 打包后剔除系统自带冗余 DLL（杀软误报源）
-// 守住五条：Electron d3dcompiler/vulkan 删除、后端 UCRT 全家删除（VCRUNTIME/python 保留）、
+// 守住五条：Electron d3dcompiler/vulkan 删除、后端 UCRT+VC++ 运行库删除（python 保留）、
 // 无匹配文件 no-op、钩子默认剔除、YUKI_KEEP_SYSTEM_DLLS=1 逃生口保留。
 'use strict';
 const { test } = require('node:test');
@@ -42,25 +42,26 @@ test('stripSystemDlls：剔除 Electron 自带 d3dcompiler_47.dll 与 vulkan-1.d
     }
 });
 
-test('stripSystemDlls：剔除后端 UCRT（ucrtbase + api-ms-win-*），保留 VCRUNTIME/python', () => {
+test('stripSystemDlls：剔除后端 UCRT + VC++ 运行库（ucrtbase/api-ms-win-*/VCRUNTIME140*），保留 python', () => {
     const dir = tempOutDir();
     try {
         const internal = path.join(dir, BACKEND_INTERNAL);
-        for (const name of ['ucrtbase.dll', 'api-ms-win-crt-heap-l1-1-0.dll', 'api-ms-win-core-heap-l1-1-0.dll']) {
+        for (const name of ['ucrtbase.dll', 'api-ms-win-crt-heap-l1-1-0.dll', 'api-ms-win-core-heap-l1-1-0.dll',
+            'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll']) {
             writeFile(path.join(internal, name), 8192);
         }
-        for (const name of ['VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'python314.dll']) {
-            writeFile(path.join(internal, name), 1024);
-        }
+        writeFile(path.join(internal, 'python314.dll'), 1024);
         const removed = afterPack.stripSystemDlls(dir);
-        assert.equal(removed.length, 3);
+        assert.equal(removed.length, 5);
         assert.ok(removed.every((r) => r.rel.startsWith(BACKEND_INTERNAL)));
         assert.equal(fs.existsSync(path.join(internal, 'ucrtbase.dll')), false);
         assert.equal(fs.existsSync(path.join(internal, 'api-ms-win-crt-heap-l1-1-0.dll')), false);
-        // VC++ 运行库系统不保证自带、python314 为解释器本体，剔除即坏，必须保留
-        for (const name of ['VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'python314.dll']) {
-            assert.equal(fs.existsSync(path.join(internal, name)), true, name);
-        }
+        // VC++ 运行库副本一并剔除（杀软按系统同名 DLL 拦截安装包写入）；
+        // 系统缺失时由主进程 vcrt-missing 预检引导安装，不再随包分发。
+        assert.equal(fs.existsSync(path.join(internal, 'VCRUNTIME140.dll')), false);
+        assert.equal(fs.existsSync(path.join(internal, 'VCRUNTIME140_1.dll')), false);
+        // 解释器本体剔除即坏，必须保留
+        assert.equal(fs.existsSync(path.join(internal, 'python314.dll')), true);
     } finally {
         cleanup(dir);
     }

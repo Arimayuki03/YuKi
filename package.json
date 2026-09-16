@@ -1,6 +1,6 @@
 {
   "name": "yuki",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "YuKi：影视聚合应用桌面端",
   "main": "src/main/index.js",
   "scripts": {
