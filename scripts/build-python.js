@@ -48,7 +48,8 @@ try {
 }
 // 导入守卫：与 PyInstaller 用同一解释器，缺包在打包前就失败，而不是打进产物后
 // 在用户机器上才炸。quickjs/lxml 是 hidden-import 项，同样纳入检查。
-run(`"${VENV_PYTHON}" -c "import fastapi, uvicorn, requests, lxml, quickjs; print('[build-python] 导入守卫通过')"`, BACKEND);
+// 输出保持 ASCII（run_all 同约）：release CI 无 PYTHONUTF8，中文 print 会 UnicodeEncodeError。
+run(`"${VENV_PYTHON}" -c "import fastapi, uvicorn, requests, lxml, quickjs; print('[build-python] import guard OK')"`, BACKEND);
 
 // 2. 清理旧产物
 console.log('[build-python] 清理旧产物…');
