@@ -32,6 +32,7 @@ TVBox/
 .omo/
 .zcode/
 .claude/
+.v2c/
 .codegraph/
 .playwright-mcp/
 ha-orchestrator.config*.json
