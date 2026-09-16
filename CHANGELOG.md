@@ -4,6 +4,15 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.3] - 2026-09-17
+
+修复 v0.2.2 发布产物问题：安装包内后端缺依赖导致无法启动、安装过程杀软拦截误报面。
+
+### Fixed
+
+- **安装包后端缺运行时依赖（打开即报 `ModuleNotFoundError: No module named 'fastapi'`）**：CI 发布流水线在全新 venv 里只安装 PyInstaller 工具链、未安装后端运行时依赖，PyInstaller 对缺失导入只告警不失败，冻结产物静默缺包。`build-python` 现按 `requirements-build.txt` 与 `requirements.txt` 双锁文件校准构建环境，并在打包前用同一解释器做导入守卫（缺包立即失败，不再产出坏包）。
+- **安装过程杀软拦截**：未签名安装包写入系统同名 DLL 触发杀软（如火绒）行为拦截。afterPack 新增剔除 Electron 自带的冗余 `vulkan-1.dll`（Windows 上 ANGLE 默认走 D3D11，应用代码零引用），与既有 d3dcompiler/UCRT 剔除同策略；`VCRUNTIME140*.dll` 为 `python314.dll` 真实导入且系统不保证自带，仍保留（被拦截时回退系统副本，不影响运行）。
+
 ## [0.2.2] - 2026-09-17
 
 规划特性落地（RM-1/2/4/5）、Bangumi 镜像域切换与安全加固，并修复安装包杀软误报与下载列表展示名。

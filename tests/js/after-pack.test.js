@@ -1,5 +1,5 @@
 // 单元测试：scripts/after-pack.js — 打包后剔除系统自带冗余 DLL（杀软误报源）
-// 守住五条：Electron d3dcompiler 删除、后端 UCRT 全家删除（VCRUNTIME/python 保留）、
+// 守住五条：Electron d3dcompiler/vulkan 删除、后端 UCRT 全家删除（VCRUNTIME/python 保留）、
 // 无匹配文件 no-op、钩子默认剔除、YUKI_KEEP_SYSTEM_DLLS=1 逃生口保留。
 'use strict';
 const { test } = require('node:test');
@@ -24,13 +24,19 @@ function cleanup(dir) {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
-test('stripSystemDlls：剔除 Electron 自带 d3dcompiler_47.dll', () => {
+test('stripSystemDlls：剔除 Electron 自带 d3dcompiler_47.dll 与 vulkan-1.dll', () => {
     const dir = tempOutDir();
     try {
-        const dll = path.join(dir, 'd3dcompiler_47.dll');
-        writeFile(dll, 4096);
-        assert.deepEqual(afterPack.stripSystemDlls(dir), [{ rel: 'd3dcompiler_47.dll', size: 4096 }]);
-        assert.equal(fs.existsSync(dll), false);
+        const d3d = path.join(dir, 'd3dcompiler_47.dll');
+        const vulkan = path.join(dir, 'vulkan-1.dll');
+        writeFile(d3d, 4096);
+        writeFile(vulkan, 2048);
+        assert.deepEqual(afterPack.stripSystemDlls(dir), [
+            { rel: 'd3dcompiler_47.dll', size: 4096 },
+            { rel: 'vulkan-1.dll', size: 2048 },
+        ]);
+        assert.equal(fs.existsSync(d3d), false);
+        assert.equal(fs.existsSync(vulkan), false);
     } finally {
         cleanup(dir);
     }
@@ -69,13 +75,15 @@ test('stripSystemDlls：无匹配文件时 no-op（mac/linux 产物/纯 Electron
     }
 });
 
-test('afterPack 钩子：默认剔除两类误报源', () => {
+test('afterPack 钩子：默认剔除全部误报源（d3dcompiler/vulkan/UCRT）', () => {
     const dir = tempOutDir();
     try {
         writeFile(path.join(dir, 'd3dcompiler_47.dll'));
+        writeFile(path.join(dir, 'vulkan-1.dll'));
         writeFile(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll'));
         afterPack({ appOutDir: dir, electronPlatformName: 'win' });
         assert.equal(fs.existsSync(path.join(dir, 'd3dcompiler_47.dll')), false);
+        assert.equal(fs.existsSync(path.join(dir, 'vulkan-1.dll')), false);
         assert.equal(fs.existsSync(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll')), false);
     } finally {
         cleanup(dir);
@@ -88,9 +96,11 @@ test('afterPack 钩子：YUKI_KEEP_SYSTEM_DLLS=1 保留全部（诊断逃生口�
     process.env.YUKI_KEEP_SYSTEM_DLLS = '1';
     try {
         writeFile(path.join(dir, 'd3dcompiler_47.dll'));
+        writeFile(path.join(dir, 'vulkan-1.dll'));
         writeFile(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll'));
         afterPack({ appOutDir: dir, electronPlatformName: 'win' });
         assert.equal(fs.existsSync(path.join(dir, 'd3dcompiler_47.dll')), true);
+        assert.equal(fs.existsSync(path.join(dir, 'vulkan-1.dll')), true);
         assert.equal(fs.existsSync(path.join(dir, BACKEND_INTERNAL, 'ucrtbase.dll')), true);
     } finally {
         if (prev === undefined) delete process.env.YUKI_KEEP_SYSTEM_DLLS;

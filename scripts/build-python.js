@@ -4,7 +4,7 @@
  * 产物放在项目根 python-dist/ 下，electron-builder 将其作为 extraResource
  * 内嵌到安装包中。主进程根据 isPackaged 自动切换后端启动路径。
  *
- * 前置：python-backend/.venv 中需安装 pyinstaller。
+ * 前置：python-backend/.venv 存在（脚本会自动按锁文件校准 PyInstaller 与运行时依赖）。
  * 用法：node scripts/build-python.js
  */
 const { execSync } = require('child_process');
@@ -20,6 +20,7 @@ const VENV_PYTHON = path.join(BACKEND, '.venv', VENV_BIN,
 const VENV_PIP = path.join(BACKEND, '.venv', VENV_BIN,
     process.platform === 'win32' ? 'pip.exe' : 'pip');
 const BUILD_REQUIREMENTS = path.join(BACKEND, 'requirements-build.txt');
+const RUNTIME_REQUIREMENTS = path.join(BACKEND, 'requirements.txt');
 const DATA_SEPARATOR = process.platform === 'win32' ? ';' : ':';
 
 function run(cmd, cwd) {
@@ -27,19 +28,27 @@ function run(cmd, cwd) {
     execSync(cmd, { cwd: cwd || ROOT, stdio: 'inherit' });
 }
 
-// 1. 按构建锁文件安装/校准 PyInstaller，避免构建环境漂移。
-console.log('[build-python] 按 requirements-build.txt 校准 PyInstaller…');
-if (!fs.existsSync(BUILD_REQUIREMENTS)) {
-    throw new Error(`缺少构建依赖锁文件：${BUILD_REQUIREMENTS}`);
+// 1. 按锁文件校准构建环境：PyInstaller（工具链）+ requirements.txt（运行时依赖）。
+// CI 全新 checkout 的 venv 是空的——PyInstaller 对缺失的导入包只告警不失败，
+// 产物里静默少整个 fastapi（v0.2.2 安装后 ModuleNotFoundError 的根因），
+// 因此运行时依赖必须在这里显式安装，并在打包前用目标解释器做一次导入守卫。
+console.log('[build-python] 按 requirements-build.txt / requirements.txt 校准构建环境…');
+for (const req of [BUILD_REQUIREMENTS, RUNTIME_REQUIREMENTS]) {
+    if (!fs.existsSync(req)) {
+        throw new Error(`缺少依赖锁文件：${req}`);
+    }
 }
 const pipCmd = fs.existsSync(VENV_PIP) ? `"${VENV_PIP}"` : 'pip';
 try {
-    run(`${pipCmd} install -r "${BUILD_REQUIREMENTS}"`);
+    run(`${pipCmd} install -r "${BUILD_REQUIREMENTS}" -r "${RUNTIME_REQUIREMENTS}"`);
 } catch (e) {
     // venv 不存在时回退到 python -m pip（CI 全新 checkout 场景）
     console.log(`[build-python] ${pipCmd} 不可用，尝试 python -m pip…`);
-    run(`python -m pip install -r "${BUILD_REQUIREMENTS}"`);
+    run(`python -m pip install -r "${BUILD_REQUIREMENTS}" -r "${RUNTIME_REQUIREMENTS}"`);
 }
+// 导入守卫：与 PyInstaller 用同一解释器，缺包在打包前就失败，而不是打进产物后
+// 在用户机器上才炸。quickjs/lxml 是 hidden-import 项，同样纳入检查。
+run(`"${VENV_PYTHON}" -c "import fastapi, uvicorn, requests, lxml, quickjs; print('[build-python] 导入守卫通过')"`, BACKEND);
 
 // 2. 清理旧产物
 console.log('[build-python] 清理旧产物…');
