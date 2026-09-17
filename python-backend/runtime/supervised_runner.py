@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 
 from proxy_contract import ProxyResult
 
@@ -36,14 +37,24 @@ class SupervisedRunner:
         self.supervisor = RuntimeSupervisor(spec, policy=policy)
         self.spider = _SpiderState(self, str((spec or {}).get('site_key') or ''))
         self.bridge = None
-        self.last_request_id = ''
-        self.last_play_session_id = ''
+        # 与 runner.py 的 Runner 同一修法：每站点一个 SupervisedRunner，同一站点会并发
+        # 处理多个请求，把 request_id 存成普通实例属性等于存「最后一个碰巧跑完的请求」，
+        # 排障时会指到别的请求上。改为线程本地记录本线程最近一次处理的请求。
+        self._ctx_tls = threading.local()
+
+    @property
+    def last_request_id(self):
+        return getattr(self._ctx_tls, 'request_id', '')
+
+    @property
+    def last_play_session_id(self):
+        return getattr(self._ctx_tls, 'play_session_id', '')
 
     def _invoke(self, method, *args):
         request = current_runtime_request()
         if request is not None:
-            self.last_request_id = request.request_id
-            self.last_play_session_id = request.play_session_id
+            self._ctx_tls.request_id = request.request_id
+            self._ctx_tls.play_session_id = request.play_session_id
             self.spider.request_id = request.request_id
             self.spider.play_session_id = request.play_session_id
         result, last_error = self.supervisor.call(method, args, request=request)

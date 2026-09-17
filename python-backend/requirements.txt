@@ -15,13 +15,21 @@ beautifulsoup4==4.15.0
 cachetools==7.1.7
     # via -r python-backend/requirements.in
 certifi==2026.7.22
-    # via requests
+    # via
+    #   curl-cffi
+    #   requests
+cffi==2.1.1
+    # via curl-cffi
 charset-normalizer==3.5.1
     # via requests
 click==8.4.2
     # via uvicorn
 colorama==0.4.6
-    # via click
+    # via
+    #   click
+    #   qrcode
+curl-cffi==0.16.3
+    # via -r python-backend/requirements.in
 fastapi==0.141.1
     # via -r python-backend/requirements.in
 h11==0.16.0
@@ -34,6 +42,10 @@ jsonpath-ng==1.8.0
     # via -r python-backend/requirements.in
 lxml==6.1.1
     # via -r python-backend/requirements.in
+pillow==12.3.0
+    # via -r python-backend/requirements.in
+pycparser==3.0
+    # via cffi
 pycryptodome==3.23.0
     # via -r python-backend/requirements.in
 pydantic==2.13.4
@@ -41,6 +53,8 @@ pydantic==2.13.4
 pydantic-core==2.46.4
     # via pydantic
 python-multipart==0.0.32
+    # via -r python-backend/requirements.in
+qrcode==8.2
     # via -r python-backend/requirements.in
 quickjs-ng==0.16.0.1
     # via -r python-backend/requirements.in

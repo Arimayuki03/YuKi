@@ -1,2 +1,5 @@
-allowBuilds:
-  electron: true
+# pnpm 只允许 electron 跑 postinstall（构建原生依赖）。
+# 注意：pnpm 的正确字段是 onlyBuiltDependencies（字符串数组）；旧写法 allowBuilds 不是
+# 有效配置项，pnpm 会把它当未知设置静默忽略——即"以为放行了、实际没放行"。
+onlyBuiltDependencies:
+  - electron

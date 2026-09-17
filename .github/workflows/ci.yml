@@ -6,10 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 最小权限：CI 只需读仓库内容，显式声明避免沿用默认的宽权限
+permissions:
+  contents: read
+
+# 连续 push 时取消同类旧任务，避免旧提交占额度；网络抖动下也不至于跑满 6h
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   js:
-    name: JS 单元测试 + 语法门禁
+    name: JS 单元测试 + 语法门禁 + Lint
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,13 +30,20 @@ jobs:
       - run: npm ci
       - name: 供应链审计
         run: npm audit --omit=dev || true
-        # 运行时依赖审计（当前仅 electron 链）；首轮观察，稳定后去掉 || true
+        # 运行时依赖审计（当前仅 electron-updater 链，基线 1 high）；非阻断，避免上游
+        # 发布新通告时直接锁死主干合并。dev 链的 14 high + 1 critical 集中在
+        # electron/electron-builder/tar，随其版本升级收敛，不在此拦截。
       - run: npm run test:jsunit
       - run: npm run test:js
+      # eslint 此前只在本地 test:all 里跑、CI 从不调用：no-undef 是 error 级
+      # （未定义变量=运行时直接崩），缺这道门禁等于该规则形同虚设。
+      - name: ESLint
+        run: npm run lint
 
   python:
     name: Python 回归（smoke/phase3/kazumi/jar + 编译检查）
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -22,3 +22,9 @@ cachetools>=5.3
 quickjs-ng>=0.16
 # Kazumi 规则引擎 API 模式 JSONPath 解析（受限实现）
 jsonpath-ng>=1.8,<2.0
+# 夸克扫码登录（pan_login.py）：curl_cffi 提供 chrome TLS/HTTP2 指纹；qrcode 渲染二维码，
+# 其 make_image(format='PNG') 依赖 Pillow。三者都是生产路径依赖（缺则扫码登录在 CI 全新
+# 构建的产物里静默不可用），必须进锁文件——本地 venv 残留会掩盖这个缺口，只有 CI 能暴露。
+curl-cffi>=0.16
+qrcode>=8.2
+pillow>=12.3

@@ -4,26 +4,28 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 // 测试 remove 操作顺序：先移除任务（停止写入），再删除文件
-test('remove: 先移除任务后删除文件（防止 aria2 仍在写入时文件被删）', () => {
+//
+// 修复说明（2026-09 审查 P0）：本用例原先把断言写在 **未被 await 的 `.then()`** 里。
+// 同步 test 回调一返回，node:test 就判定通过；`.then()` 里的断言在「用例已经结束」之后
+// 才执行，失败只会作为文件级 unhandledRejection 冒出来，用例本身永远打 ✔。
+// 实测：把期望值改成错误字符串，本文件仍报 pass。改为 async 用例 + await 后断言才真正生效。
+test('remove: 先移除任务后删除文件（防止 aria2 仍在写入时文件被删）', async () => {
     const events = [];
     const fakeTask = { gid: 'g1', files: ['/dl/video.mp4'], status: 'active' };
-    const fakeDl = { remove: async (gid) => { events.push('task-removed'); } };
+    const fakeDl = { remove: async (gid) => { events.push('task-removed:' + gid); } };
     const fakeFs = { rmSync: (f, opts) => { events.push('file-deleted:' + f); } };
 
-    // 模拟正确的 remove 顺序
-    (async () => {
-        const delFiles = new Set(fakeTask.files);
-        // 先移除任务
-        await fakeDl.remove(fakeTask.gid);
-        // 再删除文件
-        for (const f of delFiles) { fakeFs.rmSync(f, { force: true }); }
-        // 推送刷新
-        events.push('list-pushed');
-    })().then(() => {
-        assert.equal(events[0], 'task-removed', '应先移除任务');
-        assert.equal(events[1], 'file-deleted:/dl/video.mp4', '后删除文件');
-        assert.equal(events[2], 'list-pushed', '最后推送刷新');
-    });
+    // 被测编排：先移除任务 → 再删文件 → 最后推刷新
+    const delFiles = new Set(fakeTask.files);
+    await fakeDl.remove(fakeTask.gid);
+    for (const f of delFiles) { fakeFs.rmSync(f, { force: true }); }
+    events.push('list-pushed');
+
+    assert.deepEqual(events, [
+        'task-removed:g1',
+        'file-deleted:/dl/video.mp4',
+        'list-pushed',
+    ], '必须严格按「停任务 → 删文件 → 推刷新」的顺序，否则 aria2 仍在写入时文件被删');
 });
 
 // 测试文件去重（Set 去重，O(1) 而非 includes O(n)）

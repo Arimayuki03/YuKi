@@ -537,10 +537,17 @@ class HlsDownloader extends EventEmitter {
             }
         };
         const workers = Array.from({ length: Math.min(concurrency, segments.length) }, () => downloadOne());
-        await Promise.all(workers);
-        // 下载完毕后立即停止速度定时器（合并阶段不再有下载速度）
-        if (task._speedTimer) { clearInterval(task._speedTimer); task._speedTimer = null; }
-        task.speed = 0;
+        // 必须 finally：任一 worker 抛出（分片重试耗尽）时 Promise.all 直接 reject，
+        // 原本写在 await 之后的清理会被整段跳过，留下一个每秒空转并锁住已废弃 task
+        // 闭包的定时器——外层 catch 里只有 status==='removed' 才走 _cleanSegsDir 兜底，
+        // 暂停/目录迁移（_gen 变化）路径下它就是永久泄漏。
+        try {
+            await Promise.all(workers);
+        } finally {
+            // 下载完毕后立即停止速度定时器（合并阶段不再有下载速度）
+            if (task._speedTimer) { clearInterval(task._speedTimer); task._speedTimer = null; }
+            task.speed = 0;
+        }
     }
 
     /** 用 ffmpeg concat demuxer 合并分片为最终文件。withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */

@@ -1471,16 +1471,29 @@ const Player = {
                     }
                 }).appendTo(actionRow);
             }
+            // 这两个按钮是播放失败后唯一的自助修复入口。原实现的
+            // `if (typeof openSettingsPanel === 'function')` 守卫让「函数根本不存在」
+            // 和「函数存在」表现完全一致（点了没反应、零日志），把一次跨文件契约失配
+            // 直接掩盖掉。缺失时改为显式告警并逐级退回，不再静默。
+            const gotoSettings = (cat) => {
+                if (typeof openSettingsPanel === 'function') { openSettingsPanel(cat); return; }
+                console.error('[player] openSettingsPanel 未定义（panels.js 未加载或未导出）');
+                if (window.YUKI && window.YUKI.panels && window.YUKI.panels.openSettingsPanel) {
+                    window.YUKI.panels.openSettingsPanel(cat);
+                } else if (typeof App !== 'undefined' && App.showView) {
+                    App.showView('settings');
+                }
+            };
             if (failureDetails.suggestCookie) {
                 $('<button class="md-btn md-btn-sm md-btn-tonal">配置网盘 Cookie</button>').on('click', () => {
                     this._close();
-                    if (typeof openSettingsPanel === 'function') openSettingsPanel('pan');
+                    gotoSettings('pan');
                 }).appendTo(actionRow);
             }
             if (failureDetails.suggestMpv) {
                 $('<button class="md-btn md-btn-sm md-btn-tonal">安装/指定 mpv</button>').on('click', () => {
                     this._close();
-                    if (typeof openSettingsPanel === 'function') openSettingsPanel('player');
+                    gotoSettings('player');
                 }).appendTo(actionRow);
             }
             if (failureDetails.rawDiagnostics) {

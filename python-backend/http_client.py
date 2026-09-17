@@ -352,6 +352,16 @@ def fetch_follow_redirects(url, params=None, timeout=TIMEOUT_NORMAL, max_redirec
             body = _read_capped(rsp, int(max_bytes or MAX_API_RESPONSE_BYTES))
             return _CappedResponse(
                 rsp, body, str(getattr(rsp, 'encoding', '') or ''))
-        current = _guard_hop(urljoin(current, rsp.headers['Location']),
-                             kind=kind, trust_redirect=True)
+        location = rsp.headers.get('Location') or ''
+        # 3xx 响应以 stream=True 取得且 body 从不读取：不显式 close 则该连接永不归还
+        # pool_maxsize=16 的连接池（socket 要等 GC），每一跳泄漏一个 slot。TVBox 源
+        # 大量 302 到镜像，命中率高；同仓 go_proxy._fetch 的等价逻辑是显式 close 的。
+        # 取完 Location 就立刻关，必须早于 _guard_hop——否则下一跳被 SSRF 守卫拦下
+        # 抛异常时，这一跳的响应又会被漏掉。
+        try:
+            rsp.close()
+        except Exception:
+            pass
+        current = _guard_hop(urljoin(current, location), kind=kind, trust_redirect=True)
+    # 走到这里说明每次迭代都在循环内 close 过并重定向；此处无需再收尾释放
     raise ValueError(f'too many redirects (>{max_redirects}): {url}')

@@ -6,10 +6,43 @@
 
 ## [未发布]
 
+本轮为全项目代码审查（6 个子代理分模块审查 + 逐条复核）后的修复，共 3 项安全风险、17 项缺陷，并补齐相应的回归门禁。明细见 `CODE_REVIEW_2026-09-18*.md`。
+
+### Security
+
+- **发版安装包内含真实网盘 Cookie**：`build.files` 以 `python-backend/**/*` 全量收纳，而 electron-builder **不读 `.gitignore`**——被标注「含 cookie 敏感文件，禁止入库」的蜘蛛运行态（`FM/.quark`、`FM/.uc` 含真实夸克/UC 登录 Cookie）与 `.test-runtime/pan_cookies.json` 被原样打进 `app.asar`；asar 不加密，取出无需权限、无需运行程序。打包后后端实际只读 `extraResources` 的 PyInstaller 产物，asar 内那份纯属冗余，现把 `files` 收窄为运行时真正读取的 5 项。afterPack 同时新增敏感文件门禁（按 asar 条目名精确匹配，命中即终止构建，不随 `YUKI_KEEP_SYSTEM_DLLS` 逃生口豁免）——实测对旧泄露产物命中 4 项、对旧 asar 全 1423 条目零误报。**泄露过的 Cookie 需由账号侧吊销，此前产物不应继续分发。**
+- **ffmpeg 二进制无完整性校验（供应链）**：`binaries.lock.json` 中 ffmpeg 的 `sha256` 为 `null`，且 `verifyDownload` 在期望值为空时静默跳过，下载后直接解压使用。现锁定 gyan.dev 版本化不可变包（`ffmpeg-9.0.1-essentials_build.zip`，与滚动 `release-essentials` 当前指向一致，故不改变新构建的实际产物）并填入官方哈希；构建脚本与**主进程运行时自动下载**两条路径都改为强制校验、不匹配即删档，缺哈希由静默放行改为硬失败。顺带修正运行时解压未走 System32 bsdtar、PATH 含 Git Bash 时把 `C:\` 盘符冒号误解析成远程主机语法的问题。
+- **主窗导航守卫放行任意 http(s)**：`will-navigate` 与自身注释及 `setWindowOpenHandler` 一律 deny 的意图矛盾——主窗是 `file://` 本地页面，渲染层一旦被注入即可把窗口源换成远程站点。改为只放行本应用页面（`parse-window` 加载的就是远程页，两者策略本就应相反）。
+
 ### Fixed
 
+- **定时关机入参零校验可致整机立即强制关机**：`yuki:shutdown-timer` 只判 `!minutes || minutes <= 0`，对 `{}` / `'abc'` 恒为 false（NaN 比较永不成立），延时算成 NaN 被 Node 当 1ms → 立刻停播放并下发 `shutdown`；`minutes ≥ 35792` 时延时超过 `2^31-1` 同样被钳成 1ms（设得越远越早关）。现做类型/有限性校验 + 24 小时硬上限，并补 `shutdown /a` 取消通道（原命令一旦下发即无可撤 handle）。
+- **播放失败弹窗的两个自助按钮永久无效**：`player.js` 调用的 `openSettingsPanel()` 全仓从未定义（`panels.js` 导出的是 `initSettingsPanel`），且传入的 `'pan'`/`'player'` 也不是合法分类名（实际为 `source`/`system`）；`typeof === 'function'` 守卫让缺失时静默无操作、零日志。网盘 Cookie 过期正是播放失败最常见原因，这等于废掉最关键的自助入口。现补齐实现与分类别名映射，缺失时显式告警，并新增「渲染层 `/* global */` 声明 ↔ 真实定义」一致性门禁（eslint 的 `no-undef` 正是被这类文件头声明采信的）。
+- **声明 GBK/GB2312 的苹果 CMS 站点全部失效**：`_parse_xml` 把已按 `apparent_encoding` 解码的 str 再 `encode('utf-8')` 交给 ElementTree，后者仍按文档声明用 GBK 去解 UTF-8 字节，实测抛 `ValueError: multi-byte encodings are not supported`。改为直接传 str（bytes 入参按声明编码解码）。
+- **HTTP 重定向响应从不释放，连接池 slot 泄漏**：`fetch_follow_redirects` 以 `stream=True` 取得 3xx 后既不读 body 也不 `close()`，连接永不归还 `pool_maxsize=16` 的池；TVBox 源大量 302 到镜像，命中率高。改为取完 Location 立即关闭，且早于 SSRF 逐跳校验（否则被拦下时又漏一次）。
+- **`settings.json` 非原子写可致用户数据整体丢失**：`writeFileSync` 是「truncate → 写入」两阶段，中间崩溃即留下截断的非法 JSON，而 `_load` 的 `catch { return {} }` 把「文件损坏」静默降级成「全新安装」——收藏/历史/统计消失且无从得知。改为 tmp + fsync + rename，解析失败另存 `.corrupt-<ts>` 留证并告警。
+- **退出清理遗漏播放列表代理**：`PlaylistProxy.close()`（http.Server + keep-alive agent 池 + sweeper）已实现却全仓零调用，`unref()` 只撤销 event-loop 引用、socket 与监听并未关闭。现接入统一清理序列，并把 `window-all-closed` 的手写子集改为走同一函数（原漏 `hls.cleanup()` 与 `dlTimer`）。
+- **SyncPlay ping 定时器只建不销**：全文件 `clearInterval` 出现 0 次，`disconnect()` 与 socket `close` 均不回收，重连 N 次即并行残留 N 个 5s 循环且旧句柄不可追。
+- **站点诊断快照并发下自相矛盾**：`SiteHealth` 是每站点一个、进程级共享的可变对象却全字段无锁，实测 12000 次快照采样出现 364 次矛盾组合（`healthy=True` 同时 `consecutiveFailures>0` 等），直接打到诊断页与前端提示。改为 RLock（`mark_healthy` 会转调 `record_failure`，需可重入）+ 一致快照。
+- **慢源被熔断器无限冻结**：半开探测**失败**时重新计满 `open_seconds`，与同一函数里取消分支刻意「不重计满窗口」的语义自相矛盾；实际链条是 3 次失败 → 冻 60s → 放行 1 探测 → 又超时 → 再冻 60s，用户浏览期间几乎打不开该源。改为短退避（默认 5s）。
+- **Worker 回收失败进入不可恢复活锁**：`_dispose_locked` 杀进程失败后把半死句柄塞回 `self._process`，而 `_connection` 已置 None，于是每次请求都重试杀同一个杀不掉的进程。改为请求路径快速失败（计入熔断自动降温），句柄留给 `destroy()`/atexit 做最后一次回收，残留 pid 暴露到诊断快照。
+- **同站点并发请求互相污染诊断标识**：`Runner`/`SupervisedRunner` 把 `last_request_id` 存成 Site 级单例的普通实例属性，「最后写入者获胜」与任何在执行中的请求无关（A 超时后按它排障会指到 B）。改为线程本地记录。
+- **夸克扫码登录在打包版静默不可用**：`curl_cffi`/`qrcode`（及其 PNG 工厂所需 `pillow`）被生产代码 import 却未进锁文件，本地靠 venv 残留才「看起来正常」，CI 全新构建的产物会缺包；而三者都是惰性 import + 缺失即优雅降级，打包期根本不报错。现补入锁文件、纳入构建导入守卫，并显式 `--hidden-import qrcode.image.pil`（entry-point 动态工厂，PyInstaller 静态分析抓不到）。
+- **mpv 一次瞬时错误即让整会话无法播放**：单次 ENOENT/EACCES（杀软占用、文件锁、UAC 抖动）就把 `binary` 永久置 null，唯一恢复点是用户手开设置页。改为延迟重探自愈。
+- **推送服务超限请求挂死**：请求体超 64KB 时只 `req.destroy()`，`end` 不再触发、响应永不写出。改为先回 413 再断开。
+- **聚合搜索离开页面后 SSE 不关闭**：`Search.stop()` 已实现却零调用，用户在结果未返回完时切走，仍会向隐藏容器追加卡片并触发封面补拉。接入新增的视图离开钩子；点到详情页属「看一眼再返回」主流程，特意不掐流以免逼用户重搜。
+- 另含 `showSetCat` 缺判空（抛错会连带吞掉快捷键回填等后续初始化）、`_bgmMatchCache` 无容量上限（持久化侧早有 `slice(-500)`，唯独内存 Map 只增不减）、`_SAVE_CACHE_MAX` 定义后全文件零引用致缓存无界增长且每次写入全量落盘、JS 模块二级缓存无上限无锁（×8 Worker 进程放大）等修复。
 - **重启/更新后自定义下载目录失效（表现为「被还原」）**：下载页轮询的 `listAll` 曾在引擎尚未启动时以空目录拉起 aria2，`Downloader.start` 对空目录回退系统「下载」目录并缓存就绪句柄，其后按设置目录的启动调用被直接复用忽略——整个会话的下载都落回系统下载目录（设置值本身并未丢失，更新重启恰好触发该场景）。现在 `listAll` 不再代拉未启动的引擎，仅保留崩溃自愈的原位重拉；「新建下载」「种子文件」两处引擎拉起也补上设置目录兜底。
 - **下载产物文件名带影片名**：番剧子目录布局的文件名从「第N集.mp4」改为「剧名 - 第N集.mp4」（仅新任务生效，存量文件不动）——产物离开 `<剧名>/` 子目录（复制、移动、外部播放器历史记录）后不再丢失影片名；集名本身已含剧名或单集影片不重复前缀，下载列表展示判重同步适配。超长剧名触到段长上限时只截短剧名前缀、保留尾部集名，避免同剧多集被截成同名互相覆盖；剧名+连接符完全放不下时放弃前缀保住集名。
+
+### Tests
+
+- **`api-contract.test.js` 从同义反复改写为真实契约测试**：原 19 条用例全部在断言测试自己内联的常量/正则/假实现（零 require 任何 `src/` 模块）——白名单被放宽、路径遍历校验改成恒真，它们依然 100% 通过，回归发现能力为零。现 18 条全部作用在真实源码行为上：vm 加载 `index.js` 并桩化 electron 与本地服务后调用真实 IPC handler（54 个 handler 注册进桩）、直接 require `settings`/`downloader`/`hls-downloader`/`file-manager` 实测落盘与路径遍历、vm 加载 `player.js` 裸调真实 `_onExit` 验证 quit 语义。每条断言都做了突变测试验收（禁用真实校验 → 对应用例变红）。删除 2 条无真实承载者的用例（`watchStats` 初始结构属渲染层 UI 内部对象、`TOKEN_EXEMPT` 属 Python 侧管辖），去向在文件尾注释说明。运行时行为零改动（`src/` 无该任务产生的 diff）。
+- 4 个从未接入回归的 Python 测试（`test_circuit` / `test_all_runtimes_contract` / `test_quark_session_refresh` / `test_config_compat_offline`）注册进 `run_all.py`，并新增 `_check_stage_coverage()` 门禁：`tests/test_*.py` 既未接入 STAGES 又不在 `EXEMPT_TESTS` 即判失败（`run_all.py` 本就写着「不接入的话文件损坏不会惊动任何人——2026-09 就发生过一次」，现改为机器检查）。编译门禁不再排除整个 `tests/`，覆盖 **110 → 175** 文件。
+- `download-remove.test.js` 的断言原先写在**未被 await 的 `.then()`** 里，用例永远打 ✔（实测把期望值改成错误字符串仍报 pass）；改为 async + await，并新增静态门禁拦截同类写法（按花括号配对取回调体、剥离注释与字符串，避免把 `return ...then()` 这种 node:test 会等待的正常用法误判）。
+- 5 处「环境不满足即 `return`」的静默跳过（唯一验证真杀 ffmpeg 进程的 `hls-cleanup` 用例在 CI 上必然不跑却计为通过等）改为 node:test `skip`，并在 `run-jsunit.js` 汇总中显式告警跳过数。
+- CI 补 `npm run lint`（此前 CI 从不跑 eslint，`no-undef` 形同虚设）、`permissions: contents: read`、`concurrency`、`timeout-minutes`；`pnpm-workspace.yaml` 的 `allowBuilds` 是无效字段（pnpm 静默忽略）改为 `onlyBuiltDependencies`。
+- 新增 `test_health_concurrency.py`（含无锁孪生对照实现，锁被删除时会变红）、`test_cms_xml_encoding.py`、`renderer-globals-contract.test.js`、`test-effectiveness.test.js`；`test_circuit.py` 补半开退避语义用例。JS 用例 534 → 541，Python 阶段 51 → 57。
 
 ## [0.2.4] - 2026-09-17
 

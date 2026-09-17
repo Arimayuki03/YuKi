@@ -48,8 +48,15 @@ try {
 }
 // 导入守卫：与 PyInstaller 用同一解释器，缺包在打包前就失败，而不是打进产物后
 // 在用户机器上才炸。quickjs/lxml 是 hidden-import 项，同样纳入检查。
+// curl_cffi / qrcode / PIL 是夸克扫码登录（pan_login.py）的生产依赖，且全部是**函数内
+// 惰性 import + 缺失即优雅降级**（curl_cffi 抛可读 RuntimeError、qrcode 渲染返回 None）：
+// 打包期不报错、运行时才让功能静默不可用，而本地 venv 的手装残留会完全掩盖这个缺口
+// （只有 CI 全新环境才暴露），所以必须显式纳入守卫。
 // 输出保持 ASCII（run_all 同约）：release CI 无 PYTHONUTF8，中文 print 会 UnicodeEncodeError。
-run(`"${VENV_PYTHON}" -c "import fastapi, uvicorn, requests, lxml, quickjs; print('[build-python] import guard OK')"`, BACKEND);
+run(`"${VENV_PYTHON}" -c "`
+    + 'import fastapi, uvicorn, requests, lxml, quickjs, jsonpath_ng, bs4, cachetools, multipart, '
+    + 'curl_cffi, qrcode, PIL.Image; '
+    + "print('[build-python] import guard OK')\"", BACKEND);
 
 // 2. 清理旧产物
 console.log('[build-python] 清理旧产物…');
@@ -80,6 +87,10 @@ const cmd = [
     '--hidden-import', 'uvicorn.protocols.http.auto',
     '--hidden-import', 'lxml',
     '--hidden-import', 'quickjs',
+    // qrcode 的图像工厂通过 setuptools entry-point 动态解析（qrcode.image.pil），
+    // PyInstaller 静态分析抓不到；不显式声明的话扫码二维码在打包版里渲染为空。
+    '--hidden-import', 'qrcode.image.pil',
+    '--hidden-import', 'PIL.Image',
     'server.py',
 ].join(' ');
 

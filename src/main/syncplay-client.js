@@ -70,6 +70,8 @@ class SyncplayClient extends EventEmitter {
             this.socket.on('error', onError);
             this.socket.on('close', () => {
                 this.connected = false;
+                // 服务器侧断开（最常见路径）同样要收掉 ping 定时器
+                this._stopPingLoop();
                 this.emit('disconnect');
             });
         });
@@ -78,8 +80,11 @@ class SyncplayClient extends EventEmitter {
     /** 断开连接并离开房间。 */
     disconnect() {
         this.connected = false;
+        // ping 定时器必须与连接同生共死，否则断线后每 5s 空转一次并锁住旧闭包
+        this._stopPingLoop();
         if (this.socket) {
             try { this.socket.end(); } catch (e) { /* ignore */ }
+            try { this.socket.destroy(); } catch (e) { /* ignore */ }
             this.socket = null;
         }
         this.emit('disconnect');
@@ -203,11 +208,22 @@ class SyncplayClient extends EventEmitter {
     }
 
     _startPingLoop() {
+        // 先清旧定时器：重复 connect 时若直接覆盖句柄，旧 interval 的引用丢失、
+        // 再也无法清理，连 N 次就会并行跑 N 个 ping 循环
+        this._stopPingLoop();
         this._pingTimer = setInterval(() => {
             if (!this.connected) return;
             this.lastPingTime = Date.now();
             this._send({ State: { ping: { clientLatencyCalculation: Date.now() / 1000, clientRtt: this.clientRtt } } });
         }, 5000);
+    }
+
+    /** 停止 ping 定时器（幂等）。 */
+    _stopPingLoop() {
+        if (this._pingTimer) {
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
+        }
     }
 }
 

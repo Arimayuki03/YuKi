@@ -20,6 +20,8 @@ let currentParent = '';
 let dirNavStack = [];
 let pendingDelFolder = null;
 let _assetStatus = null; // 最近一次资产就绪状态缓存（Anime4K 开关提示用）
+// initSettingsPanel 内部闭包 showSetCat 的模块级引用，供 openSettingsPanel 跨函数调用
+let _showSetCat = null;
 
 // ---------------------------------------------------------------- 面板切换
 
@@ -1207,6 +1209,34 @@ async function openQuarkQrLogin() {
 
 function stopQuarkQrTimers() { /* 官方窗口方案无需前端定时器 */ }
 
+/**
+ * 跨文件入口：跳到设置页并展开指定大类。
+ *
+ * 回归背景（2026-09 全项目审查）：player.js 的播放失败弹窗一直调用
+ * openSettingsPanel('pan' | 'player')，但本文件从未定义过这个函数——
+ * `typeof openSettingsPanel === 'function'` 守卫让调用静默失败、无报错无日志，
+ * 于是「配置网盘 Cookie」「安装/指定 mpv」两个按钮点了没有任何反应。网盘 Cookie
+ * 过期恰是播放失败最常见的原因，这等于把最关键的自助修复入口废掉了。
+ *
+ * @param cat 设置大类；接受调用方的语义别名（见 SETTINGS_CAT_ALIAS）。未知分类落到
+ *            appearance，绝不因分类名不存在而抛错。
+ */
+const SETTINGS_CAT_ALIAS = { pan: 'source', cookie: 'source', player: 'system', mpv: 'system' };
+
+function openSettingsPanel(cat) {
+    const wanted = String(cat || '');
+    const alias = SETTINGS_CAT_ALIAS[wanted];
+    // 别名后仍不存在的大类（历史重划分留下的旧值）回落到外观，与 initSettingsPanel
+    // 里恢复记忆分类时的「仅在仍存在时恢复」保持同一口径
+    const resolved = $(`#view-settings .tool-card[data-setcat="${alias || wanted}"]`).length
+        ? (alias || wanted) : 'appearance';
+    if (typeof App !== 'undefined' && App.showView) App.showView('settings');
+    if (_showSetCat) _showSetCat(resolved);
+    else $('#settings-nav .settings-nav-item').filter(`[data-cat="${resolved}"]`).trigger('click');
+    // 与手动点击导航一致地记忆分类，下次进设置页停在同一处
+    if (window.yuki && window.yuki.settingsSet) window.yuki.settingsSet('settingsCat', resolved);
+}
+
 function initSettingsPanel() {
     // 设置一级菜单（T12）：点大类只显示对应二级详情卡片；记忆上次分类
     const showSetCat = (cat) => {
@@ -1228,12 +1258,18 @@ function initSettingsPanel() {
         // 重触发分类切换入场动画：移除→强制 reflow→重挂（同 detail.js _swapTabContent
         // 的 tab-enter 手法）；动画本体在 ui.css，仅非毛玻璃启用（T54：毛玻璃下
         // tool-card 携带 backdrop-filter，opacity/transform 动画会重建模糊采样层致闪烁）
+        // 判空：本函数是设置页唯一的分类切换入口，DOM 结构变动时若在此抛 TypeError，
+        // initSettingsPanel 会提前 return，其后的快捷键回填/资产状态等全部不执行。
         const grid = document.querySelector('#view-settings .settings-grid');
-        grid.classList.remove('set-enter');
-        void grid.offsetWidth; // 强制 reflow 以重启动画
-        grid.classList.add('set-enter');
+        if (grid) {
+            grid.classList.remove('set-enter');
+            void grid.offsetWidth; // 强制 reflow 以重启动画
+            grid.classList.add('set-enter');
+        }
         if (cat === 'about' && typeof About !== 'undefined' && About.enter) About.enter();
     };
+    // 暴露给 openSettingsPanel（跨文件入口：播放失败弹窗的「去配置」按钮）
+    _showSetCat = showSetCat;
     showSetCat('appearance'); // 先按默认分类收纳，回填后切到记忆分类
     $('#settings-nav').on('click', '.settings-nav-item', function () {
         const cat = String($(this).data('cat'));
@@ -1979,6 +2015,7 @@ function initSettingsPanel() {
         const minutes = parseInt($('#set_shutdown_minutes').val(), 10) || 0;
         const r = await window.yuki.shutdownTimer(minutes);
         if (r && r.ok) warnToast(r.msg || (minutes > 0 ? `已设定 ${minutes} 分钟后关机` : '已取消定时关机'));
+        else warnToast((r && r.msg) || '定时关机设置失败');
     });
     // 日志查看器：打开 + 翻页 + 按文件筛选
     let _logPage = 1;
@@ -2402,5 +2439,5 @@ async function refreshPlayerLine() {
 
 (function (root) {
     root.YUKI = root.YUKI || {};
-    root.YUKI.panels = { applyConfigResult, initAuxPanels, initSettingsPanel };
+    root.YUKI.panels = { applyConfigResult, initAuxPanels, initSettingsPanel, openSettingsPanel };
 }(typeof window !== 'undefined' ? window : globalThis));

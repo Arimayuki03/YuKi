@@ -615,11 +615,14 @@ function createWindow() {
         }
         return { action: 'deny' };
     });
-    // will-navigate 守卫（与 parse-window 同语义）：主窗只 load 本地 index.html，
-    // 正常运行不存在任何窗内导航；一旦发生（页面被注入/劫持跳转 http(s) 或
-    // file: 以外 scheme）一律拦下，非 http(s) 畸形 scheme 也不交系统弹「打开方式」。
+    // will-navigate 守卫：主窗只 load 本地 index.html，正常运行不存在窗内导航。
+    // 原实现在此处放行任意 http(s)，与本注释（以及上一行 setWindowOpenHandler 一律
+    // deny + 转系统浏览器的设计意图）自相矛盾：渲染层一旦被注入（本项目有大量拼接
+    // innerHTML 的渲染面），一句 location='http://…' 就能让主窗源从 file:// 变成远程
+    // 站点。注意 parse-window 的同名守卫是「加载远程页面的窗口」，那里放行 http(s)
+    // 才对；主窗是本地页面，策略必须相反——只放行本应用自己的页面。
     win.webContents.on('will-navigate', (ev, navUrl) => {
-        if (/^https?:\/\//i.test(navUrl) || isLocalAppPageUrl(navUrl)) return;
+        if (isLocalAppPageUrl(navUrl)) return;
         try { ev.preventDefault(); } catch (e) { /* ignore */ }
         console.warn('[main] will-navigate blocked:', navUrl);
     });
@@ -3223,9 +3226,14 @@ app.whenReady().then(() => {
 
     const playlistProxy = new PlaylistProxy({
         getBackend: () => lastBackendInfo,
-        // Kazumi 第二段解析：复用 VIP 解析的隐藏窗口抓流设施（规则头由代理管道转发）
+        // Kazumi 第二段解析：复用 VIP 解析的隐藏窗口抓流设施（规则头由代理管道转发）。
+        // abort 位必须是 _capture 认识的 { requested, reason } 标记对象：原先传的是
+        // new AbortController().signal —— 一是 .requested 恒为 undefined，取消永不生效；
+        // 二是 _capture 里 `if (abort)` 判真后仍会起一个贯穿整个抓流期的 100ms 空转轮询。
+        // 该控制器也从未被 abort，纯装饰。此处代理侧没有可对接的会话取消源，宁可显式
+        // 传 undefined（走 timeout 兜底、不起无用定时器），也不留一个假装的取消机制。
         captureDirect: (pageUrl, legacy) => parseWin.captureDirect(
-            pageUrl, undefined, !!legacy, new AbortController().signal, {}),
+            pageUrl, undefined, !!legacy, undefined, {}),
         onEntryError: ({ index, reason, sess }) => {
             send('yuki:play-failed', { message: `第 ${index + 1} 集：${reason}，原生连播已停止` });
             // 仅 parse=1（页面解析型）拉黑该线路；超时/抖动类失败不记，下次可重试
@@ -4062,13 +4070,38 @@ app.whenReady().then(() => {
 
     // ---- 定时关机 ----
     let shutdownTimer = null;
-    ipcMain.handle('yuki:shutdown-timer', (_e, minutes) => {
+    // OS 关机命令是否已下发（Windows 上处于 /t 60 的 60s 宽限期）。取消时必须
+    // 显式 shutdown /a，否则 JS 侧 clearTimeout 已失效、机器照样关机。
+    let shutdownArmed = false;
+    const cancelPendingShutdown = () => {
         if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
-        if (!minutes || minutes <= 0) return { ok: true, msg: '已取消定时关机' };
+        if (shutdownArmed && process.platform === 'win32') {
+            try { require('child_process').exec('shutdown /a', { windowsHide: true }); }
+            catch (e) { /* 已关机/无宽限期待撤，忽略 */ }
+        }
+        shutdownArmed = false;
+    };
+    ipcMain.handle('yuki:shutdown-timer', (_e, minutes) => {
+        cancelPendingShutdown();
+        // 入参归一化：原实现只判 `!minutes || minutes <= 0`，对 {} / 'abc' 这类
+        // 非数字恒为 false（NaN 比较永不成立），于是 minutes*60000 = NaN，Node 把
+        // NaN 延时当 1ms → 立即停播放并关机；另外 minutes >= 35792 时延时超过
+        // 2^31-1，setTimeout 同样钳制成 1ms。两条路径都是「设了个值 → 整机立即强制
+        // 关机」，而关机是不可逆的破坏性动作，因此这里只接受有限正数并加硬上限。
+        if (minutes === null || minutes === undefined) return { ok: true, msg: '已取消定时关机' };
+        if (typeof minutes !== 'number' && typeof minutes !== 'string') {
+            return { ok: false, msg: '定时关机参数非法：需数字分钟数' };
+        }
+        const m = Number(minutes);
+        if (!Number.isFinite(m) || m <= 0) return { ok: true, msg: '已取消定时关机' };
+        // 上限 24 小时：既覆盖真实使用场景，又保证延时远小于 setTimeout 的 2^31-1 天花板
+        const capped = Math.min(m, 24 * 60);
+        const delay = Math.min(Math.round(capped * 60 * 1000), 2 ** 31 - 1);
         shutdownTimer = setTimeout(() => {
             // 播放停止后关机：先停 mpv 再关机
             mpv.stop();
             setTimeout(() => {
+                shutdownArmed = true;
                 const { exec } = require('child_process');
                 if (process.platform === 'win32') {
                     exec('shutdown /s /t 60 /c "YuKi 定时关机"', { windowsHide: true });
@@ -4078,8 +4111,16 @@ app.whenReady().then(() => {
                     exec('shutdown -h +1', { windowsHide: true });
                 }
             }, 2000);
-        }, minutes * 60 * 1000);
-        return { ok: true, msg: `已设定 ${minutes} 分钟后关机` };
+        }, delay);
+        const at = new Date(Date.now() + delay);
+        const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+        return {
+            ok: true,
+            minutes: capped,
+            at: hhmm,
+            msg: capped === m ? `已设定 ${capped} 分钟后关机（${hhmm}）`
+                : `已设定 ${capped} 分钟后关机（${hhmm}，超出 24 小时上限已截断）`,
+        };
     });
 
     // ---- 日志查看器 ----
@@ -4133,11 +4174,9 @@ app.on('window-all-closed', () => {
     // 托盘驻留模式（win.hide 不触发；destroy 后才到这里）：保活不停 mpv
     // 只有 isQuitting=true 时才真正退出，否则保留托盘驻留
     if (!isQuitting) return;
-    mpv.stop();
-    dl.stop();
-    pushServer.stop();
-    try { syncplay.disconnect(); } catch (e) { /* ignore */ }
-    bridge.stop();
+    // 走统一清理序列：此处原先手写了一份子集，漏掉 hls.cleanup()（ffmpeg 合成进程）
+    // 与 dlTimer/播放列表代理。runQuitCleanup 幂等，before-quit 已跑过时这里直接短路。
+    runQuitCleanup();
     if (process.platform !== 'darwin') app.quit();
 });
 
@@ -4155,6 +4194,11 @@ function runQuitCleanup() {
     try { hls.cleanup(); } catch (e) {}
     try { pushServer.stop(); } catch (e) {}
     try { syncplay.disconnect(); } catch (e) {}
+    // 播放列表代理：持有 http.Server（127.0.0.1 随机端口）、keep-alive 上游 agent 池
+    // 与 30 分钟 sweeper。close() 早已实现却从未被调用——unref() 只是撤掉 event-loop
+    // 引用，socket 与监听并未关闭；在 settings-reset 的 relaunch 路径上会让旧进程
+    // 资源未释放就拉起新进程。close() 内部已 try 包裹且销毁 agent，可安全重复调用。
+    try { if (playlistProxyRef) playlistProxyRef.close(); } catch (e) {}
     try { bridge.stop(); } catch (e) {}
 }
 

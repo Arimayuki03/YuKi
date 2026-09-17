@@ -15,9 +15,15 @@ class CircuitBreaker:
     触发探测。这样不会把凭据缺失当成网络抖动反复重启 Worker。
     """
 
-    def __init__(self, failure_threshold=3, open_seconds=60.0):
+    def __init__(self, failure_threshold=3, open_seconds=60.0, half_open_backoff_seconds=None):
         self.failure_threshold = max(1, int(failure_threshold))
         self.open_seconds = max(0.01, float(open_seconds))
+        # 半开探测失败的退避窗口：默认 open_seconds / 12（60s → 5s），并硬性不超过
+        # open_seconds 本身。必须显著小于 open_seconds，否则一次抖动探测就把站点冻满
+        # 一个完整开放周期，慢源在用户浏览期间实际不可用。
+        backoff = (float(open_seconds) / 12.0 if half_open_backoff_seconds is None
+                   else float(half_open_backoff_seconds))
+        self.half_open_backoff_seconds = min(max(0.01, backoff), self.open_seconds)
         self._lock = threading.RLock()
         self._state = 'closed'
         self._failure_stage = ''
@@ -81,7 +87,17 @@ class CircuitBreaker:
             else:
                 self._failure_stage = stage
                 self._consecutive_failures = 1
-            if self._state == 'half-open' or self._consecutive_failures >= self.failure_threshold:
+            if self._state == 'half-open':
+                # 半开探测失败：回到 open，但**不重开满 open_seconds**。
+                # 原实现与上面 61-70 行的取消分支自相矛盾——那里刻意「保持原
+                # _open_until」并写明「每次中止 +60s 会把熔断无限延长，站点在用户
+                # 浏览期间始终不可用」；而这里一次探测失败就再冻 60s。慢源（偶发超时）
+                # 的实际后果：3 次失败 → 冻 60s → 放行 1 个探测 → 探测又超时 → 再冻
+                # 60s，用户在整段浏览期几乎打不开该源。
+                # 用一段远小于 open_seconds 的探测退避，既不无限冻结也不至于高频轰炸。
+                self._state = 'open'
+                self._open_until = time.monotonic() + self.half_open_backoff_seconds
+            elif self._consecutive_failures >= self.failure_threshold:
                 self._state = 'open'
                 self._open_until = time.monotonic() + self.open_seconds
             self._half_open_in_flight = False

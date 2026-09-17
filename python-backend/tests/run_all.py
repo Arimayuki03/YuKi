@@ -85,9 +85,34 @@ STAGES = [
     ('frozen-entrypoint', [PY, os.path.join(HERE, 'test_frozen_entrypoint.py')]),
     # vendor/resources 根解析契约：jar 运行时资产在冻结产物里的定位
     ('resources-root', [PY, os.path.join(HERE, 'test_resources_root.py')]),
+    # ── 以下 6 个此前长期游离在回归之外（2026-09 全项目审查发现）──────────────
+    # 上方注释写的教训（「不接入 run_all 的话文件损坏不会惊动任何人」）在补注册表时
+    # 又被漏了一次。现已由 _check_stage_coverage() 做成机器门禁，不再依赖人工记忆。
+    # 熔断器核心语义：半开探测/取消后不重计满开放时间——supervisor 放行判定直接依赖它
+    ('circuit', [PY, os.path.join(HERE, 'test_circuit.py')]),
+    # 四类运行时（jar/js/cms/python）统一契约面：能力路由与错误目录一致性
+    ('all-runtimes-contract', [PY, os.path.join(HERE, 'test_all_runtimes_contract.py')]),
+    # 夸克网盘 session 刷新状态机：pan_login.py 此前无任何直接覆盖
+    ('quark-session-refresh', [PY, os.path.join(HERE, 'test_quark_session_refresh.py')]),
+    # G0.1 兼容夹具的正常/异常/超时/无限循环退出语义（离线，可进 CI）
+    ('config-compat-offline', [PY, os.path.join(HERE, 'test_config_compat_offline.py')]),
+    # 苹果 CMS XML 编码（GBK/GB2312 站点曾 100% 解析失败）与 XXE 防护
+    ('cms-xml-encoding', [PY, os.path.join(HERE, 'test_cms_xml_encoding.py')]),
+    # SiteHealth 并发一致性：无锁时诊断快照会读到自相矛盾的组合
+    ('health-concurrency', [PY, os.path.join(HERE, 'test_health_concurrency.py')]),
 ]
 
-SKIP_DIRS = {'.venv', '__pycache__', 'tests'}
+# 有意不作为独立 stage 运行的 tests/test_*.py → 原因。
+# 新增测试文件若既不接入 STAGES、也不在此登记，_check_stage_coverage() 会让回归失败。
+EXEMPT_TESTS = {
+    # 由上面的 'config-compat' stage 以 `--offline` 参数调用，不是没有接入
+    'test_config_compat.py': '已作为 config-compat stage（--offline）接入',
+}
+
+# 编译门禁不排除 tests/：审查时 SKIP_DIRS 含 'tests' 导致「[compile] 110 py files」
+# 这个数字根本不含任何测试文件，孤儿测试文件连语法坏了都发现不了（实测 tests 下
+# 65 个 .py 全部编译干净，纳入后覆盖 110 → 175）。
+SKIP_DIRS = {'.venv', '__pycache__'}
 
 
 def compile_all():
@@ -109,11 +134,38 @@ def compile_all():
     return not bad
 
 
+def _check_stage_coverage():
+    """守住「写了测试但没接入回归」这类静默失效。
+
+    tests/ 下每个 test_*.py 都必须被某个 stage 引用（或直接以其它脚本运行），
+    否则该文件即使永远通过也拦不住任何回归——审查时就有 4 个这样的孤儿文件，
+    其中包含熔断器与网盘 session 刷新这类高风险实现。
+    """
+    import glob
+    import re
+    with open(os.path.join(HERE, 'run_all.py'), encoding='utf-8') as fp:
+        src = fp.read()
+    head, _, _ = src.partition('EXEMPT_TESTS = {')
+    registered = set(re.findall(r"['\"](test_[A-Za-z0-9_]+\.py)['\"]", head))
+    found = {os.path.basename(p) for p in glob.glob(os.path.join(HERE, 'test_*.py'))}
+    missing = sorted(found - registered - set(EXEMPT_TESTS))
+    stale = sorted((registered | set(EXEMPT_TESTS)) - found)
+    for name in missing:
+        print(f'  [FAIL] {name} 未被任何 stage 接入，也不在 EXEMPT_TESTS 中')
+    for name in stale:
+        print(f'  [FAIL] stage/EXEMPT 引用的 {name} 不存在（文件已删除或改名）')
+    return not missing and not stale
+
+
 def main():
     # 单阶段超时（秒）：子测试若挂死（如 stream 回归在旧代码上会 hang），
     # 没有超时会占住 CI 数小时；可用 YUKI_STAGE_TIMEOUT 覆盖。
     stage_timeout = int(os.environ.get('YUKI_STAGE_TIMEOUT') or 900)
     ok = True
+    print('===== stage: coverage-self-check =====')
+    covered = _check_stage_coverage()
+    print(f'===== coverage-self-check: {"PASS" if covered else "FAIL"} =====\n')
+    ok = covered and ok
     for name, cmd in STAGES:
         print(f'===== stage: {name} =====')
         try:

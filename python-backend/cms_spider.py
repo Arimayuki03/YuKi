@@ -11,8 +11,10 @@
 鸭子接口对齐 Runner 调用面（与 JsSpider 同一装配路径），方法返回 dict
 （与 Spider 基类契约一致；app.py 包装层会统一 json.dumps，返回字符串会被二次序列化）。
 """
+import codecs
 import json
 import logging
+import re
 import xml.etree.ElementTree as ET
 
 import http_client
@@ -177,7 +179,26 @@ class CmsSpider:
                 else text[:4096].decode('utf-8', 'ignore')).lower()
         if '<!doctype' in head or '<!entity' in head:
             raise ValueError('suspicious XML rejected (DOCTYPE/ENTITY)')
-        root = ET.fromstring(text.encode('utf-8') if isinstance(text, str) else text)
+        # 必须把 str 原样交给 ElementTree，不能 text.encode('utf-8') 再传：
+        # _fetch 已按 apparent_encoding 把响应解成 str（GBK 源即 GBK 解码结果），而
+        # 国内苹果 CMS 大量声明 <?xml ... encoding="GBK"?>。重新编成 UTF-8 字节后，
+        # ElementTree 仍按声明用 GBK 去解 UTF-8 字节，实测直接抛
+        # ValueError: multi-byte encodings are not supported —— 这类站点全部失效。
+        # 传 str 时 ElementTree 忽略声明编码、直接用该字符串，中文可正常解析。
+        if not isinstance(text, str):
+            # 兜底：调用方给的是原始字节时，按 XML 声明的编码自行解码再走 str 路径。
+            # 直接丢 bytes 给 ElementTree 对 GBK/GB2312 同样会抛 multi-byte 异常。
+            decl = re.match(r'\s*<\?xml[^>]*encoding=["\']([^"\']+)["\']',
+                           text[:200].decode('ascii', 'ignore'), re.I)
+            enc = None
+            if decl:
+                try:
+                    codecs.lookup(decl.group(1))
+                    enc = decl.group(1)
+                except LookupError:
+                    enc = None
+            text = text.decode(enc or 'utf-8', 'replace')
+        root = ET.fromstring(text)
         data = {}
         for tag in ('page', 'pagecount', 'limit', 'total'):
             node = root.find(tag)

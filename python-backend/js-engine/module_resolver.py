@@ -14,6 +14,7 @@ quickjs-ng 不支持跨模块 import，因此把入口模块及其依赖树抓�
 import time
 import logging
 import re
+import threading
 from urllib.parse import urljoin
 
 logger = logging.getLogger('yuki.jsengine.resolver')
@@ -28,18 +29,34 @@ MODULE_CACHE_TTL = 3600  # 模块二级缓存 TTL (1小时)
 
 # 内存二级持久缓存：url -> (src, timestamp)
 _GLOBAL_MODULE_CACHE = {}
+# 条数上限：value 是整份模块源码（单条可达数 MB），且每个 SiteWorker 是独立进程、
+# 各自持一份，8 Worker 并发时内存按 8 倍放大。原先完全无上限——配置多个 ESM 多模块
+# 源就会单调增长到进程退出。触顶按「先清过期 → 再按写入序淘汰」收敛。
+_GLOBAL_MODULE_CACHE_MAX = 128
+# 读改写保护：build 名义上单线程，但 fetch_text 走网络 IO，字典裸奔不划算
+_CACHE_LOCK = threading.Lock()
 
 
 def fetch_module_cached(url, fetch_text, ttl=MODULE_CACHE_TTL):
     """带 TTL 的全局模块网络拉取与二级缓存，避免重复解析与跨站点拉取开销。"""
     now = time.time()
-    cached = _GLOBAL_MODULE_CACHE.get(url)
-    if cached and (now - cached[1]) < ttl:
-        return cached[0]
-    
+    with _CACHE_LOCK:
+        cached = _GLOBAL_MODULE_CACHE.get(url)
+        if cached and (now - cached[1]) < ttl:
+            return cached[0]
+
     src = fetch_text(url)
     if src:
-        _GLOBAL_MODULE_CACHE[url] = (src, now)
+        with _CACHE_LOCK:
+            _GLOBAL_MODULE_CACHE[url] = (src, now)
+            if len(_GLOBAL_MODULE_CACHE) > _GLOBAL_MODULE_CACHE_MAX:
+                # 过期条目先清（无损），仍超限才按写入时间从早到晚删
+                for k in [k for k, (_s, ts) in _GLOBAL_MODULE_CACHE.items()
+                          if (now - ts) >= ttl]:
+                    _GLOBAL_MODULE_CACHE.pop(k, None)
+                overflow = len(_GLOBAL_MODULE_CACHE) - _GLOBAL_MODULE_CACHE_MAX
+                for k in list(_GLOBAL_MODULE_CACHE)[:max(0, overflow)]:
+                    _GLOBAL_MODULE_CACHE.pop(k, None)
     return src
 
 

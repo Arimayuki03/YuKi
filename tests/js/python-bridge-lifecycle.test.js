@@ -130,8 +130,13 @@ function readJsonLine(proc, timeoutMs = 15000) {
     });
 }
 
-test('packaged Windows does not spawn backend when system VC++ runtime is missing', () => {
-    if (process.platform !== 'win32') return;
+// 平台门槛用 skip 选项而非 `if (...) return`：后者在非 Windows 上会以「通过」的
+// 形态计入总数（本文件 :343 那条真三层进程树回收回归是全套里最有价值的用例之一，
+// 却在 Linux/mac runner 上静默变绿 no-op），skip 会让它在汇总的 skipped 里显形。
+const WINDOWS_ONLY = process.platform === 'win32' ? {}
+    : { skip: '仅 Windows 适用（当前 ' + process.platform + '）：本用例未执行，非通过' };
+
+test('packaged Windows does not spawn backend when system VC++ runtime is missing', WINDOWS_ONLY, () => {
     const sysRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yuki-sysroot-'));
     const prevSystemRoot = process.env.SystemRoot;
     process.env.SystemRoot = sysRoot; // 空目录 = 无 vcruntime140*.dll
@@ -157,8 +162,7 @@ test('packaged Windows does not spawn backend when system VC++ runtime is missin
     }
 });
 
-test('packaged Windows spawns backend when system VC++ runtime present', () => {
-    if (process.platform !== 'win32') return;
+test('packaged Windows spawns backend when system VC++ runtime present', WINDOWS_ONLY, () => {
     const sysRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yuki-sysroot-'));
     const sys32 = path.join(sysRoot, 'System32');
     fs.mkdirSync(sys32);
@@ -339,8 +343,7 @@ test('stop then start respawns a fresh backend', () => {
     assert.notEqual(bridge.proc, procs[0]);
 });
 
-test('real Windows app stop releases Python Java Node descendants and ports', async () => {
-    if (process.platform !== 'win32') return;
+test('real Windows app stop releases Python Java Node descendants and ports', WINDOWS_ONLY, async () => {
     const root = path.join(__dirname, '../..');
     const fixtureDir = path.join(__dirname, 'fixtures');
     const runtimeDir = path.join(root, 'python-backend', '.test-runtime', 'node-lifecycle');

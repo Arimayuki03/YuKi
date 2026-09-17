@@ -58,6 +58,17 @@ const App = {
         return branch;
     },
 
+    /** 离开某视图时的统一收尾点（与 enter/onViewShown 对称）。新增需在离开时
+     *  释放的流/定时器/订阅一律加到这里，避免再出现「写了 stop() 却没人调」。 */
+    _onViewLeft(view, to) {
+        try {
+            // 搜索结果页 → 详情是「点卡片看一眼再返回」的主流程，此时不能掐掉在途的
+            // 聚合搜索（否则返回后结果残缺、只能重搜）；只有真正离开搜索场景才关流。
+            if (view === 'search' && to !== 'detail'
+                && typeof Search !== 'undefined' && Search.stop) Search.stop();
+        } catch (e) { /* 收尾失败不得阻断视图切换 */ }
+    },
+
     /** 视图切换主入口：opts.push === false 时不入栈（后退/前进自身切换用，避免栈膨胀）；
      *  opts.refresh === true 时强制重拉（忽略页级缓存 TTL）。 */
     showView(name, opts) {
@@ -87,6 +98,12 @@ const App = {
             const el = document.getElementById('view-' + name);
             if (el) el.scrollTop = backTop;
         }));
+        // 离开上一个视图时的收尾：与下面的 onViewShown/enter 对称。
+        // 回归背景（2026-09 审查 P1）：Search.stop() 早就写好了（关 EventSource + 停
+        // 进度条定时器），但全仓零调用点——用户在聚合搜索结果未返回完时切走，SSE 仍在
+        // 向后端接收每个源的结果并向**已隐藏的容器**追加 DOM、触发封面补拉；多次搜索后
+        // 堆积成百上千张不可见卡片 + N 条不关闭的 EventSource。
+        if (fromView && fromView !== name) this._onViewLeft(fromView, name);
         // 页级缓存：可缓存的只读视图在 TTL 内再次切入 → 跳过 enter 网络重拉（refresh=true 强制刷新）
         const forceRefresh = !!(opts && opts.refresh);
         const skipEnter = !forceRefresh && this._cacheableViews[name] && this._viewFresh(name);

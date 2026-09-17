@@ -193,6 +193,11 @@ class RuntimeSupervisor:
         self._job = None
         self._generation = 0
         self._destroyed = False
+        # 杀不掉的 Worker 进程树 pid + 句柄。pid 非 None 即表示本 Supervisor 已无法
+        # 安全重启该 Worker，后续调用快速失败并计入熔断（见 _start_locked）；句柄留给
+        # destroy()/atexit 做最后一次回收。
+        self._unreapable_pid = None
+        self._unreapable_proc = None
         self._lifecycle_lock = threading.RLock()
         self._call_lock = threading.Lock()
         capacity = max(1, self.policy.max_concurrency + self.policy.max_queue)
@@ -246,6 +251,14 @@ class RuntimeSupervisor:
         if self._destroyed:
             raise RuntimeError('L3_RUNTIME_RESTARTED', site_key=self.site_key,
                                runtime=self.runtime, raw_error='supervisor destroyed')
+        if self._unreapable_pid is not None:
+            # 上一次回收就没成功：再开一个 Worker 只会与残留进程争同一份站点资源，
+            # 且旧进程仍占着全局槽位。快速失败（retryable → 计入熔断，坏站点自动降温），
+            # 而不是每次都重试杀同一个杀不掉的进程。重建 Supervisor（重载配置/重启应用）
+            # 会清掉本标记。
+            raise RuntimeError(
+                'L3_RUNTIME_CRASHED', site_key=self.site_key, runtime=self.runtime,
+                raw_error='previous worker pid %s could not be terminated' % self._unreapable_pid)
         if self._process is not None and self._process.is_alive() and self._connection is not None:
             _touch_global(self)
             return
@@ -365,11 +378,18 @@ class RuntimeSupervisor:
                 except Exception:
                     pass
         if not terminated:
-            # Keep an observable handle instead of presenting a failed kill
-            # as a completed timeout/cancel cleanup.
-            self._process = process
+            # 原实现在这里把杀不掉的 process 重新塞回 self._process，好「保留可观察
+            # 句柄」。但 self._connection 已被摘除并 close，于是下一次 call() 走
+            # _start_locked 时命中不了「process + connection 都健康」的早退分支，会
+            # 再调一次 _dispose_locked(kill=True) 去杀同一个僵尸——每次请求都重付一遍
+            # taskkill/join 的代价且永远杀不掉，该 Supervisor 因此进入不可恢复的活锁
+            # （Windows 上 Job Object attach 失败或进程受保护时就会走到这里）。
+            # 改为挪到独立字段：请求路径快速失败（_start_locked），但句柄不丢，
+            # destroy()/atexit 仍有一次最后的回收机会（否则就是纯进程泄漏）。
+            self._unreapable_pid = getattr(process, 'pid', None)
+            self._unreapable_proc = process
             logger.critical('worker process tree did not terminate site=%s pid=%s',
-                            self.site_key, getattr(process, 'pid', None))
+                            self.site_key, self._unreapable_pid)
         return terminated
 
     def _hard_stop(self):
@@ -556,6 +576,8 @@ class RuntimeSupervisor:
             'pid': self.pid,
             'generation': self._generation,
             'destroyed': self._destroyed,
+            # 诊断页据此解释「该站点为什么所有请求秒失败」：残留进程 pid
+            'unreapablePid': self._unreapable_pid,
         })
         return state
 
@@ -564,7 +586,10 @@ class RuntimeSupervisor:
         active = False
         with self._lifecycle_lock:
             if self._destroyed and (
-                    self._process is None or not self._process.is_alive()):
+                    self._process is None or not self._process.is_alive()) \
+                    and self._unreapable_proc is None:
+                # 仍要放行一次：_unreapable_proc 非空说明还有颗没杀掉的进程要收，
+                # 直接 return 就等于把它彻底泄漏了
                 return
             self._destroyed = True
             connection, process = self._connection, self._process
@@ -587,6 +612,24 @@ class RuntimeSupervisor:
                 0.2, self.policy.shutdown_grace_seconds + 1.0))
         with self._lifecycle_lock:
             self._dispose_locked(kill=True)
+            # 最后一次回收没杀掉的进程树（请求路径已因 _unreapable_pid 快速失败，
+            # 只有这里还会再试一遍；atexit 走的正是本函数，不给它机会就是纯泄漏）
+            straggler = self._unreapable_proc
+            if straggler is not None:
+                self._unreapable_proc = None
+                reaped = False
+                try:
+                    reaped = terminate_process_tree(straggler, job=self._job)
+                except Exception:
+                    reaped = False
+                if reaped:
+                    logger.info('unreapable worker pid %s reaped at destroy site=%s',
+                                self._unreapable_pid, self.site_key)
+                    self._unreapable_pid = None
+                else:
+                    logger.warning(
+                        'worker pid %s still alive at destroy site=%s（需人工介入或重启系统）',
+                        getattr(straggler, 'pid', None), self.site_key)
         with _registry_lock:
             _registry.discard(self)
         _remove_global(self)

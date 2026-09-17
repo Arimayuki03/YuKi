@@ -65,8 +65,21 @@ class PushServer extends EventEmitter {
             };
             if (req.method === 'POST') {
                 let body = '';
-                req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+                let overflow = false;
+                req.on('data', (c) => {
+                    if (overflow) return;
+                    body += c;
+                    if (body.length > 65536) {
+                        // 必须先回 413 再 destroy：原实现只 destroy()，而 destroy 后
+                        // 'end' 永不触发 → done() 不执行，客户端拿不到任何响应，
+                        // 连接一直挂到自身超时。
+                        overflow = true;
+                        this._json(res, 413, { code: 413, msg: 'body too large' });
+                        try { req.destroy(); } catch (e) { /* ignore */ }
+                    }
+                });
                 req.on('end', () => {
+                    if (overflow) return;
                     const merged = new URLSearchParams(u.search);
                     new URLSearchParams(body).forEach((v, k) => merged.set(k, v));
                     done(merged);

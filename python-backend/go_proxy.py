@@ -419,10 +419,30 @@ _SHARE_CACHE_TTL = 300
 _SHARE_CACHE_MAX = 512   # C2：条目上限（触顶全清，过期即清）
 # 转存缓存持久化文件（放用户数据目录，幂等创建）
 _SAVE_CACHE_FILE = None
-# _SAVE_CACHE 条目上限（C2）：超限在持久化前删最早插入的条目
+# _SAVE_CACHE 条目上限（C2）：超限删最早插入的条目（dict 保序，插入序即淘汰序）。
+# 注意这个常量此前定义了却全文件零引用——缓存实际无界增长，且每次写入都会把整表
+# json.dumps 落盘，越用越慢。现由 _save_cache_put() 强制执行。
 _SAVE_CACHE_MAX = 2000
-# _SAVE_CACHE 持久化的并发保护：多个请求同时转存时避免互相覆盖
-_SAVE_LOCK = threading.Lock()
+# _SAVE_CACHE 的读改写 + 持久化保护。必须是 RLock：_save_cache_put 持锁期间会调用
+# _persist_save_cache（它也要这把锁），用普通 Lock 会自死锁。
+_SAVE_LOCK = threading.RLock()
+
+
+def _save_cache_put(key, fid):
+    """写入转存缓存，顺带执行注释里一直承诺但从未实现的容量守卫。
+
+    条目键有两类：`pwd_id`（整分享）与 `pwd_id:file_id`（多集逐集转存），后者在
+    逐集播放场景下增速约为前者的 1~2 倍，所以无界增长的代价是真实存在的。
+    淘汰按插入序删最早的条目；这些 fid 只在「命中且验证失败」时才被 pop，冷键永不再
+    被访问，因此淘汰它们是无损的（最坏是多转存一次）。
+    """
+    with _SAVE_LOCK:
+        _SAVE_CACHE[key] = fid
+        overflow = len(_SAVE_CACHE) - _SAVE_CACHE_MAX
+        if overflow > 0:
+            for stale in list(_SAVE_CACHE.keys())[:overflow]:
+                _SAVE_CACHE.pop(stale, None)
+        _persist_save_cache()
 
 
 def _save_cache_file():
@@ -1027,8 +1047,7 @@ def _quark_share_play_url(pwd_id, headers, quality=''):
             # 分享文件 v2/play 被拒：转存一次兜底（期间 mpv 等待 120s 足够）
             new_fid = _quark_save_share(pwd_id, stoken, fid, fid_token, headers)
             if new_fid:
-                _SAVE_CACHE[pwd_id] = new_fid
-                _persist_save_cache()
+                _save_cache_put(pwd_id, new_fid)
             playable = _quark_personal_play_url(new_fid, headers, retries=4,
                                                   quality=quality)
             if playable:
@@ -1179,12 +1198,10 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
                 # 不再覆盖单 pwd 键：多集分享下它会被最后一集的 fid 覆盖，
                 # 导致后续对同分享的首集 fallback 取到错集（串集）。
                 try:
-                    key = '%s:%s' % (pwd_id, file_id)
-                    _SAVE_CACHE[key] = new_fid
+                    _save_cache_put('%s:%s' % (pwd_id, file_id), new_fid)
                     # 若目标是文件夹 fid 转换后的视频，也缓存转换后 fid 映射
                     if eff_fid != file_id:
-                        _SAVE_CACHE['%s:%s' % (pwd_id, eff_fid)] = new_fid
-                    _persist_save_cache()
+                        _save_cache_put('%s:%s' % (pwd_id, eff_fid), new_fid)
                 except Exception:
                     pass
                 return playable

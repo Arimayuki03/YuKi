@@ -22,7 +22,42 @@ const ROOT = (() => {
     } catch (e) { return path.join(__dirname, '..', '..'); }
 })();
 const WIN = process.platform === 'win32';
-const FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
+// 二进制来源与哈希一律以 scripts/binaries.lock.json 的 ffmpeg 段为准（构建期已锁定版本化
+// 不可变包 URL）。运行时自动下载同样强制校验，防止上游/CDN 被篡改后把恶意 exe 落到用户机器。
+const FFMPEG_URL_FALLBACK = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip';
+
+/** 读取 binaries.lock.json 的 ffmpeg 段；找不到或解析失败返回 null（调用方据此拒绝下载）。 */
+function ffmpegLock() {
+    const candidates = [];
+    try {
+        const { app } = require('electron');
+        if (app && typeof app.getAppPath === 'function') {
+            candidates.push(path.join(app.getAppPath(), 'scripts', 'binaries.lock.json'));
+        }
+    } catch (e) { /* 非 Electron 环境（单测） */ }
+    candidates.push(path.join(__dirname, '..', '..', 'scripts', 'binaries.lock.json'));
+    for (const p of candidates) {
+        try {
+            if (!fs.existsSync(p)) continue;
+            const lock = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const f = lock && lock.ffmpeg;
+            if (f && f.url && f.sha256) return f;
+        } catch (e) { /* 尝试下一个候选路径 */ }
+    }
+    return null;
+}
+
+/** 流式 sha256（避免把 ~110MB 读进内存）。 */
+function sha256File(p) {
+    return new Promise((resolve, reject) => {
+        const h = crypto.createHash('sha256');
+        const rs = fs.createReadStream(p);
+        rs.on('error', reject);
+        h.once('error', reject);
+        rs.on('data', (c) => h.update(c));
+        rs.on('end', () => resolve(h.digest('hex')));
+    });
+}
 
 /** vendor 内置 → PATH 探测；找不到返回 null。 */
 function findFfmpeg() {
@@ -90,17 +125,41 @@ function ensureFfmpeg() {
         if (exist) return exist;
         if (!WIN) return null; // 非 Windows 交给系统包管理器
         _ensuringActive = true;
+        const pinned = ffmpegLock();
+        if (!pinned) {
+            // 无 lock 绝不下载未校验的二进制：宁可不装，也不引入供应链风险
+            console.error('[ffmpeg] 拒绝下载：binaries.lock.json 缺少 ffmpeg.url/sha256');
+            return null;
+        }
+        const url = pinned.url || FFMPEG_URL_FALLBACK;
         const target = path.join(ROOT, 'vendor', 'ffmpeg', 'ffmpeg.exe');
         const stage = path.join(ROOT, 'vendor', '.tmp');
         try {
             fs.mkdirSync(stage, { recursive: true });
             fs.mkdirSync(path.dirname(target), { recursive: true });
-            console.log('[ffmpeg] downloading', FFMPEG_URL);
+            console.log('[ffmpeg] downloading', url);
             const archive = path.join(stage, 'yuki-ffmpeg.zip');
-            await downloadFile(FFMPEG_URL, archive);
+            await downloadFile(url, archive);
+            // 完整性校验：不匹配即删除并放弃安装（上游可能已更新或被篡改）
+            const got = await sha256File(archive);
+            if (got !== pinned.sha256) {
+                try { fs.rmSync(archive, { force: true }); } catch (e) { /* ignore */ }
+                throw new Error(`ffmpeg sha256 校验失败（期望 ${pinned.sha256}，实际 ${got}）`);
+            }
+            console.log('[ffmpeg] sha256 校验通过');
             const tmp = path.join(stage, 'yuki-ffmpeg-extract');
             fs.mkdirSync(tmp, { recursive: true });
-            execSync(`tar -xf "${archive}" -C "${tmp}"`, { stdio: 'ignore', windowsHide: true });
+            // 必须走 System32 的 bsdtar：PATH 里可能是 Git Bash 的 GNU tar，它会把
+            // "C:\..." 的盘符冒号解析成「主机:文件」远程语法。改用 cwd + 相对名进一步消歧。
+            const sysTar = WIN
+                ? (() => {
+                    const s = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows',
+                        'System32', 'tar.exe');
+                    return fs.existsSync(s) ? s : 'tar';
+                })()
+                : 'tar';
+            execSync(`"${sysTar}" -xf "yuki-ffmpeg.zip" -C "yuki-ffmpeg-extract"`,
+                { cwd: stage, stdio: 'ignore', windowsHide: true });
             const found = findFile(tmp, 'ffmpeg.exe');
             if (!found) throw new Error('ffmpeg.exe not found in archive');
             fs.copyFileSync(found, target);

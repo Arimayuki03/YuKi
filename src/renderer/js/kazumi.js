@@ -1366,7 +1366,7 @@ const Kazumi = {
                 }
             } catch (e) { /* 搜索失败按空匹配 */ }
             if (!(match.id && match.cover)) match = { id: 0, cover: '', negAt: Date.now() };
-            this._bgmMatchCache.set(key, match);
+            this._setBgmMatch(key, match);
             this._saveBgmMatchCache();
             this._bgmMatchInflight.delete(key);
             return match;
@@ -1383,8 +1383,23 @@ const Kazumi = {
         if (!key || !id) return;
         const cur = this.getCachedBangumiMatch(key) || {};
         const m = { id: Number(id) || cur.id || 0, cover: cover || cur.cover || '' };
-        this._bgmMatchCache.set(key, m);
+        this._setBgmMatch(key, m);
         this._saveBgmMatchCache();
+    },
+
+    /** 写入 Bangumi 匹配缓存并守容量上限（Map 插入序即淘汰序）。
+     *  回归背景（2026-09 审查）：持久化侧一直有 slice(-500) 截断，内存 Map 却只 set
+     *  不淘汰——长时间会话里浏览/搜索越多增长越多。同文件其它缓存都做了容量控制
+     *  （_bgmEpCache > 32、common.js _coverCache > 2000、records.js _localCoverCap 500），
+     *  这是唯一漏掉的一个。上限与持久化侧的 500 对齐，避免内存里留一批永远不会被存盘的条目。 */
+    _setBgmMatch(key, match) {
+        this._bgmMatchCache.set(key, match);
+        const BGM_MATCH_CAP = 500;
+        while (this._bgmMatchCache.size > BGM_MATCH_CAP) {
+            const oldest = this._bgmMatchCache.keys().next();
+            if (oldest.done) break;
+            this._bgmMatchCache.delete(oldest.value);
+        }
     },
 
     /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。

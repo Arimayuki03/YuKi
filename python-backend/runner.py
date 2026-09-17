@@ -1,4 +1,5 @@
 import inspect
+import threading
 
 from runtime.contracts import current_runtime_request
 
@@ -6,16 +7,33 @@ from runtime.contracts import current_runtime_request
 class Runner:
     def __init__(self, spider):
         self.spider = spider
-        self.last_request_id = ''
-        self.last_play_session_id = ''
+        # 诊断用「本线程最近一次处理的请求」标识，必须是线程本地的：
+        # Runner 是 Site 级单例（config._assemble 每站点一个），而同一站点会并发处理
+        # 多个请求（多集预加载 / 自动换线路 + 用户手动点击，/action 走 16 并发
+        # threadpool）。原先写成普通实例属性就是「最后写入者获胜」，A 请求超时后拿
+        # runner.last_request_id 排障会指到 B 请求上去。
+        # 用线程本地而非直接读 contextvar：调用方（含 test_runtime_contract）在请求
+        # 上下文退出后仍要能读到「刚才那次」的值，而 contextvar 在退出后即清空。
+        self._ctx_tls = threading.local()
+
+    @property
+    def last_request_id(self):
+        return getattr(self._ctx_tls, 'request_id', '')
+
+    @property
+    def last_play_session_id(self):
+        return getattr(self._ctx_tls, 'play_session_id', '')
+
+    def _remember_request(self, request):
+        self._ctx_tls.request_id = request.request_id
+        self._ctx_tls.play_session_id = request.play_session_id
 
     def _invoke(self, method, *args):
         """在不改变 Spider 方法签名的前提下贯穿运行时请求上下文。"""
         request = current_runtime_request()
         if request is not None:
             request.raise_if_cancelled()
-            self.last_request_id = request.request_id
-            self.last_play_session_id = request.play_session_id
+            self._remember_request(request)
             try:
                 self.spider.request_id = request.request_id
                 self.spider.play_session_id = request.play_session_id
@@ -72,8 +90,7 @@ class Runner:
         if callable(static):
             request = current_runtime_request()
             if request is not None:
-                self.last_request_id = request.request_id
-                self.last_play_session_id = request.play_session_id
+                self._remember_request(request)
             return static(param)
         return self._invoke('localProxy', param)
 

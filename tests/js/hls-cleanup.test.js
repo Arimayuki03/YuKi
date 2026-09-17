@@ -37,8 +37,15 @@ test('hls cleanup: spawn 被登记、cleanup 全杀全部存活进程且幂等�
     runImpl('\\[mock\\]', { HLS_CLEANUP_MOCK: '1' });
 });
 
-test('hls cleanup: 真实 _spawn 登记在跑的 ffmpeg，cleanup 立即收敛不落地成品（asyncExit）', { timeout: 60000 }, () => {
-    if (!require('node:fs').existsSync(FFMPEG)) return; // 无 vendor ffmpeg 的环境跳过（impl 同样跳过）
+// 原实现是 `if (!existsSync(FFMPEG)) return;`：vendor/ 被 .gitignore 忽略、CI 的
+// postinstall 只下 anime4k 不下 ffmpeg，于是这条**唯一验证「cleanup 能真杀在跑的 ffmpeg
+// 进程」**的用例在 CI 上必然一行不跑却计为 pass——「全绿」因此是假的。
+// 改用 node:test 的 skip 选项：跳过会计入汇总的 skipped，一眼可见，不再伪装成通过。
+test('hls cleanup: 真实 _spawn 登记在跑的 ffmpeg，cleanup 立即收敛不落地成品（asyncExit）', {
+    timeout: 60000,
+    skip: require('node:fs').existsSync(FFMPEG) ? false
+        : `缺少 vendor ffmpeg（${FFMPEG}）：真进程回收回归未执行，需先跑 node scripts/download-binaries.js ffmpeg`,
+}, () => {
     // impl 用例含 stall 服务器 + 5s 存活轮询 + 2s respawn 观察（自身 timeout 45s），
     // 父级 30s 已不够——提高到 60s 给子进程留余量
     runImpl('\\[real\\]', { HLS_CLEANUP_REAL: '1', HLS_CLEANUP_FFMPEG: FFMPEG });

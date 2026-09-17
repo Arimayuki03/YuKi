@@ -1,5 +1,5 @@
 {
-  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 上游无版本化摘要，暂不校验。",
+  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 锁定版本化包 URL（packages/…-essentials_build.zip，不可变），sha256 取上游官方 .sha256 边车；升级=改 version/url 后同步 sha256。",
   "mpv": {
     "tag": "20260814",
     "asset": "mpv-x86_64-20260814-git-7b8915bc1d.7z",
@@ -11,8 +11,9 @@
     "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
   },
   "ffmpeg": {
-    "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    "sha256": null
+    "version": "9.0.1",
+    "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip",
+    "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
   },
   "anime4k": {
     "Anime4K_Clamp_Highlights.glsl": "a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a",

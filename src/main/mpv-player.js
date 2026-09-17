@@ -190,6 +190,25 @@ class MpvPlayer extends EventEmitter {
         this.externalStyle = false; // 回到自动发现：恢复 YuKi 引擎样式
     }
 
+    /**
+     * 置空 binary 后排一次延迟重探。
+     * 原先 ENOENT/EACCES 一旦命中就把 this.binary 永久置 null，唯一恢复入口是
+     * 用户主动打开设置页触发 yuki:asset-status——但杀软瞬时占用、文件被扫描锁定、
+     * UAC 抖动这类一次性错误会在整个会话里把所有播放都判成 mpv-missing。
+     * 重探只在仍未发现二进制时才改状态，成功则自愈，失败保持原样（下次起播仍可再排）。
+     */
+    _scheduleBinaryReprobe() {
+        if (this._reprobeTimer) return;
+        this._reprobeTimer = setTimeout(() => {
+            this._reprobeTimer = null;
+            if (this.binary) return; // 期间已被 setCustomPath/asset-status 恢复
+            this.resetBinary();      // 连带 externalStyle 回到自动发现语义，状态保持一致
+            if (this.binary) console.log(`[mpv] 重探恢复二进制可用：${this.binary}`);
+        }, 3000);
+        // 不让重探定时器本身拖住进程退出
+        if (this._reprobeTimer.unref) this._reprobeTimer.unref();
+    }
+
     get playing() { return !!this.proc; }
 
     /** spawn 注入点：生产即 child_process.spawn；测试覆写以截取 argv、不真起进程。 */
@@ -299,6 +318,7 @@ class MpvPlayer extends EventEmitter {
         if (!fs.existsSync(this.binary)) {
             console.warn(`[mpv] 二进制已不存在，标记为不可用：${this.binary}`);
             this.binary = null;
+            this._scheduleBinaryReprobe();
             return { ok: false, reason: 'mpv-missing', ...trace };
         }
         if (!episodes || !episodes.length) return { ok: false, reason: 'empty playlist' };
@@ -492,7 +512,11 @@ class MpvPlayer extends EventEmitter {
         // 广播 mpv-missing，让渲染层给出友好提示而非静默失败。
         proc.on('error', (err) => {
             console.error(`[mpv] 启动失败（${err && err.code || 'unknown'}）：${err && err.message}`);
-            if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) this.binary = null;
+            // 一次性 spawn 失败（杀软占用/文件锁/UAC 抖动）不该让整个会话永久失去播放能力
+            if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) {
+                this.binary = null;
+                this._scheduleBinaryReprobe();
+            }
             this._teardown(sessionId);
             this.emit('spawn-error', { sessionId, code: err && err.code, message: err && err.message });
         });

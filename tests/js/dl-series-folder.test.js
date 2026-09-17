@@ -87,11 +87,14 @@ test('hls migrateDir: 旧目录外/无旧目录的任务回退按 basename 平�
     } finally { t.cleanup(); }
 });
 
-test('hls add: 接受任务级 dir 参数，产物与任务 dir 字段落子目录（引擎目录不受影响）', () => {
-    // ffmpeg 缺失的环境跳过（add 首行即校验；CI 离线环境可能未准备二进制）
-    let bin = null;
-    try { bin = require('../../src/main/ffmpeg').findFfmpeg(); } catch (e) { /* ignore */ }
-    if (!bin) return;
+// add 首行即校验 ffmpeg，缺失环境跑不动（CI 离线时可能没准备二进制）。
+// 用 skip 而非 `if (!bin) return`：后者会以「通过」的形态计入总数，掩盖真实覆盖面。
+let _ffmpegBin = null;
+try { _ffmpegBin = require('../../src/main/ffmpeg').findFfmpeg(); } catch (e) { /* ignore */ }
+
+test('hls add: 接受任务级 dir 参数，产物与任务 dir 字段落子目录（引擎目录不受影响）', {
+    skip: _ffmpegBin ? false : '未探测到 ffmpeg：本用例未执行（非通过）',
+}, () => {
     const t = tmpRoot();
     try {
         const engineDir = path.join(t.root, 'engine');

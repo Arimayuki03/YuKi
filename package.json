@@ -50,14 +50,9 @@
       }
     ],
     "files": [
-        "src/**/*",
-        "assets/**/*",
-        "python-backend/**/*",
-      "!python-backend/.venv/**",
-      "!python-backend/__pycache__/**",
-      "!python-backend/**/__pycache__/**",
-      "!python-backend/**/*.pyc",
-      "!python-backend/tests/**",
+      "src/**/*",
+      "assets/icon.png",
+      "assets/tray/**",
       "scripts/download-binaries.js",
       "scripts/binaries.lock.json"
     ],
