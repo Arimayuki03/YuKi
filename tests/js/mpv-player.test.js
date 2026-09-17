@@ -2,7 +2,27 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
 const MpvPlayer = require('../../src/main/mpv-player');
+
+// 源码断言：writeMpvAssets 的便携 input.conf 合并契约（index.js 闭包内，无法直接单测）。
+// 自定义 mpv（如 mpv.lite）旁 portable_config/input.conf 必须被合并进生成文件且排最后
+// （mpv 同键后绑定优先 → 该播放器自带键位不被应用段顶掉）；应用绑定段须跳过便携已绑键。
+test('writeMpvAssets: 自定义播放器便携 input.conf 合并契约（同键以播放器自身为准）', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+    // 便携行追加在用户全局行之后（文件中位置靠后 = 生效优先）
+    const portableWrite = src.indexOf('...portableLines,');
+    const userWrite = src.indexOf('...userLines,');
+    assert.ok(portableWrite > -1 && userWrite > -1, '生成文件同时包含用户全局与便携段');
+    assert.ok(portableWrite > userWrite, '便携段必须排用户全局段之后（同键以播放器自身为准）');
+    // 应用绑定段跳过便携已绑键（与用户全局键同样的冲突避让）
+    assert.ok(src.includes('userKeys.has(key) || portableKeys.has(key)'),
+        '应用绑定段必须同时避让用户全局键与便携键');
+    // 便携键探测复用 inputConfBoundKeys（键名提取规则一致）
+    assert.ok(src.includes('const portableKeys = inputConfBoundKeys(portableLines);'),
+        '便携键必须经 inputConfBoundKeys 收集');
+});
 
 test('parseDanmaku: 完整字段', () => {
     const d = MpvPlayer.parseDanmaku('[12.5,1,25,16711680]测试弹幕');
@@ -220,6 +240,62 @@ test('setCustomPath(): 不存在的路径返回 false，不改变现有 binary',
     const ok = p.setCustomPath(require('path').join(require('os').tmpdir(), 'yuki-nope-mpv.exe'));
     assert.equal(ok, false);
     assert.equal(p.binary, null);
+});
+
+test('setCustomPath(): 外部 mpv 跳过外观注入（externalStyle=true），bundled 补装不跳过', () => {
+    const fs = require('fs');
+    // setCustomPath 用 spawnSync --version 校验，需真实可执行文件；用 node 自身冒充
+    const fake = process.execPath;
+    assert.ok(fs.existsSync(fake), 'node 二进制必须存在（校验用）');
+    const p = Object.create(MpvPlayer.prototype);
+    p.binary = null;
+    assert.equal(p.setCustomPath(fake), true, '默认视为用户手动选择的外部 mpv');
+    assert.equal(p.externalStyle, true);
+    assert.equal(p.setCustomPath(fake, { bundled: true }), true, '补装内置二进制');
+    assert.equal(p.externalStyle, false);
+    assert.equal(p.setCustomPath(fake, { bundled: false }), true);
+    assert.equal(p.externalStyle, true);
+});
+
+test('play(): externalStyle 下功能类资产仍注入，外观类跳过（快捷键在自定义 mpv 上生效的前提）', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-extstyle-'));
+    const script = path.join(dir, 'hints.lua');
+    const conf = path.join(dir, 'input.conf');
+    const menu = path.join(dir, 'menu.conf');
+    fs.writeFileSync(script, '-- t');
+    fs.writeFileSync(conf, 'SPACE cycle pause\n');
+    fs.writeFileSync(menu, '退出\tquit\n');
+    const p = Object.create(MpvPlayer.prototype);
+    p.binary = process.execPath; // 须真实存在：play() 起播前会做存在性校验
+    p.scriptPath = script;
+    p.inputConfPath = conf;
+    p.menuConfPath = menu;
+    p.externalStyle = true; // 用户手动指定的外部 mpv（如 mpv.lite）
+    p.stop = () => {};
+    p._refreshIpcPath = () => {};
+    p._writeAss = () => {};
+    p._bringToFront = () => {};
+    p._connectIpc = () => {};
+    p._cacheArgs = () => [];
+    p._screenshotArgs = () => [];
+    p._ytdlArgs = () => [];
+    // 不 stub _contextMenuArgs：走真实实现（menuConfPath 存在即注入），验证「无条件注入」不是空转
+    let argv = null;
+    p._spawn = (_bin, args) => {
+        argv = args;
+        return { pid: 12345, on: () => {}, once: () => {} }; // 不真起进程
+    };
+    p.play([{ url: 'http://x/a.mp4', title: 'a' }]);
+    // 功能类资产：无论是否 externalStyle 都必须带上
+    assert.ok(argv.includes(`--scripts-append=${script}`), 'hints.lua 必须注入（上/下集与 Anime4K 信号）');
+    assert.ok(argv.includes(`--input-conf=${conf}`), 'input.conf 必须注入（自定义键位与步长）');
+    assert.ok(argv.some((a) => a.startsWith('--script-opt=select-menu_conf_path=')), '中文菜单必须注入');
+    // 外观类：externalStyle 下跳过
+    assert.ok(!argv.includes('--osd-font=Microsoft YaHei'), '外观字体按 externalStyle 跳过');
+    fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- 视频缓冲缓存（只走内存）
@@ -455,7 +531,6 @@ test('_contextMenuArgs(): menu.conf 存在即注入（旧版 mpv 忽略未知 sc
     try { fs.mkdirSync(path.dirname(conf), { recursive: true }); fs.writeFileSync(conf, '退出\tquit\n'); } catch (e) { /* ignore */ }
 
     const p = Object.create(MpvPlayer.prototype);
-    p.supportsContextMenu = false; // 版本解析仅作参考信息，不再是注入门槛
     p.menuConfPath = conf;
     const a = p._contextMenuArgs();
     assert.equal(a.length, 1);

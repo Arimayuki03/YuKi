@@ -14,13 +14,13 @@
  * 记录删除沿用既有链路（remove/clearFailed/clear），去重状态随之自动失效——
  * 「清除列表」即允许重新下载，与用户直觉一致。
  *
- * 本模块不持有 Electron 依赖：store/liveProvider/fsExists 均注入，便于单测。
+ * 本模块不持有 Electron 依赖：store/liveProvider/fs 均注入，便于单测。
  */
-const DEFAULT_FS = { existsSync: () => false };
-let fsLike = DEFAULT_FS;
+const realFs = require('fs');
+let fsLike = realFs;
 
-/** 单测注入 fs 替身；生产环境无需调用。 */
-function setFs(impl) { fsLike = impl || DEFAULT_FS; }
+/** 单测注入 fs 替身；不传参数恢复为真实 fs（生产代码无需调用）。 */
+function setFs(impl) { fsLike = impl || realFs; }
 
 /** 进行中状态集合（aria2 与 HLS 任务语义一致）。 */
 const ACTIVE_STATES = ['active', 'waiting', 'paused'];
@@ -85,6 +85,16 @@ class DlDedupe {
 
     /** 任务被删除：清掉会话登记（持久化记录由调用方走 dlRecords.remove 删除）。 */
     drop(gid) { this._keyByGid.delete(gid); }
+
+    /** 批量清除会话登记（clear/clearFailed/clearFinished 等整批删记录时同步，
+     *  防 Map 无界增长与过期 gid 复活旧 epKey）。返回清除的条数。 */
+    forgetMany(gids) {
+        let n = 0;
+        for (const gid of gids || []) {
+            if (this._keyByGid.delete(gid)) n++;
+        }
+        return n;
+    }
 
     /**
      * 查询某集的下载状态。命中返回 { state:'downloading' | 'done', file?, gid? }，

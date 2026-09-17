@@ -80,7 +80,7 @@ class Dex2JarLifecycleTest(unittest.TestCase):
             stderr=b'DexException: Bad dex magic'
         )
 
-        def _mock_run(cmd, capture_output=True, timeout=120):
+        def _mock_run(cmd, capture_output=True, timeout=120, **_kw):
             # 模拟在执行中途产生了一个 .tmp 文件
             with open(tmp_jvm, 'wb') as f:
                 f.write(b'partial broken jar')
@@ -106,7 +106,7 @@ class Dex2JarLifecycleTest(unittest.TestCase):
         tmp_jvm = os.path.join(self.tmp_dir, 'android_timeout-jvm.jar.tmp')
         final_jvm = os.path.join(self.tmp_dir, 'android_timeout-jvm.jar')
 
-        def _mock_timeout(cmd, capture_output=True, timeout=120):
+        def _mock_timeout(cmd, capture_output=True, timeout=120, **_kw):
             with open(tmp_jvm, 'wb') as f:
                 f.write(b'stalled partial bytes')
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
@@ -129,7 +129,7 @@ class Dex2JarLifecycleTest(unittest.TestCase):
         tmp_jvm = os.path.join(self.tmp_dir, 'android_ok-jvm.jar.tmp')
         final_jvm = os.path.join(self.tmp_dir, 'android_ok-jvm.jar')
 
-        def _mock_success(cmd, capture_output=True, timeout=120):
+        def _mock_success(cmd, capture_output=True, timeout=120, **_kw):
             # dex2jar 工具输出到 -o 指定的 tmp_jvm
             _make_dummy_jvm_jar(tmp_jvm)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b'ok', stderr=b'')

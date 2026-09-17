@@ -1,0 +1,10 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:30
+#EXT-X-VERSION:3
+#EXTINF:30.0,
+http://127.0.0.1:9/seg-000.ts
+#EXTINF:30.0,
+http://127.0.0.1:9/seg-001.ts
+#EXTINF:30.0,
+http://127.0.0.1:9/seg-002.ts
+#EXT-X-ENDLIST

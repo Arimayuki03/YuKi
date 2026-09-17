@@ -536,6 +536,14 @@ function isDynamicProxyStream(url, meta = {}) {
     return PAN_SOURCE_RE.test(`${String(meta.site || '')}|${String(meta.source || '')}`);
 }
 
+/** 本应用自身页面（主窗 loadFile 的 renderer/index.html）；will-navigate 守卫放行用。 */
+function isLocalAppPageUrl(u) {
+    try {
+        const p = path.resolve(String(u || '').replace(/^file:\/\/\//, ''));
+        return p === path.resolve(__dirname, '..', 'renderer', 'index.html');
+    } catch (e) { return false; }
+}
+
 function createWindow() {
     // 系统标题栏开关（默认使用自定义标题栏以获得更现代的外观）
     const useSystemTitleBar = settings.get('systemTitleBar') === true;
@@ -573,6 +581,14 @@ function createWindow() {
             shell.openExternal(url).catch((e) => console.error('[main] openExternal failed:', url, e));
         }
         return { action: 'deny' };
+    });
+    // will-navigate 守卫（与 parse-window 同语义）：主窗只 load 本地 index.html，
+    // 正常运行不存在任何窗内导航；一旦发生（页面被注入/劫持跳转 http(s) 或
+    // file: 以外 scheme）一律拦下，非 http(s) 畸形 scheme 也不交系统弹「打开方式」。
+    win.webContents.on('will-navigate', (ev, navUrl) => {
+        if (/^https?:\/\//i.test(navUrl) || isLocalAppPageUrl(navUrl)) return;
+        try { ev.preventDefault(); } catch (e) { /* ignore */ }
+        console.warn('[main] will-navigate blocked:', navUrl);
     });
     // 关闭行为：closeAction ∈ tray(默认缩至托盘)/exit(直接退出)/ask(每次询问)；
     // 后台播放开启时，选退出但 mpv 正在播也转托盘保播
@@ -812,6 +828,29 @@ app.whenReady().then(() => {
             : path.join(os.homedir(), '.config', 'mpv', 'input.conf');
     }
 
+    /**
+     * 所选 mpv 二进制旁的便携 input.conf（mpv Windows 便携约定：portable_config/input.conf）。
+     * --input-conf 会取代 mpv 默认加载，生成文件若不带它会丢该播放器自带键位，故合并进生成文件
+     * （同键时应用段先行跳过、便携段在后覆盖）。内置 vendor 与系统 PATH 的 mpv 旁无 portable_config，
+     * 返回空串走原有逻辑。
+     */
+    function getPortableMpvInputConfPath(binaryPath) {
+        if (!binaryPath) return '';
+        try {
+            const p = path.join(path.dirname(path.resolve(binaryPath)), 'portable_config', 'input.conf');
+            return fs.existsSync(p) ? p : '';
+        } catch (e) { return ''; }
+    }
+
+    /** 读自定义 mpv 便携 input.conf 的原始行（缺失/读失败返回空数组，不阻断）。 */
+    function readPortableMpvInputConf(binaryPath) {
+        try {
+            const p = getPortableMpvInputConfPath(binaryPath);
+            if (!p) return [];
+            return String(fs.readFileSync(p, 'utf8')).split(/\r?\n/);
+        } catch (e) { return []; }
+    }
+
     /** 读用户全局 input.conf 并剔除本应用旧版写入的 yuki 段，返回用户原始行（写坏不阻断）。 */
     function readUserMpvInputConf() {
         try {
@@ -938,8 +977,12 @@ app.whenReady().then(() => {
             fs.writeFileSync(path.join(scriptDir, 'hints.lua'), lua, 'utf8');
             // input.conf：键位取自设置（mpv 语法：add speed 支持小数步长），动作附中文 show-text 反馈。
             // 同键重复只留首个；用户全局 input.conf 已绑定的键不写入应用段，用户行追加在后（同键以用户为准）。
+            // 自定义 mpv 的便携配置（portable_config/input.conf）同样合并（放在最后，键位优先级最高）——
+            // --input-conf 取代默认加载，不带它会在自定义播放器上丢失其自带键位。
             const userLines = readUserMpvInputConf();
             const userKeys = inputConfBoundKeys(userLines);
+            const portableLines = readPortableMpvInputConf(mpv.binary);
+            const portableKeys = inputConfBoundKeys(portableLines);
             const bindings = [
                 // 上/下集走信号通道（hints/ep-*）：原生队列在 mpv 列表内跳集，
                 // 逐集会话转发渲染层推进——单集会话里 playlist-next 会直接退出 mpv，不可直绑
@@ -973,7 +1016,7 @@ app.whenReady().then(() => {
             const used = new Set();
             const defaults = [];
             for (const [key, cmd, msg] of bindings) {
-                if (!key || used.has(key) || userKeys.has(key)) continue;
+                if (!key || used.has(key) || userKeys.has(key) || portableKeys.has(key)) continue;
                 used.add(key);
                 defaults.push(msg ? `${key} ${cmd}; show-text "${msg}"` : `${key} ${cmd}`);
             }
@@ -984,6 +1027,11 @@ app.whenReady().then(() => {
                 '',
                 '# 以下为用户全局 mpv input.conf 的键位（自动合并，请编辑全局文件或此段上方）',
                 ...userLines,
+                ...(portableLines.length ? [
+                    '',
+                    '# 以下为自定义播放器便携 input.conf 的键位（自动合并，同键以此为准）',
+                    ...portableLines,
+                ] : []),
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(scriptDir, 'input.conf'), conf, 'utf8');
@@ -1799,7 +1847,7 @@ app.whenReady().then(() => {
             const vendorDir = path.join(app.getPath('userData'), 'vendor');
             const target = await downloadMpv(vendorDir);
             if (!target || !fs.existsSync(target)) return { ok: false, reason: 'download-failed' };
-            if (!mpv.setCustomPath(target)) return { ok: false, reason: '下载完成但校验失败（文件可能损坏）' };
+            if (!mpv.setCustomPath(target, { bundled: true })) return { ok: false, reason: '下载完成但校验失败（文件可能损坏）' };
             settings.set('mpvPath', target);
             if (Notification.isSupported()) {
                 new Notification({ title: '内置播放器已就绪', body: 'mpv 安装完成，现在可以播放视频了' }).show();
@@ -2876,6 +2924,8 @@ app.whenReady().then(() => {
                         }
                     }
                     n += hls.clearFailed();
+                    // 会话去重登记同步清除（Map 残留会无界增长，过期 gid 还可能把旧 epKey 盖到新记录上）
+                    dlDedupe.forgetMany(dlRecords.all().filter((r) => r.status === 'error').map((r) => r.gid));
                     dlRecords.clearErrors(); // 同步清掉失败记录
                     // 删除后立即推送刷新列表 + 重启轮询
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
@@ -2896,6 +2946,8 @@ app.whenReady().then(() => {
                     }
                     // HLS：仅移除已停止任务的列表记录，保留合成好的成品文件（clearStopped 只清临时分片目录）
                     hls.clearStopped();
+                    // 会话去重登记同步清除（Map 残留会无界增长，过期 gid 还可能把旧 epKey 盖到新记录上）
+                    dlDedupe.forgetMany(dlRecords.all().filter((r) => !['active', 'waiting', 'paused'].includes(r.status)).map((r) => r.gid));
                     dlRecords.clearFinished(); // 清已结束记录，保留进行中任务（T81：未完成卡片不消失）
                     // 清除后立即推送刷新列表 + 重启轮询
                     try { send('yuki:dl-list', buildDlList(await dl.listAll().catch(() => []), hls.list())); } catch (e) { /* ignore */ }
@@ -3404,8 +3456,17 @@ app.whenReady().then(() => {
         mpv.watchLaterDir = path.join(app.getPath('userData'), 'mpv-watch-later');
     }
     // 自定义 mpv 路径：优先使用用户在设置中指定的 mpv.exe
+    // userData/vendor 下的路径是「一键补装」产物（bundled）：恢复完整注入；其余为
+    // 用户手动选择的外部二进制：仅跳过外观注入，键位/信号脚本等功能资产仍生效。
     const customMpvPath = settings.get('mpvPath');
-    if (customMpvPath) mpv.setCustomPath(customMpvPath);
+    if (customMpvPath) {
+        const isBundled = path.resolve(customMpvPath).startsWith(
+            path.resolve(app.getPath('userData'), 'vendor') + path.sep);
+        mpv.setCustomPath(customMpvPath, { bundled: isBundled });
+        // 早前的 writeMpvAssets（起播资产注册处）按自动发现的二进制生成 input.conf，
+        // 便携合并段会算错来源；此处按最终二进制重写一次（幂等，纯本地文件写）。
+        writeMpvAssets();
+    }
     const spd = parseFloat(settings.get('playerSpeed'));
     if (spd && spd > 0) mpv.defaultSpeed = Math.max(0.25, Math.min(4, spd));
     // 语言偏好（音轨/字幕）：读设置注入播放器
@@ -4053,7 +4114,8 @@ function runQuitCleanup() {
     try { stopScheduledLogCleanup(); } catch (e) {}
     try { mpv.stop(); } catch (e) {}
     try { dl.stop(); } catch (e) {}
-    try { if (hls && hls.cleanup) hls.cleanup(); } catch (e) {}
+    // 杀掉在跑的 ffmpeg 合成进程（hls-downloader.cleanup 自身幂等，重复调用安全）
+    try { hls.cleanup(); } catch (e) {}
     try { pushServer.stop(); } catch (e) {}
     try { syncplay.disconnect(); } catch (e) {}
     try { bridge.stop(); } catch (e) {}

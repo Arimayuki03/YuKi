@@ -74,6 +74,18 @@ def read_fixture(name, *, binary=False):
     return raw if binary else raw.decode('utf-8')
 
 
+def _minimal_jar_bytes():
+    """最小合法 zip（PK 魔数 + EOCD），供 jar 下载链路当占位响应体。
+
+    只需通过 jar_bridge 的魔数校验（`PK\x03\x04` 前缀）；不是可加载的 jar，
+    相关测试也只断言下载/守卫行为，不加载。
+    """
+    local_header = (b'PK\x03\x04' + b'\x00' * 26)
+    central = (b'PK\x01\x02' + b'\x00' * 42)
+    eocd = (b'PK\x05\x06' + b'\x00' * 18)
+    return local_header + central + eocd
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     """只读夹具 + 一组显式的边界路由。
 
@@ -190,6 +202,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # 同机异名跳转：`http://localhost:port` → `http://127.0.0.1:port`。
+        # host 不同 → origin 不同，是验证「同源信任没被放宽成『只要是本机』」
+        # 的最干净夹具（同机同端口、纯跨源）。
+        if route == '/redirect-cross-host':
+            self.send_response(302)
+            self.send_header('Location',
+                             'http://127.0.0.1:%d%s' % (self.server.server_port, self.path))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
         # 压缩炸弹：正文是 gzip，解压后远超上限。同样不声明 Content-Encoding——
         # 声明了就由 urllib3 解压，挡它的是 read_capped 的响应上限而不是解压上限，
         # 「小包大解压」这条防线就没被测到。
@@ -250,6 +273,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if route == '/py/site.py':
             self._send(200, 'class Spider:\n    def init(self, extend=""):\n        pass\n',
                        ctype='text/x-python')
+            return
+
+        # 最小 zip（PK\x03\x04 魔数，jar 下载链路的魔数校验只看内容不看后缀）：
+        # 字节由调用方按需生成过一次后固化，这里直接落一份本地缓存的占位 zip。
+        if route == '/jar/tiny.jar':
+            self._send(200, _minimal_jar_bytes(), ctype='application/java-archive')
+            return
+
+        # /hop-jar/<n>/tiny.jar：逐级跳 n 次后落到 /jar/tiny.jar（jar 手动跟跳验收）。
+        if route.startswith('/hop-jar/'):
+            rest = route[len('/hop-jar/'):]
+            head, _, tail = rest.partition('/')
+            try:
+                left = int(head)
+            except ValueError:
+                self._send(404, '{"error":"bad hop-jar"}')
+                return
+            if not tail or left < 0:
+                self._send(404, '{"error":"bad hop-jar"}')
+                return
+            if left == 0:
+                self._send(200, _minimal_jar_bytes(), ctype='application/java-archive')
+                return
+            self.send_response(302)
+            self.send_header('Location', '/hop-jar/%d/%s' % (left - 1, tail))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
             return
 
         self._send(404, '{"error":"no such fixture route"}')

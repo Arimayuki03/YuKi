@@ -1667,7 +1667,10 @@ class ConfigManager:
                     logger.warning('python spider 源为明文 http 且无完整性校验（存在被篡改/MITM 风险，'
                                    '建议改用 https 源）: %s', api)
                 import http_client
-                rsp = http_client.fetch_follow_redirects(api, timeout=15)
+                # trust_root=api：用户在配置里直接填写的 py 源是其自身信任根，
+                # 严格 SSRF 模式下同源子资源仍可达（局域网源不因开关而失效）。
+                rsp = http_client.fetch_follow_redirects(api, timeout=15,
+                                                         trust_root=api)
                 content = rsp.content
             else:
                 content = api.encode('utf-8')

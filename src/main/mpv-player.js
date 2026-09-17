@@ -55,9 +55,10 @@ function parseMpvVersion(line) {
 }
 
 /**
- * 右键上下文菜单能力：select.lua 的 context-menu 绑定、Windows 原生菜单与自定义菜单定义
+ * 右键上下文菜单能力判定：select.lua 的 context-menu 绑定、Windows 原生菜单与自定义菜单定义
  * （--script-opt=select-menu_conf_path）自 0.41 起提供（PR #16816/#18057 之后）；git 开发版
- * 版本号 ≥ 对应的下一个发布版，同样满足。旧版注入会在按键时报 unknown binding，故按版本门控。
+ * 版本号 ≥ 对应的下一个发布版，同样满足。运行时注入已由 _probeContextMenuBinding 按实际绑定表
+ * 探测（不依赖版本号），此纯函数保留供测试与诊断参考。
  */
 function supportsContextMenu(versionLine) {
     const v = parseMpvVersion(versionLine);
@@ -87,7 +88,7 @@ function buildM3u(episodes) {
     return lines.length > 1 ? lines.join('\n') + '\n' : '';
 }
 
-function findMpv(verOut) {
+function findMpv() {
     const exe = WIN ? 'mpv.exe' : 'mpv';
     const candidates = [];
     const vendor = path.join(ROOT, 'vendor', 'mpv', exe);
@@ -116,7 +117,6 @@ function findMpv(verOut) {
         const v = mpvVersion(p);
         if (v) { // 能打印版本才算可用；损坏二进制回退下一候选
             console.log(`[mpv] 使用 ${v}（${p}）`);
-            if (verOut && typeof verOut === 'object') verOut.version = v; // 带回版本首行供能力判断
             return p;
         }
     }
@@ -126,10 +126,7 @@ function findMpv(verOut) {
 class MpvPlayer extends EventEmitter {
     constructor() {
         super();
-        // findMpv 顺带带回版本首行，用于判定 context-menu 能力（右键菜单/中文 menu.conf 注入门控）
-        const probe = {};
-        this.binary = findMpv(probe);
-        this.supportsContextMenu = supportsContextMenu(probe.version);
+        this.binary = findMpv();
         this.proc = null;
         this.socket = null;
         // IPC 命名管道：pid + 最近一次播放时间戳，杜绝「管道已存在（残留 mpv 仍占用）→
@@ -149,8 +146,7 @@ class MpvPlayer extends EventEmitter {
         this.menuConfPath = null;  // 可选中文右键菜单定义 menu.conf（--script-opt=select-menu_conf_path，见 index.js writeMpvAssets）
         this._queueTitles = null;  // 原生队列逐集集名表（index.js 注入；file-loaded 时设置窗口标题用）
         this._queueSeriesTitle = ''; // 原生队列片名（标题 = yuki · 片名 · 集名）
-        this.supportsContextMenu = false; // 所选二进制支持 context-menu（mpv 0.41+）；决定右键菜单绑定与 menu.conf 是否注入
-        this.externalStyle = false; // 手动指定的自定义 mpv：不注入 YuKi OSD/外观资源，用其自身配置样式
+        this.externalStyle = false; // 手动指定的自定义 mpv：跳过外观注入（osd-font），功能类资产仍注入
         this.logFilePath = null;  // 可选 mpv 运行日志（--log-file，主进程指定，见 index.js）
         this.watchLaterDir = null; // 续播位置记录目录（--save-position-on-quit）
         this.defaultSpeed = 1;     // 默认倍速（≠1 时起播注入 --speed）
@@ -170,14 +166,19 @@ class MpvPlayer extends EventEmitter {
 
     isAvailable() { return !!this.binary; }
 
-    /** 指定自定义 mpv 二进制路径（设置页手动选择）；文件存在且能打印版本则更新，下次起播生效。 */
-    setCustomPath(p) {
+    /**
+     * 指定自定义 mpv 二进制路径（设置页手动选择或一键补装）；文件存在且能打印版本则更新，下次起播生效。
+     * @param {string} p 二进制路径
+     * @param {{bundled?: boolean}} [opts] bundled=true 表示「一键补装」的官方内置二进制：
+     *   等同自动发现的 vendor 版本，完整注入外观与功能资产；缺省（用户手动选择的外部
+     *   mpv，如 mpv.lite）只跳过外观类注入，功能类资产（键位/信号脚本/菜单）仍注入。
+     */
+    setCustomPath(p, opts = {}) {
         const v = (p && fs.existsSync(p)) ? mpvVersion(p) : null;
         if (v) {
             console.log(`[mpv] 自定义路径生效：${v}（${p}）`);
             this.binary = p;
-            this.supportsContextMenu = supportsContextMenu(v); // 自定义二进制同样按版本门控
-            this.externalStyle = true; // 用户手动指定的 mpv：原生配置模式（不注入 hints/input.conf/menu.conf）
+            this.externalStyle = !opts.bundled; // 用户手动指定的外部 mpv 跳过外观注入；补装内置不跳过
             return true;
         }
         return false;
@@ -185,13 +186,14 @@ class MpvPlayer extends EventEmitter {
 
     /** 重置为自动发现（内置 vendor → PATH），清除自定义路径。 */
     resetBinary() {
-        const probe = {};
-        this.binary = findMpv(probe);
-        this.supportsContextMenu = supportsContextMenu(probe.version);
+        this.binary = findMpv();
         this.externalStyle = false; // 回到自动发现：恢复 YuKi 引擎样式
     }
 
     get playing() { return !!this.proc; }
+
+    /** spawn 注入点：生产即 child_process.spawn；测试覆写以截取 argv、不真起进程。 */
+    _spawn(bin, args, opts) { return spawn(bin, args, opts); }
 
     // ------------------------------------------------------------ 生命周期
 
@@ -339,17 +341,17 @@ class MpvPlayer extends EventEmitter {
         // ytdl_hook 默认整体排除（见 _ytdlArgs 注）：本应用不打包 yt-dlp，放任 mpv 探测
         // 只会在无扩展名直链上白白拖慢起播并刷错误日志。opts.ytdl===true 时保留。
         args.push(...this._ytdlArgs(opts));
-        // 自定义 lua 提示脚本/input.conf（主进程写入 userData/mpv-scripts，见 index.js writeMpvAssets）：
-        // 用 --scripts-append 追加而非 --scripts 覆盖，避免替换 mpv 默认 scripts 目录的加载
-        // 原生配置模式（手动指定的自定义 mpv，如 mpv.lite）：不注入 YuKi OSD/外观
-        // 资源（hints.lua / 生成 input.conf / 中文 menu.conf / 雅黑字体），完全使用
-        // 该播放器自身的 portable_config 或 %APPDATA%\mpv 配置与脚本。功能类参数
-        // （IPC/续播/缓存/截图目录）仍保留，连播与统计不受影响。
-        if (!this.externalStyle) {
-            if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
-            if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
-            args.push(...this._contextMenuArgs());
-        }
+        // 功能类资产始终注入（YuKi 设置页承诺的快捷键/右键菜单/Anime4K 在任何二进制下都成立）：
+        // - hints.lua：上/下集与 Anime4K 档位信号脚本——不注入则 ep-prev/ep-next/a4k-* 绑定
+        //   全部指向不存在的 script-binding，表现为 PGUP/PGDWN/K 与菜单静默失效；
+        // - 生成的 input.conf：自定义键位与步长（--input-conf 会取代 mpv 默认加载，必须带上）；
+        // - 中文 menu.conf：select.lua 认 script-opt 时加载，旧版静默忽略无副作用。
+        // 外观类（--osd-font 等 YuKi 样式）仍按 externalStyle 跳过，保留该播放器自身配置风格。
+        // 原生配置模式此前完全不注入以上资产，用户指定 mpv.lite 等自定义二进制后
+        // 设置页键位全部失灵（且「一键补装内置播放器」也经 setCustomPath 被误标）。
+        if (this.scriptPath && fs.existsSync(this.scriptPath)) args.push(`--scripts-append=${this.scriptPath}`);
+        if (this.inputConfPath && fs.existsSync(this.inputConfPath)) args.push(`--input-conf=${this.inputConfPath}`);
+        args.push(...this._contextMenuArgs());
         // mpv 运行日志落盘（每次启动覆盖）：--no-terminal 会吞掉全部终端输出，
         // 起播失败时 stderr 为空、用户只能看到无信息量的 'error'；落盘日志让
         // HTTP 4xx/5xx、TLS、超时等真实原因可以在退出时回读（见 exit 处理）。
@@ -438,7 +440,8 @@ class MpvPlayer extends EventEmitter {
         try {
             // stderr 不能再丢弃：网络地址/解码失败时 mpv 会把唯一可读原因
             // 写到 stderr；同时持续消费 pipe，避免缓冲区塞满后卡住进程。
-            proc = spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            // 经 this._spawn 间接调用：测试覆写该钩子即可截取 argv，不必 mock child_process。
+            proc = this._spawn(this.binary, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
         } catch (err) {
             console.error(`[mpv] spawn 异常：${err && err.message || err}`);
             return {
@@ -863,12 +866,11 @@ class MpvPlayer extends EventEmitter {
         }
     }
 
-        /**
+    /**
      * 右键上下文菜单绑定：连接后运行时探测，不猜版本号。
      * 直接查默认绑定表里有没有 select/context-menu（0.41+ 内置默认）：有 → 运行时
      * keybind 注入 MBTN_RIGHT；没有 → 保持该二进制默认行为（如旧版的右键暂停），
-     * 绝不注入会报 unknown binding 的死绑定。版本号解析（supportsContextMenu）仅作
-     * 设置页提示等参考用途，不再作为注入依据。
+     * 绝不注入会报 unknown binding 的死绑定。
      */
     _probeContextMenuBinding() {
         return this.getProperty('input-bindings').then((list) => {

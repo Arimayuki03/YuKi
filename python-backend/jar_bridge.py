@@ -21,6 +21,7 @@ import threading
 import time
 import logging
 from collections import OrderedDict
+from urllib.parse import urljoin
 
 
 import hoststate
@@ -405,15 +406,22 @@ class JarBridge:
 
     @staticmethod
     def destroy_all():
-        """销毁所有 JVM 子进程（应用退出时调用）。"""
+        """销毁所有 JVM 子进程（应用退出 / 配置热重载时调用）。
+
+        与 `_evict_jvm_if_needed_locked` 同一模式：持 `_jar_bridges_lock` 只摘除
+        实例，真正 destroy 一律在锁外逐个进行——`destroy()` 内部要重新获取同一把
+        `_jar_bridges_lock`（从全局缓存移除自己），而该锁不可重入，锁内直接
+        destroy 会永久死锁（问题 #6：退出与热重载两条路径都走这里）。
+        """
         with _jar_bridges_lock:
-            for b in list(_jar_bridges.values()):
-                try:
-                    b.destroy()
-                except Exception:
-                    pass
+            bridges = list(_jar_bridges.values())
             _jar_bridges.clear()
             _jar_lru.clear()
+        for b in bridges:
+            try:
+                b.destroy()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------ 静态工具
 
@@ -1255,11 +1263,41 @@ def _file_md5(path):
     return h.hexdigest()
 
 
+# jar 下载体积上限：TVBox 生态 spider jar（含 DEX 转换产物）普遍在几 MB～几十 MB，
+# 极端全功能 jar 上百 MB；512MB 已远超真实负载，仅拦「无上限全量入内存」的最坏情况。
+MAX_JAR_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+# jar 下载跳转上限：与 http_client.fetch_follow_redirects / 配置层 MAX_REDIRECTS 同档。
+_MAX_JAR_REDIRECTS = 5
+
+
 def requests_get_jar(url, timeout=30):
-    """下载 jar 二进制（跟重定向；走共享连接池与双来源代理）。
+    """下载 jar 二进制（手动逐跳跟随重定向；走共享连接池与双来源代理）。
 
     H-2：jar 会在 JVM 内反射执行（等价任意代码），传输必须校验 TLS。
+    C2.5（问题 #9）：requests 的 `allow_redirects=True` 会绕过逐跳守卫——
+    公网源 302 到内网同样必须被拦。这里改为手动跟随，每一跳都过 `guard_url`
+    （策略机制与配置层完全一致：默认桌面策略放行本机/内网引用，
+    `YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1` 打开严格 SSRF 防护后同步生效），
+    响应体流式限长（`MAX_JAR_DOWNLOAD_BYTES`）后一次落内存，供魔数/md5 校验
+    与落盘。
+
+    信任根：第一跳是用户给定的 jar 源，其自身 origin 即信任根（内网 NAS 上的
+    jar 直下在严格模式下仍可用）；重定向目标不继承信任——它是远端响应派生的
+    地址，公网源 302 到内网必须在跟随前被拒。
     """
-    rsp = http_client.get(url, allow_redirects=True, timeout=timeout, verify=True)
-    rsp.raise_for_status()
-    return rsp.content
+    current = http_client._guard_hop(url, kind='site', trust_root=url)
+    hdr = {'User-Agent': http_client.DEFAULT_UA}
+    for _ in range(_MAX_JAR_REDIRECTS + 1):
+        rsp = http_client._send('GET', current, timeout=timeout, allow_redirects=False,
+                                headers=hdr, verify=True, stream=True)
+        if rsp is None:
+            raise ValueError(f'[L3:jar] jar download empty: {url}')
+        if rsp.status_code in http_client._REDIRECT_STATUSES and 'Location' in rsp.headers:
+            current = http_client._guard_hop(urljoin(current, rsp.headers['Location']),
+                                             kind='site', trust_redirect=True)
+            continue
+        rsp.raise_for_status()
+        raw = http_client._read_capped(rsp, MAX_JAR_DOWNLOAD_BYTES)
+        return raw
+    raise ValueError(f'too many redirects (>{_MAX_JAR_REDIRECTS}): {url}')

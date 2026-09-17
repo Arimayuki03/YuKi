@@ -1626,7 +1626,9 @@ const Home = {
     renderGrid(list, error) {
         const grid = $('#home-grid').empty();
         if (!list.length) {
-            const why = error ? `（${errorTextOf(error, 100)}）` : '';
+            // #11：error 为后端/第三方源回传的 data.error（任意字符串/对象），
+            // 进 .html() 前必须 escHtml，防止源注入 HTML/脚本
+            const why = error ? `（${escHtml(errorTextOf(error, 100))}）` : '';
             grid.html(`<div class="tip-line">暂无内容${why}</div>`);
             return;
         }

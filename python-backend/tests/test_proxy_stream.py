@@ -14,6 +14,7 @@ if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
 import go_proxy  # noqa: E402
+import hoststate  # noqa: E402
 
 
 class _Response:
@@ -139,6 +140,31 @@ class TestProxyStream(unittest.TestCase):
     def test_legacy_url_probe_does_not_wrap_412_as_200(self):
         handler = object.__new__(go_proxy._Handler)
         handler.headers = {}
+        # ？url= 通道已收紧鉴权（#8）：播放 URL 必须带有效 token
+        handler.path = ('/?url=https%3A%2F%2Fdl-pc-zb.drive.quark.cn%2Fstale.mp4'
+                        '&proxytype=go&thread=32&token=fixture-token')
+        handler.command = 'GET'
+        handler.events = []
+        handler.wfile = io.BytesIO()
+        handler.send_response = lambda status: handler.events.append(('status', status))
+        handler.send_header = lambda key, value: handler.events.append(('header', key, value))
+        handler.end_headers = lambda: handler.events.append(('end',))
+
+        old_state = {'token': hoststate.get_token(), 'port': hoststate.get_port()}
+        hoststate.configure(token='fixture-token')
+        try:
+            with patch.object(go_proxy, '_fetch', return_value=_Response(412)):
+                handler._handle()
+        finally:
+            hoststate.configure(**old_state)
+        self.assertIn(('status', 412), handler.events)
+        self.assertNotIn(('status', 200), handler.events)
+        self.assertEqual(handler.wfile.getvalue(), b'upstream HTTP 412')
+
+    def test_legacy_url_channel_requires_token(self):
+        """#8：？url= 通道无 token 直接 401，不再无差别转发。"""
+        handler = object.__new__(go_proxy._Handler)
+        handler.headers = {}
         handler.path = ('/?url=https%3A%2F%2Fdl-pc-zb.drive.quark.cn%2Fstale.mp4'
                         '&proxytype=go&thread=32')
         handler.command = 'GET'
@@ -148,11 +174,16 @@ class TestProxyStream(unittest.TestCase):
         handler.send_header = lambda key, value: handler.events.append(('header', key, value))
         handler.end_headers = lambda: handler.events.append(('end',))
 
-        with patch.object(go_proxy, '_fetch', return_value=_Response(412)):
-            handler._handle()
-        self.assertIn(('status', 412), handler.events)
+        old_state = {'token': hoststate.get_token(), 'port': hoststate.get_port()}
+        hoststate.configure(token='fixture-token')
+        try:
+            with patch.object(go_proxy, '_fetch', return_value=_Response(412)):
+                handler._handle()
+        finally:
+            hoststate.configure(**old_state)
+        self.assertIn(('status', 401), handler.events)
+        self.assertNotIn(('status', 412), handler.events)
         self.assertNotIn(('status', 200), handler.events)
-        self.assertEqual(handler.wfile.getvalue(), b'upstream HTTP 412')
 
 
 if __name__ == '__main__':

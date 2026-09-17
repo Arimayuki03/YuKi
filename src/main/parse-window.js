@@ -180,9 +180,12 @@ class ParseWindow {
     }
 
     _release(slot) {
+        // 先把槽位还回池再唤醒 waiter：take 是零参闭包，唤醒后自己从池里
+        // shift 取槽。若先唤醒后归还，waiter 会拿到 undefined 并自我重新
+        // 排队，槽位随每次「有等待者的释放」永久泄漏（池枯竭须重启应用）。
+        this._slots.push(slot);
         const w = this._waiters.shift();
         if (w) w();
-        else this._slots.push(slot);
     }
 
     // ------------------------------------------------------------ Cookie 推送

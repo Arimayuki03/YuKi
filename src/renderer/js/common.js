@@ -305,6 +305,165 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
 }
 
 /**
+ * CSP 桥接（#11）：index.html 收紧 script-src-attr（unsafe-hashes 白名单）后，
+ * 含模板插值的内联事件属性（panels.js 遗留模板 `onclick="fn('${动态路径}')"` /
+ * `href="javascript:void(0)"`，路径运行时才确定，进不了静态哈希白名单）会被 CSP
+ * 拦截失效。捕获阶段桥接：解析属性表达式 → 调用同名全局回调。参数支持 '字符串' /
+ * "字符串" / 数字 / 裸标识符（如 currentRoot —— panels.js 闭包内 let，window 上
+ * 不可见；本地文件场景按条目相对路径（表达式首参）的父目录换算还原，即主进程
+ * path.dirname 的前端等价）。表达式非法或回调缺失时拒绝执行（fail-closed）。
+ * 测试沙箱无 DOM 时静默跳过。
+ */
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    // 同步 SHA-256（crypto.subtle 异步、Node crypto 渲染层不可用；仅为与 CSP
+    // 哈希比对，非加密用途）。输入按 UTF-8 编码，输出 hex。
+    const _cspSha256 = (str) => {
+        const utf8 = new TextEncoder().encode(String(str));
+        const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+        const K = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        ];
+        let H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+        const bitLen = utf8.length * 8;
+        const padded = new Uint8Array((((utf8.length + 8) >> 6) + 1) << 6);
+        padded.set(utf8);
+        padded[utf8.length] = 0x80;
+        // 长度用 64 位大端写入（bitLen 不超过 2^32-1 时高位为 0）
+        const dv = new DataView(padded.buffer);
+        dv.setUint32(padded.length - 4, bitLen >>> 0, false);
+        dv.setUint32(padded.length - 8, Math.floor(bitLen / 0x100000000), false);
+        const w = new Array(64);
+        for (let off = 0; off < padded.length; off += 64) {
+            for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4, false);
+            for (let i = 16; i < 64; i++) {
+                const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+                const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+            }
+            let [a, b, c, d, e, f, g, h] = H;
+            for (let i = 0; i < 64; i++) {
+                const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+                const ch = (e & f) ^ (~e & g);
+                const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+                const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+                const maj = (a & b) ^ (a & c) ^ (b & c);
+                const t2 = (S0 + maj) | 0;
+                h = g; g = f; f = e;
+                e = (d + t1) | 0;
+                d = c; c = b; b = a; a = (t1 + t2) | 0;
+            }
+            H = H.map((v, i) => (v + [a, b, c, d, e, f, g, h][i]) | 0);
+        }
+        return H.map((x) => ('00000000' + (x >>> 0).toString(16)).slice(-8)).join('');
+    };
+    // 启动时解析一次 index.html 的 CSP meta 中的 'sha256-…' 属性哈希（base64 → hex 集）。
+    // meta 缺失或解析异常视为无哈希 → 全量桥接（对动态表达式 fail-open 到桥接，
+    // 桥接本身仅调用白名单形全局函数，仍是 fail-closed）。
+    const _cspAttrHashes = (() => {
+        const out = new Set();
+        try {
+            const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+            const b64 = String(meta && meta.getAttribute('content') || '').match(/'sha256-([A-Za-z0-9+/=]+)'/g) || [];
+            for (const t of b64) {
+                const raw = atob(t.slice(8, -1)); // 剥掉前缀 'sha256-（8 字符）与收尾引号
+                let hex = '';
+                for (let i = 0; i < raw.length; i++) hex += ('0' + raw.charCodeAt(i).toString(16)).slice(-2);
+                out.add(hex);
+            }
+        } catch (e) { /* meta 缺失/解析失败 → 空集 */ }
+        return out;
+    })();
+    // 相对路径父目录（Windows '\\' 与 POSIX '/' 兼容；与主进程 file-manager 的
+    // path.relative 产物一致）。条目在根目录时父目录为 ''（白名单根）。
+    const _cspParentOf = (p) => {
+        const s = String(p || '');
+        const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+        return i > 0 ? s.slice(0, i) : '';
+    };
+    // 引号内 token 的 JS 层反转义：仅剥反斜杠转义（escPath 对 ' \ 的转义）。
+    // 实体不再二次解码：HTML 解析器读属性时已解码一次（escPath 的 &amp; 即回 &），
+    // 文件名里字面的 &amp;/&#39; 会被误伤；旧缓存若残留双转义实体只会 fail-closed。
+    const _cspUnescapeArg = (t) => String(t).replace(/\\([\s\S])/g, '$1');
+    const _cspParseArgs = (raw) => {
+        const out = [];
+        const re = /('(?:[^'\\]|\\.)*')|("(?:[^"\\]|\\.)*")|([^,\s][^,]*)/g;
+        let m;
+        while ((m = re.exec(raw)) !== null) {
+            const tok = String(m[0] || '').trim();
+            if (!tok) continue;
+            if (/^('|\").*\1$/.test(tok)) {
+                if (tok[0] === '"') {
+                    try { out.push(JSON.parse(tok)); continue; } catch (e) { /* 非法转义串走手动剥转义 */ }
+                }
+                out.push(_cspUnescapeArg(tok.slice(1, -1)));
+            } else if (/^-?\d+(\.\d+)?$/.test(tok)) out.push(Number(tok));
+            else out.push({ ident: tok });
+        }
+        return out;
+    };
+    const _cspArgVal = (a) => {
+        if (a && typeof a === 'object' && 'ident' in a) {
+            // 仅白名单标识符换算注入，不透传任意 window 成员
+            if (a.ident === 'currentRoot') return _cspParentOf(a.__rel);
+            return undefined;
+        }
+        return a;
+    };
+    const _cspRun = (host, expr, event) => {
+        const m = expr.match(/^[\s\n]*([A-Za-z_$][\w$]*)\s*\(([\s\S]*)\)[\s\S]*$/);
+        if (!m || typeof window[m[1]] !== 'function') return false;
+        const rawArgs = _cspParseArgs(m[2]);
+        // 表达式首参字符串即条目相对路径（panels.js 本地文件模板约定），
+        // 供 currentRoot（=该条目父目录）换算
+        const relArg = rawArgs.find((a) => typeof a === 'string');
+        for (const a of rawArgs) {
+            if (a && typeof a === 'object' && 'ident' in a) {
+                if (a.ident !== 'currentRoot') return false; // 未知标识符 fail-closed
+                a.__rel = relArg || '';
+            }
+        }
+        try {
+            return window[m[1]].apply(host, rawArgs.map(_cspArgVal)) === false
+                ? (event.preventDefault(), true) : true;
+        } catch (e) { return false; }
+    };
+    // 桥接判定：属性表达式命中 CSP 哈希白名单（静态 handler）→ 交给浏览器原生
+    // 执行（CSP 放行，桥接再调会双触发）；未命中（动态插值模板）→ 桥接。动态
+    // 属性保留不摘（CSP 会持续拦原生执行，仅控制台告警），桥接每次点击都生效。
+    const _cspIsHashed = (expr) => _cspAttrHashes.has(_cspSha256(expr));
+    const _cspBridge = (host, attr, event) => {
+        // 表达式原样参与哈希比对（浏览器 CSP 哈希的就是 getAttribute 的原文）；
+        // 反斜杠转义仅在 _cspParseArgs 引号 token 内逐个还原
+        const expr = host.getAttribute(attr) || '';
+        if (_cspIsHashed(expr)) return;
+        const href = host.getAttribute('href');
+        if (href && href.indexOf('javascript:') === 0) host.setAttribute('href', '#');
+        if (!_cspRun(host, expr, event)) { try { event.preventDefault(); } catch (e) { /* ignore */ } }
+        event.stopPropagation();
+    };
+    document.addEventListener('click', (event) => {
+        const el = event.target instanceof Element ? event.target : null;
+        if (!el) return;
+        const host = el.closest('[onclick]') || (el.hasAttribute && el.hasAttribute('onclick') ? el : null);
+        if (host) _cspBridge(host, 'onclick', event);
+    }, true);
+    // 右键删除确认（oncontextmenu）：同样按哈希判定桥接到全局 showDelFolder/FileDialog。
+    document.addEventListener('contextmenu', (event) => {
+        const el = event.target instanceof Element ? event.target : null;
+        if (!el) return;
+        const host = el.closest('[oncontextmenu]');
+        if (host) _cspBridge(host, 'oncontextmenu', event);
+    }, true);
+}
+
+/**
  * 封面多级兜底（T74）：按序尝试 pics（如 AniList 封面 → trace.moe 匹配帧），全部失败落占位图并淡入。
  * 用于以图搜番等封面来源可能被墙/不稳定的场景——onerror 走 coverChainNext 逐级切换，不留空框。
  */
@@ -451,8 +610,10 @@ function bangumiCard(item) {
     const name = item.name_cn || item.name || '';
     const cover = bangumiCover(item.images, 'card');
     const rating = item.rating || {};
-    const score = rating.score ? `⭐${rating.score}` : '';
-    const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${rating.rank}">#${rating.rank}</span>` : '';
+    // #11：score/rank 均为 Bangumi 远端可控字段（数字/字符串不定），先 String 化转义再拼串；
+    // remarks 行整体二次 escHtml 时转义后的实体保持文本形态，不会还原成标签
+    const score = rating.score ? `⭐${escHtml(rating.score)}` : '';
+    const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(rating.rank)}">#${escHtml(rating.rank)}</span>` : '';
     const air = item.air_date || '';
     return `<div class="vod-card bangumi-card" data-id="${escHtml(String(item.id))}" data-name="${escHtml(name)}" tabindex="0">
         <div class="vod-cover">${vodCoverImg(cover)}${rank}</div>

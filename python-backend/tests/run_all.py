@@ -39,12 +39,18 @@ STAGES = [
     ('proxy-gateway', [PY, os.path.join(HERE, 'test_proxy_gateway.py')]),
     ('proxy-http', [PY, os.path.join(HERE, 'test_proxy_http.py')]),
     ('proxy-stream', [PY, os.path.join(HERE, 'test_proxy_stream.py')]),
+    # #7/#8 回归：_SegStream 队列满背压不炸线程 + /proxy?url= 通道 token 门禁
+    ('goproxy-segstream-url-auth', [PY, os.path.join(HERE, 'test_goproxy_segstream_and_url_auth.py')]),
+    # HTTP 守卫回归：YUKI_CONFIG_* 环境边界（TEST_ENV 已注入 YUKI_TEST_ROOT，不碰真实 profile）
+    ('http-guard-regression', [PY, os.path.join(HERE, 'test_http_guard_regression.py')]),
     ('play-contract', [PY, os.path.join(HERE, 'test_play_contract.py')]),
     ('pan-provider', [PY, os.path.join(HERE, 'test_pan_provider.py')]),
     ('jar-proxy', [PY, os.path.join(HERE, 'test_jar_proxy.py')]),
     ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
     ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
     ('jar-supervisor', [PY, os.path.join(HERE, 'test_jar_supervisor.py')]),
+    # dex2jar 生命周期：jar 反编译子进程的 spawn/收敛/超时契约
+    ('dex2jar-lifecycle', [PY, os.path.join(HERE, 'test_dex2jar_lifecycle.py')]),
     ('pan-cache', [PY, os.path.join(HERE, 'test_pan_cache.py')]),
     ('pan-cookies', [PY, os.path.join(HERE, 'test_pan_cookies.py')]),
     ('jar-compatibility', [PY, os.path.join(HERE, 'test_jar_compatibility.py')]),
@@ -60,6 +66,8 @@ STAGES = [
     # N3.2~N3.5 契约回归（Python spider 隔离/CMS 契约/统一数据面）。不接入 run_all
     # 的话文件损坏（如语法错误）不会惊动任何人——2026-09 就发生过一次。
     ('n3-runtime-parity', [PY, os.path.join(HERE, 'test_n3_runtime_parity.py')]),
+    # quickjs 宿主限额契约：CPU/内存/栈 fail-closed（缺 API 或设置失败即拒绝加载站点）
+    ('quickjs-host-limits', [PY, os.path.join(HERE, 'test_quickjs_host_limits.py')]),
     # Q7.1 ~ Q7.5 全套验收套件
     ('q7-offline-fixtures', [PY, os.path.join(HERE, 'test_q7_offline_fixtures.py')]),
     ('q7-runtime-contracts', [PY, os.path.join(HERE, 'test_q7_runtime_contracts.py')]),
@@ -96,11 +104,18 @@ def compile_all():
 
 
 def main():
+    # 单阶段超时（秒）：子测试若挂死（如 stream 回归在旧代码上会 hang），
+    # 没有超时会占住 CI 数小时；可用 YUKI_STAGE_TIMEOUT 覆盖。
+    stage_timeout = int(os.environ.get('YUKI_STAGE_TIMEOUT') or 900)
     ok = True
     for name, cmd in STAGES:
         print(f'===== stage: {name} =====')
-        r = subprocess.run(cmd, cwd=BASE, env=TEST_ENV)
-        passed = r.returncode == 0
+        try:
+            r = subprocess.run(cmd, cwd=BASE, env=TEST_ENV, timeout=stage_timeout)
+            passed = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            print(f'  [note] stage exceeded {stage_timeout}s, terminated (hang guard)')
+            passed = False
         ok = ok and passed
         print(f'===== {name}: {"PASS" if passed else "FAIL"} =====\n')
     print('===== stage: compile =====')

@@ -382,7 +382,8 @@ const Detail = {
                 if (vod) _detailCacheSet(DETAIL_VOD_CACHE_PREFIX, cacheKey, vod, DETAIL_CACHE_TTL);
             }
             if (!vod) {
-                const err = data && data.error ? `（${String(data.error).slice(0, 120)}）` : '';
+                // #11：data.error 为第三方源回传内容，进 .html() 前必须 escHtml
+                const err = data && data.error ? `（${escHtml(String(data.error).slice(0, 120))}）` : '';
                 $('#detail-body').html(`<div class="tip-line">未取得详情${err}</div>`);
                 return;
             }

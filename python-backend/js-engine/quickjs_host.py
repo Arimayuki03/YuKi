@@ -10,10 +10,12 @@
 线程安全：单个 Context 非线程安全，JsEngine 内置锁；聚合搜索并发时
 每个 JS 站点各自持有独立 JsEngine。
 """
+import gzip
 import os
 import sys
 import json
 import time
+import zlib
 import hashlib
 import logging
 import threading
@@ -33,6 +35,16 @@ from esm_transform import esm_to_script  # noqa: E402
 from module_resolver import ModuleBundle, binding_statements  # noqa: E402
 
 logger = logging.getLogger('yuki.jsengine')
+
+
+class JsEngineUnavailableError(ValueError):
+    """QuickJS 宿主安全前提不满足（限额 API 缺失/设置失败等）。
+
+    继承 ValueError：config._load_js_spider 会包上 [L3:js] 标签把站点记为
+    构建失败（skipped），runtime worker 会回 ready ok=False——站点呈现为
+    「不可用」而不是静默跑无限额的远端代码，也不会崩溃后端。
+    """
+
 
 BOOTSTRAP_JS = os.path.join(ENGINE_DIR, 'host_bootstrap.js')
 LOADER_JS = os.path.join(ENGINE_DIR, 'spider-loader.js')
@@ -180,6 +192,115 @@ GLOBAL_SUGGESTIONS = {
 }
 
 
+# ---- _native_http 安全边界（N3.2/S1.1 之外的宿主级限额） ----
+# 与 http_client 的超时档位保持一致（TIMEOUT_FAST~TIMEOUT_SLOW = 5s~60s 连接段）：
+# JS 源传 0/负数/超大值一律收敛到边界，防止远端代码用超大 timeout 长占连接。
+HTTP_TIMEOUT_MIN = 1.0
+HTTP_TIMEOUT_MAX = 60.0
+HTTP_TIMEOUT_DEFAULT = 10.0
+# 响应体上限：与 config_security.MAX_DECOMPRESSED_BYTES 同档（32MB），
+# 流式读取，超限立即断开——远端代码不允许把宿主内存读爆。
+HTTP_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+_HTTP_CHUNK_SIZE = 64 * 1024
+
+
+def _clamp_timeout(value):
+    """timeout clamp 到 [HTTP_TIMEOUT_MIN, HTTP_TIMEOUT_MAX]；非法值取默认。"""
+    try:
+        if isinstance(value, bool) or value is None:
+            raise ValueError('invalid timeout')
+        value = float(value)
+        if value != value:   # NaN
+            raise ValueError('invalid timeout')
+    except (TypeError, ValueError):
+        return HTTP_TIMEOUT_DEFAULT
+    return min(max(value, HTTP_TIMEOUT_MIN), HTTP_TIMEOUT_MAX)
+
+
+def _sniff_or_latin1(raw_bytes):
+    """无 charset 兜底：charset_normalizer 嗅探只对足够长的载荷可靠——
+    过短样本误判率高（如 5 字节 latin-1 'caf\\xe9' 会被认成 utf_16_be），
+    不足 64 字节时退回 latin-1（requests 对 text/* 的缺省编码，可无损还原）。
+    """
+    if len(raw_bytes) >= 64:
+        try:
+            import charset_normalizer
+            best = charset_normalizer.from_bytes(raw_bytes).best()
+            if best is not None:
+                return str(best)
+        except Exception:
+            pass
+    return raw_bytes.decode('latin-1', errors='replace')
+
+
+def _decode_body(raw_bytes, headers):
+    """按 Content-Encoding 解 gzip/deflate，再按响应头/嗅探编码转文本。
+
+    http_client 基于 requests/urllib3，iter_content 已对 gzip/deflate 透明解压；
+    这里按头再解一次属于兜底逻辑（未来若换成返回原始压缩字节的客户端仍可用），
+    因此必须防御式：任何解压失败都按「已是明文」原样返回，绝不让 zlib.error
+    冒泡成 500。文本解码顺序：显式 charset → text/* 缺省走 utf-8 →
+    charset_normalizer 嗅探（仅长载荷，见 _sniff_or_latin1）→ latin-1，
+    全程宽松替换，保证 JS 侧总能拿到字符串。
+    """
+    headers = headers or {}
+    encoding = str(headers.get('Content-Encoding')
+                   or headers.get('content-encoding') or '').lower().strip()
+    try:
+        if encoding in ('gzip', 'x-gzip') and raw_bytes[:2] == b'\x1f\x8b':
+            raw_bytes = gzip.decompress(raw_bytes)
+        elif encoding == 'deflate':
+            # zlib 容器与 raw deflate 都可能；两层都失败则视为明文
+            # （urllib3 已透明解压时走到这里的就是明文，绝不能抛 zlib.error）
+            try:
+                raw_bytes = zlib.decompress(raw_bytes)
+            except zlib.error:
+                try:
+                    raw_bytes = zlib.decompress(raw_bytes, -zlib.MAX_WBITS)
+                except zlib.error:
+                    pass
+    except Exception:
+        pass   # 兜底解压失败：按「iter_content 已解压的明文」原样返回
+    content_type = str(headers.get('Content-Type')
+                       or headers.get('content-type') or '')
+    match = re.search(r'charset=([\w\-]+)', content_type, re.IGNORECASE)
+    if match:
+        try:
+            return raw_bytes.decode(match.group(1), errors='replace')
+        except LookupError:
+            pass
+    if content_type.strip().lower().startswith('text/'):
+        try:
+            return raw_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return _sniff_or_latin1(raw_bytes)
+    try:
+        return raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        return _sniff_or_latin1(raw_bytes)
+
+
+def _read_body_capped(response, url):
+    """流式读响应体，超过 HTTP_MAX_RESPONSE_BYTES 立即中止。"""
+    chunks, total = [], 0
+    try:
+        for chunk in response.iter_content(_HTTP_CHUNK_SIZE):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > HTTP_MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f'js http response too large: body exceeds '
+                    f'{HTTP_MAX_RESPONSE_BYTES // (1024 * 1024)}MB limit ({url})')
+            chunks.append(chunk)
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    return b''.join(chunks)
+
+
 def _native_http(url, options_json):
     """同步 HTTP，返回 JSON 串：{ok, status, code, content, headers}。"""
     try:
@@ -188,7 +309,7 @@ def _native_http(url, options_json):
         opt = {}
     method = str(opt.get('method') or 'GET').upper()
     headers = opt.get('headers') or {}
-    timeout = opt.get('timeout') or 10
+    timeout = _clamp_timeout(opt.get('timeout'))
     allow_redirects = opt.get('redirect', True)
 
     # N3.2 / S1.1: 继承宿主安全策略（SSRF 守卫与私网防护）
@@ -203,18 +324,21 @@ def _native_http(url, options_json):
 
     try:
         kwargs = dict(headers=headers, timeout=timeout,
-                      allow_redirects=bool(allow_redirects), verify=True)
+                      allow_redirects=bool(allow_redirects), verify=True,
+                      stream=True)
         if method == 'POST':
             kwargs['data'] = opt.get('body') or opt.get('data')
             rsp = http_client.post(url, **kwargs)
         else:
             rsp = http_client.get(url, **kwargs)
+        raw = _read_body_capped(rsp, url)
+        text = _decode_body(raw, rsp.headers)
         return json.dumps({
             'ok': rsp.status_code < 400,
             'status': rsp.status_code,
             'code': rsp.status_code,
-            'content': rsp.text,
-            'data': rsp.text,
+            'content': text,
+            'data': text,
             'headers': dict(rsp.headers),
         }, ensure_ascii=False)
     except Exception as e:
@@ -231,13 +355,9 @@ class JsEngine:
         self.ctx = quickjs.Context()
         # H-3：远程 JS 源不可信——C 扩展同步 eval 期间不释放 GIL，一段
         # while(true){} 会冻结整个后端（所有端点、所有站点）。三重限额：
-        # CPU 30s / 内存 256MB / 栈 1MB；API 缺失时降级告警。
-        try:
-            self.ctx.set_time_limit(30)
-            self.ctx.set_memory_limit(256 * 1024 * 1024)
-            self.ctx.set_max_stack_size(1024 * 1024)
-        except AttributeError:
-            logger.warning('quickjs-ng 缺少限额 API，跳过（建议升级 quickjs-ng）')
+        # CPU 30s / 内存 256MB / 栈 1MB。限额是运行不可信远端代码的安全前提：
+        # API 缺失或设置失败都必须 fail-closed（拒绝加载该站点），绝不静默降级。
+        self._apply_runtime_limits()
         self.ctx.add_callable('_native_http', _native_http)
         self.ctx.add_callable('_native_log', self._log)
         self.ctx.add_callable('_native_local_get', _native_local_get(site_key))
@@ -251,6 +371,33 @@ class JsEngine:
         self._bootstrap()
 
     # ------------------------------------------------------------ 初始化
+
+    def _apply_runtime_limits(self):
+        """应用 CPU/内存/栈三重限额；不可用即 fail-closed。
+
+        两种情形都拒绝运行远端 JS：
+        - API 完全缺失（AttributeError）：当前 quickjs-ng 构建不带限额能力；
+        - API 存在但设置失败（其他异常）：限额可能未生效，同样是 fail-open 风险。
+        抛 JsEngineUnavailableError 让上层把站点标记为不可用，而不是告警后
+        继续跑一段可 while(true){} 冻结整个后端的远端代码。
+        """
+        limits = (
+            ('set_time_limit', 30),
+            ('set_memory_limit', 256 * 1024 * 1024),
+            ('set_max_stack_size', 1024 * 1024),
+        )
+        for name, value in limits:
+            fn = getattr(self.ctx, name, None)
+            if fn is None or not callable(fn):
+                raise JsEngineUnavailableError(
+                    f'quickjs-ng 缺少限额 API {name}，无法安全运行 JS 站点源 '
+                    f'（站点不可用；请升级 quickjs-ng）')
+            try:
+                fn(value)
+            except Exception as e:
+                raise JsEngineUnavailableError(
+                    f'quickjs-ng 限额 API {name}({value}) 设置失败：{e}'
+                    f'（站点不可用，拒绝在无限额状态下运行远端 JS）') from e
 
     def _log(self, level, msg):
         getattr(logger, level if level in ('info', 'warn', 'error', 'debug') else 'info')(

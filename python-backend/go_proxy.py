@@ -292,6 +292,94 @@ def _cookie_host_allowed(url):
     return host in ('quark.cn', 'myquark.cn', 'uc.cn') or \
         host.endswith(('.quark.cn', '.myquark.cn', '.uc.cn'))
 
+
+# ---- ？url= 通用转发通道的鉴权与出网边界（#8 开放代理修复）--------------
+# 该通道可转发任意 http(s)，此前无 token 也无私网拦截 → 本机任意非浏览器
+# 进程都能把它当开放代理打内网。数据面整体仍免 token（/proxy 播放兼容），
+# 只收紧 ?url= 子通道：token 校验对齐既有带 token 接口的传输位置（query
+# ?token= / X-Proxy-Token 头）；目标地址复用配置安全边界的 guard_url +
+# ConfigSecurityPolicy.from_env()，与 C2.5 保持同一套语义——默认放行私网
+# （局域网 NAS / 本机服务是 TVBox 生态常态），YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1
+# 时必须拦截。
+
+
+def _request_proxy_tokens(query, headers):
+    """收集 ？url= 请求在所有既有传输位置携带的 token 值。
+
+    与 proxy_contract.proxy_token_values 对齐（query token 键 + 专用请求头），
+    但不引入该模块（保持 go_proxy 可独立单测/冻结），仅支持 GET/HEAD 场景
+    的两个位置：query 与请求头。parse_qs 的值是列表（可能有重复键），逐个
+    取出交给 valid_proxy_token 判定。
+    """
+    values = []
+    for key, val in (query or {}).items():
+        if str(key).lower() != 'token':
+            continue
+        if isinstance(val, (list, tuple)):
+            values.extend(val)
+        else:
+            values.append(val)
+    for key, val in (headers or {}).items():
+        if str(key).lower() in ('x-proxy-token', 'proxy-token'):
+            values.append(val)
+    return [v for v in values if v]
+
+
+def _request_valid_proxy_token(query, headers):
+    """？url= 通道的 token 门禁：至少一个位置携带有效 token 才放行。
+
+    有效语义以 hoststate.valid_proxy_token 为准：宿主**已配置** token 时须
+    常数时间比对命中；宿主未配置 token（空）时任意非空值放行（兼容旧
+    FongMi 地址）。运行时宿主恒注入随机 token（server 启动 YUKI_TOKEN /
+    token_hex），空 token 仅存在于测试。
+    """
+    import hoststate
+    values = _request_proxy_tokens(query, headers)
+    if not values:
+        return False
+    return any(hoststate.valid_proxy_token(v) for v in values)
+
+
+_GUARD_CTX = None
+
+
+def _guard_ctx():
+    """惰性缓存 (policy, trust)，免掉热路径（HLS 每分片）的每跳策略构造。
+
+    guard_url 的放行/拦截决策只依赖两个环境开关（allow_private_network /
+    resolve_hostnames），故以这两个开关的原始 env 值为缓存键：测试经
+    patch.dict 翻转开关时缓存自动失效；其余 env 运行期不变，无需失效。
+    DNS 分级缓存独立在 config_security._DNS_CACHE，本缓存只免策略构造。
+    """
+    global _GUARD_CTX
+    block = os.environ.get('YUKI_CONFIG_BLOCK_PRIVATE_NETWORK', '')
+    skip = os.environ.get('YUKI_CONFIG_SKIP_DNS_SCOPE', '')
+    if _GUARD_CTX is None or _GUARD_CTX[0] != (block, skip):
+        from runtime.config_security import ConfigSecurityPolicy, SourceTrust
+        _GUARD_CTX = ((block, skip), ConfigSecurityPolicy.from_env(),
+                      SourceTrust(root='(goproxy-url)', origin='', scope='inline'))
+    return _GUARD_CTX[1], _GUARD_CTX[2]
+
+
+def _guard_proxy_target(url):
+    """？url= 目标地址出网边界；拒绝时抛 ConfigSecurityError。
+
+    策略构造对齐 config.fetch_text_diagnostics 的缺省方式：from_env() 读
+    YUKI_CONFIG_BLOCK_PRIVATE_NETWORK 等环境变量，与 C2.5 同一套语义。
+    信任根**不能**设为目标自身（同源信任会抵消严格模式的拦截），而 ?url=
+    的调用方（mpv/蜘蛛播放链路）没有配置加载那种「用户显式信任根」——
+    因此用空 origin 的 inline 信任根：trusts() 恒 False。效果：
+    - 默认（开关关闭，allow_private_network=True）：私网/局域网源照常放行；
+    - 严格 SSRF（开关打开）：loopback/private 一律拒绝，同闸门覆盖本机
+      任意进程借道 ?url= 的转发请求。
+
+    30x 跳转的每一跳也必须过本函数（_fetch 手动跟随重定向）。
+    """
+    from runtime.config_security import guard_url
+    policy, trust = _guard_ctx()
+    return guard_url(url, policy=policy, trust=trust, kind='media')
+
+
 # FongMi 蜘蛛期望的本地代理协议：
 # - 端口：不同 jar 蜘蛛把 127.0.0.1:<port> 硬编码进字节码，跨 jar 差异很大：
 #   fm-jvm.jar（夸克盘社/百度）硬编码 unexported 7944；ea3f 4K 网盘、欧歌等
@@ -417,6 +505,13 @@ def _parse_range(rng, total):
     return start, end
 
 
+# ？url= 出网边界在重定向每一跳都复检：allow_redirects=True 会让 requests
+# 在库内静默跟随 302，初始 URL 过了 guard 也拦不住「公网源 302 → 本机任意
+# 端口」的 SSRF。手动逐跳（对齐 http_client.fetch_follow_redirects）+ 每跳
+# 过 _guard_proxy_target，封死这条通道。
+_FETCH_MAX_REDIRECTS = 5
+
+
 def _fetch(url, headers, start, end=None, timeout=60):
     """单段请求：GET Range=bytes=start-end，流式返回 response。
 
@@ -426,9 +521,21 @@ def _fetch(url, headers, start, end=None, timeout=60):
     h = dict(headers)
     if end is not None:
         h['Range'] = 'bytes=%d-%d' % (start, end)
-    return requests.get(url, headers=h, stream=True, timeout=timeout,
-                        verify=True, allow_redirects=True,
-                        proxies=_system_proxies() or None)
+    current = url
+    for _ in range(_FETCH_MAX_REDIRECTS + 1):
+        _guard_proxy_target(current)
+        resp = requests.get(current, headers=h, stream=True, timeout=timeout,
+                            verify=True, allow_redirects=False,
+                            proxies=_system_proxies() or None)
+        if resp.status_code not in (301, 302, 303, 307, 308) \
+                or 'Location' not in resp.headers:
+            return resp
+        location = resp.headers['Location'] or ''
+        resp.close()
+        # 相对 Location 按当前跳解析；下一跳在循环头复检边界
+        current = urllib.parse.urljoin(current, location)
+    raise ValueError('go-proxy too many redirects (>%d): %s'
+                     % (_FETCH_MAX_REDIRECTS, url))
 
 
 # 明确的媒体 Content-Type：原样透传。
@@ -469,9 +576,17 @@ def _hls_proxy_wrap(abs_url):
 
     凭据由该分支按夸克/UC 域名白名单注入；嵌套的变体播放列表经同一分支
     会再次被识别为 m3u8 并重写，任意深度都能走通。
+    通道鉴权（#8）：播放 URL 已带有效 token，这里原样带上，避免重写后的
+    分片请求被 ?url= 的 token 门禁拒绝。
     """
-    return 'http://127.0.0.1:%d/proxy?url=%s' % (
-        PORT, urllib.parse.quote(abs_url, safe=''))
+    try:
+        import hoststate
+        token = str(hoststate.get_token() or '')
+    except Exception:
+        token = ''
+    suffix = '&token=%s' % urllib.parse.quote(token, safe='') if token else ''
+    return 'http://127.0.0.1:%d/proxy?url=%s%s' % (
+        PORT, urllib.parse.quote(abs_url, safe=''), suffix)
 
 
 def _rewrite_hls_line(line, base_url):
@@ -1133,6 +1248,13 @@ def _quark_download_url(share_id, file_id, file_token, headers):
     raise ValueError('download URL unavailable (status %s)' % status)
 
 
+class _SegmentIdleError(Exception):
+    """分段流卡死/取消收场信号：stream 侧多拍无产出或下载线程全灭。
+
+    _Handler 的外层 except 会把它按流中断处理（已发响应头 → 断连止损），
+    避免 mpv 侧永久挂死等待数据。"""
+
+
 class _SegStream:
     """多线程分段下载 + 有界队列流水线按序转发。
 
@@ -1149,15 +1271,38 @@ class _SegStream:
         self._queues = [queue.Queue(maxsize=QUEUE_DEPTH) for _ in range(self.n)]
         self._cancel = threading.Event()
         self._threads = []
+        # stream() 的 q.get 单拍等待 + 空闲拍上限：下载线程全灭（崩溃/漏哨兵）
+        # 或持续无产出（卡死）时流以错误收场，绝不永久阻塞。上限必须覆盖
+        # 段重试阶梯的最长恢复时间（3 次 × 60s 上游超时 + 退避 ≈ 182s），
+        # 否则会把「慢但可恢复」的段误杀；8 × 30s = 240s 仍在有限时间内收场。
+        self.get_timeout = 30.0
+        self.get_max_idle_ticks = 8
 
     def _put(self, q, item):
-        """入队（带超时重试）：队列满时每秒检查一次 _cancel，消费端断开后
-        丢弃返回，避免下载线程被满队列永久阻塞（线程泄漏）。"""
+        """入队：队列满时每秒检查一次 _cancel，消费端断开后放弃并返回 False。
+
+        返回 True=已入队；False=已取消（消费端已断/流已收场）。调用方收到
+        False 必须立即收场，不得继续灌数据，更不能把「入队失败」当成网络
+        错误进入重试阶梯——那会把整段重下 3 次再灌进同一个按序消费的队列，
+        破坏字节序。
+
+        注意 q.put 抛的是 queue.Full 而非 queue.Empty：旧实现错捕 Empty，
+        Full 落进 _dl 的 except Exception → 重下整段 → 收尾哨兵再抛 →
+        下载线程炸死且无哨兵 → stream() 的 q.get 永久挂死。
+
+        满队列 + 消费端存活（mpv 暂停/消费慢于下载）是 ≥32MB 分段的正常
+        稳态（背压），必须阻塞等待而不是按计时放弃——放弃会让大文件播放
+        在带宽高于实时码率 30s 后断流。消费端消失时 stream() 的写出错/收场
+        会置位 _cancel，本函数随即返回，线程不会泄漏。
+        """
         while not self._cancel.is_set():
             try:
                 q.put(item, timeout=1.0)
                 return True
+            except queue.Full:
+                continue
             except queue.Empty:
+                # put(timeout) 满时抛 Full；Empty 理论不可达，防御性兜底。
                 continue
         return False
 
@@ -1169,6 +1314,9 @@ class _SegStream:
         q = self._queues[i]
         # 段下载失败（403 风控 / 5xx / 网络抖动）重试 3 次，退避后仍失败才中断流，
         # 避免单次瞬时失败直接打断播放（mpv 缓存耗尽即卡顿）。
+        # 重试只针对**网络/上游错误**：chunk 入队因队列满被放弃不算错误，
+        # 立即收场（消费端已经不在了），绝不能重下整段——那会把重复字节灌进
+        # 同一个按序消费的队列，破坏字节序。
         last_err = None
         for attempt in range(3):
             if self._cancel.is_set():
@@ -1184,7 +1332,9 @@ class _SegStream:
                                 continue
                             if not self._put(q, chunk):
                                 return
-                        self._put(q, None)  # 段结束哨兵（已取消则丢弃）
+                        # 段结束哨兵：消费端仍在（未取消）时入队；已取消则
+                        # stream 侧早已退出，无需哨兵。
+                        self._put(q, None)
                         return
                     last_err = RuntimeError('段 %d HTTP %d' % (i, r.status_code))
                     logger.warning('go-proxy 段 %d/%d HTTP %d（重试 %d/3）', i, self.n, r.status_code, attempt + 1)
@@ -1195,7 +1345,14 @@ class _SegStream:
             time.sleep(0.3 * (attempt + 1))  # 0.3s / 0.6s / 0.9s 退避
         if not self._cancel.is_set():
             logger.warning('go-proxy 段 %d/%d 下载失败，中断流: %s', i, self.n, last_err)
-            self._put(q, last_err)
+            # 错误哨兵（收尾 put 加保护）：无论如何下载线程都要从这里正常返回，
+            # 绝不让 queue.Full 之类炸死线程——否则 stream() 的 q.get 收不到
+            # 任何哨兵/错误，会永久挂死。消费端已断（_cancel 置位）时 stream
+            # 侧早已结束，丢弃哨兵即可。
+            try:
+                self._put(q, last_err)
+            except BaseException:
+                logger.exception('go-proxy 段 %d/%d 错误哨兵入队失败', i, self.n)
 
     def start(self):
         for i in range(self.n):
@@ -1204,12 +1361,35 @@ class _SegStream:
             t.start()
 
     def stream(self, out):
-        """按段顺序消费队列写入 out；任一段出错即中断并取消其余下载。"""
+        """按段顺序消费队列写入 out；任一段出错即中断并取消其余下载。
+
+        q.get 带 30s 超时轮询 + 空闲拍上限：下载线程全灭（崩溃/取消）或
+        持续无产出（背压卡死）时流以错误收场，绝不永久阻塞；对正常播放
+        （上游出流间隙 <30s）行为与旧版逐字节一致。
+        """
         try:
+            idle_ticks = 0
             for i in range(self.n):
                 q = self._queues[i]
                 while True:
-                    item = q.get()
+                    if self._cancel.is_set() and q.empty():
+                        # 上游已要求收场且本段再无数据：段间过渡不再被
+                        # 未产出段卡住。
+                        raise _SegmentIdleError('stream cancelled while waiting')
+                    try:
+                        item = q.get(timeout=self.get_timeout)
+                        idle_ticks = 0
+                    except queue.Empty:
+                        idle_ticks += 1
+                        # 下载线程已全部退出（正常收尾不该出现：队列里必
+                        # 留哨兵；只有线程死亡/漏发哨兵才可能）或连续多拍
+                        # 无产出 → 判定卡死，以错误收场并触发清理。
+                        if not any(t.is_alive() for t in self._threads) or \
+                                idle_ticks >= self.get_max_idle_ticks:
+                            raise _SegmentIdleError(
+                                'segment %d stalled: no data for %ds'
+                                % (i, int(idle_ticks * self.get_timeout)))
+                        continue
                     if item is None:
                         break
                     if isinstance(item, Exception):
@@ -1340,6 +1520,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if not url.startswith(('http://', 'https://')):
                 self.send_response(400)
                 self.end_headers()
+                return
+            # ？url= 通用转发通道鉴权（#8 开放代理修复）：可转发任意
+            # http(s)，必须携带有效 token（query ?token= 或 X-Proxy-Token 头，
+            # 与带 token 接口的传输位置对齐）。播放 URL（JAR Proxy.getUrl /
+            # do=pan 重写的 HLS 分片）本就带 token，不破坏兼容；无 token 的
+            # 本机任意进程从此不能再借道转发。
+            if not _request_valid_proxy_token(q, self.headers):
+                body = b'proxy url channel requires valid token'
+                self.send_response(401)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+                return
+            # 出网边界（#8）：目标默认放行私网（局域网源兼容）；严格 SSRF
+            # 模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）下 loopback/private
+            # 一律拒绝，与本机任意进程的转发请求保持同一道闸门。
+            try:
+                _guard_proxy_target(url)
+            except Exception as exc:
+                logger.warning('go-proxy ?url= 目标被安全边界拒绝: %s', exc)
+                body = 'blocked: %s' % str(exc)[:120]
+                self.send_response(403)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(body.encode('utf-8'))))
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body.encode('utf-8'))
                 return
             thread_n = 32
             try:
@@ -1962,3 +2171,13 @@ def stop_go_proxy():
             server.server_close()
         except Exception:
             pass
+
+
+def listening_ports():
+    """本模块实际监听的固定端口（供 server 侧限定 token 附加范围）。
+
+    只含 PORT + EXTRA_PORTS：ensure_listener 的动态端口由 jar 字节码扫描/
+    播放 URL 按需触发，无法静态枚举，也不在 server._attach_go_proxy_channel_token
+    的白名单语义内（那是给 jar 硬编码的旧通道补 token 用的）。
+    """
+    return [PORT, *EXTRA_PORTS]

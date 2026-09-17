@@ -138,7 +138,11 @@ class CmsSpider:
         text = ''
         for attempt in range(2):
             try:
-                rsp = http_client.fetch_follow_redirects(self.api, params=params, headers=UA, timeout=15)
+                # trust_root=api：CMS API 地址由用户配置直接给出，是其自身信任根
+                # （严格 SSRF 模式下局域网 CMS 源的同源请求仍可达）。
+                rsp = http_client.fetch_follow_redirects(self.api, params=params,
+                                                         headers=UA, timeout=15,
+                                                         trust_root=self.api)
                 # 自动探测并支持 GBK / GB2312 / UTF-8 等常见编码
                 rsp.encoding = rsp.apparent_encoding or 'utf-8'
                 text = rsp.text.strip()

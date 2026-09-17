@@ -18,6 +18,10 @@ const fs = require('fs');
 const READY_RE = /YUKI_BACKEND_READY port=(\d+) token=(\S+)/;
 const HEALTH_INTERVAL = 15000;
 const MAX_BACKOFF = 60000;
+// stdout READY 匹配缓冲上限（字符数≈字节）：后端始终打不出 READY 时防无限膨胀
+const READY_BUF_MAX = 1024 * 1024;
+// 就绪后保留的缓冲尾部（字符数，仅供诊断）：日志持续输出不再线性累积内存/正则开销
+const READY_BUF_TAIL = 4096;
 
 class PythonBridge extends EventEmitter {
     constructor(rootDir, resourcesRoot, opts = {}) {
@@ -42,6 +46,10 @@ class PythonBridge extends EventEmitter {
         this.stopping = false;
         this.backoff = 1000;
         this.healthTimer = null;
+        // 挂起的崩溃重启定时器：必须存实例字段，stop() 才能取消（否则 stop→start
+        // 竞态窗口内旧定时器触发会 spawn 出第二个后端）
+        this._restartTimer = null;
+        this._stdoutBuf = '';      // stdout READY 匹配缓冲（有界，截断逻辑见 _spawn）
         this.readyWaiters = [];
         this.extraEnv = {};        // 附加环境变量（如自定义缓存目录 YUKI_CACHE_DIR）
         this.logWriter = opts.logWriter || null;
@@ -70,6 +78,10 @@ class PythonBridge extends EventEmitter {
 
     _spawn() {
         if (this.stopping) return;
+        // 防重入：已有未退出进程时不重复 spawn（killed=true 但 exit 未到也算存活，
+        // 否则健康检查 kill 的窗口内重启会翻倍进程）。stop() 会清空 proc，
+        // 正常的 stop→start 重启不受影响。
+        if (this.proc && this.proc.exitCode === null) return;
         if (this._isPackaged && process.platform === 'win32') {
             const missing = this._vcrtMissing();
             if (missing.length) {
@@ -98,23 +110,36 @@ class PythonBridge extends EventEmitter {
             windowsHide: true,
         });
         this.proc = proc;
+        this._stdoutBuf = ''; // 每个 stdout 监听器绑定一个进程，缓冲随进程走
 
-        let buf = '';
         proc.stdout.on('data', (chunk) => {
+            // H-9 同源防护：缓冲是实例字段，换进程后旧进程迟到的 stdout 不得
+            // 污染新进程的匹配缓冲（否则旧 READY 行会写入旧端口/token）。
+            if (this.proc !== proc) return;
             const text = chunk.toString('utf8');
-            buf += text;
+            this._stdoutBuf += text;
             // STDOUT/STDERR 不是有效日志级别（LEVEL_WEIGHT 无此键会绕过级别过滤），
             // 映射为 INFO/WARN，使 Python 控制台输出同样受设置页日志级别约束。
             if (this.logWriter) this.logWriter.write('INFO', '[python:stdout]', text.trimEnd());
-            const m = buf.match(READY_RE);
-            if (m && !this.info) {
-                const port = parseInt(m[1], 10);
-                this.info = { port, token: m[2], base: `http://127.0.0.1:${port}` };
-                this.backoff = 1000;
-                this._startHealthCheck();
-                this.emit('ready', this.info);
-                this.readyWaiters.forEach((r) => r(this.info));
-                this.readyWaiters = [];
+            if (!this.info) {
+                const m = this._stdoutBuf.match(READY_RE);
+                if (m) {
+                    const port = parseInt(m[1], 10);
+                    this.info = { port, token: m[2], base: `http://127.0.0.1:${port}` };
+                    this.backoff = 1000;
+                    this._startHealthCheck();
+                    this.emit('ready', this.info);
+                    this.readyWaiters.forEach((r) => r(this.info));
+                    this.readyWaiters = [];
+                } else if (this._stdoutBuf.length > READY_BUF_MAX) {
+                    // 后端始终打不出 READY：丢弃前半段、保留尾部继续匹配，防无限膨胀
+                    this._stdoutBuf = this._stdoutBuf.slice(-Math.floor(READY_BUF_MAX / 2));
+                }
+            }
+            if (this.info && this._stdoutBuf.length > READY_BUF_TAIL) {
+                // 就绪后不再需要全量匹配，只保留小尾部供诊断：否则缓冲随日志量
+                // 无限增长，内存与逐块正则匹配开销线性上升。
+                this._stdoutBuf = this._stdoutBuf.slice(-READY_BUF_TAIL);
             }
         });
         proc.stderr.on('data', (chunk) => {
@@ -133,7 +158,13 @@ class PythonBridge extends EventEmitter {
             const delay = this.backoff;
             this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
             console.log(`[python-bridge] backend exited (code=${code}), restart in ${delay}ms`);
-            setTimeout(() => this._spawn(), delay);
+            // 句柄必须存实例字段：stop() 依赖它取消挂起的重启，否则 stop→start
+            // 竞态窗口内旧定时器触发会 spawn 出第二个后端。
+            if (this._restartTimer) clearTimeout(this._restartTimer);
+            this._restartTimer = setTimeout(() => {
+                this._restartTimer = null;
+                this._spawn();
+            }, delay);
         });
     }
 
@@ -190,6 +221,12 @@ class PythonBridge extends EventEmitter {
     stop() {
         this.stopping = true;
         this._stopHealthCheck();
+        // 取消挂起的崩溃重启：否则 stop→start 后旧定时器触发 _spawn，
+        // 与 start 刚拉起的新进程叠加成双后端。
+        if (this._restartTimer) {
+            clearTimeout(this._restartTimer);
+            this._restartTimer = null;
+        }
         if (this.proc) {
             const proc = this.proc;
             this.proc = null;

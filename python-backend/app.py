@@ -39,8 +39,15 @@ def _fetch(url, timeout=15):
 
 
 def redirect(url, timeout=15):
-    """递归跟重定向取最终响应（收编到 http_client：深度上限 5 + 相对 Location urljoin）。"""
-    return http_client.fetch_follow_redirects(url, timeout=timeout)
+    """递归跟重定向取最终响应（收编到 http_client：深度上限 5 + 相对 Location urljoin）。
+
+    trust_root=url：该地址是用户/站点直接给定的根（落盘后会 exec_module 执行），
+    同源子资源继承信任；默认桌面策略放行本机/内网引用，开关打开后逐跳守卫生效。
+    体积上限放宽到 MAX_REDIRECT_BODY_BYTES（32MB）：这是插件兜底下载路径，
+    与配置层解压后上限同档。
+    """
+    return http_client.fetch_follow_redirects(url, timeout=timeout, trust_root=url,
+                                              max_bytes=http_client.MAX_REDIRECT_BODY_BYTES)
 
 
 def str2json(content):

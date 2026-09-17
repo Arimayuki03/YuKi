@@ -4,6 +4,27 @@
 <head>
     <title>YuKi</title>
     <meta charset="UTF-8">
+    <!--
+      #11 渲染层 CSP：核心目标 = 禁止内联脚本块与 eval（XSS 注入脚本无法执行）。
+      - script-src 'self' file:：页面脚本全部为本地 <script src>（jQuery 3.7.1 本地文件），
+        file:// 加载下 'self' 不覆盖本地脚本，需显式 file:；无 unsafe-inline / eval。
+      - script-src-attr 'unsafe-hashes' + 36 个 sha256：存量静态内联事件处理器属性
+        （onclick/onload/onerror，表达式原文哈希见面板按钮与封面 img 模板）白名单放行；
+        任何改动/新增内联处理器都会被 CSP 拦截（新增需同步哈希）。动态路径处理器
+        （panels.js 本地文件 enterDir/选删等，路径运行时拼接无法静态哈希）由
+        common.js 的 CSP 桥接（捕获阶段解析属性 → 调全局回调 → 摘属性）执行。
+      - style-src 'unsafe-inline' file:：全站大量内联 style 属性（布局/显隐控制）、
+        JS 注入 <style>（自定义主题 _applyCustomTheme）与 file:// MiSans 字体 CSS
+        （applyMisansFont 经 IPC 注入 <link>）。
+      - img-src：封面来自任意远端 CMS/Bangumi/图床 → http/https/data/file/blob 全放开；
+      - media-src：直链/直播流任意远端 + 本地 file + blob；
+      - connect-src：本地 Python 后端（http://127.0.0.1:随机端口）与任意 CMS 源、
+        任意回退封面探测；
+      - font-src file:/data:：MiSans woff2 分片为本地相对 CSS URL；
+      - object-src 'none' / base-uri 限制 / form-action / frame-src 放宽到 http(s)
+        （解析器会话展示）。
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file:; script-src-attr 'unsafe-hashes' 'sha256-+wWYd0cvisjUfqJ7T2/a8vZzrF8As2lWv4Cs0NkXY+s=' 'sha256-0TQOpPlsHFrGkJFuUL4xx0Ao5AOHvCn9lSzL26hy4iQ=' 'sha256-1SQzuX8/o4JYODs3OMrp3JUfMBXkEay17ANxAIBjsOE=' 'sha256-22vvfTZidcXbm1JoJ6n9K7yLEV06fTNF+eIjkgFjTsA=' 'sha256-45/BhBSTGSUO3rxoQab92meVadR+K+beF5yHtYQltps=' 'sha256-4qFKt2gnTAmIsLSosgtioDuREzMzQcJ03ztZDdZkoss=' 'sha256-7bR3MAZOLJIjmDpTFJoYDR8F5LecHt7Lap6Pi4em/Lg=' 'sha256-7wJ21uhw/cXZL/SqWYu65n7+7hFXlbzm89TPdq9MmjQ=' 'sha256-FwrKKyPTFFM54jD3EDT4nF8wKFOfPJfEWBu/V01Mpao=' 'sha256-Gm+MqIS9oEXnhMo9JbswuICONul0MYWPZGL4Kn9Bxaw=' 'sha256-GnZkYWQS3I3b7eapjHdJHVrelo9gSq+ukvClZ9nSmcI=' 'sha256-IAOA0hucIGT+ZOQfUL5wu1NYfA6JYSABkpxv9hZl+K0=' 'sha256-L09VGdyMRnyTYUULQguQyKIydkyTtBb6e44aCniwEfM=' 'sha256-MwMRjswhMODX8lDyKTT1fLWySJnZ1EHtP05oO58DeoE=' 'sha256-OQD15E6AyW0GPlXFVWPNiX53zgwYBE2kve2yHyW3S6o=' 'sha256-OWkFIHOg1uiILp+yV2RY8709AGqoLhsA8Rld2wkx2YY=' 'sha256-PdOcaXLBUYVUVArkuCJpgtl/ALSS/HQOqk1xR3ncAng=' 'sha256-Q3a0jZ/WjnXum0AWybcR24r1PY6qZg48wAgI6yOSgjA=' 'sha256-RQypk4ndoyxoslvJYAf4jwUCNStKAPjwTHqfbU5oY1U=' 'sha256-W3IWwAr66BM8rqd9xNV4nqb57rGloVBR9YoPHiWiz2k=' 'sha256-WDz0QsZOhlR4u1CnegFLLUrF2t52Frebw+El9FBxxVI=' 'sha256-Wy+KWgmwY766eOtQUjeKMv89LD5Sryiv51qT66+jp9M=' 'sha256-XStbg4wfKn2u8GUjWjYcFnFO2KnvWfcCnB/XELBkLIM=' 'sha256-gUZ5QccDiosXitsQUsk2EAaj4yHyT8WWgjL1d/w/N7M=' 'sha256-hz3w3ksoH0Cp3tIP6giw3IAOPEoFRmXBEtU21zAQgkQ=' 'sha256-j2NeESjAytU8RUFAvXqEg7JPrwzlXvvE5qWdJ52000s=' 'sha256-jHd/zN21JyJh/Oc9ocev4pBVRd8rXRmQP6KtlHwmM0M=' 'sha256-lfnvGAb3x0BgjPCRN4KMMihFxOPb5e+sij2vThbdOng=' 'sha256-nExd8aVH7WFvo4MD2n2peN4o3wywGZ0cIOz06B5PFJw=' 'sha256-nax0D9/+3RYOGDkHizUDehG0HaUsMO9tSkvqryDPitU=' 'sha256-oD8C4Tf8jDyAjuRDY0OMIPtMrSdG7zEUVSeRn1eI4Z0=' 'sha256-pH9vasf723dW0cxFKn1nXbeTMoxQqpc0S0ICeFUkXVM=' 'sha256-pwQduWxX3Cm7lLbQmAos7n73RLP4QrsCDFejmsBdZ78=' 'sha256-rJYjNP2NX9izv0ZB5kEEbLCvDja+RtWQ6ii3KaEEnto=' 'sha256-yC+HUJqdrBNMTFNAiidWg2N54jc2ibNHVD0AdgfT5FI=' 'sha256-yiE3rRnSy3gx/5yvJObfQ/XEBmmoWi+oRKN3w52djzs='; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: http: https: blob:; media-src 'self' file: http: https: blob:; connect-src 'self' file: http: https: ws: wss: blob: data:; font-src 'self' file: data:; object-src 'none'; base-uri 'self' file:; form-action 'self' file: http: https:; frame-src http: https:;">
     <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=0,viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
     <link rel="stylesheet" href="css/ui.css">

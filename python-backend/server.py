@@ -816,6 +816,58 @@ def _attach_jar_error(ru, body, ensure_list=False, flag=''):
     return body
 
 
+def _attach_go_proxy_channel_token(url):
+    """旧 jar 生态的 ``/proxy?url=`` 直链转发通道补鉴权 token（#8）。
+
+    ``?url=`` 可转发任意 http(s)，通道收紧后必须携带有效 token。旧 jar 返
+    回的 7944/9978/1314 ``?url=...&proxytype=go`` 地址不带 token（jar 字节
+    码拼接，无法改造），所有 playerContent 结果都流经本函数，在这里统一
+    补上宿主 token。无 token 字段时不补（宿主未启用鉴权），非本地 go-proxy
+    通道一概不动。
+
+    端口必须命中 go_proxy 实际监听的固定端口（9978/7944/1314）：蜘蛛是
+    不可信代码，若任意 loopback ``?url=`` 地址都补 token，恶意 playerContent
+    可借 ``http://127.0.0.1:<无辜端口>/x?url=...`` 把宿主 token 外泄给本机
+    其他进程。go-proxy 只服务 http 明文，https 一律不改写。
+    """
+    try:
+        token = str(hoststate.get_token() or '')
+    except Exception:
+        token = ''
+    if not token or not isinstance(url, str):
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        try:
+            port = parts.port   # 非法端口（越界/非数字）在此抛 ValueError
+        except ValueError:
+            return url
+        try:
+            import go_proxy
+            allowed = go_proxy.listening_ports()
+        except Exception:
+            allowed = [9978, 7944, 1314]
+        if (parts.scheme.lower() != 'http'
+                or (parts.hostname or '').lower() not in ('127.0.0.1', 'localhost')
+                or port not in allowed):
+            return url
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if not any(key == 'url' for key, _ in query):
+            return url
+        if any(key.lower() == 'token' for key, _ in query):
+            return url
+        query.append(('token', token))
+        return urllib.parse.urlunsplit((
+            parts.scheme, parts.netloc, parts.path,
+            urllib.parse.urlencode(query, quote_via=urllib.parse.quote), parts.fragment))
+    except ValueError:
+        # urlsplit 对畸形 IPv6（如 'http://[::1/proxy?url=x'）抛
+        # Invalid IPv6 URL：原样返回，绝不能让蜘蛛的畸形 URL 炸掉 playerContent。
+        return url
+    except Exception:
+        return url
+
+
 def _normalize_play_result(body, flag='', site=None, original_id=''):
     """归一化 FongMi ``playerContent``，未知扩展字段全部保留。"""
     site_headers = getattr(site, 'headers', {}) if site is not None else {}
@@ -823,6 +875,7 @@ def _normalize_play_result(body, flag='', site=None, original_id=''):
     data = normalize_play_result(body, site_headers=site_headers,
                                  site_play_url=site_play_url,
                                  flag=flag, original_id=original_id)
+    data['url'] = _attach_go_proxy_channel_token(data.get('url'))
     return json.dumps(data, ensure_ascii=False)
 
 

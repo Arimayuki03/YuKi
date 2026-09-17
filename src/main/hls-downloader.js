@@ -15,12 +15,13 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { findFfmpeg } = require('./ffmpeg');
 const { proxyEnv, proxyFetch } = require('./system-proxy');
 const { relUnderRoot } = require('./dl-layout');
 
+const WIN = process.platform === 'win32';
 let _seq = 0;
 
 /** header 对象 → ffmpeg -headers 需要的 "K: V\r\n" 串（空对象返回 ''）。 */
@@ -116,6 +117,8 @@ class HlsDownloader extends EventEmitter {
         this.maxActive = 3;   // 同时进行的任务数上限（设置页「并发任务数」，index.js 同步）
         this._tasks = new Map(); // gid → task
         this._pending = [];      // 并发已满时排队的任务（FIFO，status 恒为 'waiting'）
+        this._procs = new Set(); // 全部已 spawn 的 ffmpeg 子进程（退出时移除，供 cleanup 收敛孤儿）
+        this._closing = false;   // cleanup() 置位：退出路径禁止 spawn/重试，防 exit 回调重生孤儿 ffmpeg
         // 任务进入终态（completed/error 事件）即释放并发槽位，补位启动排队任务
         this.on('completed', () => this._pump());
         this.on('error', () => this._pump());
@@ -261,6 +264,45 @@ class HlsDownloader extends EventEmitter {
         let n = 0;
         for (const t of this._tasks.values()) if (t.status === 'active') n++;
         return n;
+    }
+
+    // ===== ffmpeg 进程登记与退出收敛 =====
+
+    /** spawn ffmpeg 后登记（4 个 spawn 点共用）；exit/error 后自移除。 */
+    _registerProc(proc) {
+        if (!proc) return;
+        this._procs.add(proc);
+        if (typeof proc.once === 'function') {
+            proc.once('exit', () => this._procs.delete(proc));
+            proc.once('error', () => this._procs.delete(proc));
+            proc.once('spawn', () => { if (proc.killed) this._procs.delete(proc); });
+        }
+    }
+
+    /** 退出清理（M-8）：杀掉全部仍在运行的 ffmpeg 子进程，防止退出后 ffmpeg
+     *  成孤儿继续下载/转码。Windows 下 child.kill() 只能杀单进程，与仓库内
+     *  mpv/python 收敛一致，追加 taskkill /T /F 杀整棵进程树；先 taskkill 后
+     *  proc.kill()——顺序反了会先杀死目标 PID，taskkill 落到已死的树上（status 128）。
+     *  置位 _closing 后 _spawn/重试续体拒绝拉起新进程（否则 exit 回调会重生孤儿）。
+     *  幂等（Set 迭代副本 + 逐个移除），可在退出路径重复调用。 */
+    cleanup() {
+        this._closing = true;
+        if (!this._procs.size) return;
+        const tracked = [...this._procs];
+        for (const proc of tracked) {
+            let alive = false;
+            try { alive = proc.pid > 0 && !proc.killed && proc.exitCode === null && proc.signalCode === null; } catch (e) { alive = false; }
+            if (!alive) { this._procs.delete(proc); continue; } // 已死/已上报退出：仅清登记
+            this._procs.delete(proc);
+            try {
+                if (WIN) {
+                    spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+                    try { proc.kill(); } catch (e) { /* taskkill 已收敛整树；兜底不阻断退出流程 */ }
+                } else {
+                    proc.kill('SIGKILL');
+                }
+            } catch (e2) { /* 强杀失败不阻断退出流程 */ }
+        }
     }
 
     /** 有空闲槽位时按 FIFO 启动等待中的任务（并发任务数设置的 HLS 侧执行点）。 */
@@ -503,6 +545,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 用 ffmpeg concat demuxer 合并分片为最终文件。withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */
     async _concatSegments(task, segments, withBsf = true) {
+        if (this._closing) throw new Error('closing'); // 退出清理后拒绝拉起/重试（按失败收敛，不重生 ffmpeg）
         const gen = task._gen || 0;
         const segsDir = task._segsDir;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
@@ -521,6 +564,7 @@ class HlsDownloader extends EventEmitter {
             args.push(part);
             const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
             task._proc = proc;
+            this._registerProc(proc);
             let errBuf = '';
             proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
             proc.on('exit', (code) => {
@@ -544,6 +588,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 转码兜底合并（copy 失败后以重编码方式重试） */
     _concatTranscode(task, segments) {
+        if (this._closing) return Promise.reject(new Error('closing')); // 退出清理后拒绝拉起
         const gen = task._gen || 0;
         const segsDir = task._segsDir;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
@@ -552,6 +597,7 @@ class HlsDownloader extends EventEmitter {
             const args = ['-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', part];
             const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
             task._proc = proc;
+            this._registerProc(proc);
             let errBuf = '';
             proc.stderr.on('data', (chunk) => { errBuf += chunk.toString(); });
             proc.on('exit', (code) => {
@@ -618,6 +664,7 @@ class HlsDownloader extends EventEmitter {
 
     /** spawn ffmpeg 合成；withBsf=false 为重试（部分流不需要 aac_adtstoasc）。 */
     _spawn(task, withBsf) {
+        if (this._closing) return; // 退出清理后拒绝拉起（exit 回调重试会重生孤儿 ffmpeg）
         const gen = task._gen || 0;
         // 临时名保留真实扩展名：ffmpeg 按扩展名推断容器格式，.part 后缀会导致
         // 「Unable to choose an output format」直接失败；完成后 rename 为终名
@@ -635,6 +682,7 @@ class HlsDownloader extends EventEmitter {
         // ffmpeg 不读系统代理：经环境变量注入（直连不可达的环境下必需）
         const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
         task._proc = proc;
+        this._registerProc(proc);
         proc.stderr.on('data', (chunk) => {
             // ffmpeg 进度行 "size=123kB time=00:12:34.56" → 按时间差分估算速度
             const lines = (task._progressBuffer + chunk.toString()).split(/\r\n|\n|\r/);
@@ -711,6 +759,7 @@ class HlsDownloader extends EventEmitter {
 
     /** 转码兜底：copy 失败时以重编码方式重试，兼容封装/编码异常的源 */
     _spawnTranscode(task) {
+        if (this._closing) return; // 退出清理后拒绝拉起（exit 回调重试会重生孤儿 ffmpeg）
         const gen = task._gen || 0;
         const part = task._dest + '.incomplete' + path.extname(task._dest);
         const args = ['-hide_banner', '-y'];
@@ -724,6 +773,7 @@ class HlsDownloader extends EventEmitter {
         task._progressBuffer = '';
         const proc = spawn(task._bin, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, ...proxyEnv() }, windowsHide: true });
         task._proc = proc;
+        this._registerProc(proc);
         let errBuf = '';
         proc.stderr.on('data', (chunk) => {
             errBuf += chunk.toString();

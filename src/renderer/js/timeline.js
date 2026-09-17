@@ -166,11 +166,17 @@ const Timeline = {
         return `${m[1]}年${SEASON_NAMES[parseInt(m[2], 10)]}新番`;
     },
 
-    /** 生成近 SEASON_YEARS 年季节选项（最新在前），按年分组；首项「本周（在播）」。 */
-    _buildSeasonOptions() {
+    /** 单个季度选项 HTML。key 走 UIState 存档恢复路径时可能非标准格式，
+     *  进 value 属性位/文本位前必须 escHtml（#11，XSS 回归的转义汇点）。 */
+    _seasonOptionHtml(key) {
+        return `<option value="${escHtml(key)}">${escHtml(this._seasonLabel(key))}</option>`;
+    },
+
+    /** 生成近 SEASON_YEARS 年季节选项（最新在前），按年分组；首项「本周（在播）」。
+     *  now 可注入（测试钉死季度枚举），缺省取当前时间，行为不变。 */
+    _buildSeasonOptions(now = new Date()) {
         const sel = $('#timeline-season').empty();
         sel.append('<option value="current" selected>本周（在播）</option>');
-        const now = new Date();
         let y = now.getFullYear();
         let q = Math.ceil((now.getMonth() + 1) / 3);
         // 线性回溯：当前季往前 SEASON_YEARS*4 个季度
@@ -182,9 +188,10 @@ const Timeline = {
             q--; if (q < 1) { q = 4; y--; }
         }
         for (const year of [...byYear.keys()].sort((a, b) => b - a)) {
-            const group = $(`<optgroup label="${year}年"></optgroup>`);
+            // #11：year 源自本地枚举（数字），进属性位前仍转义兜底
+            const group = $(`<optgroup label="${escHtml(String(year))}年"></optgroup>`);
             // T65：季节选项拼串一次性写入
-            group.html(byYear.get(year).map((key) => `<option value="${key}">${this._seasonLabel(key)}</option>`).join(''));
+            group.html(byYear.get(year).map((key) => this._seasonOptionHtml(key)).join(''));
             sel.append(group);
         }
     },

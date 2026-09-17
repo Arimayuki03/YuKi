@@ -25,6 +25,7 @@ from urllib.parse import urljoin, urlparse, urlencode
 import requests
 from requests.adapters import HTTPAdapter
 from requests.cookies import RequestsCookieJar
+from requests.structures import CaseInsensitiveDict
 
 
 class _NoStoreCookiePolicy(DefaultCookiePolicy):
@@ -195,12 +196,145 @@ def post(url, *, timeout=TIMEOUT_NORMAL, proxy=True, **kw):
 
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
+# 响应体流式读取上限（全量入内存前按块计量，超限立刻断连）：
+# - CMS API：榜单/分类页是本路径的常态负载，10MB 覆盖极端大站（含 type=0 XML），
+#   仍远小于此前「无上限全量入内存」的最坏情况；
+# - Python 站点源：正常 spider 单文件远小于 1MB，10MB 绰绰有余；
+# - app.redirect() 兜底下载（site_manager.load_api 落盘执行）：同档放宽到 32MB，
+#   与配置层解压后上限（MAX_DECOMPRESSED_BYTES）一致。
+MAX_API_RESPONSE_BYTES = 10 * 1024 * 1024
+MAX_REDIRECT_BODY_BYTES = 32 * 1024 * 1024
 
-def fetch_follow_redirects(url, params=None, timeout=TIMEOUT_NORMAL, max_redirects=5, headers=None):
+_CHUNK_SIZE = 64 * 1024
+
+
+def _security_guard():
+    """取守卫三元组；config_security 缺席时返回 None（守卫禁用，行为同旧版）。"""
+    try:
+        from runtime.config_security import ConfigSecurityError, ConfigSecurityPolicy, SourceTrust, guard_url
+    except Exception:
+        return None
+    return guard_url, ConfigSecurityPolicy, SourceTrust, ConfigSecurityError
+
+
+def _guard_hop(url, *, kind, trust_root='', trust_redirect=False):
+    """对一跳 URL 过 SSRF 守卫（复用配置层同一套策略机制）。
+
+    策略每跳都从环境变量重新构造（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1 打开严格
+    SSRF 防护后，本路径与配置正文路径同步生效；默认桌面策略放行本机/内网引用，
+    局域网 CMS/NAS 源不受影响）。
+
+    信任根：`trust_root` 非空时以其建立信任（同一 scheme://host:port 的地址继承
+    信任——「用户亲手输入的根地址的同源子资源」语义，与配置层一致）；为空时
+    **没有**受信 origin，严格模式下任何私网地址都会被拒。`trust_redirect=True`
+    （跟随 30x）时显式忽略信任根：重定向目标是**远端响应内容**给出的地址而非
+    用户输入，公网源 302 到内网是教科书式 SSRF/提权通道，严格模式下必须在
+    跟随前被拒。守卫模块缺席时返回原地址（守卫禁用，行为同旧版）。
+    """
+    guard = _security_guard()
+    if guard is None:
+        return url
+    guard_url, policy_cls, source_trust_cls, _ = guard
+    policy = policy_cls.from_env()
+    if trust_redirect:
+        trust = source_trust_cls()
+    else:
+        trust = (source_trust_cls.for_source(trust_root, policy=policy)
+                 if trust_root else source_trust_cls())
+    return guard_url(url, policy=policy, trust=trust, kind=kind)
+
+
+class _CappedResponse:
+    """requests.Response 的轻量替身：内容已流式读取并限量。
+
+    仅暴露调用方（cms_spider / config / app.redirect）实际消费的属性，
+    以鸭子类型兼容 requests.Response。
+    """
+
+    def __init__(self, response, content, encoding):
+        self.status_code = int(getattr(response, 'status_code', 0) or 0)
+        self.headers = CaseInsensitiveDict(getattr(response, 'headers', None) or {})
+        self.url = str(getattr(response, 'url', '') or '')
+        self.content = content
+        self.encoding = encoding
+        self._apparent_encoding = None
+
+    @property
+    def apparent_encoding(self):
+        # 与 requests.Response.apparent_encoding 同源（requests.compat.chardet
+        # 在 requests 2.32+ 即 charset_normalizer），结果一致但只算一次。
+        if self._apparent_encoding is None:
+            try:
+                from requests.compat import chardet
+                result = chardet.detect(self.content[:4096])
+                self._apparent_encoding = (result or {}).get('encoding') or ''
+            except Exception:
+                self._apparent_encoding = ''
+        return self._apparent_encoding
+
+    @property
+    def text(self):
+        return self.content.decode(self.encoding or 'utf-8', errors='replace')
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f'{self.status_code} for {self.url}')
+
+    def close(self):
+        pass
+
+    def iter_content(self, chunk_size=_CHUNK_SIZE):
+        for start in range(0, len(self.content), max(1, chunk_size)):
+            yield self.content[start:start + chunk_size]
+
+
+def _read_capped(response, limit):
+    """流式读响应体并按块计量；超限立刻断连，避免无上限全量入内存。
+
+    本路径**不做**解压（调用方不解压，传输层 gzip 由 requests/urllib3 透明处理），
+    因此无需 config_security.decompress_capped 的压缩炸弹防护。
+    """
+    limit = max(1, int(limit))
+    chunks, total = [], 0
+    try:
+        for chunk in response.iter_content(_CHUNK_SIZE):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > limit:
+                response.close()
+                raise ValueError(
+                    f'response body exceeds {limit} bytes cap: '
+                    f'{str(getattr(response, "url", "") or "")}')
+            chunks.append(chunk)
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    return b''.join(chunks)
+
+
+def fetch_follow_redirects(url, params=None, timeout=TIMEOUT_NORMAL, max_redirects=5,
+                           headers=None, *, kind='site', max_bytes=None, trust_root=''):
     """手动跟随重定向取最终响应（app.redirect 的收编版）。
 
     修复原实现两个问题：无深度上限（循环重定向 → RecursionError）、
     Location 为相对路径时未 urljoin（拼出非法 URL）。
+
+    C2.5 安全边界（问题 #9）：每一跳都重新过 `guard_url`——跳转是绕过 SSRF 检查
+    最常见的路径（`http://evil/x` 302 到 `http://127.0.0.1:9978/` 必须在跟随前被
+    拒），策略机制与配置层完全一致（`YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1` 生效，
+    默认桌面策略放行本机/内网引用）。响应体流式限长（默认 10MB，见
+    `MAX_API_RESPONSE_BYTES` 注释），全量入内存前必须有 cap。
+
+    kind 只影响守卫的错误码层级（'config' → L1，其余 → L2），不放宽规则。
+    trust_root 的语义见 `_guard_hop`：CMS API / 远程 Python 源这类「用户在配置里
+    直接填写的根地址」应把该地址自身传入（第一跳继承同源信任，局域网 CMS 在
+    严格模式下仍可用）；留空表示无受信 origin。重定向目标一律**不继承**信任
+    （远端内容派生的地址，严格模式下跨源私网必拒）。
+    返回 requests 鸭子类型兼容对象（.content/.text/.encoding/.apparent_encoding/
+    .status_code/.headers/.url/.raise_for_status）。
     """
     hdr = dict(headers or {})
     hdr.setdefault('User-Agent', DEFAULT_UA)
@@ -210,9 +344,14 @@ def fetch_follow_redirects(url, params=None, timeout=TIMEOUT_NORMAL, max_redirec
         current = f"{url}{sep}{query_str}"
     else:
         current = url
+    current = _guard_hop(current, kind=kind, trust_root=trust_root)
     for _ in range(max_redirects + 1):
-        rsp = _send('GET', current, timeout=timeout, allow_redirects=False, headers=hdr)
+        rsp = _send('GET', current, timeout=timeout, allow_redirects=False,
+                    headers=hdr, stream=True)
         if rsp is None or rsp.status_code not in _REDIRECT_STATUSES or 'Location' not in rsp.headers:
-            return rsp
-        current = urljoin(current, rsp.headers['Location'])
+            body = _read_capped(rsp, int(max_bytes or MAX_API_RESPONSE_BYTES))
+            return _CappedResponse(
+                rsp, body, str(getattr(rsp, 'encoding', '') or ''))
+        current = _guard_hop(urljoin(current, rsp.headers['Location']),
+                             kind=kind, trust_redirect=True)
     raise ValueError(f'too many redirects (>{max_redirects}): {url}')
