@@ -55,6 +55,7 @@ from starlette.concurrency import run_in_threadpool
 
 from cache_store import CacheStore
 import play_cache
+import mem_cache
 from site_manager import SiteManager
 from config import ConfigManager
 import app as spider_app
@@ -996,6 +997,15 @@ def _dispatch_action_inner(form):
             except Exception:
                 repo_bytes = 0
             play_bytes, play_items, _play_expired = play_cache.stats()
+            # 会话级内存缓存分项（mem_cache.stats 为唯一生产调用方）：纯内存、
+            # 不占磁盘，不计入 bytes 总量，仅作明细展示口径。
+            mem_ns = {}
+            try:
+                mem_ns = mem_cache.stats()
+            except Exception:
+                mem_ns = {}
+            mem_items = sum(s['items'] for s in mem_ns.values())
+            mem_chars = sum(s['chars'] for s in mem_ns.values())
             return 200, json.dumps({
                 'code': 200,
                 'bytes': total,
@@ -1008,6 +1018,8 @@ def _dispatch_action_inner(form):
                     'playerCache': player_items,
                     'playerCachePersist': play_items,
                     'repoCache': repo_bytes,
+                    'memCacheItems': mem_items,
+                    'memCacheChars': mem_chars,
                 },
             }, ensure_ascii=False)
         if do == 'clearConfigCache':
@@ -1063,6 +1075,9 @@ def _dispatch_action_inner(form):
                     _kv_quota_state['exceeded'] = False
             except Exception:
                 pass
+            # 会话级内存缓存（spider 内容 + kazumi 搜索章节）：设置面板清理是
+            # 用户显式全清动作，内存层一并回收（mem_cache.clear_all 不抛错）。
+            mem_cache.clear_all()
             detail = {
                 'kv': removed,
                 'jsLocal': js_removed,
@@ -1193,26 +1208,41 @@ def _dispatch_action_inner(form):
             return 200, json.dumps(raw, ensure_ascii=False)
 
         # ---- Spider 内容 API（契约见 PHASE0_依赖矩阵.md 第 3 节）----
+        # 四个读接口走会话级内存缓存（见 _cached_spider_content）：builder 负责
+        # 「查源 → _attach_jar_error 包装 → 组装 (200, body)」，健康度采样/取消
+        # 语义仍由 _runtime_site_call 保证，命中时整体跳过。缓存的是最终 body，
+        # 命中直接回包不再包装。
+        def _spider_builder(capability, call, ensure_list=False):
+            def build():
+                return 200, _attach_jar_error(
+                    ru, _runtime_site_call(site, capability, call),
+                    ensure_list=ensure_list)
+            return build
+
         if do == 'homeContent':
-            return 200, _attach_jar_error(ru, _runtime_site_call(
-                site, 'home', lambda: spider_app.homeContent(ru, _bool(form.get('filter', 'false')))))
+            cached = _cached_spider_content(do, site, form, _spider_builder(
+                'home', lambda: spider_app.homeContent(ru, _bool(form.get('filter', 'false')))))
+            return 200, cached[1]
         if do == 'homeVideoContent':
             return 200, _attach_jar_error(ru, _runtime_site_call(
                 site, 'home', lambda: spider_app.homeVideoContent(ru, form.get('pg', '1'))))
         if do == 'categoryContent':
-            return 200, _attach_jar_error(ru, _runtime_site_call(
-                site, 'category', lambda: spider_app.categoryContent(
+            cached = _cached_spider_content(do, site, form, _spider_builder(
+                'category', lambda: spider_app.categoryContent(
                     ru, form.get('tid', ''), form.get('pg', '1'),
                     _bool(form.get('filter', 'false')), form.get('extend', '{}'))))
+            return 200, cached[1]
         if do == 'detailContent':
-            return 200, _attach_jar_error(ru, _runtime_site_call(
-                site, 'detail', lambda: spider_app.detailContent(
-                    ru, form.get('ids', '[]'))))
+            cached = _cached_spider_content(do, site, form, _spider_builder(
+                'detail', lambda: spider_app.detailContent(ru, form.get('ids', '[]')),
+                ensure_list=True))
+            return 200, cached[1]
         if do == 'searchContent':
-            return 200, _runtime_site_call(
-                site, 'search', lambda: spider_app.searchContent(
+            cached = _cached_spider_content(do, site, form, _spider_builder(
+                'search', lambda: spider_app.searchContent(
                     ru, form.get('word', form.get('key', '')),
-                    form.get('quick', '0'), form.get('pg', '1')))
+                    form.get('quick', '0'), form.get('pg', '1'))))
+            return 200, cached[1]
         if do == 'playerContent':
             # 60s 缓存：换线路又切回原线路时跳过重复解析
             vip_raw = form.get('vipFlags', '[]')
@@ -1696,20 +1726,49 @@ def create_app():
 
     @fastapi_app.get('/search/kazumi-stream')
     def kazumi_search_stream(word: str = Query(''), tag: str = Query(''),
-                             year: str = Query(''), sort: str = Query('')):
+                             year: str = Query(''), sort: str = Query(''),
+                             refresh: str = Query('')):
         """SSE 流式 Kazumi 规则源搜索（T73）：每个规则源完成即推一条 data，全部结束发 event: done。
         结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。
         已判定失效的规则源（validity == 'invalid'）不参与检索、不推送。
 
         可选筛选参数 tag/year/sort（任务三 part 2）：作为模板变量 @tag/@year/@sort
         注入声明支持它们的规则源搜索请求（searchURL 含 @tag 等占位，或 API 模式 query 引用）。
-        不声明这些占位的规则源忽略筛选、返回未过滤结果（优雅降级，对齐 Kazumi 仅传 keyword 的行为）。"""
+        不声明这些占位的规则源忽略筛选、返回未过滤结果（优雅降级，对齐 Kazumi 仅传 keyword 的行为）。
+
+        会话级缓存：流本身不缓存推送过程，但每个源完成后把单源 payload 写入
+        mem_cache 并登记整词索引（筛选参数 tag/year/sort 参与缓存键，不同筛选
+        互不串台）；同 word 同筛选再次打开时直接按索引重放缓存行（不发任何
+        网络请求），插件集合变化由失效钩子整体清 ns。error 单源结果不落缓存
+        （瞬时故障不冻结）；重放对未缓存的源补发 error 终态 payload——前端卡片
+        初始为 pending，不补齐会让该卡永久停在「检索中」。refresh=1 跳过重放
+        强制实时检索（仍回写缓存）。流超时/异常中断时对整词缓存失效，禁止
+        残缺结果集参与重放。索引在而 payload 全缺失视作未命中回退真实检索，
+        避免空重放假「无结果」。"""
         filters = {'tag': tag, 'year': year, 'sort': sort}
+        fkey = _kazumi_stream_filters_key(tag, year, sort)
         def gen():
             if not word:
                 yield 'event: done\ndata: {}\n\n'
                 return
             plugins = list(kazumi_mgr.searchable_plugins())
+            # 整词已缓存：按登记顺序逐源重放 + 对缺失源补发终态，秒回不碰网络。
+            # refresh=1 显式跳过；索引存在但 payload 全部失效 → 空列表视作 miss。
+            if not _form_flag({'refresh': refresh}, 'refresh'):
+                cached_payloads = _kazumi_stream_cached_payloads(word, fkey)
+                if cached_payloads:
+                    for payload in cached_payloads:
+                        yield f'data: {payload}\n\n'
+                    for miss in _kazumi_stream_missing_names(
+                            cached_payloads, [p.name for p in plugins]):
+                        yield 'data: %s\n\n' % json.dumps({
+                            'source': 'kazumi:' + miss, 'name': miss, 'list': [],
+                            'status': 'error', 'error': True, 'captcha': False,
+                            'captchaUrl': '',
+                            'msg': '上次检索该源失败未缓存，点「重试」重新查询',
+                        }, ensure_ascii=False)
+                    yield 'event: done\ndata: {}\n\n'
+                    return
             if not plugins:
                 yield 'event: done\ndata: {}\n\n'
                 return
@@ -1725,29 +1784,47 @@ def create_app():
                     logger.warning('[kazumi] kazumi-search-stream failed: %s: %s', plugin.name, e)
                     return {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
 
+            def _payload_of(r):
+                return json.dumps({
+                    'source': 'kazumi:' + r['pluginName'], 'name': r['pluginName'],
+                    'list': r.get('data', []),
+                    'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
+                    'captcha': r.get('captcha') or False,
+                    'captchaUrl': r.get('captchaUrl', ''),
+                    'msg': r.get('msg', ''),
+                }, ensure_ascii=False)
+
             # 手动管理线程池（M-20）：as_completed 超时/异常也要发 done 事件，
             # shutdown(wait=False) 防卡死 worker 阻塞生成器退出
             pool = ThreadPoolExecutor(max_workers=min(8, len(plugins)))
+            complete = False
             try:
-                futures = {pool.submit(_search_one, p): p for p in plugins}
                 try:
+                    futures = {pool.submit(_search_one, p): p for p in plugins}
                     for fut in as_completed(futures, timeout=120):
                         r = fut.result(timeout=0.1)
                         if r is None:
                             continue
-                        payload = json.dumps({
-                            'source': 'kazumi:' + r['pluginName'], 'name': r['pluginName'],
-                            'list': r.get('data', []),
-                            'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
-                            'captcha': r.get('captcha') or False,
-                            'captchaUrl': r.get('captchaUrl', ''),
-                            'msg': r.get('msg', ''),
-                        }, ensure_ascii=False)
+                        payload = _payload_of(r)
+                        # 单源结果落缓存 + 登记索引；error 不落缓存（瞬时故障
+                        # 不该冻结进重放）。写缓存绝不影响推送主链路。
+                        if not r.get('error'):
+                            _kazumi_stream_cache_put_source(word, fkey, r['pluginName'], payload)
                         yield f'data: {payload}\n\n'
+                    complete = True
+                except GeneratorExit:
+                    raise  # 客户端断连：交给 finally 清理后照常向外传播
                 except Exception as e:
                     logger.warning('kazumi sse search overall timeout: %s', e)
-            finally:
-                pool.shutdown(wait=False)
+                finally:
+                    pool.shutdown(wait=False)
+                    # 未正常跑完（超时/异常，或客户端断连令生成器中途关闭）：
+                    # 索引里只有中断前完成源的部分结果且无残缺标记，整词失效
+                    # 禁止下次同词请求把「只搜出来几个源」重放成完整答案。
+                    if not complete:
+                        _kazumi_stream_cache_invalidate_word(word, fkey)
+            except GeneratorExit:
+                return
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
@@ -2039,6 +2116,311 @@ def _bangumi_body_ok(do, body):
     return True
 
 
+# ---- Kazumi 规则源缓存（mem_cache 会话级提速） ----
+# 读写全部 try 包裹：mem_cache 预期无异常路径，这里再兜一层，保证缓存层
+# 任何意外都不会影响搜索/章节主链路。
+_KAZUMI_SEARCH_NS = 'kazumi:search'
+_KAZUMI_STREAM_NS = 'kazumi:stream'
+_KAZUMI_CHAPTERS_NS = 'kazumi:chapters'
+
+
+def _kazumi_invalidate_caches(chapters=False):
+    """插件集合 / Cookie 等影响规则源结果的变更点整体失效。
+
+    search（kazumiSearch 全量/单源 body）与 stream（SSE 单源 payload + 整词
+    索引）是两个独立 ns，但都依赖插件集合，任何插件增删/开关/失效判定翻转
+    都得一起清，否则新装规则不会参与检索、已删规则还会被缓存重放。"""
+    try:
+        mem_cache.invalidate(_KAZUMI_SEARCH_NS)
+        mem_cache.invalidate(_KAZUMI_STREAM_NS)
+        if chapters:
+            mem_cache.invalidate(_KAZUMI_CHAPTERS_NS)
+    except Exception:
+        pass
+
+
+def _kazumi_search_cache_key(keyword, plugin_filter):
+    """搜索缓存键：关键词 + 可选单源过滤（单源重查与全量检索分开缓存）。"""
+    return keyword + ('|p:' + plugin_filter if plugin_filter else '')
+
+
+def _kazumi_search_body_cacheable(body):
+    """kazumiSearch 结果是否值得缓存：code==200 且 results 非空、不全是
+    error/captcha。空结果或全失败往往是无插件/瞬时网络故障——缓存住会让
+    同关键词在 TTL 内重搜永远秒回同一份空/错误（对齐 spider 侧非空守卫口径）。"""
+    try:
+        d = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(d, dict) or d.get('code') != 200:
+        return False
+    results = d.get('results')
+    if not isinstance(results, list) or not results:
+        return False
+    return any(isinstance(r, dict) and not (r.get('error') or r.get('captcha'))
+               for r in results)
+
+
+def _cached_kazumi_search(form, builder):
+    """kazumiSearch TTL 缓存包装（语义对齐 _cached_bangumi）。
+
+    命中直接返回缓存 body；?refresh=1 跳过读但仍回写；只缓存成功且非空/
+    非全失败的最终 JSON（见 _kazumi_search_body_cacheable），builder 抛
+    异常时不写缓存。返回 (status, body)。"""
+    keyword = form.get('keyword', '')
+    plugin_filter = form.get('plugin', '').strip()
+    if not keyword:
+        return builder()
+    ckey = _kazumi_search_cache_key(keyword, plugin_filter)
+    refresh = _form_flag(form, 'refresh')
+    if not refresh:
+        try:
+            cached = mem_cache.get_value(_KAZUMI_SEARCH_NS, ckey)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return 200, cached
+    status, body = builder()
+    try:
+        if status == 200 and _kazumi_search_body_cacheable(body):
+            mem_cache.set_value(_KAZUMI_SEARCH_NS, ckey, body)
+    except Exception:
+        pass
+    return status, body
+
+
+def _kazumi_stream_filters_key(tag, year, sort):
+    """SSE 流缓存的筛选指纹：tag/year/sort 会真实注入规则搜索，必须参与缓存键，
+    否则同 word 不同筛选会互相串结果（重放出未筛选/别筛选的数据）。"""
+    return '|'.join([str(tag or ''), str(year or ''), str(sort or '')])
+
+
+def _kazumi_stream_index_key(word, fkey):
+    return 'stream-index|%s|%s' % (word, fkey)
+
+
+def _kazumi_stream_payload_key(word, fkey, plugin_name):
+    return 'stream|%s|%s|%s' % (word, fkey, plugin_name)
+
+
+def _kazumi_stream_cache_put_source(word, fkey, plugin_name, payload_json):
+    """SSE 流：单源结果写缓存 + 登记进整词索引（供下次整词重放）。
+
+    fkey 是筛选指纹（见 _kazumi_stream_filters_key）。error 结果由调用方
+    不落缓存——瞬时故障不该被冻结进重放；该源缺失时重放补发终态占位
+    （见 _kazumi_stream_missing_names），下次整词检索重新查源补齐。
+
+    索引用 mem_cache.mutate 锁内原子追加：两个同词并发流各自
+    get→append→set 交错时，后写者会以自己看到的旧索引覆盖对方刚登记的
+    源——payload 都在但索引丢名，该源在 TTL 内从重放里静默消失。"""
+    try:
+        mem_cache.set_value(_KAZUMI_STREAM_NS, _kazumi_stream_payload_key(word, fkey, plugin_name),
+                            payload_json)
+
+        def _append_index(old_raw):
+            names = []
+            if old_raw:
+                try:
+                    loaded = json.loads(old_raw)
+                    if isinstance(loaded, list):
+                        names = [n for n in loaded if isinstance(n, str)]
+                except ValueError:
+                    names = []
+            if plugin_name not in names:
+                names.append(plugin_name)
+            return json.dumps(names, ensure_ascii=False)
+
+        mem_cache.mutate(_KAZUMI_STREAM_NS, _kazumi_stream_index_key(word, fkey), _append_index)
+    except Exception:
+        pass
+
+
+def _kazumi_stream_cache_invalidate_word(word, fkey):
+    """清除整词流缓存（payload + 索引）。
+
+    流超时/异常中断时调用：中断前完成的源已落缓存但结果集残缺且无标记，
+    留着会让下次同词请求把「只搜出来几个源」当完整答案重放整个 TTL。"""
+    try:
+        mem_cache.invalidate_prefix(_KAZUMI_STREAM_NS, 'stream|%s|%s|' % (word, fkey))
+        mem_cache.delete_value(_KAZUMI_STREAM_NS, _kazumi_stream_index_key(word, fkey))
+    except Exception:
+        pass
+
+
+def _kazumi_stream_missing_names(cached_payloads, plugin_names):
+    """重放集合相对当前插件集还缺哪些源名。
+
+    上次检索中 error/超时/被中断的源不落缓存，重放若不补齐，前端对应卡片
+    （初始 pending）永远收不到 payload、永久停在「检索中」。"""
+    seen = set()
+    for payload in cached_payloads or []:
+        try:
+            name = json.loads(payload).get('name')
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(name, str):
+            seen.add(name)
+    return [n for n in plugin_names if n not in seen]
+
+
+def _kazumi_stream_cached_payloads(word, fkey):
+    """整词缓存重放：索引存在则按登记顺序取各单源 payload，缺失的跳过。
+
+    返回 payload 字符串列表；索引不存在返回 None（走正常并发搜索）。
+    索引在而 payload 全部缺失（过期/LRU 淘汰错位）时返回空列表——调用方
+    必须把空列表视作 miss 回退网络，绝不能只发 done 让用户看到假「无结果」。"""
+    try:
+        raw = mem_cache.get_value(_KAZUMI_STREAM_NS, _kazumi_stream_index_key(word, fkey))
+        if not raw:
+            return None
+        names = json.loads(raw)
+        if not isinstance(names, list):
+            return None
+        payloads = []
+        for name in names:
+            if not isinstance(name, str):
+                continue
+            cached = mem_cache.get_value(_KAZUMI_STREAM_NS,
+                                         _kazumi_stream_payload_key(word, fkey, name))
+            if cached:
+                payloads.append(cached)
+        return payloads
+    except Exception:
+        return None
+
+
+def _kazumi_chapters_cache_key(plugin_name, src):
+    """章节缓存键：插件名 + 源地址（同插件不同源互不影响）。"""
+    return '%s|%s' % (plugin_name, src)
+
+
+def _cached_kazumi_chapters(form, plugin_name, src, builder):
+    """kazumiChapters TTL 缓存包装：只缓存 code==200 且 roads 非空的 body
+    （空 roads 不缓存，防异常源把空结果钉死 30min）；refresh=1 跳读仍回写。"""
+    ckey = _kazumi_chapters_cache_key(plugin_name, src)
+    refresh = _form_flag(form, 'refresh')
+    if not refresh:
+        try:
+            cached = mem_cache.get_value(_KAZUMI_CHAPTERS_NS, ckey)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return 200, cached
+    status, body = builder()
+    try:
+        if status == 200:
+            d = json.loads(body)
+            if isinstance(d, dict) and d.get('code') == 200 and d.get('roads'):
+                mem_cache.set_value(_KAZUMI_CHAPTERS_NS, ckey, body)
+    except Exception:
+        pass
+    return status, body
+
+
+# ---- Spider 内容 API 会话级内存缓存（home/category/detail/search）----
+# 与 _cached_bangumi 同一套思路：切源往返、翻页重访、重复搜索是高频重复调用，
+# 会话内命中即回，省一次实时查源。TTL 走 mem_cache.DEFAULT_TTL 的 spider:* 表；
+# homeVideoContent 故意不缓存——首页 feed 翻页高频且渲染层已有冷启动缓存，
+# 再缓存一层会让内存占用翻倍。
+
+# do -> mem_cache 命名空间（ns 同时决定默认 TTL，见 mem_cache.DEFAULT_TTL）
+_SPIDER_CONTENT_NS = {
+    'homeContent': 'spider:home',
+    'categoryContent': 'spider:category',
+    'detailContent': 'spider:detail',
+    'searchContent': 'spider:search',
+}
+
+
+def _spider_cache_key(do, site_key, form):
+    """按 do + 站点 key + 该 endpoint 实际生效的参数构造缓存键。
+
+    只纳入真正影响结果的字段（忽略 token/refresh 等无关项），且顺序固定，
+    保证「同语义请求」命中同一条目：extend 用原文（蜘蛛侧自己解析，规范化
+    反而可能改变语义），其余原样取值拼串。searchContent 的 word 与 builder
+    一样取 `word 缺省回退 key` 别名——只传 key 的请求若按空 word 缓存，
+    换关键词会命中同一条目造成跨关键词串结果。
+    """
+    if do == 'searchContent':
+        relevant = (('word', form.get('word', form.get('key', ''))),
+                    ('quick', form.get('quick', '')), ('pg', form.get('pg', '')))
+        parts = ['%s=%s' % (k, v) for k, v in relevant]
+    else:
+        relevant = {
+            'homeContent': ('filter',),
+            'categoryContent': ('tid', 'pg', 'filter', 'extend'),
+            'detailContent': ('ids',),
+        }.get(do, ())
+        parts = ['%s=%s' % (k, form.get(k, '')) for k in relevant]
+    return '%s|%s' % (site_key, '|'.join([do] + parts))
+
+
+def _spider_body_cacheable(do, body):
+    """判定响应是否值得缓存：排除失败包络，且核心列表非空。
+
+    防两类污染：1) 失败包络（带 error 字段，或 code 为明确失败码）——失败
+    结果秒回看似变快，实则把故障冻结成缓存；2) 全空结果——异常源经常对任何
+    参数都返回空列表，缓存住会让该源在 TTL 内「看起来没内容」。
+
+    code 判定用失败黑名单而非成功白名单：jar 蜘蛛对 JVM 输出原样透传
+    （jar_spider._json 不裁字段），TVBox 旧 CMS 约定 code:1 即成功
+    （见 fixtures/q7_offline_fixtures.SAMPLE_JSON_CMS）——白名单 (200, None)
+    会让这类源的全部响应静默不落缓存。失败码口径：0/-1 与 4xx/5xx；无 code
+    的扁平 CatVod 响应属合法成功包络。"""
+    try:
+        d = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(d, dict) or d.get('error'):
+        return False
+    code = d.get('code')
+    if code is not None:
+        try:
+            code_num = int(code)
+        except (TypeError, ValueError):
+            return False  # 非数值 code：包络不明，不缓存
+        if code_num <= 0 or code_num >= 400:
+            return False
+    if do == 'detailContent':
+        return bool(d.get('list'))
+    if do == 'searchContent':
+        return bool(d.get('list'))
+    # home/category 的结构弹性大（list/class/filters 组合），只要有一块非空即收
+    if do in ('homeContent', 'categoryContent'):
+        return bool(d.get('list') or d.get('class'))
+    return False
+
+
+def _cached_spider_content(do, site, form, builder):
+    """Spider 内容 API 的 TTL 缓存包装（语义对齐 _cached_bangumi）。
+
+    命中返回 (200, body) 且跳过 builder——即跳过本次健康度采样，属可接受
+    代价（缓存命中本身说明源最近一次调用是成功的）。?refresh=1 跳过读但仍
+    回写。缓存读写全程不抛错（mem_cache 自身不抛错 + 兜底 except），缓存
+    故障绝不影响主链路；builder 本身保证至多执行一次（避免重复查源）。
+    """
+    ns = _SPIDER_CONTENT_NS.get(do)
+    if ns is None:
+        return builder()
+    try:
+        ckey = _spider_cache_key(do, site.key, form)
+        refresh = _form_flag(form, 'refresh')
+    except Exception:
+        # 键构造意外失败：按 refresh 处理（不读不写），主链路照常
+        ckey, refresh = None, True
+    if not refresh:
+        cached = mem_cache.get_value(ns, ckey)
+        if cached is not None:
+            return 200, cached
+    status, body = builder()
+    try:
+        if status == 200 and ckey and _spider_body_cacheable(do, body):
+            mem_cache.set_value(ns, ckey, body)
+    except Exception:
+        pass
+    return status, body
+
+
 def dispatch_kazumi_action(form):
     """Kazumi 规则引擎端点分发（与 CatVod /action 物理隔离）。"""
     do = form.get('do', '')
@@ -2050,11 +2432,16 @@ def dispatch_kazumi_action(form):
             raw = form.get('json', '')
             plugin = Plugin.from_json(raw)
             ok, msg = kazumi_mgr.add(plugin)
+            if ok:
+                # 插件集合变化：搜索结果与 SSE 单源索引都可能失真，整体失效
+                _kazumi_invalidate_caches(chapters=True)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
 
         if do == 'kazumiRemove':
             name = form.get('name', '')
             ok = kazumi_mgr.remove(name)
+            if ok:
+                _kazumi_invalidate_caches(chapters=True)
             return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
 
         if do == 'kazumiGet':
@@ -2068,6 +2455,8 @@ def dispatch_kazumi_action(form):
             name = form.get('name', '')
             enabled = form.get('enabled', '1').lower() in ('1', 'true', 'yes')
             ok = kazumi_mgr.toggle(name, enabled)
+            if ok:
+                _kazumi_invalidate_caches(chapters=True)
             return (200 if ok else 404), json.dumps({'code': 200 if ok else 404, 'msg': 'ok' if ok else 'not found'}, ensure_ascii=False)
 
         if do == 'kazumiReorder':
@@ -2076,6 +2465,10 @@ def dispatch_kazumi_action(form):
             except Exception:
                 names = []
             ok, msg = kazumi_mgr.reorder(names)
+            if ok:
+                # 顺序影响 SSE 推送次序与整词重放的登记序：清掉流缓存与搜索
+                # 缓存，下次检索按新顺序重建（漏清会让重放继续吐旧序结果集）
+                _kazumi_invalidate_caches()
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
 
         if do == 'kazumiSetMirror':
@@ -2089,6 +2482,8 @@ def dispatch_kazumi_action(form):
                 )
             except ValueError as e:
                 return 400, json.dumps({'code': 400, 'msg': str(e)}, ensure_ascii=False)
+            # 镜像只影响 bangumi 元数据链路，不影响规则搜索；一并清掉更稳
+            _kazumi_invalidate_caches(chapters=True)
             return 200, json.dumps({'code': 200, 'mirror': state}, ensure_ascii=False)
 
         if do == 'kazumiSearch':
@@ -2096,32 +2491,36 @@ def dispatch_kazumi_action(form):
             plugin_filter = form.get('plugin', '').strip()
             if not keyword:
                 return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
-            if plugin_filter:
-                # 单源重查（SourceSheet 别名/手动/重试/验证后重试）：显式指定源名，
-                # 不做无效源过滤——被判失效的源修复后仍可手动重试并翻回 valid
-                plugins = [p for p in kazumi_mgr.enabled_plugins() if p.name == plugin_filter]
-            else:
-                # 全源检索跳过已判定失效的规则（validity == 'invalid'）
-                plugins = list(kazumi_mgr.searchable_plugins())
-            # 空插件列表直接返回（M-23）：max_workers=0 会让线程池抛异常变 500
-            if not plugins:
-                return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
-            results = [None] * len(plugins)
-            def _search_one(idx, plugin):
-                try:
-                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), keyword)
-                    if isinstance(trace, dict) and trace.get('captcha_required'):
-                        results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
-                    else:
-                        data = [vars(it) for it in trace.response.data]
-                        results[idx] = {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
-                        logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(data))
-                except Exception as e:
-                    logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
-                    results[idx] = {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
-            with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
-                pool.map(lambda args: _search_one(*args), enumerate(plugins))
-            return 200, json.dumps({'code': 200, 'results': [r for r in results if r is not None]}, ensure_ascii=False)
+
+            def _build_search():
+                if plugin_filter:
+                    # 单源重查（SourceSheet 别名/手动/重试/验证后重试）：显式指定源名，
+                    # 不做无效源过滤——被判失效的源修复后仍可手动重试并翻回 valid
+                    plugins = [p for p in kazumi_mgr.enabled_plugins() if p.name == plugin_filter]
+                else:
+                    # 全源检索跳过已判定失效的规则（validity == 'invalid'）
+                    plugins = list(kazumi_mgr.searchable_plugins())
+                # 空插件列表直接返回（M-23）：max_workers=0 会让线程池抛异常变 500
+                if not plugins:
+                    return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
+                results = [None] * len(plugins)
+                def _search_one(idx, plugin):
+                    try:
+                        trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), keyword)
+                        if isinstance(trace, dict) and trace.get('captcha_required'):
+                            results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
+                        else:
+                            data = [vars(it) for it in trace.response.data]
+                            results[idx] = {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
+                            logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(data))
+                    except Exception as e:
+                        logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
+                        results[idx] = {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
+                with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
+                    pool.map(lambda args: _search_one(*args), enumerate(plugins))
+                return 200, json.dumps({'code': 200, 'results': [r for r in results if r is not None]}, ensure_ascii=False)
+            # 同关键词重复搜索命中即回，不再全量请求各规则源（会话级 TTL）
+            return _cached_kazumi_search(form, _build_search)
 
         if do == 'kazumiChapters':
             plugin_name = form.get('pluginName', '')
@@ -2129,11 +2528,15 @@ def dispatch_kazumi_action(form):
             plugin = kazumi_mgr.get(plugin_name)
             if not plugin:
                 return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
-            trace = kazumi_engine.query_chapters(plugin.execution_config(), src)
-            return 200, json.dumps({'code': 200, 'roads': [
-                {'name': r.name, 'data': r.data, 'identifier': r.identifier}
-                for r in trace.roads
-            ]}, ensure_ascii=False)
+
+            def _build_chapters():
+                trace = kazumi_engine.query_chapters(plugin.execution_config(), src)
+                return 200, json.dumps({'code': 200, 'roads': [
+                    {'name': r.name, 'data': r.data, 'identifier': r.identifier}
+                    for r in trace.roads
+                ]}, ensure_ascii=False)
+            # 重进详情/切源重访命中即回，不再实时解析章节（会话级 TTL）
+            return _cached_kazumi_chapters(form, plugin_name, src, _build_chapters)
 
         if do == 'kazumiResolve':
             plugin_name = form.get('pluginName', '')
@@ -2165,6 +2568,10 @@ def dispatch_kazumi_action(form):
             if not plugin:
                 return 404, json.dumps({'code': 404, 'msg': 'rule not found or download failed'}, ensure_ascii=False)
             ok, msg = kazumi_mgr.add(plugin)
+            if ok:
+                # 商店安装与手动 kazumiAdd 同效：插件集合变了，搜索/章节缓存一起失效，
+                # 否则新装规则在 TTL 内搜同关键词不出现（像「装了没用」）
+                _kazumi_invalidate_caches(chapters=True)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
 
         # ---- 规则有效性检测 / 批量更新 ----
@@ -2172,6 +2579,9 @@ def dispatch_kazumi_action(form):
             keyword = form.get('keyword', '') or '海贼王'
             names = [n for n in form.get('names', '').split(',') if n] or None
             started = kazumi_mgr.start_validity_check(kazumi_engine, keyword=keyword, names=names)
+            if started:
+                # 失效判定翻转影响 searchable_plugins，只清搜索 ns（章节不受影响）
+                _kazumi_invalidate_caches()
             return (200 if started else 409), json.dumps(
                 {'code': 200 if started else 409, 'started': started}, ensure_ascii=False)
 
@@ -2181,6 +2591,11 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBatchUpdate':
             names = [n for n in form.get('names', '').split(',') if n] or None
             started = kazumi_mgr.start_batch_update(names=names)
+            if started:
+                # 批量更新会改写规则内容（可能换域名/解析结构），章节以
+                # (plugin_name, src) 为键、同名同 src 的旧章节照旧命中会指向
+                # 旧结构 → 搜索与章节一起失效（低频显式操作，保守整清）。
+                _kazumi_invalidate_caches(chapters=True)
             return (200 if started else 409), json.dumps(
                 {'code': 200 if started else 409, 'started': started}, ensure_ascii=False)
 
@@ -2198,6 +2613,8 @@ def dispatch_kazumi_action(form):
             if not domain:
                 return 400, json.dumps({'code': 400, 'msg': 'domain required'}, ensure_ascii=False)
             kazumi_cookies.set_domain_cookies(domain, cookies)
+            # Cookie 直接影响规则源的请求结果（登录/反爬），两 ns 都得清
+            _kazumi_invalidate_caches(chapters=True)
             return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
 
         if do == 'kazumiCookieList':
@@ -2206,6 +2623,7 @@ def dispatch_kazumi_action(form):
 
         if do == 'kazumiCookieClear':
             kazumi_cookies.clear()
+            _kazumi_invalidate_caches(chapters=True)
             return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
 
         # ---- Bangumi 元数据 ----

@@ -246,6 +246,39 @@ async function ensureAnime4k() {
 const ROOT = path.join(__dirname, '..', '..');
 // 打包后 extraResources 放在 resources/ 下，vendor 与 python-backend 均从该处读取
 const RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : ROOT;
+
+// ---- yuki:asset-status 探测缓存（加速设置页/软件启动期反复查询）----
+// 每次全量探测都要 execSync('java -version')（同步阻塞，Windows 上可达几十至几百 ms）并
+// 遍历着色器文件读内容校验。设置页每次打开都会查询，短 TTL 缓存避免重复开销：
+//   - 整个返回对象缓存 60s：60s 内重复查询直接复用（文件存在性等可变因素 60s 后重探）；
+//   - Java 探测结果进程生命周期缓存：装没装 Java 基本不变，成功后永不再 execSync；
+//     失败只缓存 60s（用户可能中途安装 Java，过期允许重试一次）。
+const ASSET_STATUS_TTL = 60 * 1000;
+let assetStatusCache = null;      // { at, result }：整份 yuki:asset-status 返回对象（60s TTL）
+let javaProbe = { done: false, ready: false, at: 0 }; // java 探测结果（done=已定论/ready+at 见下）
+
+/** java -version 同步探测（execSync 阻塞调用收敛到此处，配合上层缓存控制调用频度）。 */
+function probeJavaRuntime() {
+    try {
+        const execSync = require('child_process').execSync;
+        const out = execSync('java -version 2>&1', { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', windowsHide: true });
+        return /version\s+"[^"]+"/.test(String(out || ''));
+    } catch (e) { return false; }
+}
+
+/** Java 就绪状态：成功后进程生命周期内直接复用；失败结果 60s 后允许重试一次（可能中途装了 Java）。
+ *  force=true（手动刷新等显式重探）连成功/失败缓存一并穿透，重新 execSync。 */
+function javaReadyCached(force) {
+    const now = Date.now();
+    if (!force) {
+        if (javaProbe.done && javaProbe.ready) return true;      // 探测成功：长期有效
+        if (javaProbe.done && now - javaProbe.at < ASSET_STATUS_TTL) return javaProbe.ready; // 失败：60s 内沿用
+    }
+    const ready = probeJavaRuntime();
+    javaProbe = { done: true, ready, at: now };
+    return ready;
+}
+
 const LOG_DIR = path.join(os.homedir(), '.yuki', 'logs');
 installConsoleLogger(LOG_DIR);
 const bridge = new PythonBridge(ROOT, RESOURCES_ROOT, {
@@ -770,11 +803,19 @@ app.whenReady().then(() => {
     ipcMain.handle('yuki:win-minimize', () => { if (win) win.minimize(); return { ok: true }; });
     ipcMain.handle('yuki:win-maximize', () => { if (!win) return { ok: false }; if (win.isMaximized()) win.unmaximize(); else win.maximize(); return { ok: true, maximized: win.isMaximized() }; });
     ipcMain.handle('yuki:win-close', () => { if (win) win.close(); return { ok: true }; });
-    // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）
-    ipcMain.handle('yuki:asset-status', () => {
+    // 资产就绪状态查询（设置页展示 ffmpeg/mpv/aria2/Anime4K 是否就绪）。
+    // 带 60s TTL 缓存：60s 内重复查询直接返回上次结果，不再 execSync java / 重扫文件。
+    // force=true 跳过缓存全量重探：用户点「刷新」、刚完成 mpv 下载、或起播发现
+    // 播放器缺失等「状态刚可能变了」的时刻，必须拿到实时结果而非 60s 旧值。
+    // 探测本体是全同步的（execSync/文件系统），单线程主进程中不存在「在途并发」，
+    // 不需要 pending 去重——同步执行完直接落缓存返回即可。
+    ipcMain.handle('yuki:asset-status', (event, force) => {
+        const now = Date.now();
+        if (!force && assetStatusCache && now - assetStatusCache.at < ASSET_STATUS_TTL) return assetStatusCache.result;
         const ffmpegPath = require('./ffmpeg').findFfmpeg();
         // binary 可能被起播拦截清空（文件丢失/spawn 失败），查询资产状态时重探一次，
-        // 避免一次失败后设置页永远显示「未安装」（findMpv 现含 userData\vendor 候选）
+        // 避免一次失败后设置页永远显示「未安装」（findMpv 现含 userData\vendor 候选）。
+        // 缓存语义不变味：整份结果只缓存 60s，过期后这里照常按需重探 mpv.binary。
         if (!mpv.binary) mpv.resetBinary();
         const mpvAvail = mpv.isAvailable();
         const aria2exe = process.platform === 'win32' ? 'aria2c.exe' : 'aria2c';
@@ -793,21 +834,17 @@ app.whenReady().then(() => {
         const anime4kFiles = [...new Set(Object.values(ANIME4K_CHAINS).flat())];
         const anime4kOk = anime4kFiles.every((f) => anime4kFileOk(path.join(RESOURCES_ROOT, 'vendor', 'anime4k', f)));
         const mpvPath = mpv.binary || '';
-        // Java 运行时探测（jar spider 源需要）：复用后端 java_probe 逻辑会在主进程查询后端
-        const hasJava = (() => {
-            try {
-                const execSync = require('child_process').execSync;
-                const out = execSync('java -version 2>&1', { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', windowsHide: true });
-                return /version\s+"[^"]+"/.test(String(out || ''));
-            } catch (e) { return false; }
-        })();
-        return {
+        // Java 运行时探测（jar spider 源需要）：成功后进程内长期缓存，失败 60s 后才重试；force 穿透
+        const hasJava = javaReadyCached(force);
+        const result = {
             ffmpeg: { ready: !!ffmpegPath, downloading: require('./ffmpeg').isEnsuring() },
             mpv: { ready: mpvAvail, path: mpvPath },
             aria2: { ready: !!aria2Path },
             anime4k: { ready: anime4kOk },
             java: { ready: hasJava },
         };
+        assetStatusCache = { at: Date.now(), result };
+        return result;
     });
 
     // mpv 起播资产：lua 快捷键提示脚本 + input.conf 自定义步长（设置页可调），

@@ -1917,7 +1917,7 @@ function initSettingsPanel() {
     refreshCacheSize();
     // 资产就绪状态（ffmpeg / mpv / aria2 / Anime4K），启动时静默加载不弹通知
     refreshAssetStatus(true);
-    $('#asset-refresh').on('click', () => refreshAssetStatus(false));
+    $('#asset-refresh').on('click', () => refreshAssetStatus(false, true));
     // 统一播放器指定：mpv → 内置全功能；VLC/PotPlayer → 作为主播放器（无 mpv 也能播）
     refreshPlayerLine();
     $('#pick_player').on('click', async () => {
@@ -1950,7 +1950,8 @@ function initSettingsPanel() {
             if (r && r.ok) {
                 warnToast(r.already ? '内置播放器已就绪' : '内置播放器安装完成，现在可以播放视频了');
                 refreshPlayerLine();
-                refreshAssetStatus();
+                // 资产刚变化：force 穿透 60s 探测缓存，按钮立即可正确隐藏
+                refreshAssetStatus(false, true);
             } else if (r && r.reason === 'downloading') {
                 warnToast('下载已在进行中，请稍候…');
             } else {
@@ -1965,7 +1966,8 @@ function initSettingsPanel() {
     // mpv 异步启动失败（安装时取消内置播放器后文件缺失、损坏、无权限）：友好提示而非静默
     window.yuki.onPlayerSpawnError(() => {
         warnToast('未检测到播放器，请在 设置 → 组件状态 指定 mpv.exe，或点「下载内置播放器」');
-        refreshAssetStatus();
+        // 播放器文件可能刚丢失/损坏：force 重探，展示真实状态
+        refreshAssetStatus(false, true);
         refreshPlayerLine();
     });
     // 局域网推送到达 → 提示（mpv 已由主进程直接接管播放）
@@ -2313,14 +2315,15 @@ function updateBlockedLine(s) {
 }
 
 /** 资产就绪状态：查询主进程各二进制（ffmpeg/mpv/aria2/Anime4K）是否有
- *  效，渲染为就绪/下载中/缺失图标行。首次进入设置页自动刷新，也可手动刷新。 */
-async function refreshAssetStatus(silent) {
+ *  效，渲染为就绪/下载中/缺失图标行。首次进入设置页自动刷新，也可手动刷新。
+ *  force=true 穿透主进程 60s 探测缓存（手动刷新/资产刚变更后必须拿实时值）。 */
+async function refreshAssetStatus(silent, force) {
     const box = $('#asset-status-list');
     // 不立即清空旧内容，避免刷新时闪烁；仅在无内容时显示查询中
     if (!box.children().length) box.html('<div class="tip-line">查询中…</div>');
     let status;
     try {
-        status = await window.yuki.assetStatus();
+        status = await window.yuki.assetStatus(force);
     } catch (e) {
         box.html('<div class="tip-line" style="color:var(--md-error)">查询失败</div>');
         warnToast('扩展状态查询失败');

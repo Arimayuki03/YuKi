@@ -190,8 +190,8 @@ contextBridge.exposeInMainWorld('yuki', {
     onMpvDownloadState: (cb) => ipcRenderer.on('yuki:mpv-download-state', (_e, info) => cb(info)),
     /** mpv 进程异步启动失败（文件被删/损坏/无权限）：渲染层给友好提示 { code, reason } */
     onPlayerSpawnError: (cb) => ipcRenderer.on('yuki:player-spawn-error', (_e, info) => cb(info)),
-    /** 资产就绪状态：ffmpeg / mpv / aria2 / Anime4K 是否就绪 */
-    assetStatus: () => ipcRenderer.invoke('yuki:asset-status'),
+    /** 资产就绪状态：ffmpeg / mpv / aria2 / Anime4K 是否就绪；force=true 跳过主进程 60s 探测缓存 */
+    assetStatus: (force) => ipcRenderer.invoke('yuki:asset-status', !!force),
     /** SyncPlay 一起看：连接/断开/状态/文件/聊天 */
     syncplay: {
         connect: (opts) => ipcRenderer.invoke('yuki:syncplay-connect', opts),

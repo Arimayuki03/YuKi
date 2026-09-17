@@ -1596,7 +1596,10 @@ const Kazumi = {
         p.status = 'pending';
         this._renderSourceCard(pluginName);
         try {
-            const rsp = await doAction('kazumiSearch', { keyword, plugin: pluginName }, '/kazumi/action');
+            // refresh=1：重试/重新检索/手动检索/验证后重查都是用户显式动作，
+            // 必须实时查源，不能被会话缓存挡住（否则「点了没反应」/验证白做）；
+            // 后端跳过读缓存但仍照常回写。
+            const rsp = await doAction('kazumiSearch', { keyword, plugin: pluginName, refresh: '1' }, '/kazumi/action');
             if (token !== this._dlgToken) return;
             const r = ((rsp && rsp.results) || []).find((x) => x.pluginName === pluginName) || null;
             if (!r) { p.status = 'noresult'; p.results = []; }

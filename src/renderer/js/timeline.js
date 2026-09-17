@@ -7,7 +7,7 @@
  * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, UIState, showLoading, hideLoading */
+/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, localCacheDel, UIState, showLoading, hideLoading */
 
 const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
@@ -18,6 +18,11 @@ const TIMELINE_CACHE_PREFIX = 'timeline::sched::v1::';
 const TIMELINE_TTL_CURRENT = 10 * 60 * 1000;      // 本周在播 10 分钟
 const TIMELINE_TTL_SEASON = 6 * 60 * 60 * 1000;   // 历史季度 6 小时
 const TIMELINE_COL_TTL = 5 * 60 * 1000;           // Bangumi 账号收藏集合内存缓存 5 分钟（My 同步后作废）
+// 账号收藏集合持久缓存（版本键防旧结构污染）：只存纯条目数组（_colCache 的 JSON 快照），
+// 重启应用后首开时间表即可即时上屏过滤集合，免去白屏等待分页拉取。TTL 对齐 popular 30min；
+// My 页同步账号收藏后 invalidateColCache 会连持久层一并作废，保证过滤与账号状态一致。
+const TIMELINE_COL_PERSIST_KEY = 'timeline::collections::v1';
+const TIMELINE_COL_PERSIST_TTL = 30 * 60 * 1000;  // 30 分钟
 
 const Timeline = {
     _inited: false,
@@ -214,15 +219,33 @@ const Timeline = {
                 if (this._colCache && this._colCacheToken === token && Date.now() - this._colCacheTs < TIMELINE_COL_TTL) {
                     all = this._colCache;
                 } else {
-                    for (let offset = 0; offset < 500; offset += 100) {
-                        const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100, offset }, '/kazumi/action');
-                        const items = (rsp && rsp.items) || [];
-                        all = all.concat(items);
-                        if (items.length < 100) break;
+                    // 内存 miss（首次/过期）：回退持久缓存兜底上屏（重启应用后免去首开白屏等待）。
+                    // 持久数据是上次账号收藏的 JSON 快照，恢复时连同 token/ts 一起还原，保持
+                    // _colCacheToken/_colCacheTs 世代校验语义不变（token 变了自然判 miss）。
+                    const persisted = this._loadPersistedColSets();
+                    if (persisted && persisted.token === token && Array.isArray(persisted.items) && persisted.items.length) {
+                        all = persisted.items;
+                        this._colCache = all;
+                        this._colCacheToken = token;
+                        // 内存 age 直接继承持久快照的真实年龄（修复：原取 30min-age 的补数
+                        // 方向倒挂——刚落盘的快照被立即判过期，25min 以上的旧快照反而命中）。
+                        // 新快照（age<5min）在剩余内存寿命内由内存直接命中；age≥5min 则内存
+                        // 判过期，由持久兜底继续零网络上屏，直到 30min 持久 TTL 耗尽才走网络
+                        // 重拉刷新（账号收藏在本机变更时另有 invalidateColCache 双清路径）。
+                        this._colCacheTs = Date.now() - persisted.ageMs;
+                    } else {
+                        for (let offset = 0; offset < 500; offset += 100) {
+                            const rsp = await doAction('kazumiBangumiCollections', { token, limit: 100, offset }, '/kazumi/action');
+                            const items = (rsp && rsp.items) || [];
+                            all = all.concat(items);
+                            if (items.length < 100) break;
+                        }
+                        this._colCache = all;
+                        this._colCacheToken = token;
+                        this._colCacheTs = Date.now();
+                        // 网络拉取成功的同时落盘（内部只缓存非空结果；失败静默不影响主流程）
+                        this._savePersistedColSets(all, token);
                     }
-                    this._colCache = all;
-                    this._colCacheToken = token;
-                    this._colCacheTs = Date.now();
                 }
             }
         } catch (e) { /* Bangumi 拉取失败时仅用本地集合 */ }
@@ -246,17 +269,44 @@ const Timeline = {
      *  _loadColSets 每次都会重读 favorites 存储，天然拿到最新 tag/bangumiId，无需缓存失效。 */
     async refreshAfterFavoriteChange() {
         // 收藏变更（可能含开启自动同步后上传到 Bangumi 账号）：作废账号收藏缓存强制重拉，
-        // 保证过滤集合与账号状态一致；视图普通再进入（refreshCollections）仍走缓存免重复拉。
-        this._colCache = null;
+        // 保证过滤集合与账号状态一致。必须走 invalidateColCache 双清（内存 + 持久层）：
+        // 只清内存的话，持久兜底（token 未变、30min 内）会命中旧快照，跨设备经
+        // Bangumi 同步的服务端变化最长 30 分钟不可见。
+        this.invalidateColCache();
         await this._loadColSets();
         if (this._colAvailable) this._renderGrid();
     },
 
-    /** 作废 Bangumi 账号收藏内存缓存（My 页同步账号收藏后调用，使时间表过滤下次重拉最新）。 */
+    /** 作废 Bangumi 账号收藏内存缓存（My 页同步账号收藏后调用，使时间表过滤下次重拉最新）。
+     *  持久层存的是同一份账号收藏快照，须一并删除——否则重启后持久兜底仍用同步前的旧数据过滤。 */
     invalidateColCache() {
         this._colCache = null;
         this._colCacheToken = '';
         this._colCacheTs = 0;
+        // cache.js 未加载的测试沙箱环境静默降级
+        if (typeof localCacheDel === 'function') {
+            try { localCacheDel(TIMELINE_COL_PERSIST_KEY); } catch (e) { /* 缓存失败不影响主流程 */ }
+        }
+    },
+
+    /** 读账号收藏持久缓存：返回 { items, token, ageMs } 或 null（未命中/过期/损坏/缓存层不可用）。
+     *  只信 cache.js TTL 层的过期判定；token 一并校验（调用方还需与当前 token 比对，防换号串数据）。 */
+    _loadPersistedColSets() {
+        if (typeof localCacheGet !== 'function') return null;
+        try {
+            const d = localCacheGet(TIMELINE_COL_PERSIST_KEY);
+            if (!d || typeof d !== 'object' || !Array.isArray(d.items) || !d.items.length) return null;
+            const ageMs = Math.max(0, Date.now() - Number(d.ts) || 0);
+            if (ageMs > TIMELINE_COL_PERSIST_TTL) return null;
+            return { items: d.items, token: String(d.token || ''), ageMs };
+        } catch (e) { return null; }
+    },
+
+    /** 写账号收藏持久缓存（只缓存成功非空结果；失败静默——缓存是优化，不影响主流程）。 */
+    _savePersistedColSets(items, token) {
+        if (typeof localCacheSet !== 'function') return;
+        if (!Array.isArray(items) || !items.length) return; // 只缓存成功非空结果，绝不缓存空/错误
+        try { localCacheSet(TIMELINE_COL_PERSIST_KEY, { ts: Date.now(), token: String(token || ''), items }, TIMELINE_COL_PERSIST_TTL); } catch (e) { /* ignore */ }
     },
 
     /** 合并本地收藏（records.js favorites）里带 bangumiId 的项到过滤集合，按 tag 归类。

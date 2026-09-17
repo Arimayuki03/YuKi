@@ -26,6 +26,12 @@ STAGES = [
     ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('webdav-conn', [PY, os.path.join(HERE, 'test_webdav_conn.py')]),
     ('cache', [PY, os.path.join(HERE, 'test_cache_store.py')]),
+    # 会话内 TTL 内存缓存底座（spider 内容 / kazumi 搜索章节共用）
+    ('mem-cache', [PY, os.path.join(HERE, 'test_mem_cache.py')]),
+    # spider 内容 API 会话级缓存：key 规范化 / 可缓存判定 / 命中回写语义
+    ('spider-content-cache', [PY, os.path.join(HERE, 'test_spider_content_cache.py')]),
+    # Kazumi 规则源搜索/章节的会话缓存（复用 mem_cache 底座）
+    ('kazumi-cache', [PY, os.path.join(HERE, 'test_kazumi_cache.py')]),
     # RM-4：playerContent 解析结果持久缓存（跨重启跳过查源 + 失效重解析）
     ('play-cache', [PY, os.path.join(HERE, 'test_play_cache.py')]),
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),

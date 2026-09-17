@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import hoststate
+import mem_cache
 from site_manager import Site
 from js_spider import make_js_spider_class
 from runtime.errors import RuntimeError as RuntimeContractError, error_from_exception, redact_sensitive
@@ -1116,6 +1117,18 @@ class ConfigManager:
                 s.runner.destroy()
             except Exception:
                 pass
+        # 站点热替换后，旧站点的内容缓存全部失效：spider:* 各 ns 逐个清理
+        # （不用 clear_all，避免把 kazumi 等与站点配置无关的命名空间连带清掉）。
+        # 时机在旧 runner 销毁之后：已在途的旧请求若在销毁前完成，builder 回写
+        # 的旧内容会先随销毁一起失效；若提前清理，在途回填会让旧配置内容以
+        # 新站点 key 的名义存活整个 TTL。
+        # 已知残留窗口（接受，不闭环）：runner.destroy() 不取消在途 spider 调用
+        # （cms_spider.destroy 为空实现、jar destroy 仅 spider 级清理），销毁后
+        # 才完成的旧请求 builder 仍可能以旧内容回写到清理后的 ns（同站点 key），
+        # 存活至 TTL 到期。窗口=单个在途请求 × 低频显式热替换，代际键/在途
+        # 取消属过度设计。
+        for ns in ('spider:home', 'spider:category', 'spider:detail', 'spider:search'):
+            mem_cache.invalidate(ns)
         # 回收新配置不再引用的 JVM 桥（同 jar 复用，换掉的才关停）
         new_bridge_ids = set()
         for s in self.sites.sites:
