@@ -106,6 +106,16 @@ function escHtml(s) {
 }
 
 /**
+ * data-* 反查选择器值的转义约定（P3-17）：
+ * - 写入侧：data-x="escHtml(原始值)" —— HTML 属性内安全，DOM 读取时实体解码回原始值；
+ * - 反查侧：querySelector/find 中用 `data-x="${CSS.escape(原始值)}"` —— 必须传
+ *   原始值而非 escHtml 后的值，才能与 DOM 解码后的属性值匹配；CSS.escape 同时
+ *   处理 \ 、] 与引号，避免未转义字符构成非法选择器。消费点：search.js
+ *   _renderKazumiCaptcha、kazumi.js _applyBangumiColState。
+ * Chromium 原生支持 CSS.escape（浏览器全局，无需引入跨文件辅助函数）。
+ */
+
+/**
  * 卡片标题限字（T74）：超长标题粗截断为 max 字符（完整标题保留在 title 悬浮提示）。
  * 仅为 DOM 长度保险（避免过长串进入后续精确截断），不再承担视觉省略——
  * 精确的两行截断 + '…' 由 fitVodTitle 在网格渲染后按实际列宽完成。
@@ -311,7 +321,8 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
  * 拦截失效。捕获阶段桥接：解析属性表达式 → 调用同名全局回调。参数支持 '字符串' /
  * "字符串" / 数字 / 裸标识符（如 currentRoot —— panels.js 闭包内 let，window 上
  * 不可见；本地文件场景按条目相对路径（表达式首参）的父目录换算还原，即主进程
- * path.dirname 的前端等价）。表达式非法或回调缺失时拒绝执行（fail-closed）。
+ * path.dirname 的前端等价）。函数名必须在显式白名单内（见 _cspFnWhitelist，新增
+ * 消费点须显式加入）；表达式非法、回调缺失或不在白名单时拒绝执行（fail-closed）。
  * 测试沙箱无 DOM 时静默跳过。
  */
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
@@ -416,9 +427,24 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
         }
         return a;
     };
+    // 桥接可调用的全局函数名白名单：枚举当前全部消费点（panels.js 本地文件板块的
+    // 动态插值内联事件——goParent/enterDir/selectFile/pickRoot 与右键删除确认；
+    // 路径运行时拼接，进不了 CSP 静态哈希白名单，是桥接唯一实际执行的形态）。
+    // 注意：新增消费点必须显式加入此表，否则桥接拒绝执行（fail-closed）并告警；
+    // 静态哈希放行的表达式（closeDialog/pushFile 等）由浏览器原生执行，不经此处。
+    const _cspFnWhitelist = new Set([
+        'goParent', 'enterDir', 'selectFile', 'pickRoot',
+        'showDelFileDialog', 'showDelFolderDialog',
+    ]);
     const _cspRun = (host, expr, event) => {
         const m = expr.match(/^[\s\n]*([A-Za-z_$][\w$]*)\s*\(([\s\S]*)\)[\s\S]*$/);
-        if (!m || typeof window[m[1]] !== 'function') return false;
+        if (!m) return false;
+        // 仅放行显式白名单内的全局函数（eval/setTimeout 等危险全局一律拒绝）
+        if (!_cspFnWhitelist.has(m[1])) {
+            console.warn('[csp-bridge] 拒绝非白名单函数:', m[1]);
+            return false;
+        }
+        if (typeof window[m[1]] !== 'function') return false;
         const rawArgs = _cspParseArgs(m[2]);
         // 表达式首参字符串即条目相对路径（panels.js 本地文件模板约定），
         // 供 currentRoot（=该条目父目录）换算

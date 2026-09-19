@@ -263,7 +263,7 @@ class TestQuarkPan(unittest.TestCase):
         handler.send_header = lambda key, value: handler.events.append(('header', key, value))
         handler.end_headers = lambda: handler.events.append(('end',))
         handler._stream_forward = (
-            lambda url, headers, head_only, refresh=None:
+            lambda url, headers, head_only, refresh=None, valid_token='':
             handler.events.append(('stream', url)))
 
         with patch('pan.registry.registry.get', return_value=provider), \

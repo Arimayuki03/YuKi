@@ -636,7 +636,9 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             if (!list.length) {
                 if (this._selectMode) this.toggleSelectMode(); // 列表空时退出选择模式
                 $(`#${viewName}-pager`).empty();
-                grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : emptyTip}</div>`);
+                // P3-18：_q/_tag/emptyTip 当前均为静态字面量或本地输入回显，
+                // 统一转义插值不改行为，仅堵「外部数据流入 emptyTip」的回归源
+                grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
                 return;
             }
             // 客户端分页（T39）：每页条数取本页单独设置（收藏/历史各自一项，默认 20），超过即出底部分页器

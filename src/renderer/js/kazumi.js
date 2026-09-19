@@ -1127,17 +1127,21 @@ const Kazumi = {
         } catch (e) { return null; }
     },
 
-    /** 查询并回填详情页/弹窗里某 subject 的 Bangumi 收藏状态（高亮对应按钮）。 */
+    /** 查询并回填详情页/弹窗里某 subject 的 Bangumi 收藏状态（高亮对应按钮）。
+     *  P3-17：data-id 写入侧是 escHtml(原始值)（HTML 属性内安全），DOM 解码后的
+     *  属性值即原始值；反查选择器必须用 CSS.escape(原始值) 才与之匹配——拼 escHtml
+     *  后的串会在 id 含 &/'/"/<> 时失配，且未转义 \ 与 ] 直接构成非法选择器。 */
     async _applyBangumiColState(subjectId) {
         const col = await this.getBangumiCollection(subjectId);
-        const wrap = $(`.kazumi-col-btns[data-id="${subjectId}"]`);
+        const sel = CSS.escape(String(subjectId));
+        const wrap = $(`.kazumi-col-btns[data-id="${sel}"]`);
         if (!wrap.length) return;
         wrap.find('.kazumi-col-btn').removeClass('active');
         // type 可能为数字或字符串（不同 API/镜像响应形态）；统一 Number 归一，
         // 否则字符串 type 会走 -1 分支导致设置成功后按钮不高亮，用户误判为「失败」。
         const t = col ? Number(col.type) : NaN;
         const cur = Number.isFinite(t) ? t : -1;
-        wrap.find(`.kazumi-col-btn[data-type="${cur}"]`).addClass('active');
+        wrap.find(`.kazumi-col-btn[data-type="${CSS.escape(String(cur))}"]`).addClass('active');
     },
 
     /** 检测规则有效性：后台并发搜索测试关键词，标记 valid/invalid。 */
@@ -1405,15 +1409,59 @@ const Kazumi = {
     /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。
      *  迁移到 localStorage 持久缓存（cache.js），重启仍即时上屏；纳入设置页「清理缓存」。 */
     _bgmInfoCacheKey(subjectId) { return 'detail::bgminfo::v1::' + String(subjectId); },
+    /**
+     * Bangumi info 净化（安全审查 P2-3 放大项）：后端对 Bangumi 镜像响应原样透传、
+     * 无字段校验，恶意镜像可借 info 携带注入 payload；此缓存写入 localStorage 存
+     * 30 分钟，切回官方源后恶意内容仍会短暂回灌渲染。持久化前按字段白名单净化：
+     * 只保留渲染链路实际消费的字段，字符串字段存原文（所有渲染消费点均经 escHtml
+     * 或 stripHtml，此处转义会双重转义），数值字段一律 Number 归一（字符串形态的
+     * payload 直接丢失），未知字段丢弃。读写两侧都过净化：读侧兜底旧版本写入的
+     * 未净化缓存条目。
+     */
+    _sanitizeBangumiInfo(info) {
+        if (!info || typeof info !== 'object') return null;
+        const str = (v) => (v == null ? '' : String(v));
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+        const images = (info.images && typeof info.images === 'object') ? info.images : {};
+        const rating = (info.rating && typeof info.rating === 'object') ? info.rating : {};
+        const count = (rating.count && typeof rating.count === 'object') ? rating.count : {};
+        const out = {
+            id: num(info.id),
+            name: str(info.name),
+            name_cn: str(info.name_cn),
+            date: str(info.date),
+            air_date: str(info.air_date),
+            platform: str(info.platform),
+            type_name: str(info.type_name),
+            summary: str(info.summary),
+            images: {},
+            rating: { score: num(rating.score), total: num(rating.total), rank: num(rating.rank), count: {} },
+            tags: [],
+        };
+        for (const k of ['large', 'common', 'medium', 'small', 'grid']) {
+            if (images[k]) out.images[k] = str(images[k]);
+        }
+        for (let i = 1; i <= 10; i++) {
+            const v = num(count[i] != null ? count[i] : count[String(i)]);
+            if (v > 0) out.rating.count[i] = v;
+        }
+        if (Array.isArray(info.tags)) {
+            for (const t of info.tags.slice(0, 64)) {
+                if (t && typeof t === 'object' && t.name) out.tags.push({ name: str(t.name), count: num(t.count) });
+                else if (t && typeof t !== 'object' && str(t).trim()) out.tags.push(str(t));
+            }
+        }
+        return out;
+    },
     async bangumiInfo(subjectId) {
         const key = String(subjectId);
         if (key && typeof localCacheGet === 'function') {
-            try { const hit = localCacheGet(this._bgmInfoCacheKey(key)); if (hit) return hit; } catch (e) { /* ignore */ }
+            try { const hit = this._sanitizeBangumiInfo(localCacheGet(this._bgmInfoCacheKey(key))); if (hit && hit.id) return hit; } catch (e) { /* ignore */ }
         }
         try {
             const rsp = await doAction('kazumiBangumiInfo', { id: subjectId }, '/kazumi/action');
-            const info = (rsp && rsp.info) || null;
-            if (info && key && typeof localCacheSet === 'function') {
+            const info = this._sanitizeBangumiInfo((rsp && rsp.info) || null);
+            if (info && info.id && key && typeof localCacheSet === 'function') {
                 try { localCacheSet(this._bgmInfoCacheKey(key), info, 30 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
             }
             return info;
@@ -1870,7 +1918,7 @@ const Kazumi = {
                     <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
                     ${summary ? `<div class="kazumi-bangumi-summary">${escHtml(summary)}…</div>` : ''}
                     <div class="kazumi-bangumi-actions">
-                        <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-detail" data-id="${info.id}">查看详情</button>
+                        <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-detail" data-id="${escHtml(String(info.id))}">查看详情</button>
                     </div>
                 </div>
             </div>`;
@@ -1982,7 +2030,7 @@ const Kazumi = {
         // Bangumi 收藏状态按钮（仿 Kazumi CollectButton，点击即同步）
         html += `<div class="kazumi-bangumi-colrow">
             <span class="tip-line pad0">Bangumi 收藏（点击即同步）</span>
-            <div class="kazumi-col-btns" data-id="${info.id}">
+            <div class="kazumi-col-btns" data-id="${escHtml(String(info.id))}">
                 <button class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
                 <button class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
                 <button class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
@@ -2507,12 +2555,16 @@ Kazumi.imageSearch = async function (imageFile) {
  * 设置同步排除项：不参与「设置同步」上传/覆盖。
  * - favorites/history/watchStats：各自独立文件，由子开关单独控制；
  * - webDavUrl/Username/Password：凭据不随快照走，避免覆盖本机 WebDAV 配置；
+ * - bangumiToken/dandanAppSecret：凭据类键（与主进程 settings.js SENSITIVE_KEYS
+ *   同级别），同步到远端 WebDAV 即把账号凭据明文交给服务器管理员，绝不随快照走；
  * - cacheDir/dlDir/wallpaper：本机绝对路径，跨设备无意义；
  * - settingsCat：纯本机界面记忆。
+ * - webDavRestoreBackup：恢复前的本机备份快照，体积大且仅本机有意义
  */
 const WEBDAV_SETTINGS_EXCLUDE = new Set([
     'favorites', 'history', 'watchStats',
     'webDavUrl', 'webDavUsername', 'webDavPassword',
+    'bangumiToken', 'dandanAppSecret',
     'cacheDir', 'dlDir', 'wallpaper', 'settingsCat',
     'webDavRestoreBackup', // 恢复前的本机备份快照，体积大且仅本机有意义
 ]);
@@ -2525,6 +2577,43 @@ Kazumi._webdavSettingsSnapshot = function (s) {
     }
     return snap;
 };
+
+/**
+ * 「从云端恢复」的设置键允许表（P2-5）：只恢复纯数据键——播放/界面偏好与
+ * 观看辅助数据，跨设备迁移动作本来就要的就是这些。显式排除（默认拒绝）：
+ * - 凭据：bangumiToken/dandanAppSecret/dandanAppId（与上传侧排除表同级别）；
+ * - URL/路径类：lastConfigUrl/configHistory（启动自动重载/历史直连的配置源，
+ *   静默恢复改写即加载恶意源）、probeSourceUrl（lastConfigUrl 的仓标识副本）、
+ *   proxyUrl/proxyTestUrl、cacheDir/dlDir/wallpaper（本机绝对路径）、
+ *   webDav* 本组自引用键（避免恢复过程改写正在使用的同步配置）、
+ *   bangumiMirrorRoot（镜像域名，恢复后会话直连攻击者域名）；
+ * - 本机态：settingsCat/webDavRestoreBackup（只增不减的本地备份）。
+ * 新增跨设备可迁移的偏好键时须显式加入此表。
+ */
+const WEBDAV_RESTORE_ALLOWED = new Set([
+    // 观看行为
+    'resumePos', 'autoNext', 'autoLineFallback', 'autoUpdate', 'updateNotify',
+    'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'simulDownload', 'hlsAdFilter',
+    'mediaProbe', 'anime4k', 'anime4kMode', 'bgPlay', 'incognito', 'errorToast',
+    // 播放器偏好
+    'playerVolume', 'playerSpeed', 'playerAlang', 'playerSlang', 'playerHotkeys',
+    // 界面/外观（不含 wallpaper：本机绝对路径）
+    'theme', 'customTheme', 'colorMode', 'fontSize', 'textSize', 'textColor',
+    'glass', 'animEnabled', 'wallpaperDim', 'wallpaperAdjust', 'useMisansFont',
+    'navCollapsed', 'startupView', 'closeAction', 'systemTitleBar',
+    'uiStateMemory',
+    // 数据/探针纯数据键
+    'blockedReason', 'blockedSites', 'probedSites', 'probedAt', 'probeFp',
+    'probeFailStreak', 'lastSourceMap', 'recentWatches', 'watchStatsEnabled',
+    'sourceAutoDetect', 'catvodBgmMatch', 'legacyParser', 'customLives',
+    'liveProbeCache', 'enableBangumiProxy', 'enableGitProxy',
+    // 各列表页每页条数
+    'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive',
+    'pageSizePopular', 'pageSizeSearch',
+    // Bangumi 同步偏好（仅开关，token 绝不恢复）
+    'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
+    'bangumiProgressSync', 'bangumiSyncPriority',
+]);
 
 /** WebDAV 同步：上传收藏/历史/规则/设置/观看统计到远程；按子开关决定包含哪些数据。
  *  webDavSslSkip 开启时通知后端跳过证书校验（自签名服务器）；
@@ -2594,9 +2683,14 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
             }
             let needRestartHint = false;
             if (d.settings) {
-                // 设置快照逐键写回（云端文件本身已剔除排除项，这里再兜底过滤一次）
+                // 设置快照逐键写回。P2-5：改显式允许表——云端快照是攻击者可控的
+                // 数据源（任何拿到 WebDAV 账号的人都能改写），此前「仅剔除排除项」
+                // 意味着新出现的 URL/路径/开关类键默认放行；启动 5s 静默恢复
+                // （scheduleWebdavStartupPull）走同一入口，可无感改写 lastConfigUrl
+                // 等键（下次启动自动加载恶意配置源）。只恢复纯数据键：凭据、URL/
+                // 路径、以及不在表内的未知键一律不落本机（默认拒绝）。
                 for (const [key, val] of Object.entries(d.settings)) {
-                    if (WEBDAV_SETTINGS_EXCLUDE.has(key)) continue;
+                    if (!WEBDAV_RESTORE_ALLOWED.has(key)) continue;
                     await window.yuki.settingsSet(key, val);
                     if (['playerHotkeys', 'proxyEnable', 'proxyUrl', 'panFastPath'].indexOf(key) >= 0) needRestartHint = true;
                 }
@@ -2695,9 +2789,15 @@ Kazumi.webdavTestUI = async function () {
  * 启动时从云端拉取：延迟 5 秒静默执行一次「从云端恢复」（多设备场景先取云端数据）。
  * 生效条件：主开关 + 启动拉取开关均已开启且已保存地址；读持久化设置而非 DOM。
  * 失败仅 toast 提示一次，不影响正常使用，也不重试（避免启动期网络未就绪时反复报错）。
+ * P3-24：timer id 存 _webdavStartupPullTimer——本函数在每次 init 都会被调用一次，
+ * 游离 timer 会在 5s 窗口内重复触发静默恢复（覆盖用户刚改完的本机数据）；
+ * 重复调度前先清掉旧的，避免叠加。
  */
+Kazumi._webdavStartupPullTimer = null;
 Kazumi.scheduleWebdavStartupPull = async function () {
-    setTimeout(async () => {
+    if (this._webdavStartupPullTimer) { clearTimeout(this._webdavStartupPullTimer); this._webdavStartupPullTimer = null; }
+    this._webdavStartupPullTimer = setTimeout(async () => {
+        this._webdavStartupPullTimer = null;
         try {
             const s = (await window.yuki.settingsGet()) || {};
             if (!s.webDavEnable || !s.webDavStartupPull || !s.webDavUrl) return;

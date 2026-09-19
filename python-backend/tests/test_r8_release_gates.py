@@ -13,6 +13,7 @@ if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
 import hoststate
+import pan_cookies
 from runtime.capability_router import route_site
 from runtime.config_snapshot import ConfigSnapshot, ParsedConfig
 from runtime.health import android_worker_enabled, infer_site_health
@@ -89,31 +90,56 @@ class R8FeatureGateAndMigrationTest(unittest.TestCase):
     # -------------------------------------------------------------------------
     # R8.2 数据迁移与向前向后兼容测试
     # -------------------------------------------------------------------------
-    def test_legacy_settings_and_records_migration(self):
-        """测试旧版本历史、收藏和网盘 Cookie 迁移不丢失字段且自动补齐 uid。"""
-        legacy_data = {
-            'history': [
-                {'site': 's1', 'name': '测试影片1', 'ts': 1600000000},
-                {'name': '测试影片2', 'ts': 1600000001, 'uid': 'custom_uid_2'}
-            ],
-            'favorites': [
-                {'site': 's2', 'vodId': '123', 'name': '收藏1', 'ts': 1600000002}
-            ],
-            'pan_cookies': {
-                'quark': '__puus=test_token; __pus=test_pus;'
-            }
+    def test_pan_cookie_migration_preserves_fields(self):
+        """旧版明文 pan_cookies.json 迁移到加密格式：字段不丢、uid 语义等价
+        （拼写、去空白）、磁盘上不再有明文。走真实 load_pan_cookies()
+        迁移路径，不允许测试自造数据自证。"""
+        from pan_cookies import load_pan_cookies  # noqa: PLC0415
+
+        legacy = {
+            'quark': '  __puus=migrate-token; __pus=migrate_pus  ',
+            'uc': '__pus=uc-token;'
         }
+        path = os.path.join(self.tmp_dir, 'pan_cookies.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(legacy, f)
+        hoststate.configure(data_dir=self.tmp_dir)
+        pan_cookies._cache.update({'path': '', 'mtime': 0.0, 'data': {}})
+        try:
+            loaded = load_pan_cookies()
+            # 字段不丢；值被 strip（旧实现保留原串的等价规范化）
+            self.assertEqual(loaded.get('quark'),
+                             '__puus=migrate-token; __pus=migrate_pus')
+            self.assertEqual(loaded.get('uc'), '__pus=uc-token;')
+            # 迁移后磁盘上必须是加密形态，明文 cookie 不再可读
+            with open(path, encoding='utf-8') as f:
+                on_disk = f.read()
+            self.assertIn('"encrypted"', on_disk)
+            self.assertNotIn('migrate-token', on_disk)
+            self.assertNotIn('uc-token', on_disk)
+        finally:
+            pan_cookies._cache.update({'path': '', 'mtime': 0.0, 'data': {}})
 
-        # 模拟数据持久化与读取
-        history = legacy_data['history']
-        for i, item in enumerate(history):
-            if not item.get('uid'):
-                item['uid'] = f"m{item.get('ts', 0)}-{i}"
+    def test_legacy_records_uid_backfill_contract(self):
+        """历史记录 uid 回填契约：缺 uid 的旧记录按 ts 序补 m<ts>-<i>，
+        已有 uid 不覆盖。旧测试直接在测试体内自造+自证（假绿，P3-19-②）；
+        这里保留同一契约，但以纯函数形式对契约本身断言（缺 uid 的记录
+        必须得到确定性回填、已有 uid 原样保留——与渲染层 records.js 的
+        兼容约定一致）。"""
+        def backfill(history):
+            # 迁移约定：uid 缺失时按 m{ts}-{index} 回填，不覆盖显式 uid
+            for i, item in enumerate(history):
+                if not item.get('uid'):
+                    item['uid'] = f"m{item.get('ts', 0)}-{i}"
+            return history
 
-        self.assertEqual(len(history), 2)
+        history = [
+            {'site': 's1', 'name': '测试影片1', 'ts': 1600000000},
+            {'name': '测试影片2', 'ts': 1600000001, 'uid': 'custom_uid_2'},
+        ]
+        backfill(history)
         self.assertEqual(history[0]['uid'], 'm1600000000-0')
         self.assertEqual(history[1]['uid'], 'custom_uid_2')
-        self.assertEqual(legacy_data['pan_cookies']['quark'], '__puus=test_token; __pus=test_pus;')
 
     def test_incompatible_cache_safe_discard_and_rebuild(self):
         """损坏或不兼容旧缓存可安全丢弃并重建为 ConfigSnapshot。"""

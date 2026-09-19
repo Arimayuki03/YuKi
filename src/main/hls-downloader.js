@@ -477,7 +477,12 @@ class HlsDownloader extends EventEmitter {
         return { segments, isEncrypted, totalDuration };
     }
 
-    /** 并发池下载分片到临时目录。单分片失败重试 2 次。 */
+    /** 并发池下载分片到临时目录。单分片失败重试 2 次。
+     *  P2-16：续传时校验已存在分片的完整性——状态里记录了每个分片下载后写入的
+     *  字节数（task._segSizes[index]），期望字节数已知的分片按大小核对；期望大小
+     *  未知（无记录/旧任务残留）的分片一律不信任、重新下载。崩溃/强杀/磁盘满
+     *  残留的截断分片不再被静默复用进合成产物。正常暂停/恢复路径不受影响：
+     *  完整写盘的分片大小有记录，继续时照常命中复用。 */
     async _downloadSegments(task, segments, concurrency) {
         const gen = task._gen || 0;
         const segsDir = task._segsDir;
@@ -485,6 +490,8 @@ class HlsDownloader extends EventEmitter {
         task._totalSegs = segments.length;
         task._downloaded = 0;
         task._segBytes = 0;
+        // 每分片写入字节数（index → 字节）：本进程内写盘时记录；续传完整性校验依据
+        if (!(task._segSizes instanceof Map)) task._segSizes = new Map();
         const headers = { 'User-Agent': 'Mozilla/5.0', ...(task.header || {}) };
         // 速度计算定时器（1s 采样）
         task._speedLastBytes = 0;
@@ -506,13 +513,19 @@ class HlsDownloader extends EventEmitter {
                 if (task.status === 'removed' || task._gen !== gen || failed) return;
                 const seg = segments[idx++];
                 const segFile = path.join(segsDir, `seg-${String(seg.index).padStart(6, '0')}.ts`);
-                // 断点续传（目录迁移/进程重启恢复）：已存在且非空的分片直接计入进度，
-                // 不再重复拉取（分片文件按序号命名，playlist 未变时可安全复用）
+                // 断点续传（目录迁移/进程重启恢复/暂停后继续）：已存在分片先按状态里
+                // 记录的期望字节数校验完整性（P2-16）——大小吻合才计入进度跳过重拉；
+                // 期望大小未知（无记录，如上次进程崩溃/强杀/磁盘满留下的截断分片）
+                // 一律不信任，按未下载处理重新拉取。
                 try {
-                    if (fs.existsSync(segFile) && fs.statSync(segFile).size > 0) {
-                        task._downloaded++;
-                        task.percent = Math.min(99, Math.round(task._downloaded / task._totalSegs * 1000) / 10);
-                        continue;
+                    if (fs.existsSync(segFile)) {
+                        const expected = task._segSizes.get(seg.index);
+                        if (Number.isFinite(expected) && expected > 0
+                            && fs.statSync(segFile).size === expected) {
+                            task._downloaded++;
+                            task.percent = Math.min(99, Math.round(task._downloaded / task._totalSegs * 1000) / 10);
+                            continue;
+                        }
                     }
                 } catch (e) { /* stat 失败按未下载处理 */ }
                 let ok = false;
@@ -524,6 +537,7 @@ class HlsDownloader extends EventEmitter {
                         const buf = Buffer.from(await resp.arrayBuffer());
                         if (task.status === 'removed' || task._gen !== gen || failed) return; // 下载期间被取消/迁移
                         fs.writeFileSync(segFile, buf);
+                        task._segSizes.set(seg.index, buf.length); // 记录期望字节数（续传完整性校验依据，P2-16）
                         task._segBytes += buf.length;
                         ok = true;
                     } catch (e) {

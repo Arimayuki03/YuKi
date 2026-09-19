@@ -330,11 +330,19 @@ class TestServerTokenAttach(unittest.TestCase):
                '&token=tok-xyz')
         self.assertEqual(self._normalize_url(raw), raw)
 
-    def test_non_local_and_do_pan_urls_untouched(self):
+    def test_non_local_urls_untouched_and_do_pan_gets_token(self):
         raw = 'https://example.com/play?url=x'
         self.assertEqual(self._normalize_url(raw), raw)
+        # P1-3：do=pan 通道加 token 门禁后，旧 jar 硬编码的 do=pan 地址
+        # （无 url= 参数）由 _attach_go_proxy_channel_token 统一补 token，
+        # 否则会被新门禁 401（旧断言「do=pan 原样不动」随批次 1 失效）。
         raw2 = 'http://127.0.0.1:9978/proxy?do=pan&site=quark&fileId=f1'
-        self.assertEqual(self._normalize_url(raw2), raw2)
+        out2 = self._normalize_url(raw2)
+        self.assertIn('token=tok-xyz', out2)
+        self.assertIn('do=pan', out2)
+        # 已带 token 的 do=pan 地址不重复附加
+        raw3 = raw2 + '&token=tok-xyz'
+        self.assertEqual(self._normalize_url(raw3), raw3)
 
 
 if __name__ == '__main__':

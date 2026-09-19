@@ -1175,9 +1175,10 @@ const Home = {
         }
     },
 
-    /** 空态占位（含恢复进度提示）：不改动列表状态，只更新网格区文案。 */
+    /** 空态占位（含恢复进度提示）：不改动列表状态，只更新网格区文案。
+     *  P3-18：插值经 escHtml——当前调用点均为静态字面量，转义不改行为，仅堵回归源。 */
     _showGridTip(text) {
-        $('#home-grid').html(`<div class="tip-line">${String(text || '')}</div>`);
+        $('#home-grid').html(`<div class="tip-line">${escHtml(String(text || ''))}</div>`);
     },
 
     /**

@@ -343,6 +343,16 @@ def _request_valid_proxy_token(query, headers):
 _GUARD_CTX = None
 
 
+# P3-14：file_id 可能携带分享令牌片段（分享链接直出的 fid 形态），日志只留
+# 长度 + 前 8 字符，保证排障可辨识的同时不回显完整原文。
+def _redact_file_id(value):
+    try:
+        s = str(value or '')
+    except Exception:
+        return '?'
+    return 'len=%d head=%s' % (len(s), s[:8])
+
+
 def _guard_ctx():
     """惰性缓存 (policy, trust)，免掉热路径（HLS 每分片）的每跳策略构造。
 
@@ -417,6 +427,9 @@ _SAVE_CACHE = {}
 _SHARE_CACHE = {}
 _SHARE_CACHE_TTL = 300
 _SHARE_CACHE_MAX = 512   # C2：条目上限（触顶全清，过期即清）
+# P3-2：ThreadingHTTPServer 多线程下 _SHARE_CACHE 读改写的保护（后果限丢条目，
+# 与 _SAVE_LOCK 同款模式；临界区无嵌套加锁，普通 Lock 即可）。
+_SHARE_CACHE_LOCK = threading.Lock()
 # 转存缓存持久化文件（放用户数据目录，幂等创建）
 _SAVE_CACHE_FILE = None
 # _SAVE_CACHE 条目上限（C2）：超限删最早插入的条目（dict 保序，插入序即淘汰序）。
@@ -591,25 +604,23 @@ def _is_hls_ctype(ctype):
 _HLS_URI_ATTR_RE = re.compile(r'(URI=")([^"]*)(")')
 
 
-def _hls_proxy_wrap(abs_url):
+def _hls_proxy_wrap(abs_url, token=''):
     """分片/子列表/KEY 统一包回本代理 ？url= 转发。
 
     凭据由该分支按夸克/UC 域名白名单注入；嵌套的变体播放列表经同一分支
     会再次被识别为 m3u8 并重写，任意深度都能走通。
-    通道鉴权（#8）：播放 URL 已带有效 token，这里原样带上，避免重写后的
-    分片请求被 ?url= 的 token 门禁拒绝。
+    通道鉴权（#8 / P1-3）：仅在调用方已通过 token 校验时才把宿主 token
+    附到重写后的分片地址上——无条件附加会把主 token 泄露给未经鉴权的
+    do=pan 请求（DNS rebinding / 本机任意进程可达）。token 为空时重写
+    照常进行，分片请求由 ？url= 的 token 门禁按既有语义放行（宿主未配置
+    token 的测试环境）或拒绝。
     """
-    try:
-        import hoststate
-        token = str(hoststate.get_token() or '')
-    except Exception:
-        token = ''
     suffix = '&token=%s' % urllib.parse.quote(token, safe='') if token else ''
     return 'http://127.0.0.1:%d/proxy?url=%s%s' % (
         PORT, urllib.parse.quote(abs_url, safe=''), suffix)
 
 
-def _rewrite_hls_line(line, base_url):
+def _rewrite_hls_line(line, base_url, token=''):
     """重写单行：非标签行=分片/子列表 URI；标签行只改写 URI="..." 属性。
 
     返回 None 表示空行（丢弃）；无法解析为 http(s) 的行原样保留。
@@ -629,17 +640,17 @@ def _rewrite_hls_line(line, base_url):
                 uri = urllib.parse.urljoin(base_url, uri)
             if not uri.lower().startswith(('http://', 'https://')):
                 return m.group(0)  # data: 等非 http URI 不包装
-            return m.group(1) + _hls_proxy_wrap(uri) + m.group(3)
+            return m.group(1) + _hls_proxy_wrap(uri, token) + m.group(3)
 
         return _HLS_URI_ATTR_RE.sub(_sub, line)
     if not stripped.lower().startswith(('http://', 'https://')):
         stripped = urllib.parse.urljoin(base_url, stripped)
     if not stripped.lower().startswith(('http://', 'https://')):
         return line
-    return _hls_proxy_wrap(stripped)
+    return _hls_proxy_wrap(stripped, token)
 
 
-def _rewrite_hls_playlist(base_url, text):
+def _rewrite_hls_playlist(base_url, text, token=''):
     """重写 HLS 播放列表：所有分片/子列表/AES KEY 地址改为经本代理转发。
 
     背景：do=pan 把夸克 v2/play 返回的 m3u8 原文透传给 mpv 时，相对分片
@@ -649,13 +660,13 @@ def _rewrite_hls_playlist(base_url, text):
     """
     out = []
     for line in text.splitlines():
-        rewritten = _rewrite_hls_line(line, base_url)
+        rewritten = _rewrite_hls_line(line, base_url, token)
         if rewritten is not None:
             out.append(rewritten)
     return '\n'.join(out) + '\n'
 
 
-def _send_hls_playlist(self, url, headers, head_only):
+def _send_hls_playlist(self, url, headers, head_only, token=''):
     """整体取回上游 m3u8、重写后回给客户端。返回是否成功。"""
     resp = _fetch(url, headers, 0, None, timeout=30)
     try:
@@ -668,7 +679,7 @@ def _send_hls_playlist(self, url, headers, head_only):
         text = resp.content.decode('utf-8', 'replace')
     finally:
         resp.close()
-    body = _rewrite_hls_playlist(url, text).encode('utf-8')
+    body = _rewrite_hls_playlist(url, text, token).encode('utf-8')
     self.send_response(200)
     self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
     self.send_header('Content-Length', str(len(body)))
@@ -999,12 +1010,16 @@ def _quark_share_play_url(pwd_id, headers, quality=''):
                     return cached_url
                 _SAVE_CACHE.pop(pwd_id, None)
                 _persist_save_cache()
-            sc = _SHARE_CACHE.get(pwd_id)
-            if sc and (now - sc.get('ts', 0)) >= _SHARE_CACHE_TTL:
-                sc = _SHARE_CACHE.pop(pwd_id, None)   # 过期即清（C2：原先只跳过）
-            if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
-                stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
-            else:
+            with _SHARE_CACHE_LOCK:
+                sc = _SHARE_CACHE.get(pwd_id)
+                if sc and (now - sc.get('ts', 0)) >= _SHARE_CACHE_TTL:
+                    sc = _SHARE_CACHE.pop(pwd_id, None)   # 过期即清（C2：原先只跳过）
+                if sc and (now - sc.get('ts', 0)) < _SHARE_CACHE_TTL and sc.get('fid'):
+                    stoken, fid, fid_token = sc['stoken'], sc['fid'], sc['fid_token']
+                    hit = True
+                else:
+                    hit = False
+            if not hit:
                 r = _qpost(
                     'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
                     headers={**headers, 'Content-Type': 'application/json'},
@@ -1035,10 +1050,11 @@ def _quark_share_play_url(pwd_id, headers, quality=''):
                     raise ValueError('share has no video file')
                 fid = str(f.get('fid', ''))
                 fid_token = str(f.get('share_fid_token') or '')
-                if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
-                    _SHARE_CACHE.clear()   # C2：触顶全清（条目均为 300s TTL，代价低）
-                _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
-                                        'fid': fid, 'fid_token': fid_token}
+                with _SHARE_CACHE_LOCK:
+                    if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
+                        _SHARE_CACHE.clear()   # C2：触顶全清（条目均为 300s TTL，代价低）
+                    _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': stoken,
+                                            'fid': fid, 'fid_token': fid_token}
             # 优先分享文件原始 fid 直链（快、不失效）
             url = _quark_v2play(fid, headers, quality)
             if url:
@@ -1074,10 +1090,11 @@ def _quark_share_stoken(pwd_id, headers):
     import json as _json
     import time as _time
     now = _time.time()
-    cached = _SHARE_CACHE.get(pwd_id) or {}
-    if cached.get('stoken') and (now - cached.get('ts', 0)) < _SHARE_CACHE_TTL:
-        return str(cached['stoken'])
-    _SHARE_CACHE.pop(pwd_id, None)
+    with _SHARE_CACHE_LOCK:
+        cached = _SHARE_CACHE.get(pwd_id) or {}
+        if cached.get('stoken') and (now - cached.get('ts', 0)) < _SHARE_CACHE_TTL:
+            return str(cached['stoken'])
+        _SHARE_CACHE.pop(pwd_id, None)
     r = _qpost(
         'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
         headers={**headers, 'Content-Type': 'application/json'},
@@ -1087,11 +1104,12 @@ def _quark_share_stoken(pwd_id, headers):
     if not stoken:
         logger.warning('quark upstream stage=share-token %s', _quark_response_meta(r))
         raise ValueError('share token empty')
-    if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
-        _SHARE_CACHE.clear()
-    _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': str(stoken),
-                            'fid': str(cached.get('fid') or ''),
-                            'fid_token': str(cached.get('fid_token') or '')}
+    with _SHARE_CACHE_LOCK:
+        if len(_SHARE_CACHE) >= _SHARE_CACHE_MAX:
+            _SHARE_CACHE.clear()
+        _SHARE_CACHE[pwd_id] = {'ts': _time.time(), 'stoken': str(stoken),
+                                'fid': str(cached.get('fid') or ''),
+                                'fid_token': str(cached.get('fid_token') or '')}
     return str(stoken)
 
 
@@ -1213,7 +1231,8 @@ def _quark_share_file_play_url(pwd_id, file_id, file_token, headers, quality='',
         except Exception as e:
             last_err = e
             # stoken 可能已失效（分享被重开/会话过期）：清缓存后重申请一次。
-            _SHARE_CACHE.pop(pwd_id, None)
+            with _SHARE_CACHE_LOCK:
+                _SHARE_CACHE.pop(pwd_id, None)
             if attempt == 0:
                 _time.sleep(0.8)
     # 已转存但分享链路失败的最后一档：直接用个人空间 fid 试 v2/play/download
@@ -1437,6 +1456,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         """浏览器来源防御（H-1b）：mpv/requests 发的请求没有 Origin /
         Sec-Fetch-Site 头；恶意网页跨站请求 127.0.0.1（盗流/探测）会带
         非本机 Origin 或 Sec-Fetch-Site: cross-site → 拒绝。"""
+        if not self._host_header_allowed():
+            return True
         origin = self.headers.get('Origin')
         if origin:
             try:
@@ -1448,6 +1469,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if (self.headers.get('Sec-Fetch-Site') or '').strip().lower() == 'cross-site':
             return True
         return False
+
+    def _host_header_allowed(self):
+        """Host 头白名单（P2-1，DNS rebinding 防御）：剥离端口后 hostname
+        必须是 127.0.0.1/localhost。rebinding 攻击的请求 Host 是攻击者域名
+        （浏览器按原域名发 Host），必不匹配；不带 Host 的非浏览器客户端放行，
+        保持 HTTP/1.0 兼容。"""
+        host_header = (self.headers.get('Host') or '').strip()
+        if not host_header:
+            return True
+        try:
+            hostname = urllib.parse.urlsplit('http://%s' % host_header).hostname
+        except ValueError:
+            return False
+        return (hostname or '').lower() in ('127.0.0.1', 'localhost')
 
     def do_GET(self):
         self._handle()
@@ -1524,7 +1559,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
             # FongMi 本地代理协议：网盘分享文件取流（夸克/UC/百度等）
             if do == 'pan':
-                self._handle_pan(q, head_only)
+                # P1-3：do=pan 会自动取用本机网盘 Cookie、触发转存等账号侧
+                # 操作、并回写内嵌 token 的 HLS——与 ？url= 通道同权鉴权。
+                # 播放 URL 本就带 token（jar_spider/proxy_gateway 构造点统一
+                # 附带），不破坏兼容；无 token 的本机任意进程/DNS rebinding
+                # 从此不能再免鉴权取流。
+                if not _request_valid_proxy_token(q, self.headers):
+                    body = b'proxy pan channel requires valid token'
+                    self.send_response(401)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    if not head_only:
+                        self.wfile.write(body)
+                    return
+                self._handle_pan(q, head_only,
+                                 valid_token=next(iter(_request_proxy_tokens(q, self.headers)), ''))
                 return
 
             raw = q.get('url', [''])[0]
@@ -1543,6 +1593,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # 与带 token 接口的传输位置对齐）。播放 URL（JAR Proxy.getUrl /
             # do=pan 重写的 HLS 分片）本就带 token，不破坏兼容；无 token 的
             # 本机任意进程从此不能再借道转发。
+            valid_token = ''
             if not _request_valid_proxy_token(q, self.headers):
                 body = b'proxy url channel requires valid token'
                 self.send_response(401)
@@ -1552,6 +1603,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if not head_only:
                     self.wfile.write(body)
                 return
+            # 校验已通过：本次请求携带的 token 原值供 HLS 重写复用（P1-3）。
+            # 取第一个有效值（query 或 X-Proxy-Token 头均可，与门禁收集一致）。
+            try:
+                valid_token = next(iter(_request_proxy_tokens(q, self.headers)), '')
+            except Exception:
+                valid_token = ''
             # 出网边界（#8）：目标默认放行私网（局域网源兼容）；严格 SSRF
             # 模式（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1）下 loopback/private
             # 一律拒绝，与本机任意进程的转发请求保持同一道闸门。
@@ -1612,9 +1669,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if total is None or total <= 0:
                 # 无长度信息（HLS 等）。m3u8 同样整体取回并重写分片地址——
                 # do=pan 重写过的嵌套变体列表会经 ?url= 回到此处，二次重写
-                # 保证任意深度嵌套的分片都落在代理内。
+                # 保证任意深度嵌套的分片都落在代理内。重写出的分片地址带上
+                # 本次请求已通过校验的 token，避免把宿主主 token 无条件回显。
                 if _is_hls_ctype(ctype):
-                    _send_hls_playlist(self, url, headers, head_only)
+                    _send_hls_playlist(self, url, headers, head_only, token=valid_token)
                     return
                 # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
                 # 不发 Content-Length，按开放区间（不带 Range）直接透传
@@ -1729,7 +1787,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
-    def _handle_pan(self, q, head_only=False):
+    def _handle_pan(self, q, head_only=False, valid_token=''):
         """网盘分享取流：do=pan&site=quark&shareId=&fileId=&fileToken=...
 
         蜘蛛 playerContent 返回该协议 URL（127.0.0.1:<port>/proxy?do=pan...）。
@@ -1804,7 +1862,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     # shareId+fid，PC 侧建不起分享会话，应交回 JAR 解析）。
                     logger.warning(
                         'quark play URL unavailable: share=%s pwd=%s file=%s',
-                        bool(share_id), bool(pwd_id or share_url), file_id[:80])
+                        bool(share_id), bool(pwd_id or share_url), _redact_file_id(file_id))
                     body = b'quark play URL unavailable'
                     self.send_response(502)
                     self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -1827,7 +1885,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     return fresh.url, (fresh.headers or headers)
 
                 self._stream_forward(play.url, play.headers or headers, head_only,
-                                     refresh=refresh_play)
+                                     refresh=refresh_play, valid_token=valid_token)
                 return
             if site != 'quark':
                 self.send_response(400)
@@ -1872,12 +1930,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(502)
                 self.end_headers()
                 return
-            self._stream_forward(url, headers, head_only)
+            self._stream_forward(url, headers, head_only, valid_token=valid_token)
         except _QuarkSaveDenied as e:
             # 转存被夸克明确拒绝：与笼统失败区分，日志与响应体都带语义，
             # 渲染层/排查时能直接定位到「账号转存额度/风控」而非链路故障。
             logger.warning('quark save denied: %s (pwd=%s file=%s)',
-                           e, bool(pwd_id or share_url), file_id[:80])
+                           e, bool(pwd_id or share_url), _redact_file_id(file_id))
             if getattr(self, '_headers_sent', False):
                 self.close_connection = True
                 return
@@ -1903,7 +1961,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _stream_forward(self, url, headers, head_only, refresh=None):
+    def _stream_forward(self, url, headers, head_only, refresh=None, valid_token=''):
         """通用取流转发：探测长度 → 分段并发/单线程 → 写回。
 
         并发上限 8：实测夸克 CDN 8 并发即达带宽峰值（12MB/s），更高并发
@@ -1974,7 +2032,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # 无长度信息（HLS 等）。m3u8 播放列表必须整体取回并重写分片地址：
             # 相对分片按代理基址解析必 404，绝对分片直连 CDN 缺凭据被拒。
             if _is_hls_ctype(ctype):
-                if _send_hls_playlist(self, url, headers, head_only):
+                if _send_hls_playlist(self, url, headers, head_only, token=valid_token):
                     return
             # 其余未知长度流：先发 200 + 探测到的 Content-Type，
             # 不发 Content-Length，按开放区间（不带 Range）直接透传
@@ -2191,10 +2249,14 @@ def stop_go_proxy():
 
 
 def listening_ports():
-    """本模块实际监听的固定端口（供 server 侧限定 token 附加范围）。
+    """本模块实际监听的端口（供 server 侧限定 token 附加范围）。
 
-    只含 PORT + EXTRA_PORTS：ensure_listener 的动态端口由 jar 字节码扫描/
-    播放 URL 按需触发，无法静态枚举，也不在 server._attach_go_proxy_channel_token
-    的白名单语义内（那是给 jar 硬编码的旧通道补 token 用的）。
+    含 PORT + EXTRA_PORTS + ensure_listener 创建的动态端口（_extra_servers）：
+    动态端口服务的是同一批 jar 硬编码通道（字节码里的 127.0.0.1:<port>），
+    server._attach_go_proxy_channel_token 的白名单语义就是给这类 jar 通道补
+    token——动态端口不纳入，走该端口的 jar 播放地址会永远 401（P2-9）。
+    读取在锁内快照，去重后返回（EXTRA_PORTS 与动态端口理论上可重叠）。
     """
-    return [PORT, *EXTRA_PORTS]
+    with _extra_servers_lock:
+        dynamic = list(_extra_servers.keys())
+    return sorted({PORT, *EXTRA_PORTS, *dynamic})

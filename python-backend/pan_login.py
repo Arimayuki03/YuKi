@@ -178,22 +178,28 @@ def _exchange_st(s, st):
     except Exception as e:
         logger.warning('exchange st failed: %s', e)
         return {'status': 'error', 'message': '兑换登录态失败：%s' % str(e)[:80]}
-    # 收集 quark 相关域 Cookie（__puus/__pus/ctoken/_UP_* 等）
+    # 收集夸克/UC 相关域 Cookie（__puus/__pus/ctoken/_UP_* 等）。
+    # P3-24（hy4 P2→P3）：与主分支一致按域名白名单过滤——curl_cffi 会把
+    # 会话期间所有响应域（含重定向途经的第三方域）都落进 cookie jar，
+    # 不过滤会把无关域的 Cookie 一并写进网盘配置。
     parts = []
     try:
-        jar = s.cookies
-        items = jar.items() if hasattr(jar, 'items') else []
+        for cookie in getattr(getattr(s, 'cookies', None), 'jar', []) or []:
+            name = str(getattr(cookie, 'name', '') or '')
+            domain = str(getattr(cookie, 'domain', '') or '').lower().lstrip('.')
+            if name and (domain == 'quark.cn' or domain.endswith('.quark.cn')
+                         or domain == 'uc.cn' or domain.endswith('.uc.cn')):
+                parts.append('%s=%s' % (name, cookie.value))
     except Exception:
-        items = []
-    for name, value in items:
-        if 'quark.cn' in name.lower() or 'uc.cn' in name.lower():
-            parts.append('%s=%s' % (name, value))
-    # curl_cffi cookie 对象形态兜底
+        parts = []
+    # 按名称收集的兜底（旧形态：jar.items() 只有 name→value，无域信息）
     if not parts:
-        for c in getattr(s.cookies, 'cookies', []) or []:
-            name = getattr(c, 'name', '')
-            value = getattr(c, 'value', '')
-            if name:
+        try:
+            items = s.cookies.items() if hasattr(s.cookies, 'items') else []
+        except Exception:
+            items = []
+        for name, value in items:
+            if 'quark.cn' in str(name).lower() or 'uc.cn' in str(name).lower():
                 parts.append('%s=%s' % (name, value))
     if not parts:
         logger.warning('account/info 未取得 Cookie: %s %s', r.status_code, body[:120])

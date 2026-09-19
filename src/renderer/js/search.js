@@ -357,7 +357,10 @@ function createSearchPage(cfg) {
                 <div class="src-head">${escHtml(name)} <span class="src-count" style="color:var(--md-error)">需验证</span></div>
                 <div class="kazumi-captcha-line" data-captcha-url="${escHtml(payload.captchaUrl || '')}" title="点击打开验证窗口，完成后重新搜索" tabindex="0">该源需要验证码验证 · 点击尝试</div>
             </div>`);
-            box.find(`.src-group[data-source="${escHtml(src)}"] .kazumi-captcha-line`).on('click', (e) => {
+            // P3-17：反查选择器用 CSS.escape(原始值)——DOM 属性值是 escHtml 实体解码
+            // 后的原文，选择器若拼 escHtml 后的串，源含 &/'/"/<> 时两值失配，
+            // 处理器静默绑不上；且未转义 \ 与 ] 会直接构成非法选择器。
+            box.find(`.src-group[data-source="${CSS.escape(src)}"] .kazumi-captcha-line`).on('click', (e) => {
                 const url = String($(e.currentTarget).data('captcha-url') || '');
                 if (url && typeof Kazumi !== 'undefined' && Kazumi._openCaptchaWindow) {
                     Kazumi._openCaptchaWindow(url, () => { if (typeof this.run === 'function') this.run(); });

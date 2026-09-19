@@ -34,6 +34,20 @@ class _SpiderState:
 
 class SupervisedRunner:
     def __init__(self, spec, policy=None):
+        spec = dict(spec or {})
+        # P1-5：Worker 是 spawn 的全新解释器，hoststate._state 里 port/token
+        # 全空（data_dir 仅 env 兜底）——KV 请求打到 :0、getProxyUrl() 产出
+        # 坏地址、JVM 地址 token 为空。宿主侧在 server.main 已经 configure，
+        # 在统一的 runner 构造点把三元组补进 spec（缺省注入：config.py 各
+        # runtime 分支与 site_manager 本地插件分支自动覆盖，无需逐处改）；
+        # token 只经 Pipe 在本机父子进程间传递，可以放 spec。
+        try:
+            import hoststate
+            spec.setdefault('proxy_port', int(hoststate.get_port() or 0))
+            spec.setdefault('proxy_token', str(hoststate.get_token() or ''))
+            spec.setdefault('data_dir', str(hoststate.get_data_dir() or ''))
+        except Exception:
+            pass
         self.supervisor = RuntimeSupervisor(spec, policy=policy)
         self.spider = _SpiderState(self, str((spec or {}).get('site_key') or ''))
         self.bridge = None

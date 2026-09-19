@@ -26,7 +26,7 @@ const Popular = {
     _total: 0,
     _page: 1,
     _size: 24,
-    _loading: false,
+    _loadToken: 0, // 请求令牌（P3-16）：每次 load 自增，响应回来只认最新令牌
     _tag: '', // 当前选中标签（空=趋势/热门番组）
 
     init() {
@@ -112,37 +112,45 @@ const Popular = {
     /**
      * 拉取当前视图数据。silent=true（预载/后台刷新）时不弹 loading/toast，
      * 不打断用户已看到的缓存内容。成功且为热门番组时写本地缓存。
+     * P3-16：请求令牌模式——此前 _loading 旗标下切换标签会把新请求直接丢弃，
+     * 而旧标签响应照常回写，界面显示与选中标签不一致；现在新请求不再被旧请求
+     * 阻塞，响应回来仅当令牌仍为最新时才写状态/渲染。
      */
     async load(page, silent) {
-        if (this._loading) return;
-        this._loading = true;
+        const token = ++this._loadToken;
         this._size = await this._pageSize();
+        if (token !== this._loadToken) return; // 读取设置期间已有更新请求，让位
         this._page = Math.max(1, page || 1);
         this._saveView(); // 页码存档（标签/翻页共用此入口）
         if (!silent) showLoading();
         try {
             const offset = (this._page - 1) * this._size;
+            let items = [];
+            let total = 0;
             if (this._tag) {
                 const rsp = await doAction('kazumiBangumiListByTag', { tag: this._tag, limit: this._size, offset }, '/kazumi/action');
-                this._items = (rsp && rsp.items) || [];
-                this._total = (rsp && rsp.total) || 0;
+                items = (rsp && rsp.items) || [];
+                total = (rsp && rsp.total) || 0;
             } else {
                 const rsp = await doAction('kazumiBangumiTrends', { limit: this._size, offset }, '/kazumi/action');
-                this._items = (rsp && rsp.trends) || [];
-                this._total = (rsp && rsp.total) || 0;
+                items = (rsp && rsp.trends) || [];
+                total = (rsp && rsp.total) || 0;
             }
+            if (token !== this._loadToken) return; // 已切标签/翻页：旧响应丢弃，不回写
+            this._items = items;
+            this._total = total;
             this._renderGrid();
             this._renderPager();
             if (!this._items.length) $('#popular-status').text('暂无数据').show();
             else $('#popular-status').hide();
             this._saveCache(); // 仅缓存热门番组（推荐页落地视图），内部按 _tag 守卫
         } catch (e) {
+            if (token !== this._loadToken) return; // 旧请求的失败提示不打断新视图
             if (!silent) warnToast('推荐载入失败');
             // 载入失败且当前无内容：同样落到网络/镜像引导空态（多为无法直连 Bangumi）
             if (!this._items.length) this._renderGrid();
         } finally {
-            if (!silent) hideLoading();
-            this._loading = false;
+            if (token === this._loadToken && !silent) hideLoading(); // 新请求的 loading 不被旧请求收尾
         }
     },
 

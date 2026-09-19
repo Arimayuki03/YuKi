@@ -23,9 +23,38 @@ if BASE not in sys.path:
 
 import hoststate  # noqa: E402
 import http_client  # noqa: E402
+import go_proxy  # noqa: E402
 import server  # noqa: E402
 
 TOKEN = 'kazumi-cover-token'
+
+
+def _stub_go_proxy_listeners():
+    """屏蔽 create_app() 的 go_proxy.start_go_proxy() 固定端口监听（9978/7944/1314）。
+
+    旧实现引用 server._go_proxy_started 属性——server.py 已不存在该属性，
+    抑制从未生效，本文件独立直跑会真绑生产端口（P3-19-①）。改为 monkeypatch
+    go_proxy.start_go_proxy 本身：封面代理走 FastAPI 侧 http_client mock，
+    完全不需要 go_proxy 固定端口服务。返回还原函数。
+    """
+    sentinel = object()
+    original = getattr(go_proxy, 'start_go_proxy', sentinel)
+
+    def fake_start():
+        return None
+
+    go_proxy.start_go_proxy = fake_start
+
+    def restore():
+        if original is sentinel:
+            try:
+                del go_proxy.start_go_proxy
+            except AttributeError:
+                pass
+        else:
+            go_proxy.start_go_proxy = original
+
+    return restore
 
 
 class _FakeRsp:
@@ -58,13 +87,12 @@ class TestKazumiCoverProxy(unittest.TestCase):
     def setUpClass(cls):
         import uvicorn  # noqa: PLC0415
 
-        cls.old_started = getattr(server, '_go_proxy_started', False)
+        cls.restore_go_proxy = _stub_go_proxy_listeners()
         cls.old_state = {
             'port': hoststate.get_port(),
             'token': hoststate.get_token(),
         }
-        # 不需要生产固定端口监听器与真实站点
-        server._go_proxy_started = True
+        # 不需要生产固定端口监听器与真实站点（go_proxy 启动已被屏蔽）
         hoststate.configure(port=_free_port(), token=TOKEN)
         cls.app = server.create_app()
         cls.port = _free_port()
@@ -86,7 +114,7 @@ class TestKazumiCoverProxy(unittest.TestCase):
             cls.uvicorn.should_exit = True
         if getattr(cls, 'thread', None) is not None:
             cls.uvicorn and cls.thread.join(timeout=5)
-        server._go_proxy_started = cls.old_started
+        cls.restore_go_proxy()
         hoststate.configure(**cls.old_state)
 
     def setUp(self):

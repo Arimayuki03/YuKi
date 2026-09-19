@@ -19,6 +19,7 @@
   +集 + 线路 + vipFlags 都影响结果）。
 """
 import os
+import threading
 
 from cache_store import CacheStore
 
@@ -30,23 +31,30 @@ MAX_TOTAL_BYTES = 16 * 1024 * 1024
 
 _store_instance = None
 _store_dir = None  # 测试注入目录；None 时按 hoststate 常规解析
+# P3-3：并发首访（聚合搜索/多集预解析同时落盘）会各自构造 CacheStore 实例，
+# 后写的覆盖先写的实例级 max_bytes 记账与内存层缓存。锁保护单例构造的
+# check-then-set 完整性；已建实例后的 get/set 由 CacheStore 自身保证。
+_store_lock = threading.Lock()
 
 
 def set_dir_for_tests(dirpath):
     """测试钩子：替换存储目录并丢弃单例（下次访问按新目录重建）。"""
     global _store_instance, _store_dir
-    _store_instance = None
-    _store_dir = dirpath
+    with _store_lock:
+        _store_instance = None
+        _store_dir = dirpath
 
 
 def _store():
     global _store_instance
     if _store_instance is None:
-        import hoststate
-        base = _store_dir or os.path.join(hoststate.get_cache_dir(), 'play-cache')
-        inst = CacheStore(base)
-        inst.max_bytes = MAX_TOTAL_BYTES
-        _store_instance = inst
+        with _store_lock:
+            if _store_instance is None:
+                import hoststate
+                base = _store_dir or os.path.join(hoststate.get_cache_dir(), 'play-cache')
+                inst = CacheStore(base)
+                inst.max_bytes = MAX_TOTAL_BYTES
+                _store_instance = inst
     return _store_instance
 
 

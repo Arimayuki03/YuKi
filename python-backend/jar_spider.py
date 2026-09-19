@@ -311,6 +311,12 @@ class JarSpider(Spider):
         share_url = str(params.get('shareUrl') or '')
         if share_url and 'pan.quark.cn/s/' in share_url:
             query.append(('shareUrl', share_url))
+        # P1-3：do=pan 通道已加 token 门禁，构造点必须带上宿主 token
+        # （query ?token=，与 _request_valid_proxy_token 的传输位置对齐），
+        # 否则快路径播放地址会被 401 拒绝。
+        token = str(hoststate.get_token() or '')
+        if token:
+            query.append(('token', token))
         return 'http://127.0.0.1:9978/proxy?' + urlencode(query, quote_via=quote)
 
     @staticmethod

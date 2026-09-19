@@ -27,6 +27,19 @@ const SUCCESS_COOKIES = ['__puus', '__pus'];
 const MAX_WAIT_MS = 5 * 60 * 1000; // 最长等待 5 分钟
 const POLL_MS = 1000;
 
+/**
+ * P2-12：quark-pan-login partition（内存会话）加载远程官方登录页，此前未注册
+ * 权限处理器——Chromium 对未注册的权限请求默认放行，通知/定位/剪贴板读取等
+ * 一律可达。登录流程引导用户复制整行 Cookie，剪贴板读取权限尤其危险。登录判定
+ * 完全靠主进程轮询 session Cookie，页面侧零必需权限 → 注册**全拒**处理器。
+ */
+function denyAllPermissions(ses) {
+    if (!ses || typeof ses.setPermissionRequestHandler !== 'function') return;
+    ses.setPermissionRequestHandler((_wc, _permission, callback) => {
+        try { callback(false); } catch (e) { /* 会话销毁竞态：忽略 */ }
+    });
+}
+
 let win = null;
 let resolveCb = null;
 let rejectCb = null;
@@ -96,6 +109,8 @@ function openLoginWindow() {
 
         // 清理旧 session（上次登录的 cookie 清掉，保证新会话干净）
         ses().clearStorageData().catch(() => {});
+        // P2-12：远程登录页的会话全拒权限请求
+        denyAllPermissions(ses());
 
         win = new BrowserWindow({
             width: 460,

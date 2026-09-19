@@ -29,6 +29,21 @@ function isMediaUrl(u) {
     try { return MEDIA_EXT.test(new URL(u).pathname); } catch (e) { return false; }
 }
 
+/**
+ * P2-12：parse-<slot> 等 partition 会话加载远程内容，却从未注册权限处理器——
+ * Chromium 对未注册的权限请求默认放行，通知/定位/剪贴板读取等一律可达。解析/验证
+ * 流程还会引导用户复制整行 Cookie，剪贴板读取权限尤其危险。这里对传入 session
+ * 注册**全拒**处理器：解析池三类窗口（iframe 捕获/验证码/直开页）均无必需权限，
+ * 抓流只依赖 webRequest 拦截，不需要任何页面向用户申请的能力。
+ * 重复注册（同 slot 会话复用）是幂等覆盖，无副作用。
+ */
+function denyAllPermissions(ses) {
+    if (!ses || typeof ses.setPermissionRequestHandler !== 'function') return;
+    ses.setPermissionRequestHandler((_wc, _permission, callback) => {
+        try { callback(false); } catch (e) { /* 会话销毁竞态：忽略 */ }
+    });
+}
+
 /** 仅 http(s) 才允许交给隐藏窗口 loadURL；其余（畸形拼接如 demohttps://、
  *  或 intent://、magnet: 等非法/自定义 scheme）会被 Chromium 移交操作系统，
  *  弹出「用什么应用打开此链接」系统弹窗（T：解析视频弹 demohttps 系统弹窗根因）。 */
@@ -482,6 +497,8 @@ class ParseWindow {
             } catch (e) { this._release(slot); return resolve(null); }
 
             const ses = win.webContents.session;
+            // P2-12：加载远程解析页的会话全拒权限请求（通知/定位/剪贴板等默认放行的口子封死）
+            denyAllPermissions(ses);
             // R5：隐藏窗口反复加载失败会累积 Electron 内部 did-stop-loading 监听器，放开上限抑制告警
             win.webContents.setMaxListeners(0);
             // 协议守卫：解析页里的跳转/新窗若是非 http(s) scheme（如广告跳 intent://、
@@ -650,6 +667,8 @@ class ParseWindow {
                 });
             } catch (e) { this._release(slot); return resolve({ ok: false }); }
             const ses = win.webContents.session;
+            // P2-12：验证码页同样加载远程内容且用户正在会话中输入——全拒权限请求
+            denyAllPermissions(ses);
             win.webContents.setMaxListeners(0);
             // 协议守卫（与隐藏捕获窗口一致）：验证页跳转/新窗若是非 http(s) scheme
             // （如 intent://），不交系统处理；http(s) 新窗则转系统浏览器打开。

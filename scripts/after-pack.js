@@ -85,16 +85,16 @@ const SECRET_NAME_RES = [
 // 只扫描产物里"不该出现用户数据"的位置；vendor/mpv 配置等不参与。
 const SECRET_SCAN_ROOTS = ['resources'];
 
-/** 列出 app.asar 内的全部条目路径（拿不到 asar 模块时回退裸文件名扫描，二者都覆盖）。 */
+/** 列出 app.asar 内的全部条目路径。
+ *  P2-8（fail-closed）：此前解析失败时返回占位字符串 `<asar-list-failed:...>`——
+ *  不匹配任何敏感正则，清单解析失败即静默跳过扫描（@electron/asar 未声明依赖、
+ *  pnpm 布局下提升解析失效正是真实触发路径）。门禁的本意是「拿不到清单就终止
+ *  构建」，因此这里改为抛出可操作的错误。 */
 function asarEntries(appOutDir) {
     const asarPath = path.join(appOutDir, 'resources', 'app.asar');
     if (!fs.existsSync(asarPath)) return [];
-    try {
-        const asar = require('@electron/asar');
-        return asar.listPackage(asarPath).map((p) => path.join('app.asar', p.replace(/^[\\/]+/, '')));
-    } catch (e) {
-        return [`<asar-list-failed:${e.message}>`];
-    }
+    const asar = require('@electron/asar');
+    return asar.listPackage(asarPath).map((p) => path.join('app.asar', p.replace(/^[\\/]+/, '')));
 }
 
 /** 收集产物中的敏感文件相对路径（含 asar 内部条目与 extraResources 落盘文件）。 */
@@ -115,7 +115,15 @@ function findSecrets(appOutDir) {
 /** package.json build.afterPack 指向本文件，context.appOutDir 为 win-unpacked 等产物目录。 */
 module.exports = function afterPack(context) {
     // —— 门禁先行且不可豁免 ——
-    const secrets = findSecrets(context.appOutDir);
+    // P2-8：asar 清单解析失败（依赖缺失/读取失败）会在 findSecrets 内抛错直接终止
+    // 构建（fail-closed），不再被静默吞掉。
+    let secrets;
+    try {
+        secrets = findSecrets(context.appOutDir);
+    } catch (e) {
+        throw new Error('[after-pack] 敏感文件门禁无法执行（fail-closed，构建终止）：' + e.message
+            + '\n修复：确认 @electron/asar 已在 devDependencies 声明且安装成功（npm ls @electron/asar）。');
+    }
     if (secrets.length > 0) {
         throw new Error('[after-pack] 检测到敏感文件被打进安装包（Cookie/凭据泄露，构建终止）：\n  - '
             + secrets.join('\n  - ')

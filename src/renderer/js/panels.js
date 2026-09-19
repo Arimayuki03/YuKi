@@ -668,8 +668,10 @@ function pushFile(yes) {
     if (yes !== 1) return;
     const target = String(currentFile || '').trim();
     if (!target) { warnToast('未选中文件'); return; }
-    // 本地媒体直接交给主进程 mpv 播放；首播冷启动可能因 IPC 竞态短暂失败，自动重试一次
-    const doPush = (rel, isRetry) => window.yuki.filePush(rel).then((r) => {
+    // 本地媒体直接交给主进程 mpv 播放（P2-18：失败不再静默重试——500ms 无提示
+    // 重拉 mpv 会让用户误以为点击无效而反复点击；且「播放器启动超时」提示曾被
+    // 重试分支提前 return 消费而不可达。失败即给出可见提示，由用户自行重试）
+    window.yuki.filePush(target).then((r) => {
         if (r && r.ok) {
             localPlayToast(r);
             // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
@@ -692,19 +694,14 @@ function pushFile(yes) {
             } catch (e) { /* ignore */ }
             return;
         }
-        // 首播 IPC 超时/提前退出的偶发失败（二次点击成功即为此竞态），自动重试一次
-        if (!isRetry && r && (r.reason === 'mpv-start-timeout' || r.reason === 'mpv-exited-before-playback' || r.reason === 'mpv-exited')) {
-            setTimeout(() => doPush(rel, true), 500);
-            return;
-        }
         if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
         else if (r && r.reason === 'file-not-found') warnToast('文件不存在或已被移动');
         else if (r && r.reason === 'path-denied') warnToast('路径不在白名单内');
         else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
         else if (r && r.reason === 'mpv-start-timeout') warnToast('播放器启动超时，请重试');
+        else if (r && (r.reason === 'mpv-exited-before-playback' || r.reason === 'mpv-exited')) warnToast('播放器已退出，请重试');
         else warnToast('播放失败' + (r && r.reason ? `：${r.reason}` : ''));
     }).catch(() => warnToast('播放失败'));
-    doPush(target, false);
 }
 
 /** 未选根目录时的引导态（白名单未设置）。 */

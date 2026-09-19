@@ -6,6 +6,13 @@
  *
  * 根目录（白名单）持久化在 <userData>/file-manager.json；
  * 未设置时 list 返回 { needRoot: true }，由渲染层引导选择。
+ *
+ * P2-7：delFolder 在白名单根（默认=下载目录）内可递归删除任意子树——补三道防线：
+ * (a) 拒绝删除根目录本身（原有）；(b) 原生确认框二次确认（渲染层已有确认交互，
+ * 此处为主进程最后防线——渲染层被注入时一次 IPC 调用即删整个媒体库）；(c) 在写
+ * 互斥：目录下存在进行中的下载任务（持久化记录 active/waiting/paused）时拒绝删除。
+ * electron/dialog 与活动任务探测经 opts 注入（本文件保持纯 Node 可单测；
+ * index.js 装配时传入真实依赖）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -14,8 +21,18 @@ const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.ts', '.flv', '.avi', '.mov', '.wmv
 const AUDIO_EXTS = new Set(['.mp3', '.flac', '.wav', '.aac', '.ogg', '.oga', '.opus', '.m4a', '.wma', '.ape']);
 
 class FileManager {
-    constructor(userDataPath) {
+    /**
+     * @param {string} userDataPath 持久化目录
+     * @param {object} [opts] 可选依赖注入
+     * @param {(p: {type:string, title:string, message:string, detail:string, buttons:string[]})=>Promise<number>} [opts.confirm]
+     *        原生确认框（返回所选按钮下标；缺省视为用户放弃，fail-closed）
+     * @param {()=>Array<{dir?:string, status:string}>} [opts.getRecords]
+     *        下载持久化记录提供者（在写互斥判定用）
+     */
+    constructor(userDataPath, opts = {}) {
         this._configPath = path.join(userDataPath, 'file-manager.json');
+        this._confirm = typeof opts.confirm === 'function' ? opts.confirm : null;
+        this._getRecords = typeof opts.getRecords === 'function' ? opts.getRecords : null;
         this.root = this._loadRoot();
     }
 
@@ -91,11 +108,56 @@ class FileManager {
         fs.unlinkSync(p);
     }
 
-    /** 删除目录（递归；拒绝删根目录自身）。 */
-    delFolder(rel) {
+    /** 判断目标目录内（含子树）是否有进行中的下载任务产物：
+     *  持久化记录 active/waiting/paused 任务的 dir / 产物文件路径落在目标内即算。 */
+    _hasActiveTaskUnder(dir) {
+        let records;
+        try { records = (this._getRecords && this._getRecords()) || []; } catch (e) { records = []; }
+        const norm = (p) => {
+            try { return path.resolve(String(p)).toLowerCase(); } catch (e) { return ''; }
+        };
+        const target = norm(dir);
+        if (!target) return false;
+        for (const r of records) {
+            if (!r || !['active', 'waiting', 'paused'].includes(r.status)) continue;
+            if (r.dir && norm(r.dir) === target) return true; // 任务级目录即目标本身（或子树根）
+            for (const f of (r.files || [])) {
+                if (!f || f === '.') continue;
+                const fp = norm(f);
+                if (!fp) continue;
+                if (fp === target || fp.startsWith(target + path.sep)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 删除目录（递归；拒绝删根目录自身）。
+     *  P2-7 加固：原生确认框二次确认（主进程最后防线）+ 在写互斥（目录内有
+     *  进行中的下载任务即拒绝）。确认框依赖未注入（单测/早期调用）时 fail-closed
+     *  视为用户放弃——宁可少删，不可误删。 */
+    async delFolder(rel) {
         const p = this.resolveSafe(rel);
         if (p === this.root) throw new Error('cannot delete root');
         if (!fs.existsSync(p) || !fs.statSync(p).isDirectory()) throw new Error('not a directory');
+        // (c) 在写互斥：目标目录（含子树）内有进行中的下载任务 → 拒绝删除，
+        //     避免边下边删造成产物损坏/任务异常
+        if (this._hasActiveTaskUnder(p)) {
+            throw new Error('folder has active downloads');
+        }
+        // (b) 原生确认框（最后防线）：渲染层已有确认交互，此处拦的是渲染层被注入/
+        //     逻辑误传直发 IPC 的场景。列出将删除的目录绝对路径。
+        if (this._confirm) {
+            const choice = await this._confirm({
+                type: 'warning',
+                title: '删除文件夹',
+                message: `确定要删除文件夹吗？`,
+                detail: `将永久递归删除以下目录及其全部内容（不可恢复）：\n${p}`,
+                buttons: ['删除', '取消'],
+            });
+            if (choice !== 0) throw new Error('delete cancelled');
+        } else {
+            throw new Error('delete cancelled: no confirm dialog');
+        }
         fs.rmSync(p, { recursive: true, force: true });
     }
 

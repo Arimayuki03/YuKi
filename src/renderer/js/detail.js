@@ -56,6 +56,8 @@ const Detail = {
     _relations: [],
     _bgmExtraLoaded: false,
     _bgmExtraGen: 0,     // Bangumi 补充数据加载世代：每次导航/重载自增，作废在途的旧 subject 异步结果
+    _loadGen: 0,         // 详情主请求世代（P2-4）：load()/openBangumi() 共用同一详情页状态，
+                         // 每次入口自增；await 返回后不一致即丢弃，防 A→B 乱序写出混合收藏条目
 
     init() {
         if (this._escBound) return;
@@ -257,19 +259,24 @@ const Detail = {
         this._epSelectMode = false;
         App._detailOpening = true; // 标记「新开详情」：app.js 据此把详情记忆归属到来源分支（恢复展示不写）
         App.showView('detail');
+        // P2-4：与 load() 共用同一世代变量（两者写同一份详情页状态），
+        // 快速连续打开 CatVod 详情 ↔ Bangumi 详情时旧响应同样作废
+        const gen = ++this._loadGen;
         showLoading();
         $('#detail-body').html('<div class="tip-line">正在载入详情…</div>');
         try {
             this._bgmInfo = await Kazumi.bangumiInfo(subjectId); // 30 分钟缓存
+            if (gen !== this._loadGen) return; // 已切到别的详情，旧响应丢弃
             if (!this._bgmInfo) { warnToast('Bangumi 详情载入失败'); hideLoading(); this.back(); return; }
             if (!this.vodName) this.vodName = this._bgmInfo.name_cn || this._bgmInfo.name || '';
             this.sources = []; // 无 CatVod 线路
             this.render();
         } catch (e) {
+            if (gen !== this._loadGen) return; // 已切到别的详情，旧错误不覆盖新页面
             warnToast('Bangumi 详情载入失败');
             this.back();
         } finally {
-            hideLoading();
+            if (gen === this._loadGen) hideLoading(); // 新请求的 loading 不被旧请求收尾
         }
     },
 
@@ -369,6 +376,10 @@ const Detail = {
     },
 
     async load() {
+        // P2-4：主请求世代守卫——open() 只改引用不重置世代，快速 A→B 打开时
+        // 慢的 A 响应回来若继续写状态会产出 site/vodId 取 B、vod_name/vod_pic
+        // 取 A 的混合收藏条目。入口自增，await 返回后比对，不一致即丢弃。
+        const gen = ++this._loadGen;
         showLoading();
         $('#detail-body').html('<div class="tip-line">载入中…</div>');
         try {
@@ -381,6 +392,7 @@ const Detail = {
                 vod = (data && data.list && data.list[0]) || null;
                 if (vod) _detailCacheSet(DETAIL_VOD_CACHE_PREFIX, cacheKey, vod, DETAIL_CACHE_TTL);
             }
+            if (gen !== this._loadGen) return; // 已切到别的详情，旧响应丢弃
             if (!vod) {
                 // #11：data.error 为第三方源回传内容，进 .html() 前必须 escHtml
                 const err = data && data.error ? `（${escHtml(String(data.error).slice(0, 120))}）` : '';
@@ -408,12 +420,14 @@ const Detail = {
                     }
                 } catch (e) { /* Bangumi 匹配失败不影响详情 */ }
             }
+            if (gen !== this._loadGen) return; // Bangumi 匹配期间已切走，丢弃旧结果
             this.render();
         } catch (e) {
+            if (gen !== this._loadGen) return; // 已切到别的详情，旧错误不覆盖新页面
             $('#detail-body').html('<div class="tip-line">详情载入失败</div>');
             warnToast('详情载入失败');
         } finally {
-            hideLoading();
+            if (gen === this._loadGen) hideLoading(); // 新请求的 loading 不被旧请求收尾
         }
     },
 

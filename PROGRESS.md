@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-09-14
+> 更新时间：2026-09-20
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -9,7 +9,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 应用版本 | `0.2.2` |
+| 应用版本 | `0.2.4` |
 | 桌面宿主 | Electron 31，JavaScript |
 | 后端 | FastAPI，Python 3.14 独立进程 |
 | 内容引擎 | CatVod + Kazumi 双引擎 |
@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/19 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -174,6 +174,14 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-09-20 三报告交叉审查全项目修复批次（P1×5 / P2×19 / P3×24）：
+
+- **背景**：三份独立安全审查报告（hy4/ds/glm，临时文档，验证后已删除）交叉验证并逐条复核，确认 P1×5、P2×19、P3×24，推翻 4 条、重大修正 8 条、验证中新发现 8 条。按文件域分两批并行修复（每批 3 个子代理：Python 后端 / Electron 主进程 / 渲染层），修复后 `npm run test:all` 全绿。明细见 CHANGELOG [未发布] 段。
+- **P1 全部闭环**：①主 token 明文落盘 play-cache（volatile 检查前置 + 失败结果不落盘）；②`do=pan` 免鉴权（token 门禁 + HLS token 纪律 + 两个构造点与 jar 硬编码通道补 token）；③JVM 强杀后网盘 Cookie 明文残留（kill 路径补删 TVBox/*_cookie.txt，路径与 Java cacheRoot 逐层对齐——审查代理曾发现首版清理路径多一层 `cache/` 恒空转，已修）；④Worker hoststate 全空（spec 注入 proxy_port/proxy_token/data_dir + Worker 构建 configure）；⑤`dist/` 历史泄露产物（820MB 含 FM/.quark 真实 Cookie 的 v0.2.1 安装包与 win-unpacked）已全部删除——**线上 v0.2.1–v0.2.4 四个 Release 资产与夸克/UC 会话吊销仍需账号侧处置**。
+- **P2/P3 覆盖**：Host 白名单、SSRF 三处对齐、senderFrame 校验 + deleteFiles 显式 opt-in、delFolder 三道防线、after-pack fail-closed + FM/.test-runtime 拷贝排除、权限处理器全拒、退出撤销定时关机、CSP 白名单、kazumi id 转义与 localStorage 净化、detail/popular 世代守卫、WebDAV 敏感键、HLS 分片续传校验、playlist-proxy 异常保护、`/health` 收敛、Kazumi Cookie 加密落盘、假绿测试 ×3 修复等（完整清单见 CHANGELOG）。
+- **测试**：新增 `test_security_regressions.py`（33 用例）接入 run_all；`test_quark_pan.py` 桩签名适配新 `_stream_forward` 契约；`test_runtime_supervisor.py` 慢机余量（`_call` 默认 deadline 1s→5s、墙钟断言接 `_BUDGET_ASSERT_SLACK`；HEAD 基线即随机复现，与功能修复无关）。最终 `npm run test:all` 全绿：run_all 59 阶段 ALL PASS、编译 188 文件 0 error、JS 单元 540/540、ESLint 0 error（73 条既有 warning 不变）、Ruff 全过。
+- **构建门禁自证**：`@electron/asar` 提为 devDependencies（`npm ls` 不再 extraneous）；asar 清单解析失败从静默跳过改为终止构建。
 
 2026-09-15 安装包杀软误报修复批次：
 

@@ -28,7 +28,6 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 import hoststate
 import mem_cache
 from site_manager import Site
-from js_spider import make_js_spider_class
 from runtime.errors import RuntimeError as RuntimeContractError, error_from_exception, redact_sensitive
 from runtime.health import infer_site_health
 from runtime.supervised_runner import SupervisedRunner
@@ -69,6 +68,20 @@ def fetch_text(url, timeout=15):
     - 常规 JSON/直播源：原样返回文本。
     """
     return fetch_text_diagnostics(url, timeout=timeout)['text']
+
+
+def fetch_text_site_guarded(url, timeout=15):
+    """P2-11：ESM 子模块抓取用的守卫版 fetch_text。
+
+    ``ModuleResolver`` 递归抓取的 import 依赖 URL 来自**远端模块内容**而非
+    用户输入——ESM 入口被守卫后，子模块不能自任信任根绕过严格 SSRF 边界。
+    这里以 `url` 自身为信任根（主加载对入口的第一跳语义：用户选定的源地址
+    同源子资源可达），配置层同一套 `fetch_guarded` 逐跳复检；被守卫拒绝时
+    返回 ''（`module_resolver.fetch_module_cached` 的既有容错契约，缺模块
+    依赖将导致该站点构建失败，不会静默降级到无守卫抓取）。
+    """
+    result = fetch_text_diagnostics(url, timeout=timeout, trust=None, kind='site')
+    return result['text'] if not result.get('blocked') else ''
 
 
 def fetch_text_diagnostics(url, timeout=15, *, policy=None, trust=None, kind='config',
@@ -1706,78 +1719,6 @@ class ConfigManager:
             return path
         except Exception as e:
             raise ValueError(f'[L3:py] python spider materialize failed: {e}') from e
-
-    def _load_cms_spider(self, key, name, api, stype):
-        from cms_spider import CmsSpider
-        if not api.startswith('http'):
-            raise ValueError('[L3:cms] cms site needs http api')
-        return CmsSpider(key, api, stype, name)
-
-    def _load_js_spider(self, key, name, api):
-        try:
-            from quickjs_host import JsEngine   # js-engine 目录（server.py 已加入 sys.path）
-            engine = JsEngine(site_key=key)   # site_key：local KV 按站点隔离（M-24/C2）
-            engine.proxy_port = hoststate.get_port()   # js2Proxy 生成后端代理 URL 用
-            try:
-                if api.startswith('http'):
-                    # 多模块 ESM：递归抓取 import 依赖后展平执行（单文件也兼容）
-                    ok = engine.load_spider_url(api, fetch_text)
-                else:
-                    ok = engine.load_spider(api)
-            except Exception as e:
-                raise ValueError(f'[L3:js] spider load/execute failed: {e}')
-            if not ok:
-                raise ValueError('[L3:js] spider produced no __JS_SPIDER__ (need __jsEvalReturn/default export)')
-            return make_js_spider_class(key, engine, name)
-        except Exception as e:
-            # 任务五：确保所有 JS 相关错误都带有 [L3:js] 标签
-            err_msg = str(e)
-            if not err_msg.startswith('[L3:js]'):
-                raise ValueError(f'[L3:js] {err_msg}') from e
-            raise
-
-    def _load_jar_spider(self, key, name, api, spider_jar=''):
-        """装配 jar spider：jar 落盘（带 md5 校验）→ JarBridge → JarSpider 适配。
-
-        api 有两种形态：
-        - 'https://x/csp_MaoYan.jar[;md5]'：站点自带 jar 直链，class 从文件名推断。
-        - 'csp_MaoYan'：纯类名，jar 来自 config 顶层共享 spider（spider_jar）。
-        无 java 运行时或无法定位 jar 时返回 None（调用方跳过该站点）；其余异常向上抛。
-        """
-        import java_probe
-        from jar_bridge import JarBridge
-        from jar_spider import make_jar_spider_class
-        try:
-            jar_url, md5, class_name = JarBridge.norm_jar_src(api)
-            if not jar_url:
-                # api 是纯类名（csp_XXX）：用 config 顶层共享 jar 下载，class 取 api。
-                if api.startswith('csp_') and spider_jar:
-                    jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
-                    class_name = api
-                if not jar_url:
-                    logger.info('skip site %s: csp_ class but no shared spider jar', key)
-                    return None
-            jar_path = JarBridge.download_jar(
-                jar_url, md5, site_key=key,
-                portable_only=False)
-            # Download and convert before checking Java so DEX sources can enter
-            # the same JVM Worker path as standard JARs.
-            if not java_probe.find_java():
-                raise ValueError('[L3:jar] jar runtime unavailable (java not found)')
-            # 映射类名：DEX→JVM 转换后的 jar 中类在 com.github.catvod.spider.<name>
-            class_name = JarBridge.map_class_name(jar_path, class_name)
-            # 按 jar 文件共享 JVM 子进程：同一 jar 的所有 csp_XXX 站点共用一个桥
-            bridge = JarBridge.get_or_create(jar_path, runner_jar=DEFAULT_RUNNER_JAR)
-            return make_jar_spider_class(key, bridge, name, class_name)
-        except RuntimeContractError:
-            raise
-        except Exception as e:
-            # 旧的直接构造入口只保留给低层兼容测试；生产配置走
-            # _load_jar_runner，不在宿主进程加载第三方类。
-            err_msg = str(e)
-            if not err_msg.startswith('[L3:jar]'):
-                raise ValueError(f'[L3:jar] {err_msg}') from e
-            raise
 
     def _load_jar_runner(self, key, name, api, spider_jar='', ext='', base_url=''):
         """下载并分级 JAR；实际类加载与调用只发生在 Supervisor Worker/JVM。

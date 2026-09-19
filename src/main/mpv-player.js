@@ -560,6 +560,7 @@ class MpvPlayer extends EventEmitter {
             if (info.userStopped) this.controlGen++;
             // 只清理该会话；旧进程延迟退出时不能误清掉刚起播的新会话。
             this._teardown(sessionId);
+            this._removeAssFile(); // P3-24：会话退出即清弹幕临时文件（含观看文本）
             this.emit('exit', info);
         });
         this._connectIpc(0, sessionId);
@@ -703,6 +704,14 @@ class MpvPlayer extends EventEmitter {
             p.reject(new Error('mpv stopped'));
         }
         this._pending.clear();
+    }
+
+    /** 删除 ASS 弹幕临时文件（%TEMP%/yuki-danmaku-<pid>.ass，P3-24）。
+     *  文件内容含观看文本（片名/弹幕内容），原先从不清理、残留整个进程生命周期，
+     *  且其他本机进程可读。会话 teardown 与进程退出路径各清一次（幂等；写入点
+     *  在下一次 play 前由 _writeAss 覆盖重建，删除不影响后续播放）。 */
+    _removeAssFile() {
+        try { fs.unlink(this.assPath, () => { /* 不存在/占用均忽略 */ }); } catch (e) { /* ignore */ }
     }
 
     /**

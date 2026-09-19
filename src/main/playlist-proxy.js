@@ -337,14 +337,23 @@ class PlaylistProxy extends EventEmitter {
             await this._serveResolved(sess, index, sess.cache.get(index), req, res);
             return;
         }
-        // static 会话的集目在 register 时已全量预填缓存；此处仅防御性兜底
-        const resolved = (sess.kind === 'static')
+        // static 会话的集目在 register 时已全量预填缓存；此处仅防御性兜底。
+        // P2-17：解析链整体套异常保护——后端抖动等使解析 promise reject 时不能让
+        // 异常裸抛（_handle 只能兜底回一个无 Content-Type 的 502 且 onEntryError
+        // 不触发，播放器把失败当无限缓冲干等 → 连播静默卡死）。异常统一折叠为
+        // 解析失败，走与正常失败完全相同的应答路径（带 Content-Type 的 502 +
+        // onEntryError 让播放列表推进/收场）。
+        const resolved = await (sess.kind === 'static'
             ? (/^https?:\/\//i.test(String(sess.eps[index].id))
-                ? { ok: true, url: String(sess.eps[index].id) }
-                : { ok: false, reason: 'static 直链非法' })
+                ? Promise.resolve({ ok: true, url: String(sess.eps[index].id) })
+                : Promise.resolve({ ok: false, reason: 'static 直链非法' }))
             : (sess.kind === 'kazumi')
-                ? await this._withRetry(() => this._resolveKazumi(sess, index))
-                : await this._resolveCatvodWithInflight(sess, index);
+                ? this._withRetry(() => this._resolveKazumi(sess, index))
+                : this._resolveCatvodWithInflight(sess, index)
+        ).catch((e) => ({
+            ok: false,
+            reason: `解析异常：${String((e && e.message) || e).slice(0, 120)}`,
+        }));
         console.log(`[播放列表] 第 ${index + 1} 集${resolved.ok
             ? `解析成功 → ${resolved.url.slice(0, 80)}`
             : `解析失败：${resolved.reason}`}`);
@@ -825,7 +834,9 @@ class PlaylistProxy extends EventEmitter {
         return r;
     }
 
-    /** 调后端 playerContent 解析第 index 集；parse=1 / DRM / 空地址视为该集失败。 */
+    /** 调后端 playerContent 解析第 index 集；parse=1 / DRM / 空地址视为该集失败。
+     *  P2-17：网络/超时等异常在函数内捕获折叠为 { ok:false }（与 _resolveKazumiPage
+     *  的保护模式一致），调用方（预热/预取/按需/重解析）统一拿到失败对象而非裸异常。 */
     async _resolve(sess, index, refresh = '0') {
         const backend = this.getBackend() || null;
         if (!backend || !backend.base) return { ok: false, reason: '后端未就绪' };
@@ -834,13 +845,18 @@ class PlaylistProxy extends EventEmitter {
             do: 'playerContent', site: sess.site, flag: sess.flag,
             id: ep.id, vipFlags: sess.vipFlags || '[]', refresh,
         }).toString();
-        const rsp = await this.fetchFn(`${backend.base}/action?token=${encodeURIComponent(backend.token || '')}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body,
-            signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
-        });
-        const data = await rsp.json().catch(() => null);
+        let data = null;
+        try {
+            const rsp = await this.fetchFn(`${backend.base}/action?token=${encodeURIComponent(backend.token || '')}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body,
+                signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+            });
+            data = await rsp.json().catch(() => null);
+        } catch (e) {
+            return { ok: false, reason: '解析请求失败（后端不可达/超时）' };
+        }
         if (!data || data.error) {
             const err = data && data.error;
             const reason = err ? String(err.message || err.code || '源返回错误') : '源返回错误';

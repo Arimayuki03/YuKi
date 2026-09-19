@@ -10,6 +10,24 @@ from abc import abstractmethod, ABCMeta
 from importlib.machinery import SourceFileLoader
 
 
+def _strict_tls_required():
+    """P2-11：严格 SSRF 模式下 spider 不允许关闭 TLS 校验。
+
+    默认（开关关闭）返回 False，保持存量坏证书源兼容；开关打开时与私网
+    拦截同一道闸门——远端代码不得同时获得「探测内网」和「降级传输」。
+    """
+    return os.environ.get('YUKI_CONFIG_BLOCK_PRIVATE_NETWORK', '').lower() in ('1', 'true', 'yes')
+
+
+def _guard_spider_url(url):
+    """P2-11：spider 出网请求过 SSRF 守卫（复用 http_client._guard_hop）。
+
+    Python spider 是不可信代码（与 JS 同级）：第一跳与重定向每一跳都复检，
+    trust_root 留空 = 无受信 origin。守卫模块缺席时原样返回（行为同旧版）。
+    """
+    return http_client._guard_hop(url, kind='site')
+
+
 class Spider(metaclass=ABCMeta):
     _instance = None
     # 由站点工厂注入；生成的 proxy URL 带 siteKey 后，多个站点并发时
@@ -95,12 +113,47 @@ class Spider(metaclass=ABCMeta):
         return clean
 
     def fetch(self, url, params=None, cookies=None, headers=None, timeout=5, verify=True, stream=False, allow_redirects=True):
+        # P2-11：第一跳过 SSRF 守卫；重定向逐跳复检见下方 allow_redirects 分支。
+        url = _guard_spider_url(url)
+        # P2-11：严格 SSRF 模式下 verify 不允许被 spider 关闭（TLS 降级面）。
+        if _strict_tls_required():
+            verify = True
+        if allow_redirects:
+            # requests 的 allow_redirects=True 在库内静默跟随 302，绕过逐跳
+            # 守卫——公网源 302 到内网是教科书式 SSRF 通道。改为手动跟随，
+            # 每一跳复检（对齐 http_client.fetch_follow_redirects / go_proxy._fetch）。
+            # 该路径不透传 cookies（守卫版签名无 cookies 参数）；spider 带站点
+            # Cookie 的请求走默认 requests 分支，302 由守卫逐跳复检。
+            current = url
+            if params:
+                query_str = urllib.parse.urlencode(params)
+                current = f'{current}{"&" if "?" in current else "?"}{query_str}'
+            for _ in range(6):
+                rsp = http_client.get(current, headers=headers, timeout=timeout,
+                                      verify=verify, stream=stream,
+                                      allow_redirects=False)
+                if rsp.status_code not in (301, 302, 303, 307, 308) \
+                        or 'Location' not in rsp.headers:
+                    break
+                location = rsp.headers.get('Location') or ''
+                rsp.close()
+                current = _guard_spider_url(urllib.parse.urljoin(current, location))
+            else:
+                raise ValueError(f'too many redirects (>5): {url}')
+            rsp.encoding = 'utf-8'
+            return rsp
         rsp = http_client.get(url, params=params, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
         rsp.encoding = 'utf-8'
         return rsp
 
     def post(self, url, params=None, data=None, json=None, cookies=None, headers=None, timeout=5, verify=True, stream=False, allow_redirects=True):
-        rsp = http_client.post(url, params=params, data=data, json=json, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream, allow_redirects=allow_redirects)
+        # P2-11：同 fetch——首跳守卫 + 严格模式强制 verify。POST 的 30x 由
+        # requests 原样返回（不自动跟随），无需逐跳复检。
+        url = _guard_spider_url(url)
+        if _strict_tls_required():
+            verify = True
+        rsp = http_client.post(url, params=params, data=data, json=json, cookies=cookies, headers=headers, timeout=timeout, verify=verify, stream=stream,
+                               allow_redirects=False)
         rsp.encoding = 'utf-8'
         return rsp
 

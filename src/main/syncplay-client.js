@@ -41,8 +41,13 @@ class SyncplayClient extends EventEmitter {
      * @param {string} username 用户名
      * @param {string} room 房间名
      * @param {boolean} useTls 是否使用 TLS（默认 true）
+     * @param {object} [opts] 可选项
+     * @param {boolean} [opts.insecureTls] 显式跳过证书校验（自签服务器兼容开关，
+     *        默认 false——P3-7：原实现无条件 rejectUnauthorized:false，TLS 隧道对
+     *        MITM 敞开，链路虽无凭据但同步指令/聊天可被中间人伪造。仅自签服务器
+     *        场景由调用方显式传入，公共服务器一律走默认严格校验）。
      */
-    connect(server, port, username, room, useTls = true) {
+    connect(server, port, username, room, useTls = true, opts = {}) {
         this.username = username;
         this.room = room;
         const host = server || DEFAULT_SERVER;
@@ -61,7 +66,10 @@ class SyncplayClient extends EventEmitter {
                 resolve();
             };
             if (useTls) {
-                this.socket = tls.connect({ host, port: p, rejectUnauthorized: false }, onConnect);
+                // 默认校验服务端证书（rejectUnauthorized:true）；证书错误时 Node 会以
+                // CERT_HAS_EXPIRED / SELF_SIGNED_CERT_IN_CHAIN 等前缀报错，连接失败
+                // 提示可据此区分自签场景（需自签兼容请显式开启 insecureTls）。
+                this.socket = tls.connect({ host, port: p, rejectUnauthorized: opts.insecureTls !== true }, onConnect);
             } else {
                 this.socket = net.connect({ host, port: p }, onConnect);
             }

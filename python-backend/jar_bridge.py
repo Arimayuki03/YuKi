@@ -115,6 +115,36 @@ def _is_md5(s):
     return len(s) == 32 and all(c in '0123456789abcdefABCDEF' for c in s)
 
 
+# P1-4：SpiderRunner.seedCookieFiles 把 quark/uc/bili/189/diy 五个网盘 Cookie
+# 明文写入 ~/.yuki/jar-cache/TVBox/*_cookie.txt（FongMi 蜘蛛读取登录态的约定
+# 路径）。优雅退出由 Java shutdown hook 的 deleteCacheDir 清理；但 Windows 的
+# TerminateProcess 不执行 hook——强杀（超时/写失败/崩溃重启）后必须由本侧
+# 补删，否则登录态永久残留用户主目录。只删 TVBox 子目录下的 cookie 文件，
+# 不动 jar-cache 里内容寻址的 jar 缓存；清理失败静默吞掉，绝不影响主流程。
+# 路径必须与 Java 侧 cacheRoot()（user.home/.yuki/jar-cache/TVBox）逐层一致：
+# Java 读 System.getProperty("user.home")，不受 YUKI_CACHE_DIR 影响，因此这里
+# 不能用 hoststate.get_cache_dir()（默认多一层 cache/，清理会恒空转）。
+_JVM_COOKIE_DIR = os.path.join(os.path.expanduser('~'), '.yuki', 'jar-cache', 'TVBox')
+_cookie_cleanup_lock = threading.Lock()
+
+
+def cleanup_jvm_cookie_files():
+    """强杀 JVM 后清理 TVBox/*_cookie.txt 明文登录态（幂等，可并发调用）。"""
+    with _cookie_cleanup_lock:
+        try:
+            if not os.path.isdir(_JVM_COOKIE_DIR):
+                return
+            for name in os.listdir(_JVM_COOKIE_DIR):
+                if not name.lower().endswith('_cookie.txt'):
+                    continue
+                try:
+                    os.remove(os.path.join(_JVM_COOKIE_DIR, name))
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+
 # vendor 资产根：开发模式为仓库根 vendor/，打包模式为 resources/vendor/
 # （经 hoststate.resources_root 解析——冻结产物里 __file__ 在 _internal/ 下，
 # 向上一级是 exe 目录，那里没有 vendor，直接拼路径会全部落空）
@@ -1211,6 +1241,10 @@ class JarBridge:
                         pipe.close()
                 except Exception:
                     pass
+        # P1-4：TerminateProcess 不执行 Java shutdown hook，强杀后网盘
+        # Cookie 文件（TVBox/*_cookie.txt）无人清理，这里补删（幂等、
+        # 优雅路径重复删除无害）。
+        cleanup_jvm_cookie_files()
 
     # ------------------------------------------------------------ 生命周期
 
@@ -1242,6 +1276,9 @@ class JarBridge:
                     proc.kill()
                 except Exception:
                     pass
+                # P1-4：优雅退出失败转强杀时，Java hook 大概率未执行，补删
+                # cookie 文件（优雅成功时 hook 已清理，此处重复删除无害）。
+                cleanup_jvm_cookie_files()
             finally:
                 for pipe in (getattr(proc, 'stdin', None), getattr(proc, 'stdout', None),
                              getattr(proc, 'stderr', None)):

@@ -23,6 +23,7 @@ import re
 
 import http_client
 import hoststate
+import urllib.parse
 from urllib.parse import quote
 
 import quickjs
@@ -40,9 +41,10 @@ logger = logging.getLogger('yuki.jsengine')
 class JsEngineUnavailableError(ValueError):
     """QuickJS 宿主安全前提不满足（限额 API 缺失/设置失败等）。
 
-    继承 ValueError：config._load_js_spider 会包上 [L3:js] 标签把站点记为
-    构建失败（skipped），runtime worker 会回 ready ok=False——站点呈现为
-    「不可用」而不是静默跑无限额的远端代码，也不会崩溃后端。
+    继承 ValueError：上层装载入口（config 的 js 站点装配 / site_worker._build）
+    按 except Exception 捕获后把站点记为构建失败（skipped）或回 ready
+    ok=False——站点呈现为「不可用」而不是静默跑无限额的远端代码，也不会
+    崩溃后端。
     """
 
 
@@ -301,6 +303,12 @@ def _read_body_capped(response, url):
     return b''.join(chunks)
 
 
+# P2-11：重定向跟随上限。JS 源请求与 ？url=/jar 下载同档（5 跳）。
+_NATIVE_HTTP_MAX_REDIRECTS = 5
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
 def _native_http(url, options_json):
     """同步 HTTP，返回 JSON 串：{ok, status, code, content, headers}。"""
     try:
@@ -312,26 +320,60 @@ def _native_http(url, options_json):
     timeout = _clamp_timeout(opt.get('timeout'))
     allow_redirects = opt.get('redirect', True)
 
-    # N3.2 / S1.1: 继承宿主安全策略（SSRF 守卫与私网防护）
-    try:
-        from runtime.config_security import guard_url, ConfigSecurityPolicy, SourceTrust
-        guard_url(url, policy=ConfigSecurityPolicy.from_env(), trust=SourceTrust())
-    except Exception as e:
-        logger.warning('js req blocked by security policy: %s (%s)', url, e)
+    def _blocked(payload_url, exc):
+        # P2-11：SSRF 守卫拒绝（首跳或重定向任一跳）。JS 源是不可信代码，
+        # 响应结构与正常失败一致，不向沙箱内回显内部错误细节。
+        logger.warning('js req blocked by security policy: %s (%s)', payload_url, exc)
         return json.dumps({'ok': False, 'status': 403, 'code': 403,
-                           'content': f'blocked by host security policy: {e}',
-                           'headers': {}, 'url': url})
+                           'content': 'blocked by host security policy',
+                           'headers': {}, 'url': payload_url})
+
+    # N3.2 / S1.1: 继承宿主安全策略（SSRF 守卫与私网防护）。
+    # P2-11：守卫逻辑收编到 http_client._guard_hop（与 CMS/jar 下载同一套
+    # 逐跳复检机制），首跳守卫改经它执行——策略每跳从环境变量重建，
+    # trust_root 留空 = 无受信 origin（JS 源没有「用户显式信任根」语义）。
+    try:
+        current = http_client._guard_hop(url, kind='site')
+    except Exception as e:
+        return _blocked(url, e)
 
     try:
-        kwargs = dict(headers=headers, timeout=timeout,
-                      allow_redirects=bool(allow_redirects), verify=True,
-                      stream=True)
-        if method == 'POST':
-            kwargs['data'] = opt.get('body') or opt.get('data')
-            rsp = http_client.post(url, **kwargs)
+        if allow_redirects:
+            # P2-11：requests 的 allow_redirects=True 会在库内静默跟随 302，
+            # 首跳过守卫也拦不住「公网源 302 → 内网」。改为手动逐跳跟随，
+            # 每一跳都过 _guard_hop（trust_redirect=True：跳转目标是远端
+            # 响应派生的地址，不继承任何信任根）。对齐 go_proxy._fetch /
+            # http_client.fetch_follow_redirects / jar_bridge.requests_get_jar。
+            for _ in range(_NATIVE_HTTP_MAX_REDIRECTS + 1):
+                kwargs = dict(headers=headers, timeout=timeout,
+                              allow_redirects=False, verify=True, stream=True)
+                if method == 'POST':
+                    kwargs['data'] = opt.get('body') or opt.get('data')
+                    rsp = http_client.post(current, **kwargs)
+                else:
+                    rsp = http_client.get(current, **kwargs)
+                if rsp.status_code not in _REDIRECT_STATUSES \
+                        or 'Location' not in rsp.headers:
+                    break
+                location = rsp.headers.get('Location') or ''
+                rsp.close()   # 3xx body 从不读取，取完 Location 立刻还连接
+                try:
+                    current = http_client._guard_hop(
+                        urllib.parse.urljoin(current, location), kind='site',
+                        trust_redirect=True)
+                except Exception as e:
+                    return _blocked(current, e)
+            else:
+                raise ValueError(f'too many redirects (>{_NATIVE_HTTP_MAX_REDIRECTS}): {url}')
         else:
-            rsp = http_client.get(url, **kwargs)
-        raw = _read_body_capped(rsp, url)
+            kwargs = dict(headers=headers, timeout=timeout,
+                          allow_redirects=False, verify=True, stream=True)
+            if method == 'POST':
+                kwargs['data'] = opt.get('body') or opt.get('data')
+                rsp = http_client.post(current, **kwargs)
+            else:
+                rsp = http_client.get(current, **kwargs)
+        raw = _read_body_capped(rsp, current)
         text = _decode_body(raw, rsp.headers)
         return json.dumps({
             'ok': rsp.status_code < 400,
@@ -342,9 +384,9 @@ def _native_http(url, options_json):
             'headers': dict(rsp.headers),
         }, ensure_ascii=False)
     except Exception as e:
-        logger.warning('js req failed: %s %s', url, e)
+        logger.warning('js req failed: %s %s', current, e)
         return json.dumps({'ok': False, 'status': 500, 'code': 500,
-                           'content': '', 'headers': {}, 'url': url})
+                           'content': '', 'headers': {}, 'url': current})
 
 
 class JsEngine:

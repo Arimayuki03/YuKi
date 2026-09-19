@@ -50,6 +50,17 @@ def _pan_fallback_url(params: Mapping[str, Any]) -> str | None:
         query = urlencode({str(k): v for k, v in params.items()
                            if v is not None and str(k).lower() not in blocked},
                           doseq=True)
+        # P1-3：do=pan 通道已加 token 门禁；dispatch() 上游虽会剥掉请求参数里
+        # 与宿主一致的 token，重建 URL 时必须回填，否则快路径 302 出去的
+        # do=pan 地址会被旧数据面的门禁 401 拒绝。
+        try:
+            import hoststate
+            token = str(hoststate.get_token() or '')
+        except Exception:
+            token = ''
+        if token and not any(str(k).lower() == 'token' for k in params):
+            pair = urlencode({'token': token})
+            query = f'{query}&{pair}' if query else pair
         return f"http://127.0.0.1:{int(go_proxy.PORT)}/proxy" + (f"?{query}" if query else '')
     except Exception:
         return None

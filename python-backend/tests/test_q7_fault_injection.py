@@ -8,6 +8,7 @@
 - 端口冲突探测与自愈
 - mpv 缺失、首帧超时与播放中断处理
 """
+import http.client
 import os
 import sys
 import socket
@@ -108,23 +109,93 @@ class TestQ7FaultInjectionAndResilience(unittest.TestCase):
             requests.get('http://127.0.0.1:1/non-existent', timeout=1)
 
     def test_port_conflict_detection_and_release(self):
-        # 绑定测试端口并检测冲突
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('127.0.0.1', 0))
-        port = sock.getsockname()[1]
-        
-        # 试图在同端口启动另一个监听
-        sock_conflict = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        with self.assertRaises(OSError):
-            sock_conflict.bind(('127.0.0.1', port))
-            
-        sock.close()
-        sock_conflict.close()
+        """Q7.6 端口冲突探测与自愈：打在真实被测组件 go_proxy 的监听链路上。
 
-        # 释放后可以再次成功绑定
-        sock_rebound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock_rebound.bind(('127.0.0.1', port))
-        sock_rebound.close()
+        旧实现只对两个裸 socket 做二分绑定，只验证了 OS 的 socket 语义，
+        注入从未触及被测对象（假绿）。现在把「同端口二次绑定」真实注入到
+        go_proxy.start_go_proxy / ensure_listener 的启动路径：
+        - 占住 go_proxy 固定端口之一（OSError）→ start_go_proxy 跳过该端口、
+          不崩溃，其余端口照常就位且确属本进程（self-heal）；
+        - 释放后 ensure_listener 能在同一端口重新挂上服务（release）。
+        """
+        import go_proxy  # noqa: PLC0415
+
+        def _owner_pid(port):
+            """探测端口监听者；无监听返回 None。"""
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+            try:
+                conn.request('GET', '/proxy?do=ck')
+                rsp = conn.getresponse()
+                rsp.read()
+                return rsp.getheader('X-GoProxy-Pid') or 'unknown'
+            except OSError:
+                return None
+            finally:
+                conn.close()
+
+        def _find_bindable(candidates):
+            """从候选端口里找当前空闲可绑定的；优先 EXTRA_PORTS（避开 PORT 的
+            双绑定探测重试延迟）。"""
+            for port in candidates:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    sock.bind(('127.0.0.1', port))
+                    return port
+                except OSError:
+                    continue
+                finally:
+                    sock.close()
+            return None
+
+        fixed_ports = [go_proxy.PORT, *go_proxy.EXTRA_PORTS]
+        # 测试前提：固定端口集合中至少有一个空闲（否则本机已有真实实例监听，
+        # 冲突注入无从谈起——跳过而非误报）。
+        pre_held = {p for p in fixed_ports if _owner_pid(p) is not None}
+        occupiable = [p for p in (*go_proxy.EXTRA_PORTS, go_proxy.PORT)
+                      if p not in pre_held]
+        occupied = _find_bindable(occupiable)
+        if occupied is None:
+            self.skipTest('go_proxy fixed ports all in use by a live instance')
+
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            blocker.bind(('127.0.0.1', occupied))
+            blocker.listen(1)
+            servers = go_proxy.start_go_proxy()
+        finally:
+            blocker.close()
+        try:
+            self.assertTrue(servers, 'start_go_proxy must self-heal on port conflict')
+            # 冲突端口被跳过；其余「测试前空闲」的固定端口必须就位且确属本进程
+            for port in fixed_ports:
+                if port == occupied or port in pre_held:
+                    continue
+                self.assertEqual(_owner_pid(port), str(os.getpid()),
+                                 f'fixed port {port} must be served by this process')
+        finally:
+            go_proxy.stop_go_proxy()
+
+        # ── 释放后再绑定：ensure_listener 的真实服务链路 ──
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        self.assertTrue(go_proxy.ensure_listener(port))
+        try:
+            self.assertEqual(_owner_pid(port), str(os.getpid()))
+        finally:
+            listener = go_proxy._extra_servers.pop(port, None)
+            if listener is not None:
+                listener.shutdown()
+                listener.server_close()
+        # 释放后可再次成功绑定并服务（release 语义）
+        self.assertTrue(go_proxy.ensure_listener(port))
+        try:
+            self.assertEqual(_owner_pid(port), str(os.getpid()))
+        finally:
+            listener = go_proxy._extra_servers.pop(port, None)
+            if listener is not None:
+                listener.shutdown()
+                listener.server_close()
 
 
 if __name__ == '__main__':

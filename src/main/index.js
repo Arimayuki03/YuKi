@@ -27,6 +27,44 @@ const { extWatch } = require('./ext-watch');
 const { PlaylistProxy } = require('./playlist-proxy');
 const { PAN_SOURCE_RE, isPanQueueRequest } = require('./pan-source');
 
+// ---------------------------------------------------------------- IPC 可信发送方校验（P2-6）
+// 全仓约百个 ipcMain.handle 此前均不校验 senderFrame，任意被注入的渲染上下文都能
+// 调用特权通道。信任清单结论（已核对全部窗口创建点）：本应用只有主窗挂 preload
+// （index.js createWindow 一处；parse/验证码/扫码窗口均无 preload 且加载远程页面，
+// 本就没有合法 IPC 调用方），因此可信页面只有主窗加载的本应用 index.html——判定
+// 方式与主窗 will-navigate 白名单 isLocalAppPageUrl 一致（file:// 指向本应用安装
+// 路径；开发模式额外放行 localhost dev server）。不属于 → 抛错拒绝并记日志。
+// event 缺省（主进程内直调/单测桩）视为可信：真实 IPC 恒带 event。
+function isTrustedIpcSender(event) {
+    if (!event) return true;
+    let url = '';
+    try {
+        const frame = event.senderFrame;
+        url = frame ? String(frame.url || '') : '';
+    } catch (e) { return false; } // 帧已销毁等异常：fail-closed
+    if (!url) return false;
+    try {
+        if (isLocalAppPageUrl(decodeURI(url))) return true; // decodeURI 还原安装路径空格等百分号编码
+    } catch (e) { /* decode 失败继续走 dev 分支 */ }
+    if (!app.isPackaged) {
+        try {
+            const u = new URL(url);
+            if ((u.protocol === 'http:' || u.protocol === 'https:')
+                && ['localhost', '127.0.0.1'].includes(u.hostname)) return true;
+        } catch (e) { /* 非 URL 形态：不可信 */ }
+    }
+    return false;
+}
+// 一次性包装 ipcMain.handle：其后全部注册（含文件头部这条模块级注册）自动带上校验。
+const _rawIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => _rawIpcHandle(channel, (event, ...args) => {
+    if (!isTrustedIpcSender(event)) {
+        console.warn('[ipc] 已拒绝不可信发送方的通道调用:', channel);
+        throw new Error(`ipc channel '${channel}' rejected: untrusted sender`);
+    }
+    return handler(event, ...args);
+});
+
 // 模块级注册：无论 setup 流程走到哪里，渲染层调用都不会悬空 pending
 ipcMain.handle('yuki:playlist-build', (_e, queue) => {
     if (!playlistProxyRef) return { ok: false, reason: 'playlist proxy not ready' };
@@ -114,6 +152,8 @@ const pageQueueBan = new Set();
 // 外部播放器最近一次启动的子进程 pid：新启动前 kill 旧进程收敛为单窗口
 // （外部播放器无 stop 句柄；kill 位于 spawn 前一刻的同步段，见 launchExternalPlayerItems）。
 let lastExtLaunchPid = 0;
+// 旧 pid 对应的实际可执行路径（P3-11：taskkill 前按进程名校验身份，防 PID 复用误杀）
+let lastExtLaunchPath = '';
 // 外部启动 single-flight：同播放意图（kind|site|title）的并发 yuki:play 复用
 // 同一次在途启动——static 包装含 await（register/探测），渲染层竞态双发的两次
 // IPC 在 await 间隙交错时，仅靠「spawn 前 kill 上一个 pid」仍可能各 spawn 一窗
@@ -191,8 +231,13 @@ function attachAnime4kInfo(r) {
 }
 
 // Anime4K 着色器源（bloc97/Anime4K v4.1，仓库按功能分子目录）：启动时自动补齐缺失文件，免手动下载。
-// 多镜像下载加固：raw.githubusercontent 直连失败 → jsdelivr CDN（单文件上限 20MB，glsl 远小于此）→
-// ghfast.top 加速代理。镜像/代理可能回错误页（HTTP 200 假成功），按内容含 "Anime4K" 校验。
+// 多镜像下载加固：raw.githubusercontent 直连失败 → jsdelivr CDN（单文件上限 20MB，glsl 远小于此）。
+// P3-10：下载产物按 scripts/binaries.lock.json 的 anime4k 段做 sha256 强校验（打包已随
+// asar 带上该清单），通过才落盘——校验不过不写盘、换下一镜像。ghfast.top 加速代理保留但
+// 置于强校验之后（构建期 download-binaries.js 同口径）：镜像/代理可能回错误页或被篡改的
+// 内容，HTTP 200 假成功靠子串校验拦不住篡改，落盘前的哈希校验是唯一可靠防线；风险边界
+// = 哈希比对针对的是 lock 清单本身，而 lock 随 asar 分发，独立于下载通道，加速代理无法
+// 同时伪造两者。
 const ANIME4K_URLS = {
     'Anime4K_Clamp_Highlights.glsl': 'Restore/Anime4K_Clamp_Highlights.glsl',
     'Anime4K_Restore_CNN_M.glsl': 'Restore/Anime4K_Restore_CNN_M.glsl',
@@ -204,11 +249,22 @@ const ANIME4K_URLS = {
 const ANIME4K_MIRRORS = [
     (rel) => `https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/${rel}`,
     (rel) => `https://cdn.jsdelivr.net/gh/bloc97/Anime4K@master/glsl/${rel}`,
+    // 加速代理置后（第三顺位）：仅在直连与 CDN 都失败时兜底，产物仍须过 sha256 校验
     (rel) => `https://ghfast.top/https://raw.githubusercontent.com/bloc97/Anime4K/master/glsl/${rel}`,
 ];
 
-/** 单个着色器多镜像下载：任一镜像成功写盘返回 true；全部失败返回 false（不抛出，换下一个文件继续）。 */
+/** 读 binaries.lock.json 的 anime4k 哈希表（打包随 asar 分发；缺失/损坏返回 null，退化为仅子串校验）。 */
+function anime4kLockHashes() {
+    try {
+        const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'binaries.lock.json'), 'utf8'));
+        return (lock && lock.anime4k) || null;
+    } catch (e) { return null; }
+}
+
+/** 单个着色器多镜像下载：任一镜像成功且 sha256 校验通过写盘返回 true；全部失败返回 false（不抛出，换下一个文件继续）。 */
 async function downloadAnime4kOne(dest, rel) {
+    const hashes = anime4kLockHashes();
+    const expected = hashes ? hashes[path.basename(dest)] : null;
     for (const toUrl of ANIME4K_MIRRORS) {
         try {
             const res = await fetch(toUrl(rel), {
@@ -219,10 +275,19 @@ async function downloadAnime4kOne(dest, rel) {
             if (!res.ok) continue;
             const buf = Buffer.from(await res.arrayBuffer());
             if (buf.length < ANIME4K_MIN_SIZE || !buf.toString('utf8').includes('Anime4K')) continue;
+            // P3-10：lock 清单已有该资产哈希时强制比对，不符不落盘、换下一镜像
+            // （错误页/截断/被篡改内容在此拦截）。全部镜像都过不了校验才放弃本次下载。
+            if (expected) {
+                const got = require('crypto').createHash('sha256').update(buf).digest('hex');
+                if (got !== expected) {
+                    console.warn(`[anime4k] sha256 校验失败，拒绝落盘: ${rel} <- ${toUrl(rel)}`);
+                    continue;
+                }
+            }
             // L-7:下载前确保父目录已建立,防 ENOENT
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, buf);
-            console.log(`[anime4k] ${rel} <- ${toUrl(rel)}`);
+            console.log(`[anime4k] ${rel} <- ${toUrl(rel)}${expected ? '（sha256 已校验）' : '（无 lock 哈希，仅内容校验）'}`);
             return true;
         } catch (e) { /* 换下一个镜像 */ }
     }
@@ -455,12 +520,61 @@ function purgeDir(p) {
     return { bytes, files };
 }
 
-/** 播放成功后的公共后处理：应用预设音量。 */
+/** 播放成功后的公共后处理：应用预设音量。
+ *  P3-24：1.5s 音量 timer 收拢到模块级持有者，退出清理序列统一取消
+ *  （原实现游离，退出路径无法清理；影响趋零，属清理项）。 */
+const afterPlayTimers = new Set();
 function afterPlay() {
     const vol = settings ? parseInt(settings.get('playerVolume'), 10) : 0;
     if (vol > 0) {
-        setTimeout(() => { mpv.setVolume(vol).catch(() => { }); }, 1500);
+        const t = setTimeout(() => {
+            afterPlayTimers.delete(t);
+            mpv.setVolume(vol).catch(() => { });
+        }, 1500);
+        afterPlayTimers.add(t);
     }
+}
+
+// 下载产物删除重试 / 空目录清理 timer 的模块级持有者（P3-24）：timer 定义在
+// whenReady 闭包内，但退出清理序列 runQuitCleanup 是模块级函数，持有者必须
+// 同处模块层才能被退出路径取消。
+const dlCleanupTimers = new Set();
+
+// ---- 定时关机状态（模块层：yuki:shutdown-timer 与退出清理序列共用，P2-13）----
+let shutdownTimer = null;
+// OS 关机命令是否已下发（Windows 上处于 /t 60 的 60s 宽限期）。取消时必须
+// 显式 shutdown /a，否则 JS 侧 clearTimeout 已失效、机器照样关机。
+let shutdownArmed = false;
+const cancelPendingShutdown = () => {
+    if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
+    if (shutdownArmed && process.platform === 'win32') {
+        try { require('child_process').exec('shutdown /a', { windowsHide: true }); }
+        catch (e) { /* 已关机/无宽限期待撤，忽略 */ }
+    }
+    shutdownArmed = false;
+};
+
+// ---- local-thumbs 预览图缓存淘汰（P2-15）----
+// 缓存 key 含签名直链的完整 URL（ffmpeg.js urlThumb 用 md5(url)），签名一变即新
+// key——不淘汰会随观看无限增长。按条目数上限淘汰最旧（mtime 最小）文件：签名直链
+// 的旧封面天然先失效，先删不影响热封面。
+const LOCAL_THUMBS_MAX_ENTRIES = 512;
+
+function evictLocalThumbs() {
+    const dir = path.join(app.getPath('userData'), 'local-thumbs');
+    let names;
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.jpg')); } catch (e) { return; }
+    if (names.length <= LOCAL_THUMBS_MAX_ENTRIES) return;
+    const statted = [];
+    for (const name of names) {
+        try { statted.push({ name, m: fs.statSync(path.join(dir, name)).mtimeMs }); } catch (e) { /* 并发删除竞态：跳过 */ }
+    }
+    statted.sort((a, b) => a.m - b.m);
+    const excess = statted.length - LOCAL_THUMBS_MAX_ENTRIES;
+    for (let i = 0; i < excess; i++) {
+        try { fs.rmSync(path.join(dir, statted[i].name), { force: true }); } catch (e) { /* 单项失败跳过 */ }
+    }
+    console.log(`[thumbs] local-thumbs 超上限，已淘汰最旧 ${excess} 个（上限 ${LOCAL_THUMBS_MAX_ENTRIES}）`);
 }
 
 // 网盘首次解析/转存可能等待数秒；必须等到 mpv 真正加载媒体再向渲染层
@@ -1475,7 +1589,8 @@ app.whenReady().then(() => {
 
     fileIpc('yuki:file-new-folder', (rel, name) => { fileMgr.newFolder(rel, name); return {}; });
     fileIpc('yuki:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
-    fileIpc('yuki:file-del-folder', (rel) => { fileMgr.delFolder(rel); return {}; });
+    // P2-7：delFolder 为 async（原生确认框 await）——fileIpc 已 await fn(...)，拒绝/取消经 reason 返回
+    fileIpc('yuki:file-del-folder', (rel) => fileMgr.delFolder(rel));
 
     // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
     fileIpc('yuki:file-thumb', async (rel) => {
@@ -1484,6 +1599,8 @@ app.whenReady().then(() => {
         // 远程地址不经本地路径白名单（无本地文件系统边界问题），缓存 key 用 md5(url)
         const raw = String(rel || '');
         if (/^(https?|rtmps?):\/\//i.test(raw)) {
+            // 淘汰检查跟随每次直链抓帧：签名直链 key 无限增长的收敛点（P2-15）
+            evictLocalThumbs();
             return ffmpegUrlThumb(raw, path.join(app.getPath('userData'), 'local-thumbs'));
         }
         const inside = (root, target) => {
@@ -1522,6 +1639,7 @@ app.whenReady().then(() => {
         // 无扩展名文件放行（与 yuki:download-play 一致）：让 ffmpeg 实际探测容器格式，
         // 旧版无后缀存量下载文件也能抓帧；带扩展名但不在视频白名单的仍拒绝
         if (!fileMgr.isVideo(abs) && path.extname(abs)) return { ok: false };
+        evictLocalThumbs(); // 本地文件抓帧同样可能新增条目，顺手做淘汰检查（P2-15）
         return ffmpegThumb(abs, path.join(app.getPath('userData'), 'local-thumbs'));
     });
 
@@ -1597,8 +1715,16 @@ app.whenReady().then(() => {
 
     // ---- Phase 7 推送 / 解析 / 设置 ----
 
+    // P3-8：与 yuki:play 同一协议白名单——推送入口（面板手动 + 局域网 push-server）
+    // 汇聚后都走 playPushedUrl，此处统一拒绝 file:// 等本地协议直达 mpv
+    // （mpv 对本地路径与 file:// 均可播放，白名单缺失时一条推送即读取本地任意媒体文件）。
+    function isPlayablePushUrl(u) {
+        return /^(https?|rtmps?|rtsp|magnet):/i.test(String(u || ''));
+    }
+
     // 手动推送（面板）与局域网推送共用同一播放入口
     async function playPushedUrl(url, source) {
+        if (!isPlayablePushUrl(url)) return { ok: false, reason: 'bad url protocol' };
         if (!mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
         let playUrl = url;
         let header;
@@ -1931,12 +2057,28 @@ app.whenReady().then(() => {
             bridge.start();
             return { ok: true, path: '__default__' };
         }
-        try { fs.mkdirSync(target, { recursive: true }); } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
-        settings.set('cacheDir', target);
-        bridge.extraEnv.YUKI_CACHE_DIR = target;
+        // P3-9：最小防御——回传路径必须解析为绝对路径（拒绝 UNC 与相对路径；
+        // path.win32.isAbsolute 对 \\server\\share 也为 true，需单独排除），
+        // 创建后做一次可写测试。用户自选目录不做根限制（与下载目录 pickDir 同一口径）：
+        // 真实发起人只能经主进程对话框（need-restart 流程回传的是刚弹窗选中的路径），
+        // 本校验针对的是渲染层被注入后直接伪造第二次提交的场景。
+        if (/^\\\\/.test(target)) return { ok: false, reason: 'dir-invalid' }; // UNC 路径
+        let abs = '';
+        try {
+            abs = path.resolve(target);
+            if (!path.isAbsolute(abs)) return { ok: false, reason: 'dir-invalid' };
+        } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
+        try {
+            fs.mkdirSync(abs, { recursive: true });
+            const probe = path.join(abs, `.yuki-write-test-${Date.now()}`);
+            fs.writeFileSync(probe, 'ok');
+            fs.rmSync(probe, { force: true });
+        } catch (e) { return { ok: false, reason: 'dir-invalid' }; }
+        settings.set('cacheDir', abs);
+        bridge.extraEnv.YUKI_CACHE_DIR = abs;
         bridge.stop();
         bridge.start();
-        return { ok: true, path: target };
+        return { ok: true, path: abs };
     });
 
     // ---- 通用目录选择 ----
@@ -1952,8 +2094,13 @@ app.whenReady().then(() => {
     });
 
     // 统一清理主进程侧本地缓存（配合后端 clearCache 一并调用，见渲染层 clearCache）：
-    // 本地预览图 + 解析/验证窗口 partition 会话缓存。
+    // 本地预览图 + 解析/验证窗口 partition 会话 HTTP 缓存 + 主进程日志。
     // （mpv 视频缓冲只走内存，不产生可清理的磁盘缓存；历史残留由启动迁移一次性清掉。）
+    // P2-15：parse-*/quark-pan-login 均为无 persist: 前缀的内存会话（不落
+    // userData/Partitions 磁盘），原先遍历 %APPDATA%\yuki\Partitions\parse-* 的磁盘
+    // 分支永远空转——已删除；session 层 clearCache 对内存会话同样有效，保留。
+    // 日志真实目录是 ~/.yuki/logs（LOG_DIR，os.homedir），原实现统计 %APPDATA%\yuki\logs
+    // 恒为 0——清理与统计一并指向 LOG_DIR。
     // 单次遍历累加并删除（复用 purgeDir/getDirSize，避免 O(n^2) 二次遍历）；
     // 逐目录 try/catch，占用文件跳过；返回释放字节数与各项明细。
     // 并发锁 _clearingAppCaches：清理进行中再次调用直接返回 busy，避免并行重复 walk。
@@ -1966,17 +2113,11 @@ app.whenReady().then(() => {
             const detail = {};
             // 本地视频预览图缓存（单次遍历边算边删）
             try { const b = purgeDir(path.join(ud, 'local-thumbs')).bytes; detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
-            // 解析/验证隐藏窗口的 partition 会话缓存（Chromium 存 userData/Partitions/parse-*）
+            // 解析/验证隐藏窗口的 partition 会话 HTTP 缓存（内存会话，只能走 session 层清理）
             try {
-                const partRoot = path.join(ud, 'Partitions');
                 let freed = 0;
-                if (fs.existsSync(partRoot)) {
-                    for (const name of fs.readdirSync(partRoot)) {
-                        if (/^parse-/i.test(name)) freed += purgeDir(path.join(partRoot, name)).bytes;
-                    }
-                }
                 // 清各 parse-* session 的 HTTP 缓存：先测大小，clearCache 后再测差值补入
-                // （会话仍在用时磁盘文件可能被占用无法直删，session 层清理是另一部分释放量）。
+                // （session 层清理是磁盘遍历覆盖不到的部分）。
                 try {
                     for (let i = 0; i < 3; i++) {
                         const part = `parse-${i}`;
@@ -1992,6 +2133,14 @@ app.whenReady().then(() => {
                 } catch (e) { /* ignore */ }
                 detail.parsePartitions = freed; total += freed;
             } catch (e) { /* ignore */ }
+            // 主进程日志（~/.yuki/logs）：与「清空日志」一致走 clearLogs
+            // （被后端持有的句柄退化为截断清零，不误删目录结构）。
+            try {
+                const r = clearLogs(LOG_DIR);
+                const b = getDirSize(LOG_DIR).bytes;
+                detail.logs = b; total += b;
+                console.log(`[cache] 日志清理：删除 ${r.removed} 个文件（${r.failed.length} 个占用截断）`);
+            } catch (e) { /* ignore */ }
             return { ok: true, cleanedBytes: total, detail };
         } finally {
             _clearingAppCaches = false;
@@ -1999,7 +2148,10 @@ app.whenReady().then(() => {
     });
 
     // 统计主进程侧本地缓存占用（只统计不删）：供前端与后端 bytes 合并分类展示。
-    // 单次遍历各目录累加；parse-* 同时叠加 session HTTP 缓存大小（磁盘文件之外的部分）。
+    // parse-* 同时叠加 session HTTP 缓存大小（内存会话，磁盘遍历覆盖不到的部分）。
+    // P2-15：parse-*/quark-pan-login 均为无 persist: 前缀的内存会话——原遍历
+    // %APPDATA%\yuki\Partitions\parse-* 的磁盘分支永远空转，已删除；日志统计指向
+    // 真实目录 ~/.yuki/logs（LOG_DIR），原统计 %APPDATA%\yuki\logs 恒为 0。
     ipcMain.handle('yuki:cache-size', async () => {
         try {
             const ud = app.getPath('userData');
@@ -2007,15 +2159,9 @@ app.whenReady().then(() => {
             let total = 0;
             // 本地预览图
             try { const b = getDirSize(path.join(ud, 'local-thumbs')).bytes; detail.thumbs = b; total += b; } catch (e) { /* ignore */ }
-            // 解析窗口 partition：磁盘文件 + session HTTP 缓存
+            // 解析窗口 partition：session HTTP 缓存（内存会话，无磁盘目录可遍历）
             try {
-                const partRoot = path.join(ud, 'Partitions');
                 let b = 0;
-                if (fs.existsSync(partRoot)) {
-                    for (const name of fs.readdirSync(partRoot)) {
-                        if (/^parse-/i.test(name)) b += getDirSize(path.join(partRoot, name)).bytes;
-                    }
-                }
                 try {
                     for (let i = 0; i < 3; i++) {
                         try { b += await session.fromPartition(`parse-${i}`).getCacheSize(); } catch (e) { /* ignore */ }
@@ -2023,8 +2169,8 @@ app.whenReady().then(() => {
                 } catch (e) { /* ignore */ }
                 detail.parsePartitions = b; total += b;
             } catch (e) { /* ignore */ }
-            // 旧日志（只统计不删）
-            try { const b = getDirSize(path.join(ud, 'logs')).bytes; detail.logs = b; total += b; } catch (e) { /* ignore */ }
+            // 主进程日志（真实目录 ~/.yuki/logs）
+            try { const b = getDirSize(LOG_DIR).bytes; detail.logs = b; total += b; } catch (e) { /* ignore */ }
             return { ok: true, bytes: total, detail };
         } catch (e) {
             return { ok: false, reason: 'stat-failed' };
@@ -2420,7 +2566,9 @@ app.whenReady().then(() => {
 
     /** 尽力删除一批文件/目录：aria2c/ffmpeg 释放句柄可能滞后于 RPC 返回，Windows 上
      *  rmSync 会因句柄未关（EBUSY/EPERM）失败——这正是「删除运行中任务后残留 .aria2」
-     *  的根因。失败项间隔递增重试（共 5 次尝试），仍失败则留待下次（不阻塞 IPC）。 */
+     *  的根因。失败项间隔递增重试（共 5 次尝试），仍失败则留待下次（不阻塞 IPC）。
+     *  P3-24：重试 timer 收拢到模块级 dlCleanupTimers（定义见 afterPlay 旁），退出
+     *  清理序列统一取消。 */
     function rmFilesBestEffort(files, isDir, attempt = 0) {
         const list = (files || []).filter(Boolean);
         if (!list.length) return;
@@ -2432,7 +2580,11 @@ app.whenReady().then(() => {
             try { return fs.existsSync(f); } catch (e) { return false; }
         });
         if (remaining.length && attempt < 4) {
-            setTimeout(() => rmFilesBestEffort(remaining, isDir, attempt + 1), 500 * (attempt + 1));
+            const t = setTimeout(() => {
+                dlCleanupTimers.delete(t);
+                rmFilesBestEffort(remaining, isDir, attempt + 1);
+            }, 500 * (attempt + 1));
+            dlCleanupTimers.add(t);
         }
     }
 
@@ -2857,7 +3009,9 @@ app.whenReady().then(() => {
                     // delFiles=内容文件（仅 deleteFiles=true 时删除）；ctrlFiles=断点控制文件与
                     // 临时产物（.aria2/.incomplete/.part/.adfilter）——任务已删则它们无所依附，
                     // 「仅移除（保留文件）」也一并清掉，否则磁盘上残留孤儿 .aria2/分片临时文件。
-                    const deleteFiles = payload.deleteFiles !== false;
+                    // P2-6：删除媒体文件必须显式 opt-in（=== true）——字段省略不得静默删除
+                    // 已下载内容（渲染层 downloads.js 已显式传布尔值，主进程内部调用点无）。
+                    const deleteFiles = payload.deleteFiles === true;
                     const delFiles = new Set();
                     const ctrlFiles = new Set();
                     const hlsSegsDirs = [];
@@ -2933,9 +3087,12 @@ app.whenReady().then(() => {
                             if (d) seriesDirs.add(d);
                         }
                         if (seriesDirs.size) {
-                            setTimeout(() => {
+                            // P3-24：空目录清理 timer 同样收拢到 dlCleanupTimers（退出时统一取消）
+                            const t = setTimeout(() => {
+                                dlCleanupTimers.delete(t);
                                 for (const d of seriesDirs) { try { fs.rmdirSync(d); } catch (e) { /* 非空/已删 */ } }
                             }, 5500);
+                            dlCleanupTimers.add(t);
                         }
                     }
                     // 删除后立即推送刷新列表 + 重启轮询（可能有剩余活跃任务）
@@ -3445,7 +3602,12 @@ app.whenReady().then(() => {
     });
 
     settings = new Settings(app.getPath('userData'));
-    fileMgr = new FileManager(app.getPath('userData'));
+    fileMgr = new FileManager(app.getPath('userData'), {
+        // P2-7：delFolder 原生二次确认（主进程最后防线；渲染层确认之外再拦一道）
+        confirm: (opts) => dialog.showMessageBox(win, opts).then((r) => r.response).catch(() => 1),
+        // P2-7：在写互斥——活动任务从持久化记录读（含 HLS 任务，persistInProgress 落盘）
+        getRecords: () => dlRecords.all(),
+    });
     // 本地文件根目录默认与下载目录一致（未手动选过白名单时）
     if (!fileMgr.root) {
         try { fileMgr.setRoot(settings.get('dlDir') || app.getPath('downloads')); } catch (e) { /* 目录无效保持引导态 */ }
@@ -3541,6 +3703,8 @@ app.whenReady().then(() => {
     }
     // ffmpeg 内置：启动后台自动补齐（m3u8 下载合成与本地预览图依赖；缺失时静默降级）
     ensureFfmpeg().catch(() => { });
+    // P3-24：启动即清理 ext-playlists 残留（.m3u 含可回放的会话级代理 token 地址）
+    cleanupExtPlaylistsOnBoot();
     // 内置 MiSans 字体就绪探测（打包内置，无运行时下载；渲染层经 yuki:font-css 注入，T61）
     misans.ensureMisans().catch(() => { });
     // Anime4K 超分：启动自动补齐着色器（内置免手动下载）；用户从未设置过开关则默认开启，
@@ -3652,7 +3816,9 @@ app.whenReady().then(() => {
      * 规避 CDN WAF 的 VLC UA 封锁。
      */
 
-    /** 外部播放列表临时目录（userData 下，写入前清理 1 小时前的残留）。 */
+    /** 外部播放列表临时目录（userData 下；P3-24：应用启动时清理一次 1 小时前的残留，
+     *  写入时（writeExtPlaylistFile）仍按原逻辑再清——.m3u 内含可回放的代理 token
+     *  地址（playlist-proxy 会话级 2h），只靠写入时机清理会让上次会话残留整个离线期。 */
     function extPlaylistDir() {
         const dir = path.join(app.getPath('userData'), 'ext-playlists');
         try {
@@ -3663,6 +3829,11 @@ app.whenReady().then(() => {
             }
         } catch (e) { /* 目录失败由 writeFileSync 抛出 */ }
         return dir;
+    }
+
+    /** 启动时清理 ext-playlists 残留（P3-24）：仅触达已超龄文件，与写入时清理同一判定。 */
+    function cleanupExtPlaylistsOnBoot() {
+        try { extPlaylistDir(); } catch (e) { /* 目录不可用时静默，写入路径会再报 */ }
     }
 
     /** 从直链 URL 提取已知的媒体扩展名（无法识别返回 ''）。 */
@@ -3809,9 +3980,33 @@ app.whenReady().then(() => {
         return file;
     }
 
-    /** kill 上一次外部播放器进程（收敛语义：同意图重播只保留最新窗口）。 */
-    function killPrevExtPlayer(pid) {
+    /** 校验 pid 对应进程是否仍是预期的外部播放器（P3-11：防 PID 复用误杀）。
+     *  taskkill 前用 PowerShell Get-Process 比对进程名与启动配置的可执行名
+     *  （去扩展名、忽略大小写）；查询失败/进程已退出/名字不匹配一律返回 false，
+     *  调用方跳过强杀只清记录。 */
+    function isExpectedExtPlayerPid(pid, execPath) {
+        const { execFileSync } = require('child_process');
+        try {
+            const out = execFileSync(
+                'powershell.exe',
+                ['-NoProfile', '-NonInteractive', '-Command',
+                    `(Get-Process -Id ${parseInt(pid, 10)} -ErrorAction Stop).ProcessName`],
+                { encoding: 'utf8', windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] },
+            ).trim().toLowerCase();
+            if (!out) return false;
+            const expected = String(execPath || '').replace(/\\/g, '/').split('/').pop()
+                .replace(/\.exe$/i, '').toLowerCase();
+            return !!expected && out === expected;
+        } catch (e) { return false; } // 进程已退出/无权限/超时：一律不杀
+    }
+
+    /** kill 上一次外部播放器进程（收敛语义：同意图重播只保留最新窗口）。
+     *  P3-11：强杀前先校验进程身份——记录的 pid 在期间可能被系统复用给无关进程，
+     *  /T /F 会连同子树误杀。身份不匹配（或进程已退出）则跳过 taskkill 只清记录，
+     *  保持无进程时的静默成功语义。 */
+    function killPrevExtPlayer(pid, execPath) {
         if (!pid || process.platform !== 'win32') return;
+        if (!isExpectedExtPlayerPid(pid, execPath)) return;
         try {
             const { execSync } = require('child_process');
             execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
@@ -3846,7 +4041,7 @@ app.whenReady().then(() => {
                 // 与任何并发交错都不可能产生第二个存活窗口。
                 if (lastExtLaunchPid) {
                     console.log(`[外部播放器] 收敛：kill 旧进程 pid=${lastExtLaunchPid}`);
-                    killPrevExtPlayer(lastExtLaunchPid);
+                    killPrevExtPlayer(lastExtLaunchPid, lastExtLaunchPath);
                 }
                 // 观看会话开账：beginSession 内部会显式结清上一条在播会话（taskkill
                 // 失败/非 win32 时旧进程 exit 事件不可依赖），保证任何时刻至多一条
@@ -3878,6 +4073,7 @@ app.whenReady().then(() => {
                 const child = spawn(execPath, spawnArgs, { detached: true, stdio: 'ignore' });
                 child.unref();
                 lastExtLaunchPid = child.pid;
+                lastExtLaunchPath = execPath;
                 extWatch.attach(child);
                 console.log(`[外部播放器] 已启动 pid=${child.pid} 观看会话=${sessionId}`);
                 return { ok: true, via: execPath, kind, launchedPid: child.pid, sessionId };
@@ -3980,6 +4176,7 @@ app.whenReady().then(() => {
             const child = spawn(execPath, args, { detached: true, stdio: 'ignore' });
             child.unref();
             lastExtLaunchPid = child.pid;
+            lastExtLaunchPath = execPath;
             extWatch.attach(child);
             return { ok: true, via: execPath, kind, headerDropped: hasHeader && !headerSupported, sessionId };
         } catch (e) {
@@ -4069,18 +4266,7 @@ app.whenReady().then(() => {
     });
 
     // ---- 定时关机 ----
-    let shutdownTimer = null;
-    // OS 关机命令是否已下发（Windows 上处于 /t 60 的 60s 宽限期）。取消时必须
-    // 显式 shutdown /a，否则 JS 侧 clearTimeout 已失效、机器照样关机。
-    let shutdownArmed = false;
-    const cancelPendingShutdown = () => {
-        if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
-        if (shutdownArmed && process.platform === 'win32') {
-            try { require('child_process').exec('shutdown /a', { windowsHide: true }); }
-            catch (e) { /* 已关机/无宽限期待撤，忽略 */ }
-        }
-        shutdownArmed = false;
-    };
+    // 状态与取消函数在模块层（runQuitCleanup 退出清理序列也要调用，见 P2-13）
     ipcMain.handle('yuki:shutdown-timer', (_e, minutes) => {
         cancelPendingShutdown();
         // 入参归一化：原实现只判 `!minutes || minutes <= 0`，对 {} / 'abc' 这类
@@ -4181,11 +4367,17 @@ app.on('window-all-closed', () => {
 });
 
 /** 退出前清理序列（M-8）：before-quit、will-quit、process exit 与 settings-reset 的 app.exit(0) 共用——
- *  彻底清理 mpv、aria2、推送服务、Syncplay、HLS 下载及 Python 进程树，杜绝后台残留。 */
+ *  彻底清理 mpv、aria2、推送服务、Syncplay、HLS 下载及 Python 进程树，杜绝后台残留。
+ *  P2-13：首行先撤销未触发的定时关机——shutdown /s /t 60 已下发的 60s 宽限期在应用
+ *  退出后仍会真实关机（不可逆），任何退出路径都必须先 cancelPendingShutdown()。 */
 let _cleanedUp = false;
 function runQuitCleanup() {
     if (_cleanedUp) return;
     _cleanedUp = true;
+    try { cancelPendingShutdown(); } catch (e) {} // P2-13：退出即撤定时关机（含 shutdown /a 撤宽限期）
+    // P3-24：收拢的播放后处理/下载清理 timer 退出时统一取消（游离 timer 清理项）
+    try { for (const t of afterPlayTimers) clearTimeout(t); afterPlayTimers.clear(); } catch (e) {}
+    try { for (const t of dlCleanupTimers) clearTimeout(t); dlCleanupTimers.clear(); } catch (e) {}
     try { if (dlTimer) { clearInterval(dlTimer); dlTimer = null; } } catch (e) {}
     try { stopScheduledLogCleanup(); } catch (e) {}
     try { mpv.stop(); } catch (e) {}
@@ -4194,6 +4386,8 @@ function runQuitCleanup() {
     try { hls.cleanup(); } catch (e) {}
     try { pushServer.stop(); } catch (e) {}
     try { syncplay.disconnect(); } catch (e) {}
+    // P3-24：ASS 弹幕临时文件（%TEMP%/yuki-danmaku-<pid>.ass，含观看文本）随进程退出一并清理
+    try { mpv._removeAssFile(); } catch (e) {}
     // 播放列表代理：持有 http.Server（127.0.0.1 随机端口）、keep-alive 上游 agent 池
     // 与 30 分钟 sweeper。close() 早已实现却从未被调用——unref() 只是撤掉 event-loop
     // 引用，socket 与监听并未关闭；在 settings-reset 的 relaunch 路径上会让旧进程

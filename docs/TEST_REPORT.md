@@ -1,20 +1,20 @@
 # 功能测试报告（YuKi）
 
-> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建。
+> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建；**2026-09-20 更新**：三报告交叉审查修复批次后全量回归 ALL PASS（`run_all.py` 59 阶段 / 编译 188 文件 0 error / JS 单元 540 tests / check-js 48 文件 0 错 / ESLint 0 error / Ruff 全过）。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。
 > 本文是「功能测试」的唯一汇总入口；运行异常细节见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)，开发批次见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
 ## 1. 测试总览
 
-> 最近快照：2026-08-23 全量回归 **ALL PASS**（`run_all.py` 40 阶段 / 编译 98 文件 0 error / ESLint 0 error / Ruff 全过）；2026-08-24 增量后 **JS 单元 365/365**、check-js 44 文件 0 错。
+> 最近快照：2026-09-20 全量回归 **ALL PASS**（`npm run test:all`：`run_all.py` 59 阶段含 security-regressions / 编译 188 文件 0 error / Ruff 全过；JS 单元 **540/540**、check-js 48 文件 0 错、ESLint 0 error）。
 
 | 类别 | 数量 | 结果 |
 |---|---|---|
-| JS 单元测试（`tests/js/*.test.js`，35 文件） | 365 | ✅ 全部通过 |
-| Python 测试（`run_all.py` 40 阶段 + 编译） | 98 文件 | ✅ 全部通过 |
-| JS 语法检查（`scripts/check-js.js`） | 44 文件 | ✅ 0 错误 |
-| 真实界面验收（CDP，`scripts/acceptance-*.js` × 10） | 103 检查项 | ✅ 103/103 |
-| **自动化合计** | **>450** | **全部通过** |
+| JS 单元测试（`tests/js/*.test.js`，55 文件） | 540 | ✅ 全部通过 |
+| Python 测试（`run_all.py` 59 阶段 + 编译） | 188 文件 | ✅ 全部通过 |
+| JS 语法检查（`scripts/check-js.js`） | 48 文件 | ✅ 0 错误 |
+| 真实界面验收（CDP，`scripts/acceptance-*.js` × 10） | 103 检查项 | ✅ 103/103（2026-08 快照） |
+| **自动化合计** | **>640** | **全部通过** |
 
 真实界面验收均在**独立 userData 副本**（清空 `lastConfigUrl`、预置种子数据、清空 `bangumiToken` 避免真实收藏合并干扰计数）启动临时 Electron 实例，经 CDP 实测，结束自动清理，不污染真实用户数据。
 

@@ -6,6 +6,9 @@
 规则引擎发请求时经 cookie_header() 自动带上，避免重启后需重新验证。
 
 数据格式：{ domain: [{'name','value'}, ...] }（domain 小写，含父域匹配）。
+落盘口径（P3-5）：与 pan_cookies.py 完全一致——Windows DPAPI / 非 Windows
+AES-GCM 加密，密文外壳为 ``{version, encrypted, cipher, data}``；启动读取
+发现旧版明文 JSON 时自动迁移（读入 → 加密重写 → 删明文）。
 线程安全：threading.Lock 保护读写。
 """
 import json
@@ -15,6 +18,7 @@ import threading
 from urllib.parse import urlparse
 
 import hoststate
+from pan_cookies import _write_secure
 
 logger = logging.getLogger('yuki.kazumi.cookie')
 
@@ -28,24 +32,41 @@ class CookieJar:
 
     def _load(self):
         with self._lock:
+            legacy_plaintext = None
             try:
                 if os.path.exists(self._file):
                     with open(self._file, encoding='utf-8') as f:
                         data = json.load(f)
-                    if isinstance(data, dict):
+                    if isinstance(data, dict) and data.get('encrypted'):
+                        # 密文外壳：解密走 pan_cookies 的同一套 DPAPI/AES-GCM 口径
+                        from pan_cookies import _decrypt
+                        raw = json.loads(
+                            _decrypt(data.get('cipher', ''), data.get('data', ''))
+                            .decode('utf-8'))
+                        if isinstance(raw, dict):
+                            self._domains = raw
+                    elif isinstance(data, dict):
+                        # P3-5 迁移：旧版明文文件先读入内存，稍后加密重写并删明文。
+                        # 迁移失败只影响本次，明文仍可用，下次启动重试。
                         self._domains = data
+                        legacy_plaintext = data
             except Exception as e:
                 logger.warning('[kazumi] cookie load failed: %s', e)
                 self._domains = {}
+            if legacy_plaintext is not None:
+                try:
+                    os.makedirs(os.path.dirname(self._file), exist_ok=True)
+                    _write_secure(self._file, legacy_plaintext)
+                    logger.info('[kazumi] legacy plaintext cookies migrated to encrypted storage')
+                except Exception as e:
+                    logger.warning('[kazumi] cookie encryption migration failed: %s', e)
 
     def _save(self):
         with self._lock:
             try:
                 os.makedirs(os.path.dirname(self._file), exist_ok=True)
-                tmp = self._file + '.tmp'
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(self._domains, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, self._file)
+                # P3-5：与 pan_cookies 同口径加密落盘（原子替换由 _write_secure 保证）
+                _write_secure(self._file, self._domains)
             except Exception as e:
                 logger.warning('[kazumi] cookie save failed: %s', e)
 

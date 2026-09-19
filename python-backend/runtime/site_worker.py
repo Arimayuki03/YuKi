@@ -161,6 +161,22 @@ class SiteRuntimeWorker:
         self._build()
 
     def _build(self):
+        # P1-5：spawn 出来的 Worker 是全新解释器，hoststate._state 的
+        # port/token 默认为 0/''（data_dir 仅靠 env 兜底），第三方
+        # Python/CMS spider 与 JS 引擎的 KV（/cache）、getProxyUrl()、
+        # js2Proxy 全部打错地址。宿主经 SupervisedRunner 在 spec 里注入
+        # proxy_port/proxy_token/data_dir，这里在任何 spider 模块（含
+        # quickjs_host——其 LOCAL_KV_DIR 在导入时求值）导入之前灌进 hoststate。
+        if self.kind != 'fixture':
+            try:
+                import hoststate
+                hoststate.configure(
+                    port=int(self.spec.get('proxy_port') or 0),
+                    token=str(self.spec.get('proxy_token') or ''),
+                    data_dir=str(self.spec.get('data_dir') or '') or hoststate.get_data_dir(),
+                )
+            except Exception as e:
+                logger.warning('site worker %s hoststate configure failed: %s', self.site_key, e)
         if self.kind == 'fixture':
             self.fixture = _FixtureRuntime(self.spec)
             return
@@ -186,13 +202,15 @@ class SiteRuntimeWorker:
                 raise ValueError('[L3:py] Python Spider 缺少 Spider 类导出')
             spider = module.Spider()
         elif self.kind == 'js':
-            from config import fetch_text
+            # P2-11：ESM 子模块抓取走守卫版 fetch_text（import 依赖 URL 来自
+            # 远端模块内容，不得自任信任根绕过严格 SSRF 边界）。
+            from config import fetch_text_site_guarded
             from js_spider import make_js_spider_class
             from quickjs_host import JsEngine
             engine = JsEngine(site_key=self.site_key)
             engine.proxy_port = int(self.spec.get('proxy_port') or 0)
             api = str(self.spec.get('api') or '')
-            ok = engine.load_spider_url(api, fetch_text) if api.startswith('http') else engine.load_spider(api)
+            ok = engine.load_spider_url(api, fetch_text_site_guarded) if api.startswith('http') else engine.load_spider(api)
             if not ok:
                 raise ValueError('JS spider produced no export')
             spider = make_js_spider_class(self.site_key, engine, self.name)

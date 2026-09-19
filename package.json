@@ -95,6 +95,7 @@
     }
   },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "electron": "^31.0.0",
     "electron-builder": "^25.1.8",
     "eslint": "^10.8.1",

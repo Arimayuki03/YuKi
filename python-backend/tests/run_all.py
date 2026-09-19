@@ -100,6 +100,9 @@ STAGES = [
     ('cms-xml-encoding', [PY, os.path.join(HERE, 'test_cms_xml_encoding.py')]),
     # SiteHealth 并发一致性：无锁时诊断快照会读到自相矛盾的组合
     ('health-concurrency', [PY, os.path.join(HERE, 'test_health_concurrency.py')]),
+    # 批次 1 安全修复回归：P1-2/P2-10 落盘判定、P1-3 do=pan 门禁 + HLS token
+    # 纪律、P1-4 JVM cookie 清理、P1-5 Worker hoststate 注入、P2-1 Host 白名单
+    ('security-regressions', [PY, os.path.join(HERE, 'test_security_regressions.py')]),
 ]
 
 # 有意不作为独立 stage 运行的 tests/test_*.py → 原因。

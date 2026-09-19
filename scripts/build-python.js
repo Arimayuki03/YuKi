@@ -120,12 +120,30 @@ console.log('[build-python] 完成！产物在 python-dist/');
 
 // --- helpers ---
 
+// 拷贝时排除的目录名（P1-1 处置④ + P3-24）：字节码/测试目录/venv 之外，补上
+// FM/（网盘蜘蛛运行态，曾含真实登录 Cookie .quark/.uc 随安装包泄露）与
+// .test-runtime/（测试运行态，含测试凭据）——出现在快照里即泄露面。
+const COPY_EXCLUDE_NAMES = new Set([
+    '.venv', '__pycache__', 'tests', '.pytest_cache', 'node_modules',
+    'FM',            // 网盘 Cookie 运行态（.quark/.uc 等）
+    '.test-runtime', // 测试凭据与测试运行数据
+]);
+
 function copyDir(src, dst) {
     fs.mkdirSync(dst, { recursive: true });
-    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    let entries;
+    try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch (e) { return; }
+    for (const entry of entries) {
+        if (COPY_EXCLUDE_NAMES.has(entry.name)) continue;
         const s = path.join(src, entry.name);
         const d = path.join(dst, entry.name);
-        if (entry.isDirectory()) { copyDir(s, d); }
-        else if (entry.isFile()) { fs.copyFileSync(s, d); }
+        let st;
+        try { st = fs.statSync(s); } catch (e) { continue; } // 失效链接等：跳过
+        // P3-24：解引用拷贝——statSync 跟随符号链接/junction（Windows junction 同样
+        // 被跟随），按指向的真实类型分别处理。原实现按 readdirSync 的 Dirent 分类，
+        // symlink/junction 条目既非 isDirectory 也非 isFile，被静默跳过 →
+        // venv 含 junction 时冻结包不完整。
+        if (st.isDirectory()) { copyDir(s, d); }
+        else if (st.isFile()) { fs.copyFileSync(s, d); }
     }
 }

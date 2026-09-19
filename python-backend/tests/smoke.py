@@ -33,19 +33,43 @@ def _pick_port(preferred):
             s.close()
 
 
+TOKEN = 'smoke-token'
+
+import hoststate  # noqa: E402
+import play_cache  # noqa: E402
+
+
 # 父进程已选定端口时直接复用：multiprocessing spawn 会把本模块顶层在 worker
 # 子进程重跑一遍（__mp_main__），若重新 _pick_port 会得到与宿主不同的端口，
 # worker 里 spider 的 HTTP 回环（setCache/getCache/代理）就会打到死端口。
-PORT = int(os.environ.get('YUKI_PORT') or 0) or _pick_port(8321)
-TOKEN = 'smoke-token'
+def _host_setup():
+    """宿主侧一次性初始化（只在 __main__ 进程跑）。
 
-os.environ['YUKI_PORT'] = str(PORT)
-os.environ['YUKI_TOKEN'] = TOKEN
+    P1-5 / P3-19-③：此前 port/token 的 hoststate.configure、YUKI_PORT/TOKEN
+    环境变量、play_cache 目录重定向全部写在模块顶层——spawn 出的 Worker
+    子进程复跑这段（__mp_main__），Worker 里 hoststate 被顶层面数「顺手」
+    配好，恰好掩盖了「Worker 进程 hoststate 全空」的真实缺口（KV 打到 :0、
+    getProxyUrl 产出坏地址、JVM token 为空）。现在宿主初始化收进本函数
+    （由 main() 调用），Worker 子进程的 hoststate 必须由
+    supervised_runner.spec 注入 + site_worker._build 自行 configure（P1-5
+    修复）自给，冒烟断言 #7/#7.5 对此直接验收。
+    """
+    port = int(os.environ.get('YUKI_PORT') or 0) or _pick_port(8321)
+    os.environ['YUKI_PORT'] = str(port)
+    os.environ['YUKI_TOKEN'] = TOKEN
 
-import hoststate  # noqa: E402
+    hoststate.configure(port=port, token=TOKEN)
+    hoststate.ensure_dirs()
 
-hoststate.configure(port=PORT, token=TOKEN)
-hoststate.ensure_dirs()
+    # RM-4：playerContent 持久缓存测试专用目录（避免污染真实 ~/.yuki/cache）。
+    # 单例惰性解析，必须在首个 playerContent 请求前重定向。
+    play_cache.set_dir_for_tests(tempfile.mkdtemp(prefix='yuki-smoke-playcache-'))
+    return port
+
+
+if __name__ == '__main__':
+    # 仅宿主进程执行；spawn 的 Worker 子进程（__mp_main__）不得复跑这段。
+    PORT = _host_setup()
 
 import java_probe  # noqa: E402
 
@@ -54,12 +78,7 @@ import java_probe  # noqa: E402
 java_probe.clear_cache()
 
 import server  # noqa: E402
-import play_cache  # noqa: E402
 import uvicorn  # noqa: E402
-
-# RM-4：playerContent 持久缓存测试专用目录（避免污染真实 ~/.yuki/cache）。
-# 单例惰性解析，必须在首个 playerContent 请求前重定向。
-play_cache.set_dir_for_tests(tempfile.mkdtemp(prefix='yuki-smoke-playcache-'))
 
 PASSED, FAILED = [], []
 
@@ -173,6 +192,30 @@ def main():
     # 7. getProxyUrl 形态
     check('spider.getProxyUrl',
           sp.getProxyUrl() == f'http://127.0.0.1:{PORT}/proxy?do=py&siteKey=demo', sp.getProxyUrl())
+
+    # 7.5 P1-5：Worker 进程 hoststate 必须由 spec 注入自给（supervised_runner
+    # setdefault + site_worker._build configure）。此前 smoke 顶层 configure 被
+    # spawn 子进程复跑（__mp_main__）恰好掩盖该缺口——现在顶层不再 configure，
+    # Worker 侧全空就会在这里现形：KV 回环打到 :0、getProxyUrl 端口为 0。
+    # Worker 侧真实观感取自 Worker 进程内的 getProxyUrl 返回值（而非宿主
+    # hoststate），端口非 0 且与宿主一致 = 注入链路生效。
+    worker_proxy_url = ''
+    try:
+        raw = sp.getProxyUrl()
+        # sp.getProxyUrl 经 RPC 到 Worker：spider 基类在 Worker 进程里用
+        # Worker 自己的 hoststate 拼地址，返回值即 Worker 侧真实观感。
+        worker_proxy_url = str(raw or '')
+    except Exception as e:  # Worker hoststate 全空时 KV/代理调用会失败
+        check('worker hoststate injected (P1-5)', False, f'getProxyUrl failed: {e}')
+    else:
+        from urllib.parse import urlsplit as _urlsplit
+        try:
+            worker_port = _urlsplit(worker_proxy_url).port or 0
+        except ValueError:
+            worker_port = 0
+        check('worker hoststate injected (P1-5)',
+              worker_port == PORT,
+              f'worker getProxyUrl={worker_proxy_url!r} expected port {PORT}')
 
     print()
     print(f'RESULT: {len(PASSED)} passed, {len(FAILED)} failed')

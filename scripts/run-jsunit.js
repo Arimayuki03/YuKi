@@ -43,8 +43,13 @@ if (result.error) {
 const out = (result.stdout || '') + (result.stderr || '');
 if (out) process.stdout.write(out);
 
-const skipped = Number((/\bskipped\s+(\d+)/.exec(out) || [])[1] || 0);
-const todo = Number((/\btodo\s+(\d+)/.exec(out) || [])[1] || 0);
+// P3-24(f)：汇总行锚定——只匹配独立成行的汇总（spec reporter 的 'ℹ skipped N'
+// / TAP reporter 的 '# skipped N'，本仓 Node v24 在 spawnSync 捕获输出下默认 spec），
+// 用例名本身含 "skipped 2" 之类字样时不再误匹配——未锚定的 \b 正则会命中输出中
+// 任意位置（如子测试名、断言消息）。两种格式都要求「行首符号 + skipped + 数字 +
+// 行尾」，用例名行因前缀/后缀不符被排除。
+const skipped = Number((/^ℹ skipped (\d+)\s*$/m.exec(out) || /^# skipped (\d+)\s*$/m.exec(out) || [])[1] || 0);
+const todo = Number((/^ℹ todo (\d+)\s*$/m.exec(out) || /^# todo (\d+)\s*$/m.exec(out) || [])[1] || 0);
 if (skipped > 0) {
     console.warn(`[run-jsunit] [warn] 有 ${skipped} 个用例被跳过：通过数不含它们，`
         + '但被跳过意味着这部分行为本次完全没有被验证（常见原因：vendor 二进制缺失 / 非目标平台）。');

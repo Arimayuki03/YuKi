@@ -6,7 +6,53 @@
 
 ## [未发布]
 
-本轮为全项目代码审查（6 个子代理分模块审查 + 逐条复核）后的修复，共 3 项安全风险、17 项缺陷，并补齐相应的回归门禁。明细见 `CODE_REVIEW_2026-09-18*.md`。
+本轮为三份独立安全审查（hy4 / ds / glm）交叉验证后的第二轮修复：合并去重确认 P1×5、P2×19、P3×24，按文件域并行修复并补齐回归测试。三份审查报告属临时文档，验证完成后已删除。
+
+### Security
+
+- **主 token 明文落盘播放缓存（P1-2）**：`_is_ephemeral_play_result` 的本地 host 短路位于 volatile 参数检查之前，任何带 `?token=<主token>` 的本地 URL 一律判「稳定」写入 `~/.yuki/cache/play-cache/`（TTL 2h），本机低权限进程读文件即得 40 位 hex 主 token，可经 `/action` 完成全部控制面操作。现把 volatile 检查前置（`proxytype=go` 早退保持原位），任何带 token/sign/expires 等参数的 URL 无论 host 一律不落盘；解析异常与残缺响应同时改为 fail-closed。
+- **失败播放结果被持久化 2 小时（P2-10）**：`{"url":"","error":…}` 因「url 为空 → 判稳定」被落盘，重开剧集在 TTL 内直接吃到失败结果。现落盘条件对齐「url 非空且 error 为空」。
+- **`do=pan` 网盘取流免鉴权（P1-3）**：`do=pan` 分支在 `?url=` 通道 token 门禁之前 return，本机任意进程一条 GET 即可读夸克分享、把第三方分享转存进用户网盘（账号侧写操作）、并拿到内嵌主 token 的 HLS 重写地址。现与 `?url=` 通道同权鉴权（无效返回 401）；`_hls_proxy_wrap` 只在本次请求已通过校验时才把 token 附到重写后的 HLS 分片；jar_spider 快路径与 proxy_gateway 回退两个构造点补齐 token，server 侧对 jar 硬编码的 `do=pan` 地址统一附加。
+- **JVM 强杀后网盘 Cookie 明文残留（P1-4）**：SpiderRunner 把 quark/uc/bili/189/diy 五个网盘 Cookie 明文写进 `~/.yuki/jar-cache/TVBox/*_cookie.txt`，优雅退出靠 Java shutdown hook 清理，但 Windows TerminateProcess 不执行 hook——超时/写失败/崩溃重启等全部强杀路径后登录态永久残留用户主目录。现 jar_bridge 侧在所有强杀路径后补删 `TVBox/*_cookie.txt`（幂等、只删 cookie 文件、不动内容寻址 jar 缓存、绝不影响主流程）。
+- **Worker 进程 hoststate 全空（P1-5）**：python/cms 分支的 spec 不带 `proxy_port`，Worker 侧从未 configure，hoststate 默认 port:0/token:''——第三方 Python spider 的 KV 打到 `http://127.0.0.1:0/cache` 全部失败、`getProxyUrl()` 产出坏地址且被本地判断落盘（与 P1-2 叠加）、JVM 地址 token 为空。现 spec 全分支统一注入 `proxy_port`/`proxy_token`/`data_dir`，Worker 构建时 `hoststate.configure` 灌入（先于任何 spider 模块导入）。
+- **浏览器防御不校验 Host 头（P2-1）**：`_browser_origin_rejected` 与 go_proxy `_reject_browser` 只查 Origin/Sec-Fetch-Site，DNS rebinding 下浏览器可打到 `/cache`、`/health`。两处各加 Host 白名单（剥端口后须为 127.0.0.1/localhost；缺失放行兼容非浏览器蜘蛛），`/health` 免 token 端点单独加同款校验。
+- **`/health` 免 token 返回全部 Kazumi 规则源（P2-14）**：含 api/baseURL/searchURL 的完整规则列表对无 token 调用方开放。改为只返回规则数量（全仓确认无真实消费方）。
+- **严格 SSRF 边界三处不一致（P2-11）**：`_native_http` 只守首跳（重定向不逐跳复检）、`base.Spider.fetch/post` 无守卫且 `verify` 可被 spider 关 TLS、ESM 子模块抓取自任信任根。三处统一复用 `http_client._guard_hop`：重定向手动逐跳复检、严格模式下 TLS 强制开启、子模块抓取走配置层同一套守卫。
+- **`ipcMain.handle` 无 senderFrame 校验（P2-6）**：约百个特权通道对任意渲染上下文开放。统一注册包装校验可信发送方（本应用仅主窗挂 preload，可信页面即主窗加载的本应用 index.html，判定与导航白名单一致；帧销毁 fail-closed）；`download.control` 的 `deleteFiles` 同步从默认删文件收紧为显式 opt-in（字段省略不再静默删除已下载媒体）。
+- **`delFolder` 可递归删除下载根下任意子树（P2-7）**：渲染层一次误传即删整个媒体库。现加三道防线：拒绝删根、原生确认框二次确认（列出将删除的绝对路径）、目录内存在进行中下载任务时拒绝删除（在写互斥）。
+- **after-pack 门禁 fail-open（P2-8）**：asar 清单解析失败时返回占位字符串、不匹配任何敏感正则，静默跳过扫描（`@electron/asar` 未声明依赖，pnpm 布局下正是真实触发路径）。现 catch 改为抛错终止构建（fail-closed），`@electron/asar` 提为 devDependencies；`build-python.js` 快照拷贝排除 `FM/` 与 `.test-runtime/`（杜绝凭据再次进包），符号链接/junction 改为解引用拷贝（修复 venv 含 junction 时冻结包不完整）。
+- **解析/验证码/扫码窗口无权限处理器（P2-12）**：加载远程内容的会话对通知/定位/剪贴板等权限默认放行，主流程还引导用户复制整行 Cookie。parse-<slot> 与 quark-pan-login 等全部会话注册全拒处理器。
+- **退出不取消定时关机（P2-13）**：`shutdown /s /t 60` 已下发后退出应用，60s 宽限期内机器照样关机（不可逆）。`runQuitCleanup` 首行统一撤销（含 `shutdown /a`），`app.exit(0)` 路径同受覆盖。
+- **CSP 桥接放行任意 window 全局函数（P2-2）**：按函数名解析 window 任意属性（含 `eval` 可达）。改为显式函数白名单（6 个实际消费的函数名），新增消费点须显式登记。
+- **kazumi `info.id` 两处未转义（P2-3）**：恶意/被劫持 Bangumi 镜像可注入（后端对镜像响应原样透传）。两行转义修复；`bangumiInfo` localStorage 持久化同时改为字段白名单净化，恶意 payload 不再借缓存短暂存活于渲染。
+- **WebDAV 设置同步上传敏感键（P2-5）**：bangumiToken/dandanAppSecret 等被上传远端，启动 5s 静默恢复可改写 `lastConfigUrl`。上传侧补敏感键排除表，恢复侧改为显式允许表（64 个纯数据键，默认拒绝）。
+- **HLS 下载续传不校验分片完整性（P2-16）**：崩溃/强杀残留的截断分片被静默复用，产物损坏仍标 complete。现记录每分片写入字节数，续传按期望大小校验，未知大小一律重下。
+- **playlist-proxy `_resolve` 无异常保护（P2-17）**：后端抖动时裸抛 502（无 Content-Type 且 `onEntryError` 不触发），连播静默卡死。解析链统一折叠为失败对象，走与正常失败相同的应答路径。
+- **动态监听端口不在 token 白名单（P2-9）**：此类 jar 播放地址永远 401。`listening_ports()` 纳入 `_extra_servers` 动态端口。
+- **本地文件播放失败静默重试（P2-18）**：删除 500ms 无提示重试分支，失败立即 toast；「播放器启动超时」提示不再被重试分支消费而不可达。
+
+### Fixed
+
+- **缓存统计目录写错（P2-15）**：统计与「清理缓存」指向 `%APPDATA%\yuki\logs`（恒 0），真实日志在 `~/.yuki/logs`。两者一并指向真实目录；parse-*/quark-pan-login 内存会话的磁盘遍历死分支删除；local-thumbs 加条目数上限淘汰（签名直链 key 无限增长的收敛点）。
+- **Popular.load 无请求令牌（P3-16）**：`_loading` 旗标下切标签新请求被直接丢弃、旧数据照常回写。改世代令牌模式，迟到响应整体丢弃。
+- **data-* 反查选择器失配（P3-17）**：属性经 escHtml 写入、选择器又用 escHtml 后的值查找，源含 `&/'/"/<>` 时处理器静默绑不上。反查统一改 `CSS.escape(原始值)`，与 DOM 解码后的属性值恒匹配。
+- **控制面 token 用 `!=` 比较（P3-1）**：与数据面一致改 `hmac.compare_digest`。
+- **`_SHARE_CACHE` 无锁（P3-2）/ `play_cache._store` 单例无锁（P3-3）**：补锁，消除并发记账脱节。
+- **Kazumi 规则 Cookie 明文落盘（P3-5）**：`~/.yuki/kazumi/cookies.json` 复用 pan_cookies 的 DPAPI/AES-GCM 加密口径，旧明文文件启动时自动迁移重写。
+- **`jar_patch` zip 条目名无校验（P3-4）**：拒绝 `..` 段/绝对路径/盘符条目（防御性，原实现不构成实际穿越）。
+- **`_DNS_CACHE` 无上限（P3-13）**：512 条触顶重置。**go_proxy 日志输出 file_id 前 80 字符（P3-14）**：改为长度+前 8 字符。
+- **`yuki:push-url` 无协议白名单（P3-8）**：file:// 等可直达 mpv，加与 `yuki:play` 同款白名单。**`yuki:pick-cache-dir` 接受任意回传目录（P3-9）**：拒绝 UNC/相对路径并做可写探针。
+- **Anime4K 运行时下载仅子串校验（P3-10）**：升级为按 binaries.lock.json 的 sha256 强校验，不符不落盘换镜像；ghfast.top 加速代理保留但置于校验之后。**外部播放器按裸 PID 强杀（P3-11）**：taskkill 前经 PowerShell 校验进程名与启动配置一致，防 PID 复用误杀。
+- **SyncPlay TLS 校验可关（P3-7）**：默认 `rejectUnauthorized:true`，自签场景显式 opt-in。**pan-qr.js 死代码删除（P3-23）**：含「把完整 Set-Cookie 打进控制台」的复活即泄露点，删除前 grep 确认零引用。
+- **配置轮询堆叠（P3-24）**：`do=configTask` 加快路径（只读状态字典，不进 spider 信号量），信号量被慢源占满时轮询不再堆叠 30s；渲染侧 watchConfigTask 加单飞旗标。**pan_login 回退分支域名过滤**：curl_cffi cookie 收集按 quark/uc 域白名单过滤。**游离定时器清理**：afterPlay/删除重试/空目录清理/kazumi WebDAV 启动拉取/live 状态条等 timer 收拢到可取消持有者，退出统一清理；**ASS 弹幕临时文件**（`%TEMP%/yuki-danmaku-*.ass`，含观看文本）播放结束与退出时清理；**ext-playlists 启动时补一次清理**；**`_notified` 只增不减**随任务移除清理。
+- **重试按钮防抖**：播放失败「重试当前线路」600ms 防抖（play() 本身已自带并发自取消）。
+- **假绿测试修复（P3-19）**：`test_kazumi_cover_proxy.py`/`test_proxy_http.py` 引用已删除的 `_go_proxy_started`（抑制从未生效，独立跑会真绑 9978/7944/1314）改为真实 stub go_proxy 监听器；`test_q7_fault_injection.py` 端口冲突用例从「测 OS socket 语义」改为真实注入 `start_go_proxy` 启动路径；`test_r8_release_gates.py` 迁移用例从测试体内自证改为走真实 `pan_cookies` 迁移路径；`smoke.py` 顶层 hoststate.configure 收进主入口守卫（spawn 子进程复跑曾掩盖 P1-5），并新增 Worker hoststate 注入断言。
+- **新增 `test_security_regressions.py`（33 用例，接入 run_all）**：覆盖 P1-2/P2-10 落盘判定、P1-3 门禁与 HLS token 纪律、P1-4 清理语义、P1-5 注入、P2-1 Host 白名单。
+- **`test_runtime_supervisor.py` 慢机余量**：`_call` 默认 deadline 1s→5s（含 Worker 冷启动；高负载下启动屏障超时会覆盖预期错误码），两处墙钟断言接入 `_BUDGET_ASSERT_SLACK` 余量。HEAD 基线即随机复现，与功能修复无关。
+
+## [未发布-2026-09-18]
+
+本轮为全项目代码审查（6 个子代理分模块审查 + 逐条复核）后的修复，共 3 项安全风险、17 项缺陷，并补齐相应的回归门禁。
 
 ### Security
 

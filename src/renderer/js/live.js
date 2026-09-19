@@ -38,6 +38,7 @@ const Live = {
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
     _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
     _probeBar: null,   // 频道探测进度条状态
+    _statusTimer: null, // 缓存命中状态条的 5s 自动隐藏 timer（P3-24：存 id 防游离叠加）
 
     init() {
         if (this._inited) return;
@@ -183,6 +184,7 @@ const Live = {
         if (!live) return;
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
         this._clearProbeBar();
+        this._clearStatusTimer(); // 上一轮的「已按缓存载入」状态条隐藏 timer 作废
         // 设置值优先；未设置时按窗口容量铺满一屏。
         this._pageSize = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
         this._page = 1;
@@ -232,7 +234,7 @@ const Live = {
                 $('#live-status').text(hidden > 0
                     ? `已按缓存结果过滤 ${hidden} 个不可用频道 · 点「刷新」重新检测`
                     : '已按缓存结果载入 · 点「刷新」重新检测').show();
-                setTimeout(() => { if (token === this._probeToken) $('#live-status').hide(); }, 5000);
+                this._scheduleStatusHide(token);
                 return;
             }
         } catch (e) {
@@ -342,6 +344,20 @@ const Live = {
         }
         this._probeBar = null;
         $('#live-probe-bar').hide().empty();
+    },
+
+    /** P3-24：状态条 5s 自动隐藏 timer 的唯一清理口（切源/刷新/重新调度前调用）。 */
+    _clearStatusTimer() {
+        if (this._statusTimer) { clearTimeout(this._statusTimer); this._statusTimer = null; }
+    },
+
+    /** 调度状态条自动隐藏（同代才隐藏；重复调度先清旧 timer 防叠加）。 */
+    _scheduleStatusHide(token) {
+        this._clearStatusTimer();
+        this._statusTimer = setTimeout(() => {
+            this._statusTimer = null;
+            if (token === this._probeToken) $('#live-status').hide();
+        }, 5000);
     },
 
     /** T35：可用性探测结果写入 settings.liveProbeCache（按源 URL 索引，最多留 20 个源，超出丢最旧）。 */

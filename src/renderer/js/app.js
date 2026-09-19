@@ -221,14 +221,20 @@ const App = {
     },
 
     /** 后台守望配置任务：每 3s 查 configTask，离开 loading 即刷新首页/直播页。
-     *  单例（重复调用共享一个轮询），最长 5 分钟自动停止；轮询同时驱动恢复进度条。 */
+     *  单例（重复调用共享一个轮询），最长 5 分钟自动停止；轮询同时驱动恢复进度条。
+     *  P3-24：单飞守卫——doAction 超时 30s 远大于 3s 间隔，弱网下上一轮回调未返回
+     *  时本轮直接跳过（busy 旗标），避免回调重叠堆积出最多 10 个并发请求。 */
     watchConfigTask() {
         if (this._configWatch) return;
         let polls = 0;
+        let polling = false;
         const timer = setInterval(async () => {
+            if (polling) return; // 上一轮仍在途：本轮跳过，防弱网下请求堆叠
+            polling = true;
             polls += 1;
             let t = null;
             try { t = await doAction('configTask', {}); } catch (e) { /* 后端瞬断忽略 */ }
+            polling = false;
             if (typeof Home !== 'undefined' && Home.renderRestoreProgress) Home.renderRestoreProgress(t);
             const busy = !t || t.status === 'loading';
             if (busy && polls < 100) return;

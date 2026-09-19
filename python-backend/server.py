@@ -21,6 +21,7 @@ import socket
 import secrets
 import logging
 import hashlib
+import hmac
 import multiprocessing
 from logging.handlers import RotatingFileHandler
 import re
@@ -200,9 +201,14 @@ def _is_ephemeral_play_result(result):
     """
     try:
         data = json.loads(result) if isinstance(result, str) else result
-        url = str((data or {}).get('url') or '') if isinstance(data, dict) else ''
-        if not url:
-            return False
+        # 非 dict（残缺响应）同样没有可复用的稳定 url，按 ephemeral 处理。
+        if not isinstance(data, dict):
+            return True
+        url = str(data.get('url') or '')
+        # P2-10：失败结果（url 空 / error 非空）绝不落盘——重开同一集必须
+        # 重新查源，而不是在 2h TTL 内反复吃到缓存里的失败响应。
+        if not url or data.get('error'):
+            return True
         if any(data.get(key) is True for key in ('oneTime', 'ephemeral', 'skipCache')):
             return True
         if str(data.get('cache') or '').lower() in ('0', 'false', 'no', 'off'):
@@ -214,19 +220,25 @@ def _is_ephemeral_play_result(result):
         query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
         if str(query.get('proxytype', [''])[0]).lower() == 'go':
             return True
-        if host in ('127.0.0.1', 'localhost'):
-            return False
-        if host.endswith('.quark.cn') or host.endswith('.myquark.cn'):
-            return True
+        # P1-2：volatile 参数检查必须先于本地 host 短路——带 token/sign 等
+        # 签名参数的 127.0.0.1/localhost 地址（jar 自拼 ``?token=<主token>``、
+        # 带签名的本地代理通道）一旦被判「稳定」落盘，主 token 就随 play-cache
+        # 明文留在磁盘 2 小时。任何带 volatile 参数的 URL 无论 host 一律 ephemeral。
         volatile = {
             'auth_key', 'token', 'sign', 'signature', 'expires', 'expire',
             'expire_at', 'expires_at', 'deadline', 'policy', 'credential',
             'x-expires', 'x-oss-expires', 'x-amz-expires',
             'x-amz-signature', 'x-amz-credential', 'wssecret', 'wstime',
         }
-        return any(str(key).lower() in volatile for key in query)
-    except (TypeError, ValueError, AttributeError):
+        if any(str(key).lower() in volatile for key in query):
+            return True
+        if host in ('127.0.0.1', 'localhost'):
+            return False
+        if host.endswith('.quark.cn') or host.endswith('.myquark.cn'):
+            return True
         return False
+    except (TypeError, ValueError, AttributeError):
+        return True
 
 # /cache KV 目录总量配额（H-5c）：超 512MB 拒绝新写入；检查结果缓存 60s
 # 避免每次写入都全目录统计
@@ -682,10 +694,27 @@ def _cache_size():
     return total, items
 
 
+def _host_header_allowed(request):
+    """Host 头白名单（P2-1，DNS rebinding 防御）：剥离端口后 hostname 必须
+    是 127.0.0.1/localhost。恶意网页经 rebinding 打 127.0.0.1 时 Host 是
+    攻击者域名，必然不匹配；不带 Host 的非浏览器客户端（HTTP/1.0 蜘蛛）
+    放行，保持兼容。"""
+    host_header = (request.headers.get('host') or '').strip()
+    if not host_header:
+        return True
+    try:
+        hostname = urllib.parse.urlsplit('http://%s' % host_header).hostname
+    except ValueError:
+        return False
+    return (hostname or '').lower() in ('127.0.0.1', 'localhost')
+
+
 def _browser_origin_rejected(request):
     """浏览器来源防御（H-5b）：非本机 Origin 或 Sec-Fetch-Site: cross-site
     的请求拒绝。spider 用 requests 调用 /cache /proxy 不带这些头不受影响；
     恶意网页跨站打 127.0.0.1（CSRF / DNS rebinding）会带这些头。"""
+    if not _host_header_allowed(request):
+        return True
     origin = request.headers.get('origin')
     if origin:
         host = urllib.parse.urlparse(origin).hostname
@@ -854,7 +883,13 @@ def _attach_go_proxy_channel_token(url):
             return url
         query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
         if not any(key == 'url' for key, _ in query):
-            return url
+            # ？url= 直链之外，本地 go-proxy 数据面还有 do=pan 网盘通道
+            # （jar 硬编码字节码自拼的旧地址不带 token，无法在构造点改造）；
+            # 同样在这里统一补 token（P1-3 与 do=pan token 门禁配套），
+            # 其余通道（js/py/jar/siteKey）不在此补，避免扩大 token 暴露面。
+            do_value = next((str(v).lower() for k, v in query if str(k).lower() == 'do'), '')
+            if do_value != 'pan':
+                return url
         if any(key.lower() == 'token' for key, _ in query):
             return url
         query.append(('token', token))
@@ -889,6 +924,13 @@ _SPIDER_SEMAPHORE = threading.BoundedSemaphore(16)
 def dispatch_action(form, runtime_request=None):
     """返回 (status_code, body_text)。spider 调用均为同步阻塞，由调用方放线程池。"""
     request = runtime_request or RuntimeRequest.from_action(form)
+    # P3-24：configTask 轮询快路径。渲染层守望每 3s 轮询一次，而 /action 的
+    # 默认 deadline 30s——若让它跟真实 spider 请求一样在 _SPIDER_SEMAPHORE
+    # 排队，慢源占满信号量时每个轮询都挂满 30s，轮询请求在 anyio 线程池里
+    # 无限堆叠。configTask 只读 _config_task 状态字典，跳过排队/注册直接返回。
+    if str(form.get('do') or '') == 'configTask':
+        with bind_runtime_request(request):
+            return _dispatch_action_inner(form)
     _register_runtime_request(request)
     with bind_runtime_request(request):
         try:
@@ -1642,14 +1684,22 @@ def create_app():
         # /cacheXXX 等同前缀路径
         if path not in TOKEN_EXEMPT:
             token = request.headers.get('x-token') or request.query_params.get('token')
-            if token != hoststate.get_token():
+            if not hmac.compare_digest(str(token or ''), str(hoststate.get_token() or '')):
                 return JSONResponse({'code': 401, 'msg': 'invalid token'}, status_code=401)
         return await call_next(request)
 
     @fastapi_app.get('/health')
-    def health():
+    def health(request: Request):
+        # P2-1：/health 免 token 且不经 _browser_origin_rejected，单独补
+        # Host 白名单，封死 DNS rebinding 读取站点列表与规则源的入口。
+        if not _host_header_allowed(request):
+            return JSONResponse({'code': 403, 'msg': 'forbidden'}, status_code=403)
+        # P2-14：/health 在 TOKEN_EXEMPT 表内免 token，响应不得携带 Kazumi
+        # 规则源全文（api/baseURL/searchURL）——免 token 可读即规则源泄露。
+        # 全仓消费方（python-bridge 健康轮询 / index 启动探活）只看可达性，
+        # smoke.py 只断言 'ok'，降为规则数量不影响任何调用方。
         return {'status': 'ok', 'sites': [s.key for s in sites.sites],
-                'kazumiRules': kazumi_mgr.list_all() if kazumi_mgr else []}
+                'kazumiRuleCount': len(kazumi_mgr.list_all()) if kazumi_mgr else 0}
 
     @fastapi_app.get('/sites')
     def sites_state():
@@ -2725,9 +2775,6 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
 
         if do == 'kazumiBangumiStaff':
-            subject_id = form.get('id', '')
-            data = kazumi_mgr.bangumi_staff(subject_id)
-            return 200, json.dumps({'code': 200, 'staff': data}, ensure_ascii=False)
             subject_id = form.get('id', '')
             data = kazumi_mgr.bangumi_staff(subject_id)
             return 200, json.dumps({'code': 200, 'staff': data}, ensure_ascii=False)

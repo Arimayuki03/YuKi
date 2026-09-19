@@ -54,6 +54,11 @@ MAX_LOCAL_CONFIG_BYTES = 32 * 1024 * 1024
 
 _DNS_CACHE = {}
 _DNS_LOCK = threading.Lock()
+# P3-13：条目上限。_resolve_scope 只缓存「DNS 已决出结论」的主机，但远端
+# 配置可引用任意多的高速域名（CDN 分片域名等），无上限时缓存随配置规模
+# 单调增长。触顶整体重置：缓存只是解析加速与内网判据，重置仅短暂回退到
+# 重新解析（每个 host 最多等 DNS_SCOPE_TIMEOUT），正确性不受影响。
+_DNS_CACHE_MAX = 512
 
 
 class ConfigSecurityError(ValueError):
@@ -135,6 +140,8 @@ def _resolve_scope(host, timeout=DNS_SCOPE_TIMEOUT):
         # 解析还没回来：本次按 unknown 放行，且**不写缓存**，下次重新判定。
         return 'unknown'
     with _DNS_LOCK:
+        if len(_DNS_CACHE) >= _DNS_CACHE_MAX:
+            _DNS_CACHE.clear()   # P3-13：触顶重置（见 _DNS_CACHE_MAX 注释）
         _DNS_CACHE[host] = scope
     return scope
 

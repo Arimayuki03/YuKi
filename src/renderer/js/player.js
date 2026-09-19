@@ -1463,7 +1463,14 @@ const Player = {
             extraActions.empty().show();
             const actionRow = $('<div style="display:flex;gap:8px;flex-wrap:wrap;"></div>').appendTo(extraActions);
             if (failureDetails.canRetry) {
+                // P2-18 附带：重试按钮轻防抖——600ms 内重复点击忽略（play() 入口已有
+                // _playToken 自增 + cancelRuntime + abort 的并发自取消，此处只挡连点
+                // 造成的无效重复起播请求，不改变令牌语义）。
+                let lastRetryAt = 0;
                 $('<button class="md-btn md-btn-sm md-btn-tonal">重试当前线路</button>').on('click', () => {
+                    const now = Date.now();
+                    if (now - lastRetryAt < 600) return;
+                    lastRetryAt = now;
                     this._close();
                     if (this._currentPlayback) {
                         const p = this._currentPlayback;

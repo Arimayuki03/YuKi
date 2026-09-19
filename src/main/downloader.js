@@ -222,6 +222,9 @@ class Downloader extends EventEmitter {
             this.proc = null;
         }
         this._ready = null;
+        // P3-20：通知集合与引擎生命周期对齐——aria2 gid 仅单会话唯一，引擎重启后
+        // 同名 gid 不会复现，但集合只增不减会随长期运行缓慢增长；引擎停止即整体清空。
+        this._notified.clear();
         // 重置诊断信息，避免下次启动误带上一次的残留状态
         this._exitCode = null;
         this._spawnError = '';
@@ -332,11 +335,22 @@ class Downloader extends EventEmitter {
         catch (e) { /* 非活跃任务 */ }
         try { return await this._rpc('forceRemove', [gid]); }
         catch (e) { /* 已停止任务 */ }
-        return this._rpc('removeDownloadResult', [gid]).catch(() => gid);
+        return this._rpc('removeDownloadResult', [gid]).catch(() => gid)
+            .finally(() => this._forgetNotified(gid));
     }
     /** 从 stopped 列表彻底清除记录（complete/error/removed） */
-    purge(gid) { return this._rpc('removeDownloadResult', [gid]); }
+    purge(gid) {
+        return this._rpc('removeDownloadResult', [gid]).finally(() => this._forgetNotified(gid));
+    }
     tellStatus(gid) { return this._rpc('tellStatus', [gid]); }
+
+    /** P3-20：任务从 aria2 stopped 列表移除时同步清掉对应通知标记（含 error 侧的 'e'+gid），
+     *  集合只增不减会随任务量无界增长。仅当任务已不在列表（purge 之后）才需清；
+     *  简化处理：直接删两个键，未通知过的 gid 删空集是无害操作。 */
+    _forgetNotified(gid) {
+        this._notified.delete(gid);
+        this._notified.delete('e' + gid);
+    }
     tellActive() { return this._rpc('tellActive'); }
     tellWaiting() { return this._rpc('tellWaiting', [0, 1000]); }
     tellStopped() { return this._rpc('tellStopped', [0, 1000]); }

@@ -10,6 +10,7 @@
    Spider（runner 内置 stub），invokespecial/invokevirtual 均按
    JVM 虚方法语义正常解析。
 """
+import re
 import zipfile
 
 # 已知失效选择器补丁表：jar 内 class 路径 → [(旧选择器, 新选择器), ...]
@@ -167,6 +168,25 @@ def patch_utf8_constant(data, old, new):
     return bytes(out), count
 
 
+def _validate_zip_entry_name(name):
+    """P3-4 防御校验：zip 条目名不得含 ``..`` 段、不以 ``/``/盘符开头。
+
+    现实约束下补丁名硬编码、writestr 只写进 zip 包内不落盘，不构成实际
+    目录穿越；但下游/第三方解包工具按条目名还原路径时，恶意条目名仍可能
+    被写到目标目录外。非法即抛 ValueError，fail-closed。
+    """
+    text = str(name or '')
+    if not text:
+        raise ValueError('empty zip entry name')
+    if text.startswith('/') or text.startswith('\\'):
+        raise ValueError('zip entry name is absolute: %r' % text[:80])
+    if len(text) >= 2 and text[1] == ':' and text[0].isalpha():
+        raise ValueError('zip entry name carries a drive letter: %r' % text[:80])
+    parts = re.split(r'[\\/]+', text)
+    if any(seg == '..' for seg in parts):
+        raise ValueError('zip entry name contains ".." segment: %r' % text[:80])
+
+
 def patch_jar(src_jar, dst_jar, patches, dry_run=False):
     """把 src_jar 复制为 dst_jar，并应用补丁。
 
@@ -177,6 +197,8 @@ def patch_jar(src_jar, dst_jar, patches, dry_run=False):
         names = zin.namelist()
         with zipfile.ZipFile(dst_jar, 'w', zipfile.ZIP_DEFLATED) as zout:
             for name in names:
+                # P3-4：防御性条目名校验（说明见 _validate_zip_entry_name）
+                _validate_zip_entry_name(name)
                 data = zin.read(name)
                 for old, new in (patches or {}).get(name, []):
                     data, cnt = patch_utf8_constant(data, old, new)
