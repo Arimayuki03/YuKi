@@ -12,7 +12,7 @@
  * - mpv/aria2：锁定 release tag 与压缩包 sha256（mpv 摘要来自 GitHub API digest）。
  *   上游发新版不会自动跟——更新二进制 = 人工核对后改 lock 再重跑（防供应链漂移）。
  * - anime4k/misans：逐文件 sha256；已存在的文件跳过时也校验（文件小，代价可忽略）。
- * - ffmpeg：锁定 gyan.dev 版本化包（packages/…-essentials_build.zip，不可变）+ 官方 sha256，
+ * - ffmpeg：锁定 BtbN/FFmpeg-Builds 版本化资产（GitHub release，自带官方 digest 可核对）+ sha256，
  *   下载后强校验；缺哈希直接失败（不再静默放行）。
  */
 const fs = require('fs');
@@ -66,10 +66,13 @@ async function verifyDownload(p, expected, label) {
 // shinchiro 构建（mpv 官方推荐的 Windows 发行渠道）；release 经 lock 锁定，
 // 下载走 releases/download 直链（ghfast.top 镜像在前），API 动态解析仅兜底。
 const ARIA2_API = 'https://api.github.com/repos/aria2/aria2/releases/latest';
-// ffmpeg 官方 essentials 构建（m3u8 合成 + 抓帧，约 110MB；与主进程 ffmpeg.js 同源）。
-// 实际下载 URL 与 sha256 一律取 binaries.lock.json 的 ffmpeg 段（版本化不可变包）；
-// 此处常量仅作 lock 缺失/无 ffmpeg 段时的兜底。
-const FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip';
+// ffmpeg 官方构建（m3u8 合成 + 抓帧，约 190MB；与主进程 ffmpeg.js 同源）。
+// 实际下载 URL 与 sha256 一律取 binaries.lock.json 的 ffmpeg 段（BtbN/FFmpeg-Builds
+// 版本化资产）；此处常量仅作 lock 缺失/无 ffmpeg 段时的兜底。
+// 原锁定源 gyan.dev 的 packages/ 版本化包已从服务器移除（HTTP 404），2026-09-22 迁移至
+// BtbN/FFmpeg-Builds——mpv 官方 wiki 同样推荐该构建渠道，且 GitHub release 资产自带
+// 服务端 digest 可核对。
+const FFMPEG_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip';
 // Anime4K v4.1 着色器（Mode A 链：高光钳制→恢复→2x 升频→再恢复→暗部增强）
 // 仓库按功能分子目录，下载后扁平存入 vendor/anime4k（主进程按文件名拼链）。
 // 多镜像（与主进程 index.js ensureAnime4k 同源）：raw 直连 → jsdelivr CDN → ghfast.top 加速代理

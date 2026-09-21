@@ -277,7 +277,7 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 （`.git` 约 39MB→3.6MB；清洗前备份 bundle 留存于临时目录）；当前跟踪的 cookie/token 命名文件均为测试
 代码与 `fixture.invalid` 假数据。**G02** 通过：最大跟踪文件 1.16MB。**G03–G05/G06–G09/G12** 新增
 LICENSE(GPLv3)（同日依所有者决定由 MIT 改为 GPL）、CHANGELOG.md、CONTRIBUTING.md、CODE_OF_CONDUCT.md、Issue/PR 模板 ×3、
-[docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)（mpv GPLv2+ / ffmpeg gyan.dev essentials GPLv3 / aria2c GPLv2 /
+[docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)（mpv GPLv2+ / ffmpeg BtbN 构建 GPLv3 / aria2c GPLv2 /
 Anime4K MIT / MiSans 免费商用逐项核实）与 [.github/workflows/release.yml](.github/workflows/release.yml)
 （tag→NSIS→Draft Release；mac/linux 占位待验收）；README 加徽章（OWNER 占位待建仓替换）与许可证章节。
 **G10** 首轮基线审计零漏洞：`npm audit --omit=dev`（官方 registry）0 vulnerabilities、`pip-audit --strict`

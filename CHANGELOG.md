@@ -33,6 +33,7 @@
 
 ### Fixed
 
+- **ffmpeg 锁定源下线导致构建失败（发布阻断）**：原锁定的 gyan.dev 版本化包 `ffmpeg-9.0.1-essentials_build.zip` 已从服务器移除（HTTP 404），CI 构建在「下载第三方二进制」一步失败。现迁移至 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 的版本化资产 `ffmpeg-n9.0-latest-win64-gpl-9.0.zip`（mpv 官方 wiki 推荐构建渠道之一；GitHub release 资产自带服务端官方 digest 可核对，sha256 已本地下载复验一致）；`binaries.lock.json`、构建脚本兜底常量、主进程运行时自动下载兜底与许可声明文档同步更新。另修复 `build-python.js` 的 `COPY_EXCLUDE_NAMES` 定义位于首次调用之后的暂时性死区问题（本地有旧产物时被掩盖，CI 全新 checkout 首次执行拷贝即崩溃）。
 - **缓存统计目录写错（P2-15）**：统计与「清理缓存」指向 `%APPDATA%\yuki\logs`（恒 0），真实日志在 `~/.yuki/logs`。两者一并指向真实目录；parse-*/quark-pan-login 内存会话的磁盘遍历死分支删除；local-thumbs 加条目数上限淘汰（签名直链 key 无限增长的收敛点）。
 - **Popular.load 无请求令牌（P3-16）**：`_loading` 旗标下切标签新请求被直接丢弃、旧数据照常回写。改世代令牌模式，迟到响应整体丢弃。
 - **data-* 反查选择器失配（P3-17）**：属性经 escHtml 写入、选择器又用 escHtml 后的值查找，源含 `&/'/"/<>` 时处理器静默绑不上。反查统一改 `CSS.escape(原始值)`，与 DOM 解码后的属性值恒匹配。

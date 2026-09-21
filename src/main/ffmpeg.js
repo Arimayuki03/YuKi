@@ -6,7 +6,7 @@
  * - 本地文件视频预览图抓帧（主进程 yuki:file-thumb）
  *
  * 二进制来源：<repo>/vendor/ffmpeg/ffmpeg.exe → PATH；
- * 缺失时 ensureFfmpeg() 后台下载 gyan.dev essentials 构建（约 90MB，zip 经系统 tar 解压）。
+ * 缺失时 ensureFfmpeg() 后台下载 BtbN/FFmpeg-Builds 官方构建（约 190MB，zip 经系统 tar 解压）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -24,7 +24,12 @@ const ROOT = (() => {
 const WIN = process.platform === 'win32';
 // 二进制来源与哈希一律以 scripts/binaries.lock.json 的 ffmpeg 段为准（构建期已锁定版本化
 // 不可变包 URL）。运行时自动下载同样强制校验，防止上游/CDN 被篡改后把恶意 exe 落到用户机器。
-const FFMPEG_URL_FALLBACK = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip';
+// 二进制来源与哈希一律以 scripts/binaries.lock.json 的 ffmpeg 段为准（构建期已锁定
+// BtbN/FFmpeg-Builds 版本化资产 URL）。运行时自动下载同样强制校验，防止上游/CDN
+// 被篡改后把恶意 exe 落到用户机器。
+// 原锁定源 gyan.dev 的 packages/ 版本化包已从服务器移除（HTTP 404），2026-09-22 迁移至
+// BtbN/FFmpeg-Builds；此处常量仅作 lock 缺失时的兜底。
+const FFMPEG_URL_FALLBACK = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip';
 
 /** 读取 binaries.lock.json 的 ffmpeg 段；找不到或解析失败返回 null（调用方据此拒绝下载）。 */
 function ffmpegLock() {

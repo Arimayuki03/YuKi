@@ -171,7 +171,7 @@ YuKi 坚持 **本地优先、无追踪** 原则：
 YuKi 的实现站在诸多开源项目的肩膀上，衷心感谢：
 
 - **上游对照与生态**：[Kazumi](https://github.com/Predidit/Kazumi)（规则引擎与 Bangumi 体验参考）、[FongMi / TV](https://github.com/FongMi/TV) 与 CatVod 生态（TVBox 配置契约与爬虫生态）。
-- **播放与处理**：[mpv](https://mpv.io/)（GPLv2+）、[FFmpeg](https://ffmpeg.org/)（GPLv3, gyan.dev 构建）、[aria2](https://aria2.github.io/)（GPLv2）。
+- **播放与处理**：[mpv](https://mpv.io/)（GPLv2+）、[FFmpeg](https://ffmpeg.org/)（GPLv3, BtbN 构建）、[aria2](https://aria2.github.io/)（GPLv2）。
 - **超分与识图**：[bloc97/Anime4K](https://github.com/bloc97/Anime4K)（MIT，v4.1 实时动漫超分着色器，YuKi 三档位均衡 / 细节 / 仅修复）、[trace.moe](https://trace.moe/)（以图搜番，YuKi “以图搜番”功能后端通过 `api.trace.moe/search` 实现）。
 - **字体与前端**：[MiSans](https://hyperos.mi.com/font)（小米免费商用）via [dsrkafuu/misans](https://github.com/dsrkafuu/misans)、[jQuery](https://jquery.com/)（MIT）。
 - **宿主与后端**：[Electron](https://www.electronjs.org/) / [electron-builder](https://www.electron.build/) / [electron-updater](https://github.com/electron-userland/electron-updater)、[FastAPI](https://fastapi.tiangolo.com/) / [Uvicorn](https://www.uvicorn.org/) / [Pydantic](https://docs.pydantic.dev/)。

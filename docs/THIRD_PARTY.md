@@ -11,7 +11,7 @@
 | 组件 | 来源与锁定方式 | 许可证 | 合规结论 |
 |---|---|---|---|
 | mpv | [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake) releases（mpv 官方推荐的 Windows 构建渠道）；`binaries.lock.json` 锁定 release tag 与 sha256 | **GPLv2+**（shinchiro 构建为 GPL 构建） | 允许再分发；分发时须随附 GPL 许可证文本并注明源码获取地址（上游 GitHub 仓库）。本仓库不修改 mpv 源码，仅原样打包 |
-| ffmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) `ffmpeg-release-essentials.zip`（滚动 release，无版本化摘要可锁，见 lock 说明） | **GPLv3**（gyan.dev essentials 为 GPL 构建，含 libx264 等 GPL 组件） | 允许再分发；须随附 GPLv3 许可证文本并提供对应源码获取途径。仅使用 ffmpeg.exe 命令行能力，未链接其库 |
+| ffmpeg | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) releases（mpv 官方 wiki 推荐的 Windows 构建渠道之一）；`binaries.lock.json` 锁定版本化资产 URL 与 sha256（与 GitHub release 官方 digest 核对一致）。原锁定源 gyan.dev 的版本化包已下线（404），2026-09-22 迁移 | **GPLv3**（BtbN gpl 构建含 libx264 等 GPL 组件） | 允许再分发；须随附 GPLv3 许可证文本并提供对应源码获取途径。仅使用 ffmpeg.exe 命令行能力，未链接其库 |
 | aria2c | [aria2/aria2](https://github.com/aria2/aria2) 官方 releases Windows x64 zip；lock 锁定 tag 与 sha256 | **GPLv2**（含 OpenSSL 例外条款） | 允许再分发；随附 GPL 许可证文本与上游源码地址 |
 | Anime4K v4.1 着色器 | [bloc97/Anime4K](https://github.com/bloc97/Anime4K) `glsl/`（Restore / Upscale / Darken 共 6 个 .glsl 文件）；逐文件 sha256 锁定 | **MIT** | 允许再分发；保留版权声明即可（着色器文件头自带） |
 | MiSans 字体子集 | npm 包 [misans@4.1.0](https://www.npmjs.com/package/misans)（dsrkafuu 基于 Noto Sans SC 码位范围做的 woff2 分片子集），经 jsdelivr 分发；逐文件 sha256 锁定 | 字体版权 © 小米科技，按小米官方 MiSans 字体许可协议**免费商用、无需授权、允许随软件再分发**；npm 打包代码 MIT | 允许再分发；在发布页与本文件中注明字体出处即可 |
