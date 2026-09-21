@@ -315,6 +315,8 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
 
 ### R20 · PotPlayer 作为主播放器三类内容全部无法播放（开关语法 + verbatim 分词）（2026-08-25）
 
+> **外部播放器能力边界（用户口径小结，2026-09-22 实测定版）**：PotPlayer 与 VLC 作为主播放器均能正常起播在线内容、本地文件与下载文件；整季播放列表（本地 `.m3u` + 按需解析代理条目）能被正常加载，**连播可用**（播放器内切集即逐集向本地代理取流，直链零过期特性不变）。但 mpv 专属能力全部不可用：Anime4K 超分、应用内快捷键与右键中文菜单、截图、续播进度与弹幕均不生效；播放器不回传播放位置，历史条目进度显示 0%，观看统计按播放器运行墙钟计入（ext-watch 会话，≥15s 记一次）。想要完整体验请使用内置 mpv。
+
 - **发现时间**：2026-08-25（用户报告：选 PotPlayer 后本地文件、下载文件、在线视频均不能播）
 - **现象**：PotPlayer 进程能拉起，但 URL 只被收进播放列表不加载（无反应）；带鉴权头的在线源完全卡死。应用日志侧对应时段出现 playlist-proxy `clientError` 记录。
 - **触发链路**：`yuki:play` / `yuki:file-push` / `yuki:dl-play` → `launchExternalPlayer` → `buildExternalPlayerArgs('potplayer')`（verbatim 手工引号 `/referer="v"` `/user_agent="v"`）→ `spawn(..., { windowsVerbatimArguments: true })`
