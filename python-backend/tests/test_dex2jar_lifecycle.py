@@ -17,6 +17,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 import java_probe  # noqa: E402
+import jar_bridge  # noqa: E402
 from jar_bridge import JarBridge  # noqa: E402
 from runtime.errors import RuntimeError as RuntimeContractError  # noqa: E402
 
@@ -40,9 +41,20 @@ class Dex2JarLifecycleTest(unittest.TestCase):
         # 确保 java_probe 探测返回虚拟 java 路径以测试 dex2jar 执行链路
         self._orig_find_java = java_probe.find_java
         java_probe.find_java = lambda: 'java.exe'
+        # vendor/dex-tools 被 .gitignore 排除（CI 全新 checkout 没有），而
+        # _ensure_jvm_compatible 在走到被桩的 subprocess 之前会真实检查
+        # DEX2JAR_JAR 是否存在——不补桩的话 CI 恒在「dex2jar tools not found」
+        # 分支提前抛错，三条用例的断言对象永远不可达（本地有 vendor 掩盖）。
+        # 指向一个真实存在的空文件即可通过工具存在性检查。
+        self._orig_d2j_jar = jar_bridge.DEX2JAR_JAR
+        fake_d2j = os.path.join(self.tmp_dir, 'dex-tools-v2.4.jar')
+        with open(fake_d2j, 'wb') as f:
+            f.write(b'fake dex2jar jar for tests')
+        jar_bridge.DEX2JAR_JAR = fake_d2j
 
     def tearDown(self):
         java_probe.find_java = self._orig_find_java
+        jar_bridge.DEX2JAR_JAR = self._orig_d2j_jar
         import shutil
         if os.path.isdir(self.tmp_dir):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
