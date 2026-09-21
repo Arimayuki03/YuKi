@@ -1,25 +1,38 @@
-<p align="center">
-  <img src="assets/icon.png" width="128" height="128" alt="YuKi Logo" />
-</p>
+<div align="center">
 
-<h1 align="center">YuKi</h1>
+<img src="assets/icon.png" width="128" height="128" alt="YuKi Logo" />
 
-<p align="center">
-  聚合 · 本地优先的影视探索桌面
-</p>
+# YuKi
 
-<p align="center">
-<a href="https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml"><img src="https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-<a href="https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml"><img src="https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3" /></a>
-<a href="https://github.com/Arimayuki03/YuKi/releases"><img src="https://img.shields.io/github/v/release/Arimayuki03/YuKi" alt="GitHub Release" /></a>
-</p>
+**聚合 · 本地优先的影视探索桌面**
 
-YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面与系统宿主，使用独立 FastAPI/Python 进程运行 CatVod 与 Kazumi 两套内容引擎，并通过 mpv、aria2c 和 ffmpeg 完成播放与下载。
+[![CI](https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml/badge.svg)](https://github.com/Arimayuki03/YuKi/actions/workflows/ci.yml)
+[![Release](https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml/badge.svg)](https://github.com/Arimayuki03/YuKi/actions/workflows/release.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/Arimayuki03/YuKi?logo=github)](https://github.com/Arimayuki03/YuKi/releases)
+[![License](https://img.shields.io/github/license/Arimayuki03/YuKi)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?logo=windows95)](https://github.com/Arimayuki03/YuKi/releases)
+[![Electron](https://img.shields.io/badge/Electron-31-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Stars](https://img.shields.io/github/stars/Arimayuki03/YuKi?style=flat&logo=github)](https://github.com/Arimayuki03/YuKi/stargazers)
 
-当前版本为 `0.2.4`，主要开发和验证平台是 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`/`yuki`，仅显示名为 YuKi。
+</div>
 
-## 界面预览
+---
+
+YuKi 是一个面向桌面的影视聚合应用：使用 **Electron** 作为界面与系统宿主，使用独立 **FastAPI/Python** 进程运行 **CatVod** 与 **Kazumi** 两套内容引擎，并通过 **mpv**、**aria2c** 和 **ffmpeg** 完成播放与下载。坚持 **本地优先、无追踪**——不上传任何个人数据。
+
+> 当前版本 `v0.2.5` · 主要开发与验证平台为 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`，仅显示名为 YuKi。
+
+## ✨ 功能特性
+
+- **双内容引擎**：CatVod 配置源（Python / JavaScript / CMS 爬虫）、聚合搜索、详情与播放链路完整；Kazumi 规则导入、商店、编辑、测试、搜索、剧集解析与真实视频流提取已接入。
+- **mpv 播放体验**：自动连播、续播、Anime4K 实时超分（三档位，支持快捷键循环切换）、截图、外部播放器；mpv 右键菜单已中文化。
+- **原生播放列表与边下边播**：在线整季经本地按需解析代理交给 mpv 原生队列连播（直链零过期），同源同集下载自动去重；网盘类源（夸克等）自动回退逐集连播并禁用线路回退，防止触发网盘风控。
+- **下载体系**：aria2c 直链下载、ffmpeg HLS 下载、下载记录与系统通知。
+- **数据与同步**：收藏、历史、观看统计、Bangumi 账号同步（评分 / 收藏 / 观看进度自动上报）、WebDAV 备份、本地文件管理。
+- **界面视觉系统**：按 [DESIGN.md](DESIGN.md) 契约构建（中性灰阶骨架 + 主题色点睛 + 动效令牌），背景图片支持拖动定位、缩放、透明度与模糊的自定义调整。
+
+## 🖼 界面预览
 
 | 首页 · CatVod 聚合源浏览 | 推荐 · Bangumi 热门番组 |
 |:--:|:--:|
@@ -29,46 +42,61 @@ YuKi 是一个面向桌面的影视聚合应用，使用 Electron 作为界面�
 | **设置 · Kazumi 规则管理** | **我的收藏 · 番剧列表与状态筛选** |
 | ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | ![我的收藏：番剧列表与状态筛选](assets/screenshots/favorites.png) |
 
-## 当前状态
+## 📥 安装
 
-- CatVod 配置、Python/JavaScript/CMS 爬虫、聚合搜索、详情与播放链路已经完成。
-- Kazumi 规则导入、商店、编辑、测试、搜索、剧集解析和真实视频流提取已经接入。
-- mpv 播放、自动连播、续播、Anime4K、截图、外部播放已接入；画中画已在 2A 中移除。
-- 原生播放列表与边下边播已接入：在线整季经本地按需解析代理交给 mpv 原生队列连播（直链零过期），同源同集下载自动去重；mpv 右键菜单已中文化，Anime4K 支持快捷键循环切换。网盘类源（夸克等）自动回退逐集连播并禁用线路回退，防止触发网盘风控。
-- 界面视觉系统按 [DESIGN.md](DESIGN.md) 契约整体升级（中性灰阶骨架 + 主题色点睛 + 动效令牌），背景图片支持拖动定位、缩放、透明度与模糊的自定义调整。
-- aria2c 直链下载、ffmpeg HLS 下载、下载记录与系统通知已接入。
-- 收藏、历史、观看统计、Bangumi、WebDAV 和本地文件管理已接入。
-- Windows 安装包已生成；macOS/Linux 打包、安装后冷启动和自动更新仍待验证或实现。
-- TVBox 兼容性基础能力已接入，但 21 仓全量回归、FongMi 契约审计和分层诊断验收仍在计划中，详见[功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md)。
+前往 [Releases](https://github.com/Arimayuki03/YuKi/releases/latest) 下载最新 Windows 安装包（`YuKi-Setup-x.y.z.exe`），双击安装即可。
 
-产品当前不启用弹幕界面与播放时弹幕加载。仓库保留了部分 DanDanPlay API、ASS 和历史代码，仅作为兼容基础，不代表弹幕功能处于启用状态。
+- 系统要求：Windows 10 及以上（x64）。
+- 应用内置自动更新（electron-updater），无需手动升级。
+- macOS / Linux 打包（dmg / AppImage / deb）仍在验证中，暂未提供安装包。
 
-## 快速开始
+> **杀软报毒说明**：打包钩子已剔除两类「系统自带冗余 DLL」误报源——Electron 自带的 `d3dcompiler_47.dll` 与 PyInstaller 后端捆绑的 UCRT（`ucrtbase.dll` + `api-ms-win-*` 转发器）；Win10+ 系统 System32 自带这些运行库，剔除不影响运行与渲染。若仍被误报，可在杀软中加白并向上游提交误报申诉。
 
-开发环境需要 Node.js、Python 3.14，以及项目脚本管理的 mpv、aria2c、ffmpeg 等二进制资源。
+## 🚀 快速开始（开发）
+
+环境要求：Node.js 20+、Python 3.14，以及项目脚本管理的 mpv、aria2c、ffmpeg 等二进制资源（`npm install` 与构建脚本会自动下载并校验）。
 
 ```powershell
+git clone https://github.com/Arimayuki03/YuKi.git
+cd YuKi
 npm install
 npm start
 ```
 
-运行完整回归：
+常用命令：
 
-```powershell
-npm run test:all
+| 命令 | 说明 |
+|---|---|
+| `npm start` | 启动开发实例 |
+| `npm run test:all` | 完整回归（Python 测试 + JS 单测 + Lint） |
+| `npm run build:win` | 构建 Windows 安装包 |
+| `npm run lint` / `npm run lint:py` | ESLint / Ruff 检查 |
+
+更完整的环境、架构与构建说明见 [开发状态](PROGRESS.md)、[架构说明](docs/ARCHITECTURE.md) 与 [文件结构](docs/FILE_STRUCTURE.md)。
+
+## 🏗 技术架构
+
+```
+┌─────────────────────────────────────────────┐
+│                Electron 主进程               │
+│      窗口管理 · IPC · 下载 · mpv 宿主        │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP (127.0.0.1, token 鉴权)
+┌──────────────────▼──────────────────────────┐
+│           Python 后端（FastAPI）             │
+│   CatVod Spider 引擎 · Kazumi 规则引擎       │
+│     聚合搜索 · 播放解析 · HLS 代理            │
+└──────────────────┬──────────────────────────┘
+                   │
+      ┌────────────┼────────────┐
+      ▼            ▼            ▼
+   mpv 播放     aria2c 下载   ffmpeg HLS
 ```
 
-构建 Windows 安装包：
+- **进程模型**：Electron 主进程 + 渲染进程 + 独立 Python 后端进程，全部本地通信走 `127.0.0.1` 且带 token 鉴权。
+- **安全边界**：本地服务具备浏览器防御（Origin/Host 校验）、SSRF 逐跳复检、Cookie 加密落盘（DPAPI/AES-GCM）等纵深防护，详见[系统架构](docs/ARCHITECTURE.md)。
 
-```powershell
-npm run build:win
-```
-
-> 安装时杀软报毒提示：打包钩子已剔除两类「系统自带冗余 DLL」误报源——Electron 自带的 `d3dcompiler_47.dll` 与 PyInstaller 后端捆绑的 UCRT（`ucrtbase.dll` + `api-ms-win-*` 转发器）；Win10+ 系统 System32 自带这些运行库，剔除不影响运行与渲染（VC++ 运行库与 Python 本体保留）。若仍被误报，可在杀软中加白并向上游提交误报申诉；开发诊断可用 `YUKI_KEEP_SYSTEM_DLLS=1` 保留全部以便对比。
-
-更完整的环境、架构与构建说明见 [开发状态](PROGRESS.md)、[架构说明](docs/ARCHITECTURE.md)与[文件结构](docs/FILE_STRUCTURE.md)。
-
-## 文档导航
+## 📚 文档导航
 
 先看 [文档索引](docs/README.md)，再按任务进入对应文档。
 
@@ -90,7 +118,21 @@ npm run build:win
 
 - [TVBox/FongMi 功能一致性任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) · 运行时隔离、播放收敛与发布验收（当前唯一执行入口）
 
-## 免责声明
+## 🗺 路线图
+
+- [x] CatVod / Kazumi 双引擎、聚合搜索与播放链路
+- [x] mpv 播放 + Anime4K 超分 + 原生播放列表 + 边下边播
+- [x] aria2c / ffmpeg 下载体系、Bangumi 同步、WebDAV 备份
+- [x] TVBox 兼容性基础能力（全量回归与 FongMi 契约审计进行中）
+- [ ] macOS / Linux 打包验证与安装后冷启动验收
+- [ ] 弹幕（产品当前不启用弹幕界面与播放时弹幕加载；仓库保留的 DanDanPlay API / ASS 代码仅作兼容基础）
+- [ ] 一起看（多人同屏共播）
+
+## 🤝 参与贡献
+
+欢迎提交 Issue 与 Pull Request！请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [行为准则](CODE_OF_CONDUCT.md)。开发与回归流程、发布流程见相应文档。
+
+## 🛡 免责声明
 
 > 请在使用前仔细阅读本节。继续使用 YuKi 即视为已理解并同意以下条款。
 
@@ -108,7 +150,7 @@ npm run build:win
 
 如不同意上述声明，请勿使用本软件。
 
-## 隐私政策
+## 🔒 隐私政策
 
 YuKi 坚持 **本地优先、无追踪** 原则：
 
@@ -124,7 +166,7 @@ YuKi 坚持 **本地优先、无追踪** 原则：
 | **第三方源隐私** | 聚合源返回的内容与隐私实践由源站决定，YuKi 无法控制。建议仅添加可信来源，并定期审查已添加配置。 |
 | **规划中的功能** | 后续版本计划加入**弹幕**与**一起看**（多人同屏共播）功能。届时会引入新的第三方服务依赖（如弹幕数据源 API、联播信令/中继服务），相关出站请求与数据处理方式将在功能落地时同步更新至本节；在此之前，产品不发起任何弹幕获取或联播相关的网络请求（仓库中保留的 DanDanPlay 相关代码仅为兼容基础，未启用）。 |
 
-## 致谢
+## 💐 致谢
 
 YuKi 的实现站在诸多开源项目的肩膀上，衷心感谢：
 
@@ -137,6 +179,12 @@ YuKi 的实现站在诸多开源项目的肩膀上，衷心感谢：
 
 完整第三方组件清单与许可证见 [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)。
 
-## 许可证
+## 📄 许可证
 
-本项目代码以 [GPLv3](LICENSE) 许可证发布（见根目录 LICENSE）。衍生与再分发须遵循 GPLv3 条款并提供对应源码。随安装包分发的第三方二进制（mpv GPLv2+ / ffmpeg GPLv3 / aria2c GPLv2 / Anime4K MIT / MiSans 免费商用等）各自按其原始许可证执行，逐项出处与合规结论见[第三方组件与许可声明](docs/THIRD_PARTY.md)。
+<div align="center">
+
+本项目以 [GPLv3](LICENSE) 许可证发布。
+
+衍生与再分发须遵循 GPLv3 条款并提供对应源码。随安装包分发的第三方二进制（mpv GPLv2+ / ffmpeg GPLv3 / aria2c GPLv2 / Anime4K MIT / MiSans 免费商用等）各自按其原始许可证执行，逐项出处与合规结论见[第三方组件与许可声明](docs/THIRD_PARTY.md)。
+
+</div>

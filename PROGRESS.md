@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-09-20
+> 更新时间：2026-09-22
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -9,7 +9,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 应用版本 | `0.2.4` |
+| 应用版本 | `0.2.5` |
 | 桌面宿主 | Electron 31，JavaScript |
 | 后端 | FastAPI，Python 3.14 独立进程 |
 | 内容引擎 | CatVod + Kazumi 双引擎 |

@@ -4,7 +4,7 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.2.5] - 2026-09-22
 
 本轮为三份独立安全审查（hy4 / ds / glm）交叉验证后的第二轮修复：合并去重确认 P1×5、P2×19、P3×24，按文件域并行修复并补齐回归测试。三份审查报告属临时文档，验证完成后已删除。
 
@@ -50,7 +50,7 @@
 - **新增 `test_security_regressions.py`（33 用例，接入 run_all）**：覆盖 P1-2/P2-10 落盘判定、P1-3 门禁与 HLS token 纪律、P1-4 清理语义、P1-5 注入、P2-1 Host 白名单。
 - **`test_runtime_supervisor.py` 慢机余量**：`_call` 默认 deadline 1s→5s（含 Worker 冷启动；高负载下启动屏障超时会覆盖预期错误码），两处墙钟断言接入 `_BUDGET_ASSERT_SLACK` 余量。HEAD 基线即随机复现，与功能修复无关。
 
-## [未发布-2026-09-18]
+## [0.2.4] - 2026-09-18
 
 本轮为全项目代码审查（6 个子代理分模块审查 + 逐条复核）后的修复，共 3 项安全风险、17 项缺陷，并补齐相应的回归门禁。
 
@@ -90,7 +90,7 @@
 - CI 补 `npm run lint`（此前 CI 从不跑 eslint，`no-undef` 形同虚设）、`permissions: contents: read`、`concurrency`、`timeout-minutes`；`pnpm-workspace.yaml` 的 `allowBuilds` 是无效字段（pnpm 静默忽略）改为 `onlyBuiltDependencies`。
 - 新增 `test_health_concurrency.py`（含无锁孪生对照实现，锁被删除时会变红）、`test_cms_xml_encoding.py`、`renderer-globals-contract.test.js`、`test-effectiveness.test.js`；`test_circuit.py` 补半开退避语义用例。JS 用例 534 → 541，Python 阶段 51 → 57。
 
-## [0.2.4] - 2026-09-17
+## [0.2.4-rev1] - 2026-09-17
 
 继续消除安装过程杀软拦截：安装包不再随带任何系统同名 DLL 副本。
 
