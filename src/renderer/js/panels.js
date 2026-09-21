@@ -1956,8 +1956,8 @@ function initSettingsPanel() {
     $('#pick_player').on('click', async () => {
         const r = await window.yuki.pickPlayer();
         if (r && r.ok) {
-            if (r.mode === 'internal-mpv') warnToast('已指定 mpv（内置全功能：弹幕/连播/统计）');
-            else warnToast(`已指定 ${r.kind || '外部'} 播放器作主播放器（无弹幕/连播/统计）`);
+            if (r.mode === 'internal-mpv') warnToast('已指定 mpv（转为内置引擎，体验与内置一致：连播/超分/快捷键/统计）');
+            else warnToast(`已指定 ${r.kind || '外部'} 播放器作主播放器（连播可用；无超分/快捷键/进度回传）`);
             refreshPlayerLine();
             refreshAssetStatus();
         } else if (r && r.reason !== 'cancelled') {
@@ -2416,7 +2416,7 @@ async function refreshPlayerLine() {
         const cfg = await window.yuki.playerConfig();
         if (cfg.mode === 'external') {
             const label = kindLabel[cfg.kind] || '外部';
-            line.text(`${label} · ${cfg.path}（外部模式，无弹幕/连播/统计）`);
+            line.text(`${label} · ${cfg.path}（外部模式：连播可用；无超分/快捷键/进度回传）`);
             line.attr('title', cfg.path);
             clearBtn.show();
         } else if (cfg.path) {

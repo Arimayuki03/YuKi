@@ -4219,11 +4219,11 @@ app.whenReady().then(() => {
 
     // ---- 统一播放器指定（内置 mpv vs 外部播放器合并入口）----
 
-    /** 统一「指定播放器」：选中 mpv → 作为内置引擎（全功能：弹幕/连播/统计）；
-     *  选中 VLC/PotPlayer/其他 → 作为主播放器（所有起播直接交它，无弹幕/连播/统计）。 */
+    /** 统一「指定播放器」：选中 mpv → 作为内置引擎（与自动发现同权：弹幕/连播/统计/超分全功能）；
+     *  选中 VLC/PotPlayer/其他 → 作为主播放器（起播与 .m3u 列表连播可用，无超分/快捷键/进度回传）。 */
     ipcMain.handle('yuki:pick-player', async () => {
         const r = await dialog.showOpenDialog(win, {
-            title: '选择播放器（mpv 全功能；VLC/PotPlayer 等仅外部播放）',
+            title: '选择播放器（选 mpv 转为内置引擎，体验一致；VLC/PotPlayer 为外部模式）',
             filters: [
                 { name: '可执行文件', extensions: process.platform === 'win32' ? ['exe'] : ['app', ''] },
                 { name: '全部文件', extensions: ['*'] },
