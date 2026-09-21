@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/19 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；N3（drpy / PC 原生运行时）与真实公共仓/发布环境验收仍未开始 |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；**v0.2.5 已发布**（2026-09-22），其后完成 ffmpeg 锁定源迁移 BtbN（发布阻断修复）、dex2jar CI 假绿修复、外部播放器实测定版与 README/GUIDE 使用文档批次；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -70,7 +70,7 @@
 - 设置中心、主题、壁纸、系统字体、字号、分页、托盘驻留、快捷键、自定义缓存路径和首次引导。
 - UI 视觉系统升级（2026-08-26）：按根目录 [DESIGN.md](DESIGN.md) 视觉契约整体重制 `ui.css`——中性灰阶骨架 + 主题色点睛、派生色 `color-mix` 现场计算、圆角/阴影/动效令牌化、微噪点质感、卡片入场错峰/悬浮抬升/按压反馈动效与网格空态 CSS 骨架屏；动画只动 transform/opacity 并尊重 `prefers-reduced-motion` 与应用内动画开关，类名/DOM/皮肤挂钩等禁改清单未动。
 - 背景图自定义调整：选图后弹调整弹窗（拖动定位、缩放/透明度/模糊滑杆，预览即所得，保存才生效）；壁纸改经 `--wall-url` 单层伪元素按视口缩放绘制（修复大分辨率视口平铺铺不满）；遮罩强度新增「极弱」档位。
-- 2A：移除运行时 MiSans 动态下载/注入和画中画入口；关于内容迁入设置一级分类；系统页移除版本号；设置固定在左侧功能项底部。
+- 2A：移除运行时 MiSans 动态下载/注入和画中画入口（MiSans 后于 T61 改为打包内置并恢复注入，见 §6）；关于内容迁入设置一级分类；系统页移除版本号；设置固定在左侧功能项底部。
 - Windows NSIS 安装包和自定义图标。
 
 ### TVBox / FongMi G0 基线、契约与健康模型（2026-08-18）
@@ -121,18 +121,18 @@
 - [x] TVBox/FongMi G0.1-G0.3：兼容基线、统一运行时错误契约、站点能力模型和确定性离线验收。
 - [x] TVBox/FongMi S1.1-S1.4：可终止 Worker 进程隔离、绝对 deadline、聚合取消和熔断恢复。
 - [x] TVBox/FongMi C2.1-C2.5：ConfigSnapshot 三层与原子换入、`ext` 完整语义、站点字段矩阵、
-  Capability Router、配置安全边界（`run_all.py` 28 阶段全通过）。
-- [ ] TVBox 兼容性 N3（drpy / PC 原生运行时）及真实公共仓/发布环境验收：按
-  [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 推进。
+  Capability Router、配置安全边界。
+- [x] 创建 GitHub 公开仓库（github.com/Arimayuki03/YuKi）并实测 tag→安装包流水线：v0.1.0–v0.2.5 已多轮发布，release.yml 实跑验证（期间修复 cp1252 编码崩溃 907451d、CI 无 vendor 工具假绿 52e2eca 等）；代码签名仍未实施。
+- [ ] TVBox 兼容性 N3（PC 原生运行时新引擎）及真实公共仓/发布环境验收：按
+  [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 推进。drpy 引擎（Node Worker 方案）已实现并通过验收后从产品移除，能力路由现对 drpy 固定标记 unsupported（见 RUNTIME_ISSUES 与任务书 N3.1 现状回退注）。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
-- [x] 自动更新基础链路已接入 `electron-updater`，且应用内更新闭环（RM-2）已代码完成：手动检查/自动下载开关/更新设置 UI/发布元数据（latest.yml+blockmap）全部就绪，待建仓发版后实测 v0.2.1→v0.2.2 升级链路。
-- [ ] 创建 GitHub 公开仓库并实测 tag→安装包流水线（release.yml 已就绪，含应用内更新元数据上传）；代码签名在建仓后补齐。
+- [x] 自动更新基础链路已接入 `electron-updater`，应用内更新闭环（RM-2）代码完成且随 v0.2.5 Release 流水线分发（latest.yml+blockmap 已上传）；v0.2.x→新版本应用内升级链路实测与代码签名仍待办。
 
 ### 明确不作为当前待办
 
-- 弹幕产品功能当前关闭。DanDanPlay API、ASS 生成和历史端点虽仍存在，但前端没有启用入口，不应把“补弹幕渲染”当作当前缺陷。
-- SyncPlay 同步播放与 DLNA 投屏当前未实现。
+- 弹幕自动加载已实现（设置 → 播放开关 `danmakuEnable`，默认关；弹弹play 匹配 → ASS → mpv 装载）。当前待办只有产品化项（透明度/遮挡/屏蔽词/倍速时长修正），不应把「补弹幕渲染」当作当前缺陷。
+- SyncPlay 同步播放与 DLNA 投屏的主进程模块（`syncplay-client.js`/`dlna-caster.js`）与 IPC 已接线，仅缺渲染层界面入口；补 UI 属 ROADMAP RM-7/RM-8。
 - P2P/P3P、ed2k 和 thunder 协议不在当前范围。
 - 验证码自动识别/自动过验证不在当前交付范围；现阶段保留检测、打开验证页面和 Cookie 复用。
 
@@ -153,7 +153,7 @@
 
 ## 6. 环境与命令
 
-已验证环境快照：Python 3.14.4、Node 24.18.1、Electron 31.7.7、mpv 0.41.0、aria2c 1.37.0。ffmpeg 等本地扩展由项目脚本准备；MiSans 旧静态资源和辅助脚本仍保留，但应用运行时已不再下载、注入或切换该字体。
+已验证环境快照：Python 3.14.4、Node 24.18.1、Electron 31.7.7、mpv 0.41.0、aria2c 1.37.0。ffmpeg 等本地扩展由项目脚本准备；MiSans 随安装包内置（`vendor/misans`，构建时经 `download-binaries.js misans` 就位），运行时按 `useMisansFont` 开关注入内置字体（默认开），不再有任何网络下载路径。
 
 ```powershell
 # 启动完整应用
@@ -176,12 +176,20 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
 
+2026-09-22 v0.2.5 发布与发布阻断修复批次：
+
+- **定版发布**：v0.2.5 正式发布（5cdf4f0，版本号、README 全面改版与发布文档同步）；README 新增「初次使用」四步指南（b0bac52），GUIDE 补 Kazumi 规则商店步骤与无外网环境镜像说明（c074182）。
+- **ffmpeg 锁定源迁移（发布阻断）**：原锁定的 gyan.dev 版本化包 404 下线，迁移至 BtbN/FFmpeg-Builds 版本化资产（`binaries.lock.json` sha256 复验），构建脚本兜底常量与运行时自动下载兜底同步（6efb36b）；`build-python.js` 的 `COPY_EXCLUDE_NAMES` TDZ 修复（1103e52）。
+- **CI 假绿修复**：dex2jar 生命周期测试补 `DEX2JAR_JAR` 桩，修复 CI 无 vendor 工具时的假绿（52e2eca）。
+- **外部播放器实测定版**：`指定 mpv 即内置引擎体验一致` 的 UI 与文档口径统一（f0ec5ee/f100c55），PotPlayer/VLC 连播可用、mpv 专属能力不可用的实测边界写入 GUIDE/RUNTIME_ISSUES。
+- 此前 0.2.5 内已包含 2026-09-18 「feat: 会话级 TTL 内存缓存提速」（3cec23b，`mem_cache.py` + server.py 热点供数 + 三个缓存回归阶段）。
+
 2026-09-20 三报告交叉审查全项目修复批次（P1×5 / P2×19 / P3×24）：
 
 - **背景**：三份独立安全审查报告（hy4/ds/glm，临时文档，验证后已删除）交叉验证并逐条复核，确认 P1×5、P2×19、P3×24，推翻 4 条、重大修正 8 条、验证中新发现 8 条。按文件域分两批并行修复（每批 3 个子代理：Python 后端 / Electron 主进程 / 渲染层），修复后 `npm run test:all` 全绿。明细见 CHANGELOG [未发布] 段。
 - **P1 全部闭环**：①主 token 明文落盘 play-cache（volatile 检查前置 + 失败结果不落盘）；②`do=pan` 免鉴权（token 门禁 + HLS token 纪律 + 两个构造点与 jar 硬编码通道补 token）；③JVM 强杀后网盘 Cookie 明文残留（kill 路径补删 TVBox/*_cookie.txt，路径与 Java cacheRoot 逐层对齐——审查代理曾发现首版清理路径多一层 `cache/` 恒空转，已修）；④Worker hoststate 全空（spec 注入 proxy_port/proxy_token/data_dir + Worker 构建 configure）；⑤`dist/` 历史泄露产物（820MB 含 FM/.quark 真实 Cookie 的 v0.2.1 安装包与 win-unpacked）已全部删除——**线上 v0.2.1–v0.2.4 四个 Release 资产与夸克/UC 会话吊销仍需账号侧处置**。
 - **P2/P3 覆盖**：Host 白名单、SSRF 三处对齐、senderFrame 校验 + deleteFiles 显式 opt-in、delFolder 三道防线、after-pack fail-closed + FM/.test-runtime 拷贝排除、权限处理器全拒、退出撤销定时关机、CSP 白名单、kazumi id 转义与 localStorage 净化、detail/popular 世代守卫、WebDAV 敏感键、HLS 分片续传校验、playlist-proxy 异常保护、`/health` 收敛、Kazumi Cookie 加密落盘、假绿测试 ×3 修复等（完整清单见 CHANGELOG）。
-- **测试**：新增 `test_security_regressions.py`（33 用例）接入 run_all；`test_quark_pan.py` 桩签名适配新 `_stream_forward` 契约；`test_runtime_supervisor.py` 慢机余量（`_call` 默认 deadline 1s→5s、墙钟断言接 `_BUDGET_ASSERT_SLACK`；HEAD 基线即随机复现，与功能修复无关）。最终 `npm run test:all` 全绿：run_all 59 阶段 ALL PASS、编译 188 文件 0 error、JS 单元 540/540、ESLint 0 error（73 条既有 warning 不变）、Ruff 全过。
+- **测试**：新增 `test_security_regressions.py`（33 用例）接入 run_all；`test_quark_pan.py` 桩签名适配新 `_stream_forward` 契约；`test_runtime_supervisor.py` 慢机余量（`_call` 默认 deadline 1s→5s、墙钟断言接 `_BUDGET_ASSERT_SLACK`；HEAD 基线即随机复现，与功能修复无关）。最终 `npm run test:all` 全绿：run_all 56 阶段 ALL PASS、编译 188 文件 0 error、JS 单元 540/540、ESLint 0 error（73 条既有 warning 不变）、Ruff 全过。
 - **构建门禁自证**：`@electron/asar` 提为 devDependencies（`npm ls` 不再 extraneous）；asar 清单解析失败从静默跳过改为终止构建。
 
 2026-09-15 安装包杀软误报修复批次：

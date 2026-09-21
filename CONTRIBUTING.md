@@ -11,7 +11,7 @@
 | Node.js | 20+（开发机实测 24.18） | 主进程 / 渲染层 / 构建脚本 |
 | Python | 3.14（开发机实测 3.14.4） | 后端 FastAPI 独立进程 |
 | Windows | 10/11 x64 | 当前唯一验证平台；macOS/Linux 打包尚未验证 |
-| mpv / aria2c / ffmpeg / Anime4K | 由脚本管理 | `vendor/` 目录，不入库；应用启动会自动补齐，也可手动下载 |
+| mpv / aria2c / ffmpeg / Anime4K | 由脚本管理 | `vendor/` 目录，不入库。就位方式各异：Anime4K 随 `npm install` 自动下载；ffmpeg 缺失时应用按需自动下载；mpv 可在「设置 → 系统 → 组件状态」一键下载；aria2c 无自动下载路径，需经 `download-binaries.js` 手动准备 |
 
 ## 本地开发
 
@@ -31,7 +31,7 @@ npm start
 npm run backend
 ```
 
-第三方二进制手动下载（通常不需要，应用启动会自动补齐）：
+第三方二进制手动下载（Anime4K 已随 postinstall 就位；ffmpeg 由应用按需下载；mpv / aria2c 通常需要这一步或组件状态页补齐）：
 
 ```powershell
 node scripts/download-binaries.js all   # mpv / aria2c / anime4k / ffmpeg / misans

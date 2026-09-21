@@ -1,8 +1,8 @@
 # TVBox / FongMi 功能一致性详细任务书
 
 - **编写日期**：2026-08-18
-- **最近决策**：2026-08-19（2026-08-22 核验：与当前项目实际一致，无需变更）
-- **状态**：G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 验收通过；A4.1 已完成并作出 No-Go，A4.2-A4.5 关闭
+- **最近决策**：2026-08-19（2026-09-22 核验：N3.1 已按 0.2.x 现状回退勾选，死链改注归档）
+- **状态**：G0.1-G0.3、S1.1-S1.4、C2.1-C2.5、N3.2-N3.5、U6.1-U6.4、P5.1-P5.6 等验收通过（各项以勾选与测试证据为准）；A4.1 已完成并作出 No-Go，A4.2-A4.5 关闭；**N3.1 drpy 已实现后又移除**（见下）
 - **目标平台**：Windows 优先，macOS/Linux 在 PC 原生运行时稳定后跟进
 - **正式产品目标**：C1 PC 原生兼容。用户只输入一个影视仓库地址，应用自动获取配置、识别并加载 C1 可运行站点，最终成功播放用户有权访问的媒体
 - **相关文档**：[系统架构](ARCHITECTURE.md) | 当前状态见 [PROGRESS.md](../PROGRESS.md)
@@ -771,10 +771,15 @@ Ruff 首轮报了 4 个 F401：C2 期间加进 `config.py` 的 `capability_route
 
 验收：
 
-- [x] 选定的 drpy 夹具通过 home/category/search/detail/player；
-- [x] 无限循环和内存膨胀规则可被杀死；
-- [x] 规则无法访问用户任意文件或启动进程；
-- [x] 打包后无需用户另装 Node。
+- [x] 选定的 drpy 夹具通过 home/category/search/detail/player；（已实现后于 0.2.x 移除，见下）
+- [x] 无限循环和内存膨胀规则可被杀死；（同上）
+- [x] 规则无法访问用户任意文件或启动进程；（同上）
+- [x] 打包后无需用户另装 Node。（同上）
+
+**2026-09-22 现状回退**：drpy 引擎（原 Node Worker 方案）已在 0.2.x 从产品中移除，
+`runtime/capability_router.py` 对 drpy 规则源固定返回 unsupported（C2 语义）并提示
+「drpy 规则源需要独立的 drpy 运行时，当前版本未支持」。上述勾选记录的是历史验收证据，
+当前产品边界回到 C1 且不含 drpy（对应 ROADMAP RM-13 未启动）。
 
 ### N3.2 QuickJS 宿主契约补齐
 
@@ -842,7 +847,8 @@ Worker 不属于当前产品架构、发布范围或后续执行队列；正式�
 **状态（2026-08-19）**：A4.1 Spike 已完成，结论 **No-Go**。三个真实 DEX 输入的
 JVM shim 完整契约为 0/3；本机没有可执行的 Android guest、设备或远程 Worker 原型，
 Android 方案资源指标和分发许可证也未通过门槛。产品支持上限已正式收敛到 C1，详见
-[ANDROID_WORKER_SPIKE_REPORT.md](ANDROID_WORKER_SPIKE_REPORT.md)。A4.2-A4.5 已关闭。
+ANDROID_WORKER_SPIKE_REPORT（2026-09 仓库清理时已删除，内容见 git 历史归档，
+提交 d3bfc7d 之前可按 `git log --all --diff-filter=D -- "*ANDROID_WORKER_SPIKE_REPORT*"` 检索）。A4.2-A4.5 已关闭。
 
 至少验证三类真实样例：
 
@@ -1059,6 +1065,9 @@ session/redirect Cookie，外部播放器无法透传时显式降级。离线证
 **2026-08-19 实现状态**：JAR 优先、native Quark 显式降级、统一多清晰度模型、短期 URL
 缓存和一次刷新均有离线证据。真实夸克 Cookie 已在本机加密存储中检测到，但只读外部验收
 因网络沙箱/敏感凭据授权策略未执行，故“真实 Cookie + 真实文件首帧”仍未完成，不计完成。
+**2026-09 更新**：0.2.0 修复夸克转存、0.2.5 补风控语义（`_QuarkSaveDenied` 收口、会话
+滚动 Cookie 回写与保活探针）并经开发机真实账号实测播放与转存；外部账号侧验收仍未组织，
+本项状态不变。
 
 ### P5.7 DRM 决策任务（C1 范围外）
 
@@ -1069,8 +1078,8 @@ session/redirect Cookie，外部播放器无法透传时显式降级。离线证
 授权播放器 SDK、Android 播放器画面转交和明确不支持；未完成合法授权和安全评估前，
 不提供绕过 DRM 的实现。
 
-**2026-08-19 决策输出**：[ADR-0002-drm-playback.md](ADR-0002-drm-playback.md) 比较四种
-方案并选择当前明确不支持；没有实现任何 DRM 绕过或未授权播放。
+**2026-08-19 决策输出**：ADR-0002-drm-playback（2026-09 仓库清理时已删除，结论保留于
+git 历史与本文件）比较四种方案并选择当前明确不支持；没有实现任何 DRM 绕过或未授权播放。
 
 ---
 
@@ -1233,11 +1242,13 @@ session/redirect Cookie，外部播放器无法透传时显式降级。离线证
 
 至少提供：
 
-- `runtime_drpy`；
-- `pan_fast_path`；
-- `media_probe`；
-- `auto_line_fallback`；
-- `legacy_parser`。
+- ~~`runtime_drpy`~~（drpy 引擎已移除，该开关不存在）；
+- `panFastPath`；
+- `mediaProbe`；
+- `autoLineFallback`；
+- `legacyParser`。
+
+（现有开关见 `src/main/index.js` 默认设置；drpy 相关开关随引擎移除一并取消。）
 
 开关用于灰度与回滚，不能成为长期绕过测试的手段。默认值必须记录在配置 schema 和迁移测试中。
 
@@ -1260,6 +1271,9 @@ session/redirect Cookie，外部播放器无法透传时显式降级。离线证
 - [ ] 日志脱敏测试通过；
 - [ ] 功能开关回滚验证通过；
 - [ ] Android-only 源稳定返回 `L2_SITE_REQUIRES_ANDROID`，安装包、环境变量和隐藏开关均不能绕过 C1 上限。
+
+**2026-09-22 注**：v0.2.5 发布时上述门禁未逐项登记（CI `test:all` 全绿已达成，
+公共仓报告与离线端到端矩阵尚无归档证据），首次发布按工程判断豁免；后续发布应按本清单逐项勾选后出包。
 
 ---
 

@@ -8,6 +8,10 @@
 
 本轮为三份独立安全审查（hy4 / ds / glm）交叉验证后的第二轮修复：合并去重确认 P1×5、P2×19、P3×24，按文件域并行修复并补齐回归测试。三份审查报告属临时文档，验证完成后已删除。
 
+### Changed
+
+- **会话级 TTL 内存缓存提速**：新增 `python-backend/mem_cache.py` 会话级 TTL 内存缓存，服务端热点数据（含 Kazumi 规则与 Spider 内容缓存）改经统一内存层供数，减少重复解析与磁盘往返；配套 `test_mem_cache.py`、`test_spider_content_cache.py`、`test_kazumi_cache.py` 三个回归阶段接入 run_all。
+
 ### Security
 
 - **主 token 明文落盘播放缓存（P1-2）**：`_is_ephemeral_play_result` 的本地 host 短路位于 volatile 参数检查之前，任何带 `?token=<主token>` 的本地 URL 一律判「稳定」写入 `~/.yuki/cache/play-cache/`（TTL 2h），本机低权限进程读文件即得 40 位 hex 主 token，可经 `/action` 完成全部控制面操作。现把 volatile 检查前置（`proxytype=go` 早退保持原位），任何带 token/sign/expires 等参数的 URL 无论 host 一律不落盘；解析异常与残缺响应同时改为 fail-closed。
@@ -50,6 +54,7 @@
 - **假绿测试修复（P3-19）**：`test_kazumi_cover_proxy.py`/`test_proxy_http.py` 引用已删除的 `_go_proxy_started`（抑制从未生效，独立跑会真绑 9978/7944/1314）改为真实 stub go_proxy 监听器；`test_q7_fault_injection.py` 端口冲突用例从「测 OS socket 语义」改为真实注入 `start_go_proxy` 启动路径；`test_r8_release_gates.py` 迁移用例从测试体内自证改为走真实 `pan_cookies` 迁移路径；`smoke.py` 顶层 hoststate.configure 收进主入口守卫（spawn 子进程复跑曾掩盖 P1-5），并新增 Worker hoststate 注入断言。
 - **新增 `test_security_regressions.py`（33 用例，接入 run_all）**：覆盖 P1-2/P2-10 落盘判定、P1-3 门禁与 HLS token 纪律、P1-4 清理语义、P1-5 注入、P2-1 Host 白名单。
 - **`test_runtime_supervisor.py` 慢机余量**：`_call` 默认 deadline 1s→5s（含 Worker 冷启动；高负载下启动屏障超时会覆盖预期错误码），两处墙钟断言接入 `_BUDGET_ASSERT_SLACK` 余量。HEAD 基线即随机复现，与功能修复无关。
+- **dex2jar 生命周期测试补桩（CI 假绿）**：`test_dex2jar_lifecycle.py` 在 CI 无 vendor 工具的环境补 `DEX2JAR_JAR` 桩，修复跳过逻辑失效导致的假绿。
 
 ## [0.2.4] - 2026-09-18
 
@@ -216,17 +221,23 @@ UI 视觉系统升级、壁纸自定义与网盘源播放策略收敛。
 
 ### Changed
 
-- 移除画中画入口与 MiSans 运行时动态下载/注入，界面统一使用系统字体；「关于」迁入设置一级分类。
+- 移除画中画入口；界面统一使用系统字体；「关于」迁入设置一级分类。
+- （0.1.0 时移除的 MiSans 动态下载已于 0.2.x T61 改回为**打包内置**，运行时按 `useMisansFont` 开关注入，默认开，无网络下载。）
 
 ### 已知边界
 
 - macOS / Linux 打包与安装后冷启动尚未验证，当前仅保证 Windows 平台体验。
-- 弹幕界面与播放时弹幕加载处于停用状态；仓库中的 DanDanPlay API 与 ASS 相关代码仅为兼容基础，不代表弹幕功能可用。
-- SyncPlay 同步播放与 DLNA 投屏未实现。
-- drpy 运行时与 type 15/16 站点（N3 阶段）未实现；需要 Android / Dex 的 JAR 站点在 PC 上不可用。
-- 自动更新已接入 electron-updater 基础链路，但首版没有自动升级路径，升级需重新安装。
+- 弹幕自动加载已实现（0.2.x，默认关）；透明度/遮挡/屏蔽词等产品化项未做。
+- SyncPlay 同步播放与 DLNA 投屏的主进程模块与 IPC 已接线，渲染层界面入口未开放。
+- drpy 运行时已实现后又移除（能力路由固定标记不支持），type 15/16 站点（N3 阶段）未实现；需要 Android / Dex 的 JAR 站点在 PC 上不可用。
+- 应用内自动更新已接入并随 v0.2.2 起的 Release 流水线生效。
 - P2P/P3P、ed2k、thunder 协议不在支持范围。
 
-[unreleased]: https://github.com/Arimayuki03/YuKi/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/Arimayuki03/YuKi/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/Arimayuki03/YuKi/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/Arimayuki03/YuKi/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/Arimayuki03/YuKi/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/Arimayuki03/YuKi/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/Arimayuki03/YuKi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Arimayuki03/YuKi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Arimayuki03/YuKi/releases/tag/v0.1.0

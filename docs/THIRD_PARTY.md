@@ -14,9 +14,14 @@
 | ffmpeg | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) releases（mpv 官方 wiki 推荐的 Windows 构建渠道之一）；`binaries.lock.json` 锁定版本化资产 URL 与 sha256（与 GitHub release 官方 digest 核对一致）。原锁定源 gyan.dev 的版本化包已下线（404），2026-09-22 迁移 | **GPLv3**（BtbN gpl 构建含 libx264 等 GPL 组件） | 允许再分发；须随附 GPLv3 许可证文本并提供对应源码获取途径。仅使用 ffmpeg.exe 命令行能力，未链接其库 |
 | aria2c | [aria2/aria2](https://github.com/aria2/aria2) 官方 releases Windows x64 zip；lock 锁定 tag 与 sha256 | **GPLv2**（含 OpenSSL 例外条款） | 允许再分发；随附 GPL 许可证文本与上游源码地址 |
 | Anime4K v4.1 着色器 | [bloc97/Anime4K](https://github.com/bloc97/Anime4K) `glsl/`（Restore / Upscale / Darken 共 6 个 .glsl 文件）；逐文件 sha256 锁定 | **MIT** | 允许再分发；保留版权声明即可（着色器文件头自带） |
-| MiSans 字体子集 | npm 包 [misans@4.1.0](https://www.npmjs.com/package/misans)（dsrkafuu 基于 Noto Sans SC 码位范围做的 woff2 分片子集），经 jsdelivr 分发；逐文件 sha256 锁定 | 字体版权 © 小米科技，按小米官方 MiSans 字体许可协议**免费商用、无需授权、允许随软件再分发**；npm 打包代码 MIT | 允许再分发；在发布页与本文件中注明字体出处即可 |
+| MiSans 字体子集 | npm 包 [misans@4.1.0](https://www.npmjs.com/package/misans)（dsrkafuu 基于 Noto Sans SC 码位范围做的 woff2 分片子集，锁内含 Regular/Bold 两个字重子集与 min.css），经 jsdelivr 分发；逐文件 sha256 锁定 | 字体版权 © 小米科技，按小米官方 MiSans 字体许可协议**免费商用、无需授权、允许随软件再分发**；npm 打包代码 MIT | 允许再分发；在发布页与本文件中注明字体出处即可 |
+| dex-tools（dex2jar）v2.4 | [pxb1988/dex2jar](https://github.com/pxb1988/dex2jar) v2.4 发行包，随仓库 `vendor/dex-tools/` 打包（非 download-binaries 分发，随源码树入库） | **Apache-2.0**（另捆绑 gson / kotlin-stdlib / okhttp3 / okio / org-json 各 jar，均为 Apache-2.0/MIT/BSD 系宽松许可） | 允许再分发；保留 LICENSE 与版权声明 |
+| dexdeps | AOSP（[platform_dalvik](https://android.googlesource.com/platform/dalvik) dexdeps 工具），随仓库 `vendor/dexdeps/` 打包 | **Apache-2.0** | 允许再分发；保留 NOTICE 与版权声明 |
+| spider-runner.jar | 本项目自建（`python-backend/jar-runner/` 构建产物，构建脚本 `build.py` 复制到 `vendor/`） | **GPLv3**（随 YuKi 本体） | 本项目自有代码；再分发安装包即视为提供对应源码（公开仓库满足义务） |
 
 > GPL 组件合规操作：发布 Release 时附带《GNU 通用公共许可证》文本（根目录 `LICENSE` 为 GPLv3；mpv/aria2 的 GPLv2 文本见各自上游仓库），并在 Release Notes 中给出 mpv / ffmpeg / aria2 上游源码链接。若未来改用 LGPL 构建替换任一组件，需重新核实义务并更新本表。
+>
+> 分发形态补充：安装包经 electron-builder `extraResources` 打包 `python-dist/`（PyInstaller 6.21.0 onedir 产物），即再分发 PyInstaller 引导程序（**GPLv2 + bootloader 特殊例外**，允许随目标项目再分发）与 CPython 3.14 运行时（**PSF-2.0**）。二者均满足再分发条件，无需额外操作。
 
 ## 二、内嵌前端库
 
@@ -31,6 +36,8 @@
 | electron | ^31.0.0（实测 31.7.7） | 桌面宿主 | MIT |
 | electron-builder | ^25.1.8 | 打包（devDependency） | MIT |
 | electron-updater | ^6.6.2 | 自动更新基础链路 | MIT |
+| @electron/asar | ^3.4.1（devDependency） | afterPack 构建门禁（清单解析 fail-closed） | MIT |
+| eslint / globals | ^10.8.1 / ^17.11.0（devDependency） | 代码静态检查 | MIT |
 
 ## 四、Python 后端依赖
 
@@ -41,7 +48,7 @@
 | fastapi | 0.141.1 | MIT |
 | starlette | 1.6.0 | BSD-3-Clause |
 | pydantic / pydantic-core | 2.13.4 / 2.46.4 | MIT |
-| annotated-types / annotated-doc / typing-inspection | — | MIT |
+| annotated-types / annotated-doc / typing-inspection | 0.8.0 / 0.0.5 / 0.4.4 | MIT |
 | typing-extensions | 4.16.0 | PSF-2.0 |
 | anyio | 4.14.2 | MIT |
 | uvicorn | 0.52.3 | BSD-3-Clause |
@@ -59,6 +66,12 @@
 | pycryptodome | 3.23.0 | BSD-3-Clause / Public Domain |
 | python-multipart | 0.0.32 | Apache-2.0 |
 | quickjs-ng | 0.16.0.1 | MIT |
+| cachetools | 7.1.7 | Apache-2.0 |
+| curl-cffi | 0.16.3 | MIT / Apache-2.0（夸克扫码登录生产路径依赖） |
+| qrcode | 8.2 | BSD-3-Clause |
+| pillow | 12.3.0 | HPND / MIT-CMU（qrcode PNG 工厂） |
+| cffi | 2.1.1 | MIT |
+| pycparser | 3.0 | BSD-3-Clause |
 
 ## 五、依赖审计豁免记录
 
@@ -66,14 +79,15 @@ CI 中供应链审计（`npm audit --omit=dev || true`、`pip-audit --strict || 
 
 | 审计日期 | 工具 | 高危项 | 豁免理由 | 跟进计划 |
 |---|---|---|---|---|
-
-（当前为空：首轮基线审计零漏洞，无豁免项。）
+| 2026-09-22 | npm audit --omit=dev | electron-updater 链 **1 high**（观察中） | 运行时依赖仅 electron-updater 链；electron-builder/electron 的 dev 链另有 14 high + 1 critical（集中在 tar 等），随上游版本升级收敛，dev 依赖不随包分发 | 跟随 electron-updater 上游修复升级；升级后复核基线 |
 
 ### 首轮基线审计快照
 
 - 执行时间：2026-08-22
-- `npm audit --omit=dev`（官方 registry）：**found 0 vulnerabilities**
+- `npm audit --omit=dev`（官方 registry）：当时 **found 0 vulnerabilities**
 - `pip-audit -r python-backend/requirements.txt --strict`：**No known vulnerabilities found**
+
+> 2026-09 更新：上游发布新通告后运行时依赖基线变为 electron-updater 链 1 high（见上方豁免表），dev 链存在 electron/electron-builder/tar 的 14 high + 1 critical（不随包分发）；CI（`.github/workflows/ci.yml`）注释已同步该口径。
 
 运维备注：本机开发环境默认 registry 为 npmmirror.com，该镜像未实现 `/-/npm/v1/security/*` 审计端点，`npm audit` 需追加 `--registry=https://registry.npmjs.org` 才能获得真实结果。GitHub Actions 使用官方 registry，不受影响。
 

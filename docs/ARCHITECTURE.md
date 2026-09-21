@@ -1,6 +1,6 @@
 # YuKi 系统架构
 
-> 更新时间：2026-08-24
+> 更新时间：2026-09-22
 > 许可证：[GPLv3](../LICENSE)（`package.json` `GPL-3.0-only`，见 [THIRD_PARTY.md](THIRD_PARTY.md)）
 >
 > 本文描述当前有效架构。历史方案、详细批次和踩坑记录见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
@@ -9,17 +9,19 @@
 
 ```text
 Electron 渲染层
-  首页 / 搜索 / 详情 / 播放入口 / 下载 / 设置
+  首页 / 搜索 / 详情 / 播放入口 / 下载 / 直播 / 设置
               │ IPC
 Electron 主进程
   窗口与托盘 / Python 生命周期 / mpv / aria2c / ffmpeg
-  文件管理 / 隐藏解析窗口 / 局域网推送
+  文件管理 / 隐藏解析窗口 / 局域网推送 / 应用内更新 / 网盘扫码
               │ HTTP + token
 FastAPI Python 后端
   /action         CatVod 引擎
   /kazumi/action  Kazumi 规则引擎
   /cache          Spider 缓存
   /proxy          Spider 本地代理
+  /danmaku        弹幕中转（弹弹play）
+  /search/* /kazumi/cover 等  聚合搜索 SSE / 封面代理（部分列举，见 server.py）
 ```
 
 核心原则是让 CatVod 与 Kazumi 并行工作，而不是把一种规则强行适配成另一种规则。
@@ -52,6 +54,16 @@ FastAPI Python 后端
   `kazumiBangumiEpisodeWatched`（分集批量打点，服务端重算条目完成度）与
   `kazumiBangumiEpisodeCollections`（分集收藏查询，驱动看完全部自动「看过」联动）落地，
   无 Token / 匹配不到条目或分集时静默跳过，失败提醒 5 分钟节流，不影响播放链路。
+  评分不参与同步（Bangumi 集成只写收藏类型与进度，无评分上报链路）。
+- 弹幕（默认关，开关 `danmakuEnable`）：后端经 `kazumi/plugin_manager.py` 内置的弹弹play
+  API 对接（搜索 → 分集 → 弹幕 XML），由 `/danmaku` 端点中转；渲染层按片名+集数发起
+  `Kazumi.loadDanmaku`，主进程 `mpv-player.js` 将弹幕转换为 ASS 临时文件后经 `sub-add`
+  装载进 mpv，播放结束或换片时清理临时文件。弹弹play 凭据（dandanAppId/AppSecret）在
+  设置中配置。
+- WebDAV 设置同步（上传/恢复）：设置键以显式允许表（64 个纯数据键）为准，恢复为云端
+  快照覆盖本地、上传排除敏感键；备份文件落 `<userData>`（设计文档见
+  [WEBDAV_SYNC_MERGE_DESIGN.md](WEBDAV_SYNC_MERGE_DESIGN.md)）。
+- Bangumi 镜像：API 基址矩阵经 `mirror.json` 持久化，可在设置「网络」组一键切换。
 
 详细说明与差距对照见 [KAZUMI.md](KAZUMI.md)。
 
@@ -255,9 +267,10 @@ sha256 登记，内容变化即重新评估能力与权限。
 - `runtime/android_policy.py` 是产品政策闸门：`ANDROID_WORKER_SHIPPED=false` 时，即使环境同时
   声明 enabled/ready 也不能扩大支持范围。错误 `L2_SITE_REQUIRES_ANDROID` 必须告诉用户
   “仅支持 Android、当前上限 C1、不回退 dex2jar/JVM、改用可移植源”。A4.1 的三个真实样例、
-   JVM 实测和四方案比较见 git 历史归档（原 ANDROID_WORKER_SPIKE_REPORT）。
-- drpy 规则由受 Supervisor 管理的独立 Node Worker 进程承载（`drpy-engine/`），
-  能力路由判定为 C1 / `worker='drpy'`，实现零增量体积复用 Electron Node 运行时。
+   JVM 实测和四方案比较见 git 历史归档（原 ANDROID_WORKER_SPIKE_REPORT）。- drpy 规则源由能力路由识别后固定标记为不支持（C2 语义）：drpy 引擎（原 Node Worker
+  方案）已在 0.2.x 移除，`runtime/capability_router.py` 对 drpy 返回 unsupported 并提示
+  「drpy 规则源需要独立的 drpy 运行时，当前版本未支持」（对应 ROADMAP RM-13 / N3，
+  未启动）。
 - 远程 Python、QuickJS、CMS 和 portable JAR 控制调用按站点进入 spawn Worker。Windows
   使用 kill-on-close Job Object 管理 Worker 与 Java/Node/Python 后代，并施加运行时内存上限。
 - Worker 控制面使用本地 pipe 的有大小上限 JSON 帧；spawn 子进程先发送可信 `booted` 并
@@ -280,7 +293,7 @@ npm run build:py   # PyInstaller -> python-dist/
 npm run build:win  # NSIS x64 安装包 -> dist/
 ```
 
-`test:all` 最新全量 **ALL PASS**（2026-09-20：`run_all.py` 59 阶段全过、编译 188 文件 0 error、ESLint 0 error、Ruff 全过、JS 单元 540/540、check-js 48 文件 0 错；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
+`test:all` 最新全量 **ALL PASS**（2026-09-20：`run_all.py` 56 阶段全过、编译 188 文件 0 error、ESLint 0 error、Ruff 全过、JS 单元 540/540、check-js 48 文件 0 错；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
 
 `run_all.py` 按阶段串行（任一阶段失败即停），其中 `config-snapshot`/`ext-semantics`/`capability-router`/`config-security` 四个阶段通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的 loopback 夹具跑，不出网；其余阶段覆盖 smoke/phase3/kazumi/cache/代理/JAR/站点健康等。夹具进入时会隔离宿主代理环境变量与 Windows 系统代理，否则开发机代理会吞请求；gzip、JPEG/PNG 伪装三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，`mtime=0`），四种载体哈希必须相等。
 

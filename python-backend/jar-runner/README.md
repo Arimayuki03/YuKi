@@ -77,9 +77,9 @@ Python 连接该端口并先发送 `<token>\n`，随后按块读取原始媒体�
 
 - **Android 内置 stubs**：`android.util.Log`、`android.util.Base64`、`android.content.Context` 等
 - **TVBox 基类 stubs**：`com.github.catvod.crawler.Spider`（继承此基类的 spider 可用）
-- **FongMi Proxy stub**：`com.github.catvod.Proxy` 使用 `-Dvpc.proxyPort`
-  （默认 9978）生成 PC 本地代理 URL；若宿主注入 `-Dvpc.proxyToken`，URL
-  会带可选 token
+- **FongMi Proxy stub**：`com.github.catvod.Proxy` 使用 `-Dyuki.proxyPort`
+  （默认 9978）生成 PC 本地代理 URL；若宿主注入 `-Dyuki.proxyToken`，URL
+  会带可选 token（2026-08 全局重命名 VPC→YuKi 后系统属性前缀同步为 `yuki.*`）
 - **CatVod 常用 stub**：`com.github.catvod.Init`、兼容别名
   `com.github.catvod.spider.Init`，以及 `utils.Json`、`utils.Util`、
   `utils.Path`，把 Context/cache/files 映射到 PC 用户目录

@@ -12,7 +12,7 @@
 
 - **源应用**：Leanback 原生 UI + WebView 辅助面板 + Chaquopy Python 3.10 后端 + QuickJS JS 爬虫 + mpv/FFmpeg + 迅雷 SDK（逆向产物在 `../apk_analysis/`）。
 - **目标架构（已实现）**：Electron 31（JS 非 TS）+ 独立 Python 后端进程（FastAPI，Python 3.14 venv）+ mpv 独立窗口 + quickjs-ng JS 引擎 + aria2c 下载 + ffmpeg（HLS 合成/抓帧）。
-- **本期不做**：直播 UI 已实装基础版；DLNA 投屏、P2P/P3P、ed2k/thunder 协议不做；自动更新未接（见 §8.7）。
+- **本期不做**（2026-08-26 时点快照）：直播 UI 已实装基础版；DLNA 投屏、P2P/P3P、ed2k/thunder 协议不做；自动更新已于 0.2.x 接入（electron-updater + release.yml 元数据上传，见 PROGRESS.md RM-2 记录）。
 
 ## 2. Phase 总览（全部完成 ✅）
 
@@ -49,7 +49,7 @@ node scripts\download-binaries.js mpv
 node scripts\download-binaries.js aria2
 node scripts\download-binaries.js ffmpeg
 node scripts\download-binaries.js misans
-# 一键回归（smoke + phase3 + py 编译 + src js 语法检查）
+# 一键回归（test:py + test:jsunit + test:js + lint + lint:py）
 npm run test:all
 # 打包 Python 后端 + Windows 安装包（见 §6）
 npm run build:py
@@ -482,7 +482,15 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 - **Bangumi 分页聚合（plugin_manager.py）**：`_aggregate_pages` 自动翻页补足单次总量（页间 0.3s 限速防风控、首页异常原样抛、后续页降级返回部分、单页钳制 50、单次总量上限 120），修复渲染层每页数量 60/120 触发上游拒绝致整页空白；`_webdav_sync_dir` 远程子路径拒绝 `..` 防穿越写穿盘根。
 - 测试：`tests/js/dl-dedupe.test.js` 10 例、`playlist-proxy.test.js`、`mpv-menu-conf.test.js`、`player-watch.test.js` 扩充；Python 侧 `test_circuit.py`、`test_quark_session_refresh.py`、`test_webdav_conn.py`、`test_kazumi_cover_proxy.py` 新增接入 run_all.py（40 阶段）。JS 单元 365/365、lint 0 错、check-js 44 文件 0 错。打包/实机 QA 待用户验证。
 
-## 11. 2026-08-26 UI 视觉升级与网盘播放策略批次（未提交）
+## 11. 2026-08-26 UI 视觉升级与网盘播放策略批次
+
+> 2026-09-22 勘误：原文标注「未提交」，该批工作已随 12493b2 提交入库；此处保留当时快照内容，仅去除状态标记。2026-08-26 之后的批次（RM-1/2/4/5、0.2.x 各轮发布与审查修复）详见 [../PROGRESS.md](../PROGRESS.md) §7 与 [../CHANGELOG.md](../CHANGELOG.md)：
+>
+> - 2026-09-14：RM-1/RM-2/RM-4/RM-5 代码完成（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）。
+> - 2026-09-17：v0.2.1–v0.2.4 定版（安装包凭据泄露治理、ffmpeg 校验、VCRUNTIME 剔除、17 项缺陷修复）。
+> - 2026-09-18：v0.2.5 特性批次——会话级 TTL 内存缓存提速（mem_cache.py）+ 落地 RM-1/2/4/5 特性合并、Bangumi 镜像切换。
+> - 2026-09-20：三报告交叉审查修复（P1×5/P2×19/P3×24 全项闭环）。
+> - 2026-09-22：v0.2.5 发布——ffmpeg 锁定源迁移 BtbN（发布阻断修复）、dex2jar CI 假绿修复、外部播放器实测定版与 README/GUIDE 使用文档批次。
 
 ### 11.1 UI 视觉系统升级与壁纸自定义
 

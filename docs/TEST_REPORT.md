@@ -1,26 +1,26 @@
 # 功能测试报告（YuKi）
 
-> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建；**2026-09-20 更新**：三报告交叉审查修复批次后全量回归 ALL PASS（`run_all.py` 59 阶段 / 编译 188 文件 0 error / JS 单元 540 tests / check-js 48 文件 0 错 / ESLint 0 error / Ruff 全过）。
+> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建；**2026-09-20 更新**：三报告交叉审查修复批次后全量回归 ALL PASS（`run_all.py` 56 阶段 / 编译 188 文件 0 error / JS 单元 540 tests / check-js 48 文件 0 错 / ESLint 0 error / Ruff 全过）。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。
 > 本文是「功能测试」的唯一汇总入口；运行异常细节见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)，开发批次见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
 ## 1. 测试总览
 
-> 最近快照：2026-09-20 全量回归 **ALL PASS**（`npm run test:all`：`run_all.py` 59 阶段含 security-regressions / 编译 188 文件 0 error / Ruff 全过；JS 单元 **540/540**、check-js 48 文件 0 错、ESLint 0 error）。
+> 最近快照：2026-09-20 全量回归 **ALL PASS**（`npm run test:all`：`run_all.py` 56 阶段含 security-regressions / 编译 188 文件 0 error / Ruff 全过；JS 单元 **540/540**、check-js 48 文件 0 错、ESLint 0 error）。
 
 | 类别 | 数量 | 结果 |
 |---|---|---|
 | JS 单元测试（`tests/js/*.test.js`，55 文件） | 540 | ✅ 全部通过 |
-| Python 测试（`run_all.py` 59 阶段 + 编译） | 188 文件 | ✅ 全部通过 |
+| Python 测试（`run_all.py` 56 阶段 + 编译） | 188 文件 | ✅ 全部通过 |
 | JS 语法检查（`scripts/check-js.js`） | 48 文件 | ✅ 0 错误 |
-| 真实界面验收（CDP，`scripts/acceptance-*.js` × 10） | 103 检查项 | ✅ 103/103（2026-08 快照） |
+| 真实界面验收（CDP，`scripts/acceptance-*.js` × 11） | 103 检查项 | ✅ 103/103（2026-08 快照） |
 | **自动化合计** | **>640** | **全部通过** |
 
 真实界面验收均在**独立 userData 副本**（清空 `lastConfigUrl`、预置种子数据、清空 `bangumiToken` 避免真实收藏合并干扰计数）启动临时 Electron 实例，经 CDP 实测，结束自动清理，不污染真实用户数据。
 
 ## 2. 自动化测试明细
 
-### 2.1 JS 单元测试（81）
+### 2.1 JS 单元测试（55 文件 / 540 用例）
 | 文件 | 覆盖 |
 |---|---|
 | `player-watch.test.js` | 观看统计 sessionId 元信息、未知/重复退出去重、断流重连观看链增量、ended 会话归属、isDone 判定、原生队列逐集记账（每集独立观看链、pos 记账去重） |
@@ -35,7 +35,7 @@
 | `cover-chain.test.js` | 封面多级兜底 `vodCoverChain`/`coverChainNext`：失败逐级切换、空链占位、加载策略 |
 | 其余（downloader / dl-record / hls-downloader / async-session 等） | 下载展平、记录持久化、HLS 广告过滤、单飞/串行队列 |
 
-### 2.2 Python 测试（38）
+### 2.2 Python 测试（55 个 `test_*.py`，经 run_all.py 56 阶段编排）
 | 模块 | 覆盖 |
 |---|---|
 | plugin / rule_engine / xpath_strategy | 规则解析、校验、XPath 归一化（含 R2 `//`→`.//`） |
@@ -43,7 +43,7 @@
 | bangumi search / calendar / season / trends / collections | R1 真实用户名、R6 官方搜索端点、季节日程分桶、趋势解包裹归一化、收藏 limit 钳制 100 |
 | hoststate / server / config | 二进制探测、端点路由、多仓配置合并 |
 
-### 2.3 真实界面验收脚本（10 个 / 102 项）
+### 2.3 真实界面验收脚本（11 个 / 103 项）
 | 脚本 | 覆盖功能 | 项数 |
 |---|---|---|
 | `acceptance-content.js` | 首页站点下拉/分类/网格、搜索页结构、历史页种子渲染+分页、我的页统计数值+收藏卡片 | 9 |
@@ -56,6 +56,7 @@
 | `acceptance-popular.js` | 推荐导航/视图、趋势卡片+排名角标、点卡片进二级详情页 | 7 |
 | `acceptance-detail-card.js` | 仿 Kazumi 信息卡：标题/封面/放送开始/评分星级/Bangumi Ranked/评分透视柱状图 | 7 |
 | `acceptance-bugfix.js` | 分页渲染+翻页、滚动条隐藏、我的页两标签 | 6 |
+| `acceptance-empty-class.js` | 空分类占位/空态呈现 | （见脚本内断言） |
 
 ## 3. 功能测试矩阵（按模块）
 
@@ -82,7 +83,7 @@
 | 隐藏窗口媒体拦截/DOM 轮询/legacy iframe | — | 🔬 需真实解析站 |
 | 解析窗口 partition 槽位/single-flight | JS 单元（async-session 单飞） | ✅ 逻辑 ｜ 🔬 真实解析 |
 | Anime4K/VLC 外播/截图/定时关机 | — | 🔬 需真实播放/设备 |
-| DLNA 投屏 | — | ⏸ 未实现 |
+| DLNA 投屏 | — | ⚠️ 主进程模块与 IPC 已接入，无渲染层 UI 入口（不列入实测清单） |
 
 ### 3.3 下载与数据
 | 功能 | 测试方式 | 状态 |
@@ -92,7 +93,7 @@
 | 下载记录/完成通知/一键播放 | JS 单元（dl-record） | ✅ 逻辑 ｜ 🔬 真实通知 |
 | 本地文件白名单/防穿越/上传/删除/播放 | — | 🔬 需真实文件操作 |
 | WebDAV 同步 | — | 🔬 需真实 WebDAV 服务器 |
-| SyncPlay 同步播放 | — | ⏸ 未实现 |
+| SyncPlay 同步播放 | — | ⚠️ 主进程模块与 IPC 已接入，无渲染层 UI 入口（不列入实测清单） |
 | 观看统计/最近观看 | JS 单元（观看链去重）+ CDP 验收（统计数值） | ✅ |
 
 ### 3.4 UI 与桌面
@@ -116,8 +117,8 @@
 2. **解析**：parse=1 源的后台解析、隐藏窗口抓流、legacy iframe（需有效解析接口）。
 3. **下载**：aria2c 直链/种子、m3u8 合成、广告过滤、完成通知、一键播放（真实下载任务）。
 4. **本地文件**：选择根目录、浏览/播放/上传/删除（真实文件）。
-5. **账号类**：Bangumi 收藏同步（真实 token）、WebDAV 同步（真实服务器）（SyncPlay 未实现）。
-6. **桌面能力**：托盘驻留、全局快捷键、截图、定时关机（DLNA 未实现）。
+5. **账号类**：Bangumi 收藏同步（真实 token）、WebDAV 同步（真实服务器）。
+6. **桌面能力**：托盘驻留、全局快捷键、截图、定时关机。
 7. **打包发布**：Windows 安装后冷启动、macOS/Linux 打包运行、自动更新、代码签名。
 8. **视觉主观**：壁纸/主题观感、封面自适应在大/小窗的实际效果。
 
@@ -129,7 +130,7 @@ npm run test:all
 
 # 单独运行
 npm run test:jsunit          # JS 单元（node --test）
-npm run test:py              # Python（smoke + phase3）
+npm run test:py              # Python（run_all.py 全量 56 阶段）
 npm run test:js              # JS 语法检查
 
 # 真实界面验收（各自启动独立实例，自动清理）

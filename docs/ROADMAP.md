@@ -1,7 +1,7 @@
 # YuKi 开发路线图
 
-> 文档版本 v1.1（2026-09-14）
-> 对标基线：Kazumi v2.3.1（2026-09-07 发布）、Animeko v6.1.0（2026-08-28 发布）；本项目基线：YuKi 0.2.1（含工作区未发布安全加固改动）。
+> 文档版本 v1.2（2026-09-22）
+> 对标基线：Kazumi v2.3.1（2026-09-07 发布）、Animeko v6.1.0（2026-08-28 发布）；本项目基线：0.2.1 立项（2026-09-14 落地 RM-1/2/4/5），当前已发布至 0.2.5（三轮安全修复 + 会话级 TTL 内存缓存）。
 > 执行状态唯一入口仍是 [PROGRESS.md](../PROGRESS.md)：本文只维护「为什么做、做到什么程度算完」；任一项动工时在 PROGRESS.md 登记批次与验收，完成后在本文对应小节标注完成日期并链接测试证据。
 
 ## 1. 目标与定位原则
@@ -39,15 +39,15 @@ YuKi 的差异化定位：**聚合播放器 + TVBox/CatVod 生态纵深 + 桌面
 |---|---|---|---|---|
 | 内容引擎 | CatVod（Python/QuickJS/JAR）+ Kazumi 双引擎 + 直播 + 网盘源 | 仅 XPath 规则 | BT/Mikan/动漫花园/Jellyfin/Emby/自定义 | **YuKi 领先**（TVBox 生态独占） |
 | 播放器 | mpv 独立窗口、Anime4K 三档、外部播放器、边下边播 | media_kit 内置+外部 | mpv 内核+超分+帧预览+信息面板 | 基本持平，细节有差距 |
-| 弹幕 | 代码保留、产品关闭 | 核心体验，持续打磨 | 核心体验，聚合多源+自有服务器 | **最大体验差距** |
-| 一起看/投屏 | syncplay-client/dlna-caster 代码休眠 | SyncPlay 已上线 | 一起看已上线 | 差一层 UI 接线 |
-| 追番与 Bangumi | 手动收藏同步 | 同步流程持续改进 | 看完自动云同步进度 | 缺自动上报 |
-| 下载与缓存 | aria2c+ffmpeg，平铺目录 | 基础下载 | BT 流播+缓存管理页 | 结构化管理缺失 |
-| 开播速度 | 播放列表代理 2s TTL | — | 源查询缓存跳过查源 | 可低成本跟进 |
+| 弹幕 | 自动加载已实现（弹弹play→ASS→mpv，默认关），产品化项未做 | 核心体验，持续打磨 | 核心体验，聚合多源+自有服务器 | 基础已通，差产品化打磨 |
+| 一起看/投屏 | syncplay-client/dlna-caster 主进程 IPC 已接线，缺渲染层 UI | SyncPlay 已上线 | 一起看已上线 | 差一层 UI 接线 |
+| 追番与 Bangumi | 手动收藏同步 + 分集进度自动上报（RM-5，默认关） | 同步流程持续改进 | 看完自动云同步进度 | 闭环已通，差默认体验 |
+| 下载与缓存 | aria2c+ffmpeg，番剧子目录（RM-1） | 基础下载 | BT 流播+缓存管理页 | 结构化管理差距缩小 |
+| 开播速度 | 三级缓存（内存 60s + 持久 2h + 会话级）+ 会话级 TTL 内存缓存（0.2.5） | — | 源查询缓存跳过查源 | 已对齐 |
 | UI/UX | 0.2.0 视觉系统升级 | 2.3.1 全页面重设计 | 持续打磨 | 方向一致，零散小差距 |
-| 平台与发布 | 仅 Windows 验证，无签名，更新链路未通 | 6 平台+签名+应用内更新 | 全平台+签名+多渠道 | 发布工程差距 |
+| 平台与发布 | 仅 Windows 验证，无签名，应用内更新已上线（RM-2） | 6 平台+签名+应用内更新 | 全平台+签名+多渠道 | 发布工程差距（签名/多平台） |
 
-**需要守住的独有优势（竞品均无）**：TVBox/CatVod 生态（JAR spider、多仓、站点健康模型与熔断）、夸克网盘源（扫码登录/转存/风控策略）、局域网推送接收（push-server）、直链播放、严格本地优先 + 无遥测 + 40 阶段 Python 回归的工程纪律。
+**需要守住的独有优势（竞品均无）**：TVBox/CatVod 生态（JAR spider、多仓、站点健康模型与熔断）、夸克网盘源（扫码登录/转存/风控策略）、局域网推送接收（push-server）、直链播放、严格本地优先 + 无遥测 + 56 阶段 Python 回归的工程纪律。
 
 ## 4. 立项 RM-1：下载自动创建番剧文件夹
 
@@ -112,7 +112,7 @@ YuKi 的差异化定位：**聚合播放器 + TVBox/CatVod 生态纵深 + 桌面
 ### 剩余验收项
 
 - [x] 更新源配置闭环：package.json `build.publish`（GitHub provider，Arimayuki03/YuKi）+ release.yml 随安装包上传 `dist/latest.yml` 与 `dist/*.exe.blockmap`（electron-updater 无版本元数据必然失败的缺口 1/2 已补）（2026-09-14）。
-- [x] updater.js 增强：`yuki:check-for-updates` / `yuki:update-download` / `yuki:update-install` IPC（开发模式返回明确 `development` 语义）；`autoUpdate` 设置（默认开，检查前动态应用 `autoDownload`）；系统代理经 Electron 默认 session 对检查/下载链路生效（electron-updater 主进程走 Electron net，无需额外接线）（2026-09-14）。
+- [x] updater.js 增强：`yuki:check-for-updates` / `yuki:update-download` / `yuki:update-install` IPC（开发模式返回明确 `development` 语义）；`autoUpdate` 设置（默认关，检查前动态应用 `autoDownload`）；系统代理经 Electron 默认 session 对检查/下载链路生效（electron-updater 主进程走 Electron net，无需额外接线）（2026-09-14）。
 - [x] 渲染层：设置 → 系统「软件更新」卡片——当前版本、自动下载开关、立即检查/下载更新/重启并安装按钮、状态行（检查中/已是最新/发现 vX/下载中 N%/已就绪/失败原因），监听 `yuki:update-state`，下载完成 toast（2026-09-14）。
 - [x] IPC 与状态映射单测：`tests/js/updater-controller.test.js` 6 例（事件归一/开关语义/in-flight 去重/error 恢复/退出安装/非 Electron 环境语义）（2026-09-14）。
 - [ ] 发布 v0.2.2 后：v0.2.1 安装版在应用内能发现新版本 → 下载 → 重启并安装成功，用户数据保留（需真实 Release，待建仓后实测）。
@@ -200,17 +200,17 @@ playerContent 解析结果（直链/清单）按「站点+线路+集」持久缓
 |---|---|---|---|
 | RM-1 | 下载自动创建番剧文件夹 | 见 §4，结构化下载产物 | 通用体验（Animeko 缓存管理同理） |
 | RM-2 | 应用内 GitHub 检测更新 | 见 §5，打通迭代闭环 | 两者均有应用内更新 |
-| RM-3 | 弹幕产品化 | DanDanPlay 匹配 → ASS 写入 → mpv 加载；设置开关/透明度/遮挡/屏蔽词；倍速下时长修正参照 Kazumi 2.3.0 | Kazumi/Animeko 核心体验；YuKi 已有约 80% 基础设施 |
+| RM-3 | 弹幕产品化 | 自动加载已落地（DanDanPlay 匹配 → ASS 写入 → mpv 加载，默认关）；剩余：透明度/遮挡/屏蔽词、倍速下时长修正参照 Kazumi 2.3.0 | Kazumi/Animeko 核心体验；YuKi 链路已通 |
 | RM-4 | 解析结果持久缓存 | 见 §6，实现与验收记录 | Animeko 6.1.0「在线源查询缓存」 |
 | RM-5 | Bangumi 观看进度自动上报 | 见 §7，实现与验收记录 | Animeko 云同步进度；Kazumi 2.3.1 改进同步流程 |
-| RM-6 | 体验小快赢包 | 规则批量导入、详情/下载选集定位当前集、鼠标侧键返回、详情图片点击放大、mpv 自定义参数项、播放信息快捷面板（mpv stats）、缓存管理页 | Kazumi 2.2.9/2.3.0 + Animeko 6.0/6.1 |
+| RM-6 | 体验小快赢包 | 规则批量导入、下载/详情选集定位当前集、mpv 自定义参数项、播放信息快捷面板（mpv stats）、缓存管理页（鼠标侧键返回、详情图片点击放大已在 0.2.x 实现） | Kazumi 2.2.9/2.3.0 + Animeko 6.0/6.1 |
 
 ### P1（中期）
 
 | 编号 | 事项 | 一句话说明 | 对标依据 |
 |---|---|---|---|
-| RM-7 | 一起看（SyncPlay）落地 | 激活休眠的 syncplay-client.js + 房间 UI 与入口 | Kazumi SyncPlay、Animeko 6.0 |
-| RM-8 | DLNA 投屏收尾 | 激活休眠的 dlna-caster.js，发现/投屏/停止 UI | Kazumi dlna_dart |
+| RM-7 | 一起看（SyncPlay）落地 | 补渲染层房间 UI 与入口（syncplay-client.js 与 IPC 已接线） | Kazumi SyncPlay、Animeko 6.0 |
+| RM-8 | DLNA 投屏收尾 | 补发现/投屏/停止 UI（dlna-caster.js 与 IPC 已接线） | Kazumi dlna_dart |
 | RM-9 | Jellyfin/Emby 媒体库源 | 以 Provider 形式接入本地媒体库 | Animeko 核心场景之一 |
 | RM-10 | 播放器进阶 | 进度条帧预览、跳过片头时长可配 | Animeko 6.0 |
 

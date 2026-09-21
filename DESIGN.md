@@ -2,6 +2,7 @@
 
 > 本文件是本次「系统性 UI 视觉升级」的实现契约。所有颜色、字号、圆角、阴影、间距、动效必须回溯到这里的令牌。
 > 硬约束：只改视觉层；动画只用 transform/opacity；支持 prefers-reduced-motion；复用既有类名与皮肤系统。
+> 2026-09-22 勘误：§4/§6/§7 中与 `ui.css` 当前实现漂移的机制描述已按实况修订；后续以 `src/renderer/css/ui.css` 当前实现为准。
 
 ## 0. 设计方向
 
@@ -75,13 +76,13 @@
 
 ## 4. 背景 & 质感
 
-- 应用底：`body` 上双层背景 —— 纵向微渐变 + 两角极淡 primary 径向光（≤5% alpha）；壁纸模式下被 JS 内联背景图自然覆盖，无需分支。
-- 噪点：`html::before` 固定层铺 SVG feTurbulence data-URI，opacity 浅色 .03 / 深色 .05，pointer-events:none；壁纸模式自动被 body::before 盖住。
+- 应用底：`body` 双层背景 —— 纵向微渐变 + 两角极淡 primary 径向光（≤5% alpha）；壁纸经 `--wall-url` 变量只进 `body.has-wallpaper::before` 单层绘制（应用底与噪点在其下让位），JS 不再直写 `body.style.backgroundImage`。
+- 噪点：`body::after` 固定层铺 SVG feTurbulence data-URI，opacity 浅色 .03 / 深色 .05，pointer-events:none；开启壁纸时经 `body.has-wallpaper::after { display:none }` 主动隐藏。
 - 毛玻璃/壁纸两套既有系统（html.glass-on、body.has-wallpaper）逻辑不动，仅随新令牌换肤。
 
 ## 5. 间距
 
-8pt 网格：4 / 8 / 12 / 16 / 20 / 24 / 32。视图 padding 24px、卡片内边距 20px、工具条 gap 10px、网格 gap 16~20px。消除 6/9/11/13/14px 等奇数散值（徽章内边距等微观处允许 4/6px）。
+8pt 网格：4 / 8 / 12 / 16 / 20 / 24 / 32。视图 padding 24px、卡片内边距 20px、工具条 gap 10px、网格 gap 16~20px（窄窗响应式下探档位 14px）。消除 6/9/11/13/14px 等奇数散值（徽章内边距等微观处允许 4/6px）。
 
 ## 6. 动效
 
@@ -90,16 +91,16 @@
 --ease: cubic-bezier(0.4, 0, 0.2, 1)      /* 全局唯一缓动 */
 --dur-fast: 150ms · --dur-base: 200ms · --dur-slow: 300ms
 ```
-- 视图切换：viewIn fade + translateY(10px)，250ms
-- 卡片入场：fade + translateY(12px)，320ms，nth-child stagger 30ms 封顶 10 张（沿用既有 JS 重触发手法）
+- 视图切换：viewIn fade + translateY(10px)，`--dur-base`（200ms）
+- 卡片入场：cardIn fade + scale(.96)，`--dur-base`（200ms），nth-child stagger 30ms 封顶 10 张（沿用既有 JS 重触发手法）
 - 悬浮抬升：卡片 -2~-3px + 阴影升档，200ms；按压回落 scale(.98) 即时
-- 只动 transform/opacity；骨架屏脉冲用 opacity 呼吸（不用 background-position 扫光）
+- 只动 transform/opacity；空态不做骨架脉冲——空网格经 `.vod-grid > .tip-line:only-child` 显示静态虚线占位卡，避免「呼吸动画误导加载中」（见 §7）
 - `@media (prefers-reduced-motion: reduce)`：全局关闭 animation/transition（含既有 hk-pulse 等）
 - `html.no-anim`（设置开关）行为保持
 
 ## 7. 加载体验
 
-- 网格容器空态（`.vod-grid:empty` 等）显示 CSS 骨架占位块（封面比例灰块 + 文本条），数据渲染后自然消失，零 JS。
+- 网格空态：`.vod-grid` 内仅剩 `.tip-line` 时呈现静态虚线占位卡（`ui.css` `.vod-grid > .tip-line:only-child`），静态呈现、无呼吸动画。
 - 既有 spinner（loadingToast/search-status）保留但换新配色与圆角；blocking 遮罩行为不变。
 
 ## 8. 无障碍
