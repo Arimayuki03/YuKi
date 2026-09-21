@@ -1132,7 +1132,7 @@
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">
-                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer（手动指定的自定义 mpv 使用其自身原生配置，不注入 YuKi 外观与中文菜单资源，「恢复默认」切回引擎样式）；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下弹幕与自动连播不生效；观看统计按播放器运行时长计入（运行 ≥15 秒记一次，VLC 开启「仅允许一个实例」时的秒退转交不计），播放进度无法获取（历史条目进度显示 0%）。
+                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer（手动指定的自定义 mpv 使用其自身原生配置，不注入 YuKi 外观与中文菜单资源，「恢复默认」切回引擎样式）；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下整季播放列表可正常加载、连播可用，但 Anime4K 超分、应用内快捷键与右键菜单、截图、续播进度与弹幕不生效；观看统计按播放器运行时长计入（运行 ≥15 秒记一次，VLC 开启「仅允许一个实例」时的秒退转交不计），播放进度无法获取（历史条目进度显示 0%）。
                                     <div class="tip-line pad0" style="margin-top:6px;">播放器：<span id="player_line">mpv（自动发现）</span></div>
                                 </div>
                             </div>
