@@ -100,6 +100,18 @@ run(cmd, BACKEND);
 // 与 onedir 的 _internal/ 数据并存：_internal 供 BASE_DIR 解析，根副本供
 // cwd 相对路径与人工排查使用）
 console.log('[build-python] 复制数据文件…');
+
+// 拷贝时排除的目录名（P1-1 处置④ + P3-24）：字节码/测试目录/venv 之外，补上
+// FM/（网盘蜘蛛运行态，曾含真实登录 Cookie .quark/.uc 随安装包泄露）与
+// .test-runtime/（测试运行态，含测试凭据）——出现在快照里即泄露面。
+// 必须先于下方首次 copyDir 调用求值（const TDZ）：定义放在文件尾 helpers 区时，
+// CI 全新 checkout（本地无旧产物兜底）上会 ReferenceError 崩溃。
+const COPY_EXCLUDE_NAMES = new Set([
+    '.venv', '__pycache__', 'tests', '.pytest_cache', 'node_modules',
+    'FM',            // 网盘 Cookie 运行态（.quark/.uc 等）
+    '.test-runtime', // 测试凭据与测试运行数据
+]);
+
 const dataDirs = ['js-engine', 'spiders', 'base', 'kazumi/assets'];
 for (const dir of dataDirs) {
     const src = path.join(BACKEND, dir);
@@ -119,15 +131,6 @@ try { fs.unlinkSync(specFile); } catch (e) { /* ignore */ }
 console.log('[build-python] 完成！产物在 python-dist/');
 
 // --- helpers ---
-
-// 拷贝时排除的目录名（P1-1 处置④ + P3-24）：字节码/测试目录/venv 之外，补上
-// FM/（网盘蜘蛛运行态，曾含真实登录 Cookie .quark/.uc 随安装包泄露）与
-// .test-runtime/（测试运行态，含测试凭据）——出现在快照里即泄露面。
-const COPY_EXCLUDE_NAMES = new Set([
-    '.venv', '__pycache__', 'tests', '.pytest_cache', 'node_modules',
-    'FM',            // 网盘 Cookie 运行态（.quark/.uc 等）
-    '.test-runtime', // 测试凭据与测试运行数据
-]);
 
 function copyDir(src, dst) {
     fs.mkdirSync(dst, { recursive: true });
