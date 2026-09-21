@@ -20,7 +20,6 @@ FastAPI Python 后端
   /kazumi/action  Kazumi 规则引擎
   /cache          Spider 缓存
   /proxy          Spider 本地代理
-  /danmaku        弹幕中转（弹弹play）
   /search/* /kazumi/cover 等  聚合搜索 SSE / 封面代理（部分列举，见 server.py）
 ```
 
@@ -55,11 +54,7 @@ FastAPI Python 后端
   `kazumiBangumiEpisodeCollections`（分集收藏查询，驱动看完全部自动「看过」联动）落地，
   无 Token / 匹配不到条目或分集时静默跳过，失败提醒 5 分钟节流，不影响播放链路。
   评分不参与同步（Bangumi 集成只写收藏类型与进度，无评分上报链路）。
-- 弹幕（默认关，开关 `danmakuEnable`）：后端经 `kazumi/plugin_manager.py` 内置的弹弹play
-  API 对接（搜索 → 分集 → 弹幕 XML），由 `/danmaku` 端点中转；渲染层按片名+集数发起
-  `Kazumi.loadDanmaku`，主进程 `mpv-player.js` 将弹幕转换为 ASS 临时文件后经 `sub-add`
-  装载进 mpv，播放结束或换片时清理临时文件。弹弹play 凭据（dandanAppId/AppSecret）在
-  设置中配置。
+- 弹幕：产品当前不启用。后端保留弹弹play 对接与 `/danmaku` 中转代码、渲染层保留 `danmakuEnable` 开关代码，但产品未提供可用的弹幕入口，相关链路视为兼容基础（RM-3 未启动）。
 - WebDAV 设置同步（上传/恢复）：设置键以显式允许表（64 个纯数据键）为准，恢复为云端
   快照覆盖本地、上传排除敏感键；备份文件落 `<userData>`（设计文档见
   [WEBDAV_SYNC_MERGE_DESIGN.md](WEBDAV_SYNC_MERGE_DESIGN.md)）。

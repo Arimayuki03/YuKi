@@ -28,12 +28,12 @@
 - **Bangumi 元数据**：统一详情页头部显示番剧封面/简介/评分（官方 API：api.bgm.tv / next.bgm.tv，2026-08-09 从 bangumi.lol 镜像改回）。
 - **验证码识别**：检测到验证码时源卡标记「需验证」，点击打开可见验证窗口（手动过验证，关闭后收割 Cookie 并自动重查该源）。
 - **以图搜番**：支持 URL/base64 图片输入并调用 trace.moe（T74 改为后端下载字节上传，规避 URL 直传 403）。
-- **弹幕（默认关）**：设置 → 播放可开启「自动加载弹幕」，经弹弹play API 按片名+集数匹配，后端 `/danmaku` 中转，弹幕转 ASS 由 mpv 装载（详见 §2 播放器表）。
+- **兼容基础**：保留 DanDanPlay API 与 mpv ASS 相关代码，但产品当前不启用弹幕入口或播放时弹幕加载。
 
 ### 1.2 当前边界
 
 - 验证码支持检测、打开验证页面、手动过验证和 Cookie 复用；自动识别与自动提交不在当前交付范围。
-- 弹幕功能已实现但默认关闭（开关 `danmakuEnable`），属于手动开启的可选能力，不再视为「产品范围外」。
+- 弹幕产品功能当前关闭。后端 API 和 ASS 基础代码属于保留兼容层，不应视为正在等待补齐的产品功能。
 - Anime4K、下载、WebDAV 等由YuKi 公共能力提供，Kazumi 播放源直接复用，不在本模块重复实现。
 - macOS/Linux 验证与代码签名属于项目级发布工作，不属于 Kazumi 接入范围；自动更新与 CI/CD 已在项目级落地（updater.js + GitHub Actions，见 §11/§12）。
 
@@ -111,7 +111,7 @@ python-backend/
     xpath_strategy.py  XPath 策略（lxml）
     api_strategy.py    API 策略（受限 JSONPath）
     rule_engine.py     RuleEngine：搜索剧集编排
-    plugin_manager.py  PluginManager：规则 CRUD、持久化、规则商店、Bangumi/弹幕对接、WebDAV 同步
+    plugin_manager.py  PluginManager：规则 CRUD、持久化、规则商店、Bangumi 对接、WebDAV 同步
     cookie_jar.py      Kazumi CookieJar（0.2.5 起加密落盘）
     assets/            内置默认规则（7sefun/DM84/enlie）
     utils.py           normalize_episode_url、UA 池、异常
@@ -121,7 +121,7 @@ python-backend/
     test_kazumi_cover_proxy.py 封面代理回归
 ```
 
-> 弹幕经 `plugin_manager.py` 内置的弹弹play 对接实现（`/danmaku` 端点中转），无需独立模块文件。
+> 弹弹play 对接代码保留于 `plugin_manager.py`（`/danmaku` 端点中转），属兼容基础，产品当前不启用。
 
 ### 4.2 PluginManager 规则管理
 - 持久化：~/.yuki/kazumi/plugins.json，单文件存储全部规则。
@@ -171,7 +171,7 @@ python-backend/
 - `kazumiBangumiSearch` / `Info` / `Calendar` / `Season` / `Trends` / `Episodes` / `Characters` / `Staff` / `Comments` / `Relations`：Bangumi 元数据。`Season(start,end)` 按 air_date 区间检索历史季度放送并分桶（时间表季节索引用）。
 - `kazumiBangumiMe` / `Collections` / `CollectionGet` / `CollectionSet` / `CollectionDel`：Bangumi 用户收藏同步。
 
-仓库还保留弹幕兼容端点，弹幕自动加载已实现（默认关，开关 `danmakuEnable`）。
+仓库还保留弹幕兼容端点，但产品界面当前不启用弹幕功能。
 
 ---
 
@@ -396,7 +396,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 ## 当前结论
 
 - 规则、搜索、播放解析、下载、Bangumi、WebDAV 和主要页面均已接入。
-- 弹幕自动加载已实现（默认关，开关 `danmakuEnable`）；产品化项（透明度/遮挡/屏蔽词/倍速时长修正）仍未做。
+- 弹幕产品功能已明确关闭；保留的 DanDanPlay/ASS 代码属于兼容基础，不列入当前待办。
 - 主要剩余工作是验证码自动化（暂不交付）、跨平台验证与代码签名；自动更新与 CI/CD 已落地。
 - 按当前产品范围统计，87 项中 79 项完成、3 项部分完成、5 项延后，完成率约 91%。
 
@@ -472,7 +472,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 定时关机 | ✅ TimedShutdownService | ✅ 已实现（N 分钟倒计时 → 停 mpv → 系统关机） | 无 |
 | DLNA 投屏 | ✅ dlna_dart | ✅ 已实现（UPnP SSDP 发现 + SetAVTransportURI/Play/Stop；主进程 IPC 已接线，渲染层 UI 入口未开放） | 缺界面入口 |
 | 音频会话 | ✅ audio_service / audio_session | ❌ 未实现（桌面端无系统媒体控制器） | 可后续补充 |
-| 弹幕渲染 | ✅ canvas_danmaku | ✅ 已实现（弹幕转 ASS 交 mpv sub-add 装载，非前端 canvas 叠加；默认关） | 产品化项（透明度/屏蔽词等）未做 |
+| 弹幕渲染 | ✅ canvas_danmaku | ⏸ 产品功能关闭，保留 ASS/API 基础 | 不列入当前待办 |
 
 ---
 
@@ -480,13 +480,13 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 
 | 功能 | Kazumi 原版 | yuki 现状 | 差距 |
 |------|------------|--------------|------|
-| 弹幕 API | ✅ DanDanPlay 开放平台 | ✅ 已实现（HMAC-SHA256 签名，`/danmaku` 中转） | 无（凭据 dandanAppId/AppSecret 由设置配置） |
-| 弹幕签名 | ✅ HMAC-SHA256 | ✅ 已实现 | 无 |
-| 弹幕数据模型 | ✅ DanmakuEntry / DanmakuEpisodeResponse | ✅ 已实现 | 无 |
-| 弹幕渲染 | ✅ canvas_danmaku | ✅ 已实现（弹幕转 ASS 交 mpv 装载；默认关） | 产品化项（透明度/遮挡/屏蔽词）未做 |
-| 弹幕开关/速度 | ✅ PlayerDanmakuController | ⚠️ 开关已实现（`danmakuEnable` 默认关）；速度/透明度调节未做 | 产品化项未做 |
-| 离线弹幕 | ✅ 下载时缓存弹幕 JSON | ⏸ 未实现 | 可后续补充 |
-| 弹幕屏蔽 | ✅ 屏蔽词列表 | ⏸ 未实现 | 可后续补充 |
+| 弹幕 API | ✅ DanDanPlay 开放平台 | ✅ 保留兼容实现（HMAC-SHA256 签名） | 产品未启用 |
+| 弹幕签名 | ✅ HMAC-SHA256 | ✅ 已实现 | 产品未启用 |
+| 弹幕数据模型 | ✅ DanmakuEntry / DanmakuEpisodeResponse | ✅ 已实现 | 产品未启用 |
+| 弹幕渲染 | ✅ canvas_danmaku | ⏸ 产品范围外 | 不列入当前待办 |
+| 弹幕开关/速度 | ✅ PlayerDanmakuController | ⏸ 产品范围外（`danmakuEnable` 开关代码保留但无实际效果） | 不列入当前待办 |
+| 离线弹幕 | ✅ 下载时缓存弹幕 JSON | ⏸ 产品范围外 | 不列入当前待办 |
+| 弹幕屏蔽 | ✅ 屏蔽词列表 | ⏸ 产品范围外 | 不列入当前待办 |
 
 ---
 
@@ -499,7 +499,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 直接下载 | ✅ Range 断点续传 | ✅ 已实现（aria2c） | 无 |
 | 下载通知 | ✅ flutter_foreground_task | ✅ 已实现（系统通知） | 无 |
 | 下载记录 | ✅ DownloadRecord / DownloadEpisode | ✅ 已实现（dl-records.json 持久化，跨重启恢复，删除/清除同步） | 无 |
-| 弹幕缓存 | ✅ 下载时缓存弹幕 | ⏸ 未实现 | 可后续补充 |
+| 弹幕缓存 | ✅ 下载时缓存弹幕 | ⏸ 产品范围外 | 不列入当前待办 |
 
 ---
 
@@ -535,7 +535,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 搜索 | ✅ SearchPage | ✅ 已实现（聚合搜索） | 无 |
 | 以图搜番 | ✅ ImageSearchPage | ✅ 已实现（URL/base64 上传） | 无 |
 | 详情页 | ✅ InfoPage | ✅ 已实现（T74 统一详情页 #view-detail：CatVod 源/Bangumi-only 自适应，概览/分集/角色/评论/关联/制作，收藏同步 + 开始观看；原 #view-bangumi-info 已移除） | 无 |
-| 播放页 | ✅ VideoPage | ✅ 已实现（mpv 独立窗口；弹幕经 ASS 装载，默认关） | 无 |
+| 播放页 | ✅ VideoPage | ✅ 已实现（mpv 独立窗口；弹幕不在当前产品范围） | 无 |
 | 下载页 | ✅ DownloadPage | ✅ 已实现（下载管理） | 无 |
 | 历史页 | ✅ HistoryPage | ✅ 已实现（历史记录） | 无 |
 | 设置页 | ✅ SettingsPage | ✅ 已实现（设置中心 + Kazumi 规则板块 + WebDAV 同步） | 无 |
@@ -588,7 +588,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 1. **番剧时间表**：Bangumi 每日放送。✅ 已实现
 2. **追番列表**：收藏 + 观看进度追踪。✅ 已实现
 3. **完整详情页**：Bangumi 番剧详情（角色/评论/关联/制作人员）。✅ 已实现
-4. **弹幕系统**：自动加载已实现（弹弹play API + ASS 装载，默认关）；产品化项（透明度/屏蔽词等）未做。
+4. **弹幕系统**：API 与基础代码已接入；产品功能后来明确关闭，不再继续补渲染引擎。
 5. **以图搜番**：trace.moe 图片识别。✅ 已实现
 
 ### 中优先级（已完成）
@@ -609,12 +609,12 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 
 ## 14. 技术债务与风险
 
-1. **弹幕凭据**：弹幕已实装，弹弹play 凭据（dandanAppId/AppSecret）由用户在设置中配置；未配置时弹幕匹配不可用。
+1. **弹幕兼容代码**：若未来重新启用弹幕，需要申请 `DANDANAPI_APPID`/`DANDANAPI_KEY` 并重新评估渲染方案；当前不属于产品待办。
 2. **Bangumi 镜像签名**：Bangumi 镜像 API 的签名端点（KAZUMI_APPID/KAZUMI_KEY）未申请前部分端点不可用；用户收藏同步走的是 Access Token（已接入）。
 3. **验证码自动过验证**：当前仅实现手动过验证，自动过验证复杂度高。
 4. **Cookie 持久化**：已实现（验证后 Cookie 加密落盘，重启复用）；但仅覆盖解析会话，验证码页需再次手动过验证时自动过验证未覆盖。
 5. **视频源解析池**：已实现（3 槽位独立 partition 并发解析）；前端批量解析仍串行，池为并发预留。
-6. **弹幕产品化**：渲染走 mpv ASS 装载（非前端 canvas 叠加）；透明度/遮挡/屏蔽词/倍速时长修正等产品化项未做。
+6. **弹幕渲染**：mpv 独立窗口无法直接叠加前端弹幕。该功能当前关闭，只有重新进入产品范围时才需要设计额外渲染层。
 7. **未捕获异常兜底**：已添加全局 process.on('uncaughtException') 兜底防进程崩溃。
 8. **HLS 广告过滤**：下载路径已实现（CUE-OUT/CUE-IN + 广告路径分段，设置开关）；播放路径（mpv 实时过滤）未实现。
 
@@ -627,8 +627,8 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 核心规则系统 | 14 | 0 | 0 | 0 |
 | 视频源获取 | 7 | 1 | 0 | 0 |
 | 番剧元数据 | 10 | 0 | 0 | 0 |
-| 播放器与媒体 | 10 | 0 | 1 | 2 |
-| 弹幕系统 | 5 | 2 | 0 | 0 |
+| 播放器与媒体 | 11 | 0 | 1 | 1 |
+| 弹幕系统 | 3 | 0 | 0 | 4 |
 | 下载系统 | 5 | 0 | 0 | 1 |
 | 同步服务 | 4 | 0 | 0 | 0 |
 | WebView | 2 | 1 | 0 | 0 |
@@ -636,9 +636,9 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 主题与国际化 | 5 | 0 | 0 | 0 |
 | 平台配置 | 2 | 1 | 1 | 0 |
 | 测试与 CI | 3 | 0 | 0 | 0 |
-| **合计** | **82** | **5** | **2** | **4** |
+| **合计** | **80** | **5** | **2** | **6** |
 
-> 2026-09-22 校准：弹幕自动加载（默认关）、自动更新、CI/CD 已计入“已完成”；PiP 移除计入“范围外”、平台支持计入“部分实现”。合计 93 项中完成 82 项、部分实现 5 项，完成率约 88%。“延后”主要是桌面音频会话与代码签名；“部分实现”主要是验证码自动化、弹幕产品化与跨平台验证。
+> 2026-09-22 校准：自动更新、CI/CD 已计入“已完成”（弹幕维持“产品关闭/范围外”原口径）；PiP 移除计入“范围外”、平台支持计入“部分实现”。合计 93 项中完成 80 项、部分实现 5 项，完成率约 86%。“延后”主要是桌面音频会话与代码签名；“部分实现”主要是验证码自动化与跨平台验证。
 
 ---
 

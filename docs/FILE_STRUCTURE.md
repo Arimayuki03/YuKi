@@ -50,7 +50,7 @@ src/
 │   ├── downloader.js       aria2c 引擎封装
 │   ├── hls-downloader.js   HLS 下载与广告过滤
 │   ├── mpv-menu-conf.js    mpv 右键菜单中文定义（menu.conf 译制）
-│   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键/弹幕 ASS 装载）
+│   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键）
 │   ├── parse-window.js     隐藏 BrowserWindow 真实流提取
 │   ├── playlist-proxy.js   在线整季原生播放列表本地按需解析代理
 │   ├── pan-source.js       网盘类源识别（PAN_SOURCE_RE：原生播放列表禁用/边下边播排除同源判定）
@@ -123,7 +123,7 @@ python-backend/
 │   ├── esm_transform.py / module_resolver.py  ESM 支持
 │   └── lib/cat.js          聚合库（cheerio/Crypto 等）
 ├── kazumi/                 Kazumi 规则引擎
-│   ├── plugin_manager.py   规则 CRUD 与持久化（含规则商店、Bangumi/弹幕对接、WebDAV 同步目录拼接）
+│   ├── plugin_manager.py   规则 CRUD 与持久化（含规则商店、Bangumi 对接、WebDAV 同步目录拼接）
 │   ├── rule_engine.py      搜索/剧集编排
 │   ├── xpath_strategy.py / api_strategy.py
 │   ├── models.py / plugin.py / utils.py / cookie_jar.py
@@ -165,7 +165,7 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`，55 文件 / 540 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K/弹幕）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）等。
+`tests/js/*.test.js`（`node --test`，55 文件 / 540 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）等。
 
 ## 构建产物（不入库）
 
