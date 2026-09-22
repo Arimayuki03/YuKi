@@ -90,6 +90,55 @@ def _string(value: Any) -> str:
     return '' if value is None else str(value)
 
 
+def _looks_like_http_url(value: Any) -> bool:
+    """宽松判定值是否形如 http(s) 绝对地址（scheme 快速校验，不做网络请求）。"""
+    text = str(value or '').strip()
+    return text.lower().startswith(('http://', 'https://'))
+
+
+def _unwrap_duplicated_url(url: str) -> str:
+    """容错「``<真实地址>.<同一真实地址>``」形态的播放直链（bug：mpv 报
+    ``HTTP error 400 Bad Request``，日志显示请求打开
+    ``https://…/index.m3u8.https://…/index.m3u8``）。
+
+    某些 CatVod 源（如极速 jisuzyv 系）playerContent 返回的 ``url`` 可能被
+    源码/模板以「分集序号.地址」或重复拼接的形式写出，整条 URL 语法仍以
+    http(s) 开头，但 mpv/ffmpeg 会把第一个 ``.`` 之后的 ``https://…`` 当作
+    同一 host 的路径继续请求，上游随即回 400 Bad Request，播放从未开始。
+    而 YuKi 的渲染层/主进程链路（player.js → index.js → mpv-player.js）对
+    url 全程只做 trim 与透传，没有任何 ``+ '.'`` 拼接点（已逐文件核查），
+    所以防线必须设在后端唯一收口处：``normalize_play_result``。
+
+    识别规则（必须足够保守，绝不误伤正常地址）：
+    - 整串以 http(s) 开头；
+    - 串内恰有一个 ``.`` 同时满足其两侧各自都是合法 http(s) 绝对地址
+      （即形如 ``https://a/x.m3u8.https://a/x.m3u8``）；
+    - 两侧去协议后完全一致（重复拼接的自证特征）。
+    命中即取后半（与 jisuzyv 观测样本一致，后半是源站真实给出的可播地址）；
+    其余形态（含 query/fragment 的正常地址、普通文件名 ``v1.2.m3u8``、
+    urljoin 产物等）一律原样返回。parse=1 的网页地址不匹配此双 URL 形态，
+    天然不受影响。
+    """
+    text = str(url or '').strip()
+    if not text.lower().startswith(('http://', 'https://')):
+        return text
+    # 找「.https://」/「.http://」边界：只有边界两侧都是合法 http(s) 地址、
+    # 且去掉协议后完全相同时才认定是重复拼接。
+    lower = text.lower()
+    for marker in ('.https://', '.http://'):
+        pos = lower.find(marker)
+        while pos != -1:
+            head, tail = text[:pos], text[pos + 1:]
+            if _looks_like_http_url(tail):
+                # 双写自证：去协议前缀后两侧一致（允许其中一侧缺尾斜杠差异）
+                head_body = head.split('://', 1)[-1].rstrip('/')
+                tail_body = tail.split('://', 1)[-1].rstrip('/')
+                if head_body and head_body == tail_body:
+                    return tail
+            pos = lower.find(marker, pos + 1)
+    return text
+
+
 def _number(value: Any, default: int | float = 0) -> int | float:
     if value in (None, ''):
         return default
@@ -142,7 +191,9 @@ def normalize_play_result(
         url = url.get('url', url.get('v', url.get('value', '')))
     elif isinstance(url, (list, tuple)):
         url = url[0] if url else ''
-    result['url'] = _string(url).strip()
+    # 防御性规范化：拆掉「真实地址.真实地址」双写形态（jisuzyv 等源观测样本），
+    # 正常直链/网页地址原样通过（见 _unwrap_duplicated_url 注释）。
+    result['url'] = _unwrap_duplicated_url(_string(url).strip())
 
     jx = result.get('jx')
     jx_enabled = jx is True or str(jx).lower() in ('1', 'true', 'yes')

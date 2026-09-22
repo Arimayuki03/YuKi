@@ -364,7 +364,15 @@ class ParsedConfig:
     @classmethod
     def from_json(cls, cfg, *, base_url='', shared_spider=None):
         data = dict(cfg or {})
-        spider = str(data.get('spider') or '').strip()
+        raw_spider = data.get('spider')
+        if isinstance(raw_spider, (list, tuple)):
+            # spider 数组（菜妮丝等仓的镜像写法）：取第一个非空元素转 str，
+            # 避免诊断页显示整串 Python repr（"['https://...', ...]"）。
+            # 简版语义：仅取首个元素作展示；config.py `_resolve_spider_jar`
+            # 的完整解析（依序取第一个 http(s) 镜像）不同，此处仅诊断展示。
+            raw_spider = next((str(item) for item in raw_spider
+                               if str(item or '').strip()), '')
+        spider = str(raw_spider or '').strip()
         shared = shared_spider if shared_spider is not None else spider
         entries = [normalize_site_entry(item, base_url=base_url, shared_spider=shared)
                    for item in (data.get('sites') or [])]

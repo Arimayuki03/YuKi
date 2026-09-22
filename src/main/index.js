@@ -35,13 +35,19 @@ const { PAN_SOURCE_RE, isPanQueueRequest } = require('./pan-source');
 // 方式与主窗 will-navigate 白名单 isLocalAppPageUrl 一致（file:// 指向本应用安装
 // 路径；开发模式额外放行 localhost dev server）。不属于 → 抛错拒绝并记日志。
 // event 缺省（主进程内直调/单测桩）视为可信：真实 IPC 恒带 event。
-function isTrustedIpcSender(event) {
-    if (!event) return true;
-    let url = '';
+// 兜底 URL 源：frame 瞬态不可用（导航/销毁窗口期）时 sender 仍持有真实 URL，
+// 以 event.sender.getURL() 作第二来源重复同一判定；两处都失败才不可信。
+function _senderUrlOf(event) {
     try {
         const frame = event.senderFrame;
-        url = frame ? String(frame.url || '') : '';
-    } catch (e) { return false; } // 帧已销毁等异常：fail-closed
+        const u = frame ? String(frame.url || '') : '';
+        if (u) return u;
+    } catch (e) { /* frame 瞬态不可用：落 sender.getURL 兜底 */ }
+    try { return String(event.sender && event.sender.getURL() || ''); } catch (e) { return ''; }
+}
+function isTrustedIpcSender(event) {
+    if (!event) return true;
+    const url = _senderUrlOf(event);
     if (!url) return false;
     try {
         if (isLocalAppPageUrl(decodeURI(url))) return true; // decodeURI 还原安装路径空格等百分号编码
@@ -59,7 +65,17 @@ function isTrustedIpcSender(event) {
 const _rawIpcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => _rawIpcHandle(channel, (event, ...args) => {
     if (!isTrustedIpcSender(event)) {
-        console.warn('[ipc] 已拒绝不可信发送方的通道调用:', channel);
+        // 拒绝时记录发送方现场（frame/sender 双 URL + 打包态）：2026-09 本地文件板块
+        // 出现「yuki:play 通过而 yuki:file-list 同会话被拒」的未定案之谜，当时日志
+        // 只有通道名无从排查——两 URL 对比可直接区分 frame 瞬态与真实越权。
+        const trunc = (u) => (u.length > 200 ? u.slice(0, 200) + '…' : u);
+        let frameUrl = '';
+        try { frameUrl = event && event.senderFrame ? String(event.senderFrame.url || '') : ''; }
+        catch (e) { frameUrl = `<${e && e.message ? e.message : 'error'}>`; }
+        let senderUrl = '';
+        try { senderUrl = String(event && event.sender && event.sender.getURL() || ''); }
+        catch (e) { senderUrl = `<${e && e.message ? e.message : 'error'}>`; }
+        console.warn(`[ipc] 已拒绝不可信发送方的通道调用: ${channel} frame=${trunc(frameUrl)} sender=${trunc(senderUrl)} packaged=${app.isPackaged === true}`);
         throw new Error(`ipc channel '${channel}' rejected: untrusted sender`);
     }
     return handler(event, ...args);
@@ -559,6 +575,12 @@ const cancelPendingShutdown = () => {
 // key——不淘汰会随观看无限增长。按条目数上限淘汰最旧（mtime 最小）文件：签名直链
 // 的旧封面天然先失效，先删不影响热封面。
 const LOCAL_THUMBS_MAX_ENTRIES = 512;
+
+// 视频扩展名白名单（与 file-manager.js VIDEO_EXTS 同表）：file-thumb / file-push
+// 在 fileMgr 极早期未初始化窗口内也能完成白名单判定，不依赖 fileMgr 实例。
+const LOCAL_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.ts', '.flv', '.avi', '.mov', '.wmv', '.mpg', '.mpeg', '.m4v', '.webm', '.m2ts']);
+const LOCAL_AUDIO_EXTS_SET = new Set(['.mp3', '.flac', '.wav', '.aac', '.ogg', '.oga', '.opus', '.m4a', '.wma', '.ape']);
+const isVideoExt = (name) => LOCAL_VIDEO_EXTS.has(path.extname(String(name || '')).toLowerCase());
 
 function evictLocalThumbs() {
     const dir = path.join(app.getPath('userData'), 'local-thumbs');
@@ -1222,6 +1244,9 @@ app.whenReady().then(() => {
         mpv.subLang = String(settings.get('playerSlang') || '');
         mpv.anime4kShaders = anime4kChainFromSettings();
         mpv.screenshotDir = path.join(app.getPath('pictures'), 'yuki');
+        // 弹幕轨装载门控随偏好热同步：设置页开关（panels.js 走 update-player-prefs）
+        // 改动后立即生效，下次起播/推流按新值门控（已装载的轨道不做运行时摘除）。
+        mpv.danmakuEnabled = settings.get('danmakuEnable') === true;
         writeMpvAssets(); // 同步 OSD 中的 Anime4K 状态提示（下次起播读取）
         // 播放途中把 Anime4K 配置热同步到运行中的 mpv：设置页与右键菜单共用同一状态源，
         // 菜单勾选态与实际注入立即对齐，消除「设置页已改、菜单还是旧值」的失步窗。
@@ -1538,7 +1563,12 @@ app.whenReady().then(() => {
     });
 
     // 播放控制（渲染层备用；mpv 窗口自带默认快捷键）
+    // get-pos：当前播放位置（秒，浮点）。无会话/未起播/属性不可用时返回
+    // { ok: true, pos: null }——「拿不到位置」不是错误，渲染层按无位置降级。
     ipcMain.handle('yuki:player', (_e, cmd, value) => {
+        if (cmd === 'get-pos') {
+            return Promise.resolve({ ok: true, pos: mpv.playing ? mpv.getTimePos() : null });
+        }
         if (!mpv.playing) return { ok: false };
         const table = {
             pause: () => mpv.setPause(true),
@@ -1557,14 +1587,25 @@ app.whenReady().then(() => {
     ipcMain.handle('yuki:player-state', () => ({ available: mpv.isAvailable(), playing: mpv.playing }));
 
     // ---- Phase 5 本地文件管理（白名单根目录 + 防穿越） ----
+    // 统一包装：handler 内任何同步/异步异常都收敛为 { ok:false, reason }——
+    // ipcMain.handle 的 rejection 传回渲染层是 reject，若渲染层某个调用点漏 .catch
+    // 就成为未捕获 rejection 全局上报。失败同时落主进程日志（原先 reason 被静默吞掉，
+    // 排查只能靠猜）。
     const fileIpc = (channel, fn) => ipcMain.handle(channel, async (_e, ...args) => {
         try { return { ok: true, ...(await fn(...args)) }; }
-        catch (err) { return { ok: false, reason: err.message }; }
+        catch (err) {
+            console.error(`[file-ipc] ${channel} failed:`, err && err.message);
+            return { ok: false, reason: err.message };
+        }
     });
 
-    fileIpc('yuki:file-root', () => ({ root: fileMgr.root }));
+    fileIpc('yuki:file-root', () => ({ root: fileMgr && fileMgr.root }));
 
-    ipcMain.handle('yuki:file-pick-root', async () => {
+    // 目录选择 + setRoot 持久化：必须与 fileIpc 同一容错契约——dialog 挂起/句柄失效、
+    // setRoot 对无效目录抛错（root not a directory）时返回 ok:false，而非向渲染层 reject
+    // （旧实现无 try-catch，渲染层 pickRoot 仅对 reason==='canceled' 分支处理，其余
+    // 全靠 .catch 兜底，一旦遗漏即未捕获 rejection）。
+    fileIpc('yuki:file-pick-root', async () => {
         const r = await dialog.showOpenDialog(win, {
             title: '选择本地文件根目录（白名单）',
             properties: ['openDirectory', 'createDirectory'],
@@ -1574,13 +1615,17 @@ app.whenReady().then(() => {
         return { ok: true, root };
     });
 
+    // 以下 handler 均在 fileMgr 就绪后才会真正可用；极早期（窗口已建、whenReady
+    // 后半段未跑完）fileMgr 仍为 null 时统一返回引导态/失败，而非抛 TypeError。
+    // fileIpc 已兜底 catch，这里显式判空只为返回正确的语义（needRoot / root-not-ready）。
     fileIpc('yuki:file-list', (rel) => {
-        if (!fileMgr.root) return { needRoot: true };
+        if (!fileMgr || !fileMgr.root) return { needRoot: true };
         return fileMgr.list(rel);
     });
 
     // 打开本地目录（资源管理器）：rel 限白名单内，'' 为根目录
     fileIpc('yuki:file-open-dir', async (rel) => {
+        if (!fileMgr) throw new Error('root not set');
         const dir = fileMgr.resolveSafe(rel);
         if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error('not a directory');
         const err = await shell.openPath(dir);
@@ -1588,10 +1633,19 @@ app.whenReady().then(() => {
         return { path: dir };
     });
 
-    fileIpc('yuki:file-new-folder', (rel, name) => { fileMgr.newFolder(rel, name); return {}; });
-    fileIpc('yuki:file-del-file', (rel) => { fileMgr.delFile(rel); return {}; });
+    fileIpc('yuki:file-new-folder', (rel, name) => {
+        if (!fileMgr) throw new Error('root not set');
+        fileMgr.newFolder(rel, name); return {};
+    });
+    fileIpc('yuki:file-del-file', (rel) => {
+        if (!fileMgr) throw new Error('root not set');
+        fileMgr.delFile(rel); return {};
+    });
     // P2-7：delFolder 为 async（原生确认框 await）——fileIpc 已 await fn(...)，拒绝/取消经 reason 返回
-    fileIpc('yuki:file-del-folder', (rel) => fileMgr.delFolder(rel));
+    fileIpc('yuki:file-del-folder', async (rel) => {
+        if (!fileMgr) throw new Error('root not set');
+        return fileMgr.delFolder(rel);
+    });
 
     // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
     fileIpc('yuki:file-thumb', async (rel) => {
@@ -1610,21 +1664,27 @@ app.whenReady().then(() => {
             return r === '' || (!!r && !r.startsWith('..') && !path.isAbsolute(r));
         };
         const dlRoot = dl.dir || settings.get('dlDir') || app.getPath('downloads');
-        // 支持绝对路径（如已下载文件的绝对路径，必须在下载目录或文件管理根目录白名单内）
+        // fileMgr 可能在极早期调用（窗口已建、whenReady 后半段未跑完）尚未初始化：
+        // 相对路径分支原样调用 fileMgr.resolveSafe 会抛 TypeError（fileMgr 为 null 时
+        // 读 .resolveSafe 即炸），这里与 yuki:file-push 同口径显式判空——未就绪时降级
+        // 到下载目录白名单解析，两者都不可用才返回 ok:false（不得让 TypeError 逃逸）。
+        const fileRoot = (fileMgr && fileMgr.root) ? fileMgr.root : null;
         if (path.isAbsolute(String(rel || ''))) {
             abs = path.resolve(String(rel));
-            if (!inside(dlRoot, abs) && !inside(fileMgr.root, abs)) return { ok: false };
+            if (!inside(dlRoot, abs) && !inside(fileRoot, abs)) return { ok: false };
         } else {
             // 相对路径：优先走 fileMgr.resolveSafe，若未配置 root 或超出则尝试在下载目录内解析
+            let resolved = null;
             try {
-                abs = fileMgr.resolveSafe(rel);
-            } catch (e) {
+                if (fileMgr && fileMgr.root) resolved = fileMgr.resolveSafe(rel);
+            } catch (e) { /* root not set / 越界：降级到下载目录解析 */ }
+            if (resolved === null) {
                 if (dlRoot) {
                     const candidate = path.resolve(dlRoot, String(rel || ''));
                     if (inside(dlRoot, candidate)) abs = candidate;
                     else return { ok: false };
                 } else return { ok: false };
-            }
+            } else abs = resolved;
         }
         // 存量无后缀下载记录自愈：旧版任务曾存出无后缀路径，文件后来补了扩展名
         // （或被重命名规则加上 .mp4）——原路径已不存在时按常见视频扩展名探测同名
@@ -1638,8 +1698,9 @@ app.whenReady().then(() => {
             }
         }
         // 无扩展名文件放行（与 yuki:download-play 一致）：让 ffmpeg 实际探测容器格式，
-        // 旧版无后缀存量下载文件也能抓帧；带扩展名但不在视频白名单的仍拒绝
-        if (!fileMgr.isVideo(abs) && path.extname(abs)) return { ok: false };
+        // 旧版无后缀存量下载文件也能抓帧；带扩展名但不在视频白名单的仍拒绝。
+        // fileMgr 未初始化时退化为本地扩展名白名单判定（与 FileManager.isVideo 同表）。
+        if (!isVideoExt(abs) && path.extname(abs)) return { ok: false };
         evictLocalThumbs(); // 本地文件抓帧同样可能新增条目，顺手做淘汰检查（P2-15）
         return ffmpegThumb(abs, path.join(app.getPath('userData'), 'local-thumbs'));
     });
@@ -1676,7 +1737,12 @@ app.whenReady().then(() => {
             }
         }
         if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return { ok: false, reason: 'file-not-found' };
-        if (!fileMgr.isMedia(abs)) return { ok: false, reason: 'not-video' };
+        // fileMgr 未初始化时退化为本地扩展名白名单（视频+音频，与 FileManager 同表口径），
+        // 不因实例未就绪而让 TypeError 逃出 handler
+        const isMediaOk = (fileMgr && typeof fileMgr.isMedia === 'function')
+            ? fileMgr.isMedia(abs)
+            : isVideoExt(abs) || LOCAL_AUDIO_EXTS_SET.has(path.extname(abs).toLowerCase());
+        if (!isMediaOk) return { ok: false, reason: 'not-video' };
         const title = path.basename(abs);
         // mpv 对 Windows 反斜杠路径兼容性一般，转正斜杠可规避首播因路径转义导致的加载失败
         const playUrl = abs.replace(/\\/g, '/');
@@ -1889,6 +1955,8 @@ app.whenReady().then(() => {
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
         'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
+        // opEdSkip：智能跳过片头/片尾开关（player.js play() 起播时读取，false 关闭）
+        'opEdSkip',
         'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
         // 各列表页每页条数（panels.js 动态 key 写入）
         'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
@@ -3710,6 +3778,9 @@ app.whenReady().then(() => {
     // 语言偏好（音轨/字幕）：读设置注入播放器
     mpv.audioLang = String(settings.get('playerAlang') || '');
     mpv.subLang = String(settings.get('playerSlang') || '');
+    // 弹幕轨装载门控：设置键 danmakuEnable（默认关）同步到 mpv-player；
+    // 渲染层推弹幕（yuki:load-danmaku）与起播 sub-add 均受此字段门控。
+    mpv.danmakuEnabled = settings.get('danmakuEnable') === true;
     // 视频缓冲缓存：只走内存（见 mpv-player._cacheArgs），无需注入偏好；
     // 历史 disk 模式的残留键与缓存文件在此一次性清理。
     migratePlayerCache();

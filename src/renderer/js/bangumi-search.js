@@ -8,7 +8,7 @@
  *   详情页点 Bangumi 标签 → BangumiSearch.openWithTag(tag) → 切到本页签并以 tag: 过滤搜索。
  * 后端走 POST /kazumi/action do=kazumiBangumiSearchFilter（对齐 Kazumi buildBangumiSearchParams）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App */
+/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, BgmRate */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const BANGUMI_SEARCH_TAGS = [
@@ -238,10 +238,32 @@ const BangumiSearch = {
         $('#bgm-search-results').on('click keydown', '.bangumi-card', (e) => {
             if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
             if (e.type === 'keydown') e.preventDefault();
+            // 「评分」操作条点击不进详情（stopPropagation 已在其自身 handler 处理，
+            // keydown Enter 落在操作条上时也跳过）
+            if ($(e.target).closest('.bgm-card-rate').length) return;
             const id = String($(e.currentTarget).data('id') || '');
             if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
                 Kazumi.openBangumiInfoPage(id);
             }
+        });
+        // 搜索结果卡「评分」操作条 → BgmRate 对话框（评分/吐槽，需已保存 Bangumi Token）
+        $('#bgm-search-results').on('click', '.bgm-card-rate', async (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const card = $(e.currentTarget).closest('.bangumi-card');
+            const sid = String(card.data('id') || '');
+            if (!sid) { warnToast('缺少 Bangumi 条目 ID'); return; }
+            if (typeof BgmRate === 'undefined') { warnToast('评分组件未加载'); return; }
+            const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
+            if (!token) { warnToast('评分需先在 设置 → Kazumi 规则 → Bangumi 同步 保存 Token'); return; }
+            // 搜索结果无账号收藏上下文：rate/comment 打开时由 BgmRate 单条补查
+            const cur = await BgmRate.fetchCurrent(sid, null);
+            await BgmRate.openRateDialog({
+                subjectId: sid,
+                name: String(card.data('name') || ''),
+                rate: cur.rate,
+                comment: cur.comment,
+            });
         });
         this._initWorkbench();
     },
@@ -343,6 +365,15 @@ const BangumiSearch = {
             return;
         }
         box.html(`<div class="vod-grid bangumi-search-grid">${this._items.map((it) => bangumiCard(it)).join('')}</div>`);
+        // 搜索结果卡追加「评分」操作条（Bangumi 远端条目直接可评分/吐槽，对齐 Kazumi 能力）；
+        // 追加而非改 bangumiCard：推荐/时间表共用卡片不受影响
+        box.find('.bangumi-card').each((_, el) => {
+            const $card = $(el);
+            if ($card.find('.bgm-card-rate').length) return;
+            const sid = String($card.data('id') || '');
+            if (!sid) return;
+            $card.append('<button type="button" class="bgm-card-rate" title="评分 / 吐槽（同步到 Bangumi）">★ 评分</button>');
+        });
         if (typeof fitVodTitles === 'function') fitVodTitles(box.find('.bangumi-search-grid'));
     },
 

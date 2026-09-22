@@ -158,6 +158,10 @@ const Detail = {
                     Kazumi.openSourceDialog(this.vodName || '', 'kazumi', '');
                 }
             })
+            // 开始播放（CatVod 源详情头部，与「开始观看」同位置）：一键按当前线路播第 1 集
+            .on('click', '#detail-catvod-start', () => {
+                this._catvodStartPlay();
+            })
             // 标签点击：按 Bangumi 标签精确筛选番剧（非关键词搜索，任务四 4.2）
             .on('click', '.kazumi-tag', (e) => {
                 const tag = String($(e.currentTarget).data('tag') || '');
@@ -484,7 +488,7 @@ const Detail = {
                 </div>`}
                 <div class="detail-hero-actions">
                     ${localActions}
-                    ${hasBgm ? this._bangumiColHtml(bgm) : ''}
+                    ${this._bangumiColHtml(bgm) || this._catvodStartHtml()}
                 </div>
             </div>
         </div>`;
@@ -572,11 +576,34 @@ const Detail = {
             </div>
         </div>`;
         if (hasRules) {
-            h += `<div class="kazumi-watch-row detail-watch-row detail-watch-row-plain">
+            h += `<div class="kazumi-watch-row detail-watch-row-plain">
                 <button type="button" id="detail-kazumi-start" class="md-btn md-btn-filled md-btn-sm"><span class="detail-button-mark">▶</span>开始观看</button>
             </div>`;
         }
         return h;
+    },
+
+    /** CatVod 详情页「开始播放」按钮：与 Kazumi 源「开始观看」同位置/同样式（#detail-kazumi-start
+     *  的视觉口径），一键直达选集播放。仅在有可用线路/选集时渲染（无线路时概览已有
+     *  「暂无播放线路」提示，不渲染按钮）。 */
+    _catvodStartHtml() {
+        const src = this.sources[this.activeSource];
+        if (!this.sources.length || !src || !src.episodes.length) return '';
+        return `<div class="kazumi-watch-row detail-watch-row-plain">
+            <button type="button" id="detail-catvod-start" class="md-btn md-btn-filled md-btn-sm"><span class="detail-button-mark">▶</span>开始播放</button>
+        </div>`;
+    },
+
+    /** 「开始播放」点击行为：对齐 Kazumi「开始观看」的一键语义——不走多步操作，
+     *  直接按当前（默认/记忆）线路播第 1 集。episodes[0] 恒为正序第 1 集：
+     *  lastSourceMap 只记忆线路索引、_epDesc 仅倒序展示不重排数组，均不影响该下标。 */
+    async _catvodStartPlay() {
+        const src = this.sources[this.activeSource];
+        if (!this.sources.length || !src || !src.episodes.length) {
+            warnToast('暂无可播放的线路或选集');
+            return;
+        }
+        await this._playEpisode(0);
     },
 
     _renderTabContent() {

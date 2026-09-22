@@ -631,7 +631,11 @@ function errorTextOf(e, maxLen = 120) {
     return maxLen > 0 && text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
 }
 
-/** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。 */
+/** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。
+ *  item.my_rate（可选，用户 Bangumi 评分 1-10）：封面左上角加「我的评分」徽章；
+ *  缺省字段不渲染（推荐/时间表等无账号数据路径完全不受影响）。
+ *  现有调用方暂不传 my_rate（预留字段）：「我的」收藏网格的徽章由 records.js
+ *  recCard 直接渲染（不经过本函数）；本处保留供搜索/时间表未来接入账号评分数据。 */
 function bangumiCard(item) {
     const name = item.name_cn || item.name || '';
     const cover = bangumiCover(item.images, 'card');
@@ -640,9 +644,14 @@ function bangumiCard(item) {
     // remarks 行整体二次 escHtml 时转义后的实体保持文本形态，不会还原成标签
     const score = rating.score ? `⭐${escHtml(rating.score)}` : '';
     const rank = rating.rank ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(rating.rank)}">#${escHtml(rating.rank)}</span>` : '';
+    // 我的评分徽章：仅在调用方显式传入 my_rate 时渲染（预留字段，当前调用方均不传；
+    // 「我的」收藏网格的「我的 N★」徽章由 records.js recCard 直接渲染，不经过本函数）
+    const myRate = (item.my_rate === 0 || item.my_rate) ? Number(item.my_rate) : 0;
+    const myBadge = (myRate >= 1 && myRate <= 10)
+        ? `<span class="bangumi-myrate-badge" title="我的评分 ${myRate} 分">我的 ${myRate}★</span>` : '';
     const air = item.air_date || '';
     return `<div class="vod-card bangumi-card" data-id="${escHtml(String(item.id))}" data-name="${escHtml(name)}" tabindex="0">
-        <div class="vod-cover">${vodCoverImg(cover)}${rank}</div>
+        <div class="vod-cover">${vodCoverImg(cover)}${rank}${myBadge}</div>
         <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
         <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · '))}</div>
     </div>`;

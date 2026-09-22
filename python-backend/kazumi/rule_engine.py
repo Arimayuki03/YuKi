@@ -12,7 +12,10 @@ import http_client
 from .models import RuleSearchTrace, RuleChapterTrace, PluginSearchResponse
 from .xpath_strategy import XPathRuleStrategy
 from .api_strategy import ApiRuleStrategy
-from .utils import get_random_ua, SearchErrorException, ChapterErrorException, NoResultException, CaptchaRequiredException
+from .utils import (get_random_ua, SearchErrorException, ChapterErrorException,
+                    NoResultException, CaptchaRequiredException,
+                    looks_like_image_captcha_url)
+from . import captcha as _captcha_mod
 
 logger = logging.getLogger('yuki.kazumi.engine')
 
@@ -123,16 +126,83 @@ class RuleEngine:
     # ---------------------------------------------------------------- 验证码处理
 
     def search_with_captcha_retry(self, config, keyword, cancel_token=None, filters=None):
-        """搜索，遇到验证码时返回需要验证的状态（由前端决定是否打开验证窗口）。"""
+        """搜索，遇到验证码时返回需要验证的状态（由前端决定是否打开验证窗口）。
+
+        验证码 payload 只携带纯计算字段，零额外网络请求（本结果经 SSE 逐源
+        推送，对单源延迟敏感，验证码兜底不允许拖慢主链路）：
+          - captcha_url：触发验证码的搜索页地址（前端打开验证窗口用，唯一
+            被渲染层消费的字段）；
+          - captcha_url_classified：URL 启发式分类结果（utils.looks_like_image_captcha_url，
+            对齐 animeko WebCaptchaDetector「纯分类器」定位——只决定 UI 文案，
+            判错代价低，宁可漏报不误报）；
+          - ocr_available：后端是否具备图片验证码自动识别能力（captcha.ocr_available；
+            ddddocr 缺席时为 False）。
+        验证码图片地址（规则 captchaImage XPath 解析）不在本路径自动抓取：
+        消费方出现时按需调用 _captcha_image_url。
+        """
         try:
             return self.search(config, keyword, cancel_token, filters=filters)
         except CaptchaRequiredException as e:
-            # 返回需要验证的状态与验证页 URL
+            page_url = config.search_url.replace('@keyword', keyword)
+            classified = looks_like_image_captcha_url(page_url)
             return {
                 'captcha_required': True,
                 'plugin_name': e.plugin_name,
-                'captcha_url': config.search_url.replace('@keyword', keyword),
+                'captcha_url': page_url,
+                'captcha_url_classified': classified,
+                'ocr_available': _captcha_mod.ocr_available(),
             }
+
+    def _captcha_image_url(self, config, cancel_token=None):
+        """从规则反爬配置提取验证码图片地址（captchaImage XPath 首个节点 / <img> src）。
+
+        独立成方法便于测试桩替换；任何解析失败返回 ''（展示兜底是可选信息，
+        绝不让它把验证码处理主链路带崩）。仅在消费方需要展示验证码图时按需
+        调用，不在任何请求主路径上自动触发。
+
+        抓取必须走 _send_guarded 而非裸 http_client.get：captchaImage 抓的页面
+        地址由规则派生，与搜索主链路同级不可信——逐跳 SSRF 守卫
+        （_guard_hop(kind='site')）+ 禁用自动跟重定向（公网规则源 302 到内网
+        是教科书式 SSRF 通道）；会话 Cookie 亦由 cookie_jar 按 base_url 同域
+        派生，与验证会话保持一致。"""
+        try:
+            anti = getattr(config, 'anti_crawler_config', None) or {}
+            expr = (anti.get('captchaImage') or '').strip()
+            if not expr:
+                return ''
+            from urllib.parse import urljoin, urlparse, urlunparse
+            page_url = config.search_url.replace('@keyword', '')
+            rsp = self._send_guarded(
+                'GET', page_url, config, cancel_token=cancel_token,
+                headers={'referer': f'{config.base_url}/', 'user-agent': get_random_ua()},
+                timeout=(5, 8), verify=True)
+            status = getattr(rsp, 'status_code', None)
+            # status_code 取不到（兼容无状态码的响应替身）视为成功，对齐 _send_guarded 口径
+            if status is not None and status != 200:
+                return ''
+            html = rsp.text or ''
+            sel = self._xpath_strategy  # 复用其 HTML 文档解析
+            root = sel._document_element(html)
+            nodes = root.xpath(expr)
+            if not nodes:
+                return ''
+            node = nodes[0]
+            src = ''
+            if hasattr(node, 'get'):
+                src = node.get('src') or node.get('data-src') or ''
+            else:
+                src = str(node)
+            src = src.strip()
+            if not src:
+                return ''
+            # 相对路径绝对化（对齐 utils.normalize_episode_url 的归一思想）
+            absu = urljoin(page_url, src)
+            p = urlparse(absu)
+            if p.scheme not in ('http', 'https') or not p.netloc:
+                return ''
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, p.query, ''))
+        except Exception:
+            return ''
 
     # ---------------------------------------------------------------- HTTP 执行
 

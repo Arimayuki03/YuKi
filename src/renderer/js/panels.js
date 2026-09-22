@@ -572,9 +572,10 @@ const LOCAL_PAGE_SIZE = 100;
 let _localPage = null;   // { path, parent, dirs, videos, audios }
 let _localPageNo = 1;
 
-/** 上级目录项（..，非根目录时置顶）。 */
+/** 上级目录项（..，非根目录时置顶）。无 href：a 标签不产生导航，CSP 无从拦截；
+ *  手型光标由 ui.css .file-item 的 cursor:pointer 提供（该规则本就与标签无关）。 */
 function buildParentItem() {
-    return `<a class="file-item" href="javascript:void(0)" onclick="goParent()">
+    return `<a class="file-item" onclick="goParent()">
     <img class="file-icon" src="${icDir}" alt="">
     <div class="file-info"><div class="file-name">..</div></div>
     </a>`;
@@ -583,7 +584,7 @@ function buildParentItem() {
 /** 文件夹项：点击进入；右键弹删除文件夹确认。 */
 function buildDirItem(name, time, path) {
     const ep = escPath(path);
-    return `<a class="file-item" href="javascript:void(0)" oncontextmenu="showDelFolderDialog('${ep}',currentRoot);return false" onclick="enterDir('${ep}')">
+    return `<a class="file-item" oncontextmenu="showDelFolderDialog('${ep}',currentRoot);return false" onclick="enterDir('${ep}')">
     <img class="file-icon" src="${icDir}" alt="">
     <div class="file-info"><div class="file-name">${escHtml(name)}</div><div class="file-time">${escHtml(time)}</div></div>
     </a>`;
@@ -592,7 +593,7 @@ function buildDirItem(name, time, path) {
 /** 文件项：点击弹信息确认框（可提交播放）；右键弹删除文件确认。 */
 function buildFileItem(name, time, path) {
     const ep = escPath(path);
-    return `<a class="file-item" href="javascript:void(0)" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')">
+    return `<a class="file-item" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')">
     <img class="file-icon" src="${icFile}" alt="">
     <div class="file-info"><div class="file-name">${escHtml(name)}</div><div class="file-time">${escHtml(time)}</div></div>
     </a>`;
@@ -639,7 +640,7 @@ function loadLocalThumbs() {
             img.src = window.localThumbUrl ? window.localThumbUrl(r.path) : ('file:///' + String(r.path).replace(/\\/g, '/'));
             img.alt = '';
             ph.replaceWith(img);
-        });
+        }).catch(() => { /* 单卡抓帧失败保持占位图：不得让 rejection 逃成全局未捕获 */ });
     });
 }
 
@@ -1540,10 +1541,11 @@ function initSettingsPanel() {
         window.yuki.settingsSet('simulDownload', this.checked);
         warnToast(this.checked ? '已开启边下边播（下次起播生效）' : '已关闭边下边播');
     });
-    // 自动加载弹幕：仅持久化，播放时 player.js 读取（下次起播生效）
+    // 自动加载弹幕：持久化并通知主进程热同步 mpv.danmakuEnabled（播放中切换即时生效）
     $('#set_danmaku').on('change', function () {
         window.yuki.settingsSet('danmakuEnable', this.checked);
-        warnToast(this.checked ? '已开启自动加载弹幕（下次起播生效）' : '已关闭自动加载弹幕');
+        if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
+        warnToast(this.checked ? '已开启自动加载弹幕' : '已关闭自动加载弹幕');
     });
     // m3u8 广告过滤：仅持久化，addHls 时主进程读取（下一个任务生效）
     $('#set_hls_adfilter').on('change', function () {

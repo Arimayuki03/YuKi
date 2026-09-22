@@ -5,6 +5,9 @@
  * 最新在前，上限 200 条。详情页打开时自动记入历史；收藏在详情页手动切换。
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
  * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
+ * Bangumi 收藏卡内嵌「★ 评分」按钮与「我的 N★」徽章（recCard 直接渲染，覆盖一切重建路径；
+ * 点击事件由 my.js 在 document 级委托打开 BgmRate 对话框——独立收藏页 #view-favorites
+ * 与「我的」页内嵌网格两处 Bangumi 卡都生效）。
  */
 /* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter */
 
@@ -246,7 +249,8 @@ function fmtTime(ts) {
 /** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面左上角加状态标签）。
  *  历史卡按次记录（T73）：每次播放一条，显示 集名 · 时长 · 播放时间，不再显示「已播 N 集」。
  *  Kazumi 源历史卡无源封面：复用 Bangumi 封面缓存，未命中占位图标 data-cover-missing 供 fillMissingCovers 补拉。
- *  Bangumi 条目（v.bangumi）：无移除/编辑/勾选按钮，来源徽标显示「Bangumi」，点击进 Bangumi 二级详情页。 */
+ *  Bangumi 条目（v.bangumi）：无移除/编辑/勾选按钮，来源徽标显示「Bangumi」，点击进 Bangumi 二级详情页；
+ *  并内嵌「★ 评分」按钮（v.myRate 有值时另带「我的 N★」徽章），评分点击由 my.js 委托打开 BgmRate 对话框。 */
 function recCard(v, editable, withTags, playCountByName) {
     // Bangumi 管理态判定（T79 补遗）：除远端条目自带 bangumi 标志外，详情页同步
     // 写入的本地镜像记录（site='bangumi'，带 bangumiId）同样按账号托管渲染——
@@ -308,6 +312,19 @@ function recCard(v, editable, withTags, playCountByName) {
         : '';
     const del = isBgm ? '' : `<button class="rec-del" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>`;
     const edit = (editable && !isBgm) ? `<button class="rec-edit" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : '';
+    // Bangumi 卡「★ 评分」操作按钮：并入 recCard 直接渲染（修复2）——任何重建路径
+    // （搜索防抖/标签筛选/翻页/标签切换/FavHub 重渲）都天然带按钮，不再依赖 my.js
+    // 渲染后注入。点击事件由 my.js 在 document 级委托处理（独立收藏页与「我的」页均生效）。
+    const rateBtn = isBgm && String(v.vodId || '')
+        ? `<button type="button" class="rec-bgm-rate" title="评分 / 吐槽（同步到 Bangumi）">★ 评分</button>`
+        : '';
+    // 「我的 N★」徽章：v.myRate（1-10，my.js _fetchBangumiItems 映射远端收藏 rate）
+    // 有值时渲染，封面右上角（左上角被状态标签 rec-tag 占用；bgm 卡无右上角删除按钮，不冲突）。
+    // 数值经 escHtml 转义（远端可控字段防御，对齐 #11）。
+    const myRateNum = (v.myRate === 0 || v.myRate) ? Number(v.myRate) : 0;
+    const myBadge = (isBgm && myRateNum >= 1 && myRateNum <= 10)
+        ? `<span class="bangumi-myrate-badge" style="left:auto; right:6px;" title="我的评分 ${myRateNum} 分">我的 ${escHtml(myRateNum)}★</span>`
+        : '';
     const srcBadge = isBgm
         ? `<span class="rec-site" title="Bangumi 收藏">Bangumi</span>`
         : (v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : '');
@@ -316,13 +333,14 @@ function recCard(v, editable, withTags, playCountByName) {
         ${tagBadge}
         ${del}
         ${edit}
-        <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${srcBadge}</div>
+        <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${srcBadge}${myBadge}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
         ${isPlay ? '' : `<div class="vod-remarks">${escHtml(v.remarks || '')}</div>`}
         ${epNameLine}
         ${epCountLine}
         ${playInfo}
         ${progressHtml}
+        ${rateBtn}
     </div>`;
 }
 
@@ -487,6 +505,11 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 })
                 .on('click', '.vod-card', (e) => {
                     const el = $(e.currentTarget);
+                    // 「★ 评分」操作按钮点击不进详情（对齐 bangumi-search.js 的 .bgm-card-rate 做法）：
+                    // 按钮自身 handler 委托在 document 级（my.js，独立收藏页与「我的」页均生效），
+                    // stopPropagation 拦不住本层委托（records.js 委托根更深、先于 document 执行），
+                    // 故在卡片委托入口按事件源过滤，点评分只开对话框不切页。
+                    if ($(e.target).closest('.rec-bgm-rate').length) return;
                     // 选择模式下点卡片 = 切换勾选，不打开详情
                     if (this._selectMode) {
                         const chk = el.find('.rec-check');

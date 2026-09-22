@@ -841,8 +841,28 @@ class ConfigManager:
         注意：TVBox 生态的 jar 经常伪装成 .jpg/.png/.bin 等后缀（防直链/防封），
         因此这里**不做后缀限制**；是否为真正 jar 由下载环节按内容魔数校验
         （zip PK / dex），非 jar 的顶层 spider（如 drpy .js）会在那里跳过并记录。
+
+        兼容两种非字符串写法（此前直接 `str(cfg.get('spider'))` 会把整个列表
+        序列化成 `"['https://...', ...]"`，urljoin/startswith('http') 全部失效，
+        表现为该仓所有 csp_ 站点报「no shared jar」而全部跳过）：
+        - **列表/数组**（菜妮丝 tv.菜妮丝.top、王小二放牛娃等仓的写法）：
+          `spider: ["./jar/x.jar;md5", "https://mirror/y.jar;md5"]`——依序取
+          **第一个**能解析成 http(s) 的地址作为共享 jar，镜像语义；
+        - **多值分号串**（饭太硬系等用「;;;」做主备分隔）：
+          `https://a/1.jar;md5;;;https://b/2.jar;md5`——TVBox/FongMi 桌面端
+          按第一个可达地址下载，这里保留整串交给 jar_bridge.norm_jar_src
+          的分号解析（取首段 URL + 跳过空段/'md5' 标记找校验值），不在此拆分，
+          以免丢掉第二段里的备用 md5 语义。
         """
-        raw = str(cfg.get('spider') or '').strip()
+        raw = cfg.get('spider')
+        if isinstance(raw, (list, tuple)):
+            # 菜妮丝等仓的 spider 数组：取第一个可解析成 http 的镜像。
+            for item in raw:
+                candidate = ConfigManager._resolve_spider_jar({'spider': item}, base_url)
+                if candidate:
+                    return candidate
+            return ''
+        raw = str(raw or '').strip()
         if not raw:
             return ''
         head, sep, tail = raw.partition(';')
@@ -902,7 +922,16 @@ class ConfigManager:
         # 供 type=3 且 api 为类名（csp_XXX）的站点加载（见 _build_site）。
         spider_jar = self._resolve_spider_jar(cfg, base_url)
         if cfg.get('spider'):
-            logger.info('config.spider=%s → shared jar: %s', cfg['spider'], spider_jar or '(not a jar / unresolved)')
+            logger.info('config.spider=%s → shared jar: %s', cfg['spider'],
+                        spider_jar or '(not a jar / unresolved)')
+            if not spider_jar:
+                # 顶层 spider 存在但解析不出 http 地址：几乎必然导致整仓 csp_
+                # 站点全部跳过（no shared jar）。给出可操作的诊断，而不是让
+                # 用户面对一堆相同的 L3 失败摸不着头脑。
+                logger.warning(
+                    '[L1:resolve] 顶层 spider 字段（%r）未解析出可下载的 http(s) jar：'
+                    '配置里 api 为 csp_ 类名的站点将无法加载；请检查该仓 spider 地址'
+                    '是否为 http(s) 直链或相对路径。', cfg.get('spider'))
         parsed = ParsedConfig.from_json(cfg, base_url=base_url, shared_spider=spider_jar)
         new_sites = []
         diagnostics = []
@@ -1555,6 +1584,12 @@ class ConfigManager:
                 int(raw_type)
             except (TypeError, ValueError) as e:
                 raise ValueError(f"[L2:type] invalid type for {key or '?'}") from e
+            if isinstance(raw_type, str):
+                # 「type 写成字符串」是 TVBox 生态常见的手写笔误（"type":"1"），
+                # FongMi 的 Gson 反序列化会把它静默转成整数；路由层也能容错
+                # （int('1') 可转），这里只打日志提示，不拒绝条目。
+                logger.info('site %s: type 字段为字符串 %r（已按数值 %s 处理）',
+                            key, raw_type, int(raw_type))
         raw_api = str(data.get('api') or '')
         if not key or not raw_api:
             raise ValueError('[L2:site] site entry requires key and api')
@@ -1781,8 +1816,17 @@ class ConfigManager:
             jar_url, md5, class_name = JarBridge.norm_jar_src(api)
             if not jar_url:
                 if api.startswith('csp_') and spider_jar:
+                    # 站点只写类名：jar 取该仓顶层共享 spider（TVBox 标准）。
                     jar_url, md5, _ = JarBridge.norm_jar_src(spider_jar)
                     class_name = api
+                elif api.startswith('csp_') and not spider_jar:
+                    # 可操作报错：这类失败整仓出现时，根因几乎都是配置缺
+                    # 顶层 spider（或 spider 不是 http 地址）——此前只报
+                    # 「no shared jar」，用户无从下手。
+                    raise ValueError(
+                        '[L3:jar] 站点 %s 使用 csp_ 类名（%s）但配置没有可用的'
+                        '顶层 spider jar；请确认该仓的 spider 字段是 http(s) 直链'
+                        '（部分仓写成数组或用 ;;; 分隔多个备用地址）' % (key, api))
                 if not jar_url:
                     return None
             jar_path = JarBridge.download_jar(

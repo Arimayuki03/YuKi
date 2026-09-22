@@ -137,6 +137,7 @@ test('recCard：Bangumi 条目带来源徽标/状态标签，可勾选批量标�
     assert.match(html, /rec-check/);       // Bangumi 条目现支持勾选（多选标记状态，同步账号）
     assert.match(html, /data-bgm="1"/);    // 带 Bangumi 标识供批量标记识别
     assert.doesNotMatch(html, /rec-edit/);
+    assert.match(html, /rec-bgm-rate/);    // 内嵌「★ 评分」操作按钮（recCard 直接渲染，重建路径不丢）
 });
 
 test('recCard：本地与下载文件卡片带 data-local-path 供抓帧渲染', () => {
@@ -303,4 +304,50 @@ test('recCard：详情页同步写入的本地镜像（site=bangumi 无 bangumi 
         true, true, {});
     assert.ok(plain.includes('rec-del'));
     assert.ok(plain.includes('rec-edit'));
+});
+
+// ---------------------------------------------------------------- Bangumi 卡评分操作与「我的评分」徽章（recCard 内嵌）
+
+test('recCard：isBgm 分支内嵌 rec-bgm-rate 评分按钮，本地/历史卡不带', () => {
+    const { __recCard } = loadRecords({});
+    // Bangumi 条目（远端标志）：带评分按钮
+    const bgm = __recCard({ site: 'bangumi', vodId: '77', name: '番剧', tag: 'want', bangumi: true }, true, true, {});
+    assert.ok(bgm.includes('rec-bgm-rate'), 'Bangumi 卡应自带「★ 评分」按钮');
+    assert.ok(bgm.includes('★ 评分'), '按钮文案可见');
+    // 本地镜像（site=bangumi 无 bangumi 标志）同样按 isBgm 渲染按钮
+    const mirror = __recCard({ site: 'bangumi', vodId: '77', name: '番剧', tag: 'want', bangumiId: '77', uid: 'u1' }, true, true, {});
+    assert.ok(mirror.includes('rec-bgm-rate'), '同步镜像卡也应带评分按钮');
+    // 对照组：普通收藏/播放历史不带评分按钮
+    const plain = __recCard({ site: 'cspby', vodId: 'v1', name: '普通收藏', tag: 'want', uid: 'u2' }, true, true, {});
+    assert.ok(!plain.includes('rec-bgm-rate'), '本地收藏卡不应有评分按钮');
+    const play = __recCard({ site: 's', vodId: 'v', name: '播放卡', kind: 'play' }, true, false, {});
+    assert.ok(!play.includes('rec-bgm-rate'), '历史卡不应有评分按钮');
+});
+
+test('recCard：myRate 1-10 渲染「我的 N★」徽章，缺省/越界不渲染且数值经转义', () => {
+    const { __recCard } = loadRecords({});
+    // 有评分：渲染徽章
+    const rated = __recCard({ site: 'bangumi', vodId: '9', name: '番剧', tag: 'want', bangumi: true, myRate: 9, myComment: '神作' }, true, true, {});
+    assert.ok(rated.includes('bangumi-myrate-badge'), '有评分应渲染徽章');
+    assert.ok(rated.includes('我的 9★'), '徽章文案「我的 9★」');
+    // 无 myRate 字段（旧响应）：不渲染
+    const unrated = __recCard({ site: 'bangumi', vodId: '9', name: '番剧', tag: 'want', bangumi: true }, true, true, {});
+    assert.ok(!unrated.includes('bangumi-myrate-badge'), '无评分不渲染徽章');
+    // 越界/脏数据（0、>10、非数值）：不渲染
+    for (const bad of [0, 42, 'abc']) {
+        const html = __recCard({ site: 'bangumi', vodId: '9', name: '番剧', tag: 'want', bangumi: true, myRate: bad }, true, true, {});
+        assert.ok(!html.includes('bangumi-myrate-badge'), `myRate=${bad} 不应渲染徽章`);
+    }
+    // 普通/历史卡即使误带 myRate 也不渲染徽章
+    const plain = __recCard({ site: 'cspby', vodId: 'v1', name: '普通收藏', tag: 'want', uid: 'u2', myRate: 8 }, true, true, {});
+    assert.ok(!plain.includes('bangumi-myrate-badge'), '非 Bangumi 卡不渲染徽章');
+});
+
+test('recCard：带评分按钮时仍无 rec-del/rec-edit，按钮 title 转义安全', () => {
+    const { __recCard } = loadRecords({});
+    const bgm = __recCard({ site: 'bangumi', vodId: '5', name: '<img src=x onerror=1>', tag: 'want', bangumi: true, myRate: 7 }, true, true, {});
+    assert.ok(!bgm.includes('rec-del'), '评分按钮不替代托管规则：仍无删除按钮');
+    assert.ok(!bgm.includes('rec-edit'), '仍无编辑按钮');
+    // 片名进 data-name/title 时经 escHtml，注入串不产出可执行标签
+    assert.ok(!/<img src=x/.test(bgm), '片名应被转义');
 });

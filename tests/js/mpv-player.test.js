@@ -175,6 +175,120 @@ test('stop() 标记当前会话 userStopped（退出时不得断流重连）', (
     assert.equal(session.userStopped, true);
 });
 
+// ---------------------------------------------------------------- 播放位置查询（get-pos 契约的底层）
+
+// 渲染层经 yuki:player 'get-pos' 读取当前播放位置做真实进度估算；
+// 主进程侧取值口径：无会话/未连接 → null，否则返回观察缓存（异步 get_property 顺带刷新）。
+test('getTimePos(): 已连接时返回观察缓存并异步刷新（实时 time-pos 滞后时也不跳变）', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.proc = {};
+    p._connected = true;
+    p.socket = {};
+    p._activeSession = { id: 51, pos: 33.5 };
+    let queried = 0;
+    p.getProperty = (name) => {
+        assert.equal(name, 'time-pos');
+        queried += 1;
+        return Promise.resolve(99);
+    };
+    assert.equal(p.getTimePos(), 33.5, '同步返回观察缓存（此刻 33.5）');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(queried, 1, '同步返回后仍发起一次实时查询');
+    assert.equal(p._activeSession.pos, 99, '查询结果顺带刷新缓存，下次调用即最新');
+    assert.equal(p.getTimePos(), 99);
+});
+
+test('getTimePos(): 未连接/无会话/缓存缺失时返回 null', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.proc = {};
+    p._connected = false;
+    p.socket = null;
+    p._activeSession = { id: 52, pos: 10 };
+    assert.equal(p.getTimePos(), null, 'IPC 未连接：无从取实时位置');
+
+    p._connected = true;
+    p._activeSession = null;
+    assert.equal(p.getTimePos(), null, '无活动会话：返回 null');
+
+    p._activeSession = { id: 53, pos: null }; // 起播后 time-pos 尚未上报
+    p.getProperty = () => Promise.reject(new Error('property unavailable'));
+    assert.equal(p.getTimePos(), null, '缓存缺失（未起播）时返回 null，不猜测 0');
+});
+
+// ---------------------------------------------------------------- watch-later 续播位置守卫（opEd/续播 seek 不覆盖 mpv 自行恢复）
+
+// mpv --save-position-on-quit 会在装载时自行恢复 watch-later 位置（time-pos 已落在
+// 记录处）；此后无条件下发 pendingSeekSec 会把播放位置拽回目标秒（典型症状：看到
+// 中途退出重进被拉回片头/跳片点）。守卫：仅当当前位置仍在片头附近才应用 seek。
+test('file-loaded 续播守卫：mpv 已自行恢复到中途（time-pos>5s）时跳过 pendingSeekSec', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args);
+        if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(1200.5);
+        return Promise.resolve();
+    };
+    p._activeSession = { id: 60, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._onEvent({ event: 'file-loaded' });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(seeks, [], 'watch-later 已恢复到中途位置：不得再下发 seek 覆盖');
+    assert.equal(p._activeSession.seekApplied, true, '守卫只判定一次，后续集数不再重试');
+});
+
+test('file-loaded 续播守卫：当前位置仍在片头（≤5s）时照常应用 opEd/续播 seek', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args);
+        if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(0.3);
+        return Promise.resolve();
+    };
+    p._activeSession = { id: 61, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._onEvent({ event: 'file-loaded' });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(seeks, [['seek', 90, 'absolute+exact']]);
+});
+
+test('file-loaded 续播守卫：time-pos 属性不可用时按无恢复处理，seek 照常应用', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args);
+        return Promise.resolve();
+    };
+    p.getProperty = (name) => {
+        assert.equal(name, 'time-pos');
+        return Promise.reject(new Error('property unavailable'));
+    };
+    p._activeSession = { id: 62, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._onEvent({ event: 'file-loaded' });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(seeks, [['seek', 90, 'absolute+exact']], '守卫失败必须保持 opEd/续播 seek 原有行为');
+});
+
+test('file-loaded 续播守卫：读 time-pos 期间会话已切换时不再对旧会话 seek', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args);
+        if (args[0] === 'get_property' && args[1] === 'time-pos') {
+            // 应答延迟到达前，渲染层已 stop→play 换了新会话
+            return Promise.resolve(0.3);
+        }
+        return Promise.resolve();
+    };
+    const oldSession = { id: 63, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._activeSession = oldSession;
+    p._onEvent({ event: 'file-loaded' });
+    p._activeSession = { id: 64, ready: false, seekApplied: false }; // 新会话接管
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(seeks, [], '旧会话的续播 seek 不得落在新会话头上');
+});
+
 // ---------------------------------------------------------------- 真正起播确认
 
 test('waitForReady(): 收到 file-loaded/ready 事件后返回成功', async () => {
@@ -307,7 +421,212 @@ test('play(): externalStyle 下功能类资产仍注入，外观类跳过（快�
     assert.ok(argv.some((a) => a.startsWith('--script-opt=select-menu_conf_path=')), '中文菜单必须注入');
     // 外观类：externalStyle 下跳过
     assert.ok(!argv.includes('--osd-font=Microsoft YaHei'), '外观字体按 externalStyle 跳过');
+    // 窗口层级：不注入 --ontop 常驻置顶（前置交给 _bringToFront 激活兜底）
+    assert.ok(!argv.includes('--ontop'), '起播 argv 不得包含 --ontop（不默认置顶）');
     fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- 弹幕轨装载门控（danmakuEnable 默认关）
+
+// 渲染层设置键 danmakuEnable 默认关：player.js 只在开启时才向 mpv 推弹幕；
+// 但播放器侧若 IPC 连接后无条件 sub-add 弹幕轨，外部 mpv 仍会进入弹幕播放状态
+// （表现为「设置关闭后弹幕仍默认启动」）。播放器侧必须同受该开关约束。
+test('_connectIpc(): danmakuEnabled=false（默认）不 sub-add 弹幕轨，其余 observe 照常', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 40 };
+    p.proc = {};
+    const calls = [];
+    p.command = (...args) => { calls.push(args); return Promise.resolve(); };
+    p._probeContextMenuBinding = () => {};
+    p._verifyA4kBindings = () => {};
+    p._bringToFront = () => {};
+    // 模拟 socket connect 回调（真实 _connectIpc 依赖 net.connect，直接测连接就绪段）
+    // 用 net.connect 桩：注入假 socket 触发 connect 回调
+    const net = require('net');
+    const fakeSock = new net.Socket();
+    p.ipcPath = '\\\\.\\pipe\\yuki-test';
+    const origConnect = net.connect;
+    net.connect = () => fakeSock;
+    try {
+        p._connectIpc(0, 40);
+        fakeSock.emit('connect');
+    } finally {
+        net.connect = origConnect;
+        fakeSock.destroy();
+    }
+    assert.equal(p._connected, true);
+    assert.ok(!calls.some((c) => c[0] === 'sub-add'), '弹幕关闭（默认）时不得 sub-add 弹幕轨');
+    assert.ok(calls.some((c) => c[0] === 'observe_property'), '全屏/倍速等属性观察不受弹幕开关影响');
+});
+
+test('_connectIpc(): danmakuEnabled=true 时 sub-add 弹幕轨（开启态行为保持）', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p._activeSession = { id: 41 };
+    p.proc = {};
+    p.danmakuEnabled = true;
+    const calls = [];
+    p.command = (...args) => { calls.push(args); return Promise.resolve(); };
+    p._probeContextMenuBinding = () => {};
+    p._verifyA4kBindings = () => {};
+    p._bringToFront = () => {};
+    const net = require('net');
+    const fakeSock = new net.Socket();
+    p.ipcPath = '\\\\.\\pipe\\yuki-test-on';
+    const origConnect = net.connect;
+    net.connect = () => fakeSock;
+    try {
+        p._connectIpc(0, 41);
+        fakeSock.emit('connect');
+    } finally {
+        net.connect = origConnect;
+        fakeSock.destroy();
+    }
+    const add = calls.find((c) => c[0] === 'sub-add');
+    assert.ok(add, '弹幕开启时必须 sub-add 弹幕轨');
+    assert.equal(add[1], p.assPath);
+    assert.equal(add[3], '彈幕');
+});
+
+test('loadDanmakuBatch(): danmakuEnabled=false 直接返回 0，不写盘不 sub-reload', () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.danmakuEnabled = false;
+    p._connected = true;
+    p.assPath = path.join(require('os').tmpdir(), 'yuki-danmaku-gate-off-test.ass');
+    try { fs.rmSync(p.assPath, { force: true }); } catch (e) { /* ignore */ }
+    let reloaded = 0;
+    p.command = (...args) => { if (args[0] === 'sub-reload') reloaded++; return Promise.resolve(); };
+    const n = p.loadDanmakuBatch([{ p: '1.0,1,16777215,uid', m: '弹幕' }]);
+    assert.equal(n, 0);
+    assert.equal(reloaded, 0);
+    assert.equal(fs.existsSync(p.assPath), false, '关闭态不得生成 ASS 弹幕文件');
+    assert.deepEqual(p._danmakuLines || [], []);
+});
+
+test('loadDanmakuBatch(): danmakuEnabled=true 行为保持（转 ASS 写盘并经轨探测 sub-reload）', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.danmakuEnabled = true;
+    p._connected = true;
+    p.assPath = path.join(require('os').tmpdir(), `yuki-danmaku-gate-on-${Date.now()}.ass`);
+    let reloaded = 0;
+    p.command = (...args) => {
+        if (args[0] === 'sub-reload') reloaded++;
+        // 轨探测走真实 getProperty → get_property track-list：桩回「已有弹幕轨」。
+        // 用真实 mpv（v0.41 实测）的条目形态：external-filename 字段，无 src。
+        if (args[0] === 'get_property' && args[1] === 'track-list') {
+            return Promise.resolve([{ type: 'sub', 'external-filename': p.assPath }]);
+        }
+        return Promise.resolve();
+    };
+    const n = p.loadDanmakuBatch([
+        { p: '1.0,1,16777215,uid', m: '弹幕一' },
+        { p: '2.5,5,255,uid', m: '顶部弹幕' },
+    ]);
+    assert.equal(n, 2);
+    await new Promise((r) => setImmediate(r)); // 轨探测异步分流后才下发 sub-reload
+    assert.equal(reloaded, 1);
+    const text = fs.readFileSync(p.assPath, 'utf8');
+    assert.ok(text.includes('弹幕一'));
+    try { fs.rmSync(p.assPath, { force: true }); } catch (e) { /* ignore */ }
+});
+
+// ---------------------------------------------------------------- 弹幕轨装载时序（占位文件 + 轨探测补轨）
+
+// sub-add 在文件不存在时不建轨（mpv 直接报 "error running command"），此后
+// sub-reload 无轨可刷——弹幕整场静默失效。起播前必须先落一份占位文件。
+test('play(): danmakuEnabled=true 起播前写 ASS 占位文件（sub-add 建轨前提）；关闭态不写', () => {
+    const mk = (enabled) => {
+        const p = Object.create(MpvPlayer.prototype);
+        p.binary = process.execPath; // play() 起播前校验存在性
+        p.danmakuEnabled = enabled;
+        // 原型实例不经构造器：assPath 与生产一致指向共享临时路径
+        p.assPath = path.join(require('os').tmpdir(), `yuki-danmaku-placeholder-${enabled}-${Date.now()}.ass`);
+        p.stop = () => {};
+        p._refreshIpcPath = () => {};
+        p._bringToFront = () => {};
+        p._connectIpc = () => {};
+        p._spawn = () => ({ pid: 1, on: () => {}, once: () => {}, stderr: null });
+        return p;
+    };
+    const on = mk(true);
+    on.play([{ url: 'http://x/a.mp4', title: 'a' }]);
+    const text = fs.readFileSync(on.assPath, 'utf8');
+    assert.ok(text.includes('[Script Info]') && text.includes('[V4+ Styles]') && text.includes('[Events]'),
+        '占位文件必须是含三段结构的合法 ASS');
+    assert.ok(!text.includes('Dialogue:'), '占位文件只含 header，不携带任何弹幕 Dialogue');
+    try { fs.rmSync(on.assPath, { force: true }); } catch (e) { /* ignore */ }
+
+    const off = mk(false);
+    off.play([{ url: 'http://x/a.mp4', title: 'a' }]);
+    assert.equal(fs.existsSync(off.assPath), false, '弹幕关闭（默认）时起播全程不生成 ASS 文件');
+});
+
+test('loadDanmakuBatch(): track-list 无弹幕轨时补 sub-add 建轨而非 sub-reload', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.danmakuEnabled = true;
+    p._connected = true;
+    p.assPath = path.join(require('os').tmpdir(), `yuki-danmaku-addback-${Date.now()}.ass`);
+    const calls = [];
+    p.command = (...args) => {
+        calls.push(args);
+        if (args[0] === 'get_property' && args[1] === 'track-list') {
+            return Promise.resolve([{ type: 'video' }, { type: 'audio' }]); // 只有视频/音频轨
+        }
+        return Promise.resolve();
+    };
+    p.loadDanmakuBatch([{ p: '1.0,1,16777215,uid', m: '弹幕' }]);
+    await new Promise((r) => setImmediate(r));
+    assert.ok(calls.some((c) => c[0] === 'sub-add' && c[1] === p.assPath && c[3] === '彈幕'),
+        '轨缺失必须补 sub-add（与 _connectIpc 同参：select + 彈幕）');
+    assert.ok(!calls.some((c) => c[0] === 'sub-reload'), '无轨时 sub-reload 静默失败，不得下发');
+    try { fs.rmSync(p.assPath, { force: true }); } catch (e) { /* ignore */ }
+});
+
+test('loadDanmakuBatch(): 重复调用不产生重复 sub-add（真实 mpv external-filename 形态锁死）', async () => {
+    // 回归锁（验证代理真机实测）：真实 mpv track-list 条目只有 external-filename、
+    // 没有 src 字段。此前谓词 t.src === assPath 在真实 mpv 上恒假 → 每次批量装载
+    // 都误判为「无轨」补发 sub-add，两次刷新后出现 3 条重复弹幕轨。
+    const p = Object.create(MpvPlayer.prototype);
+    p.danmakuEnabled = true;
+    p._connected = true;
+    p.assPath = path.join(require('os').tmpdir(), `yuki-danmaku-dup-${Date.now()}.ass`);
+    const calls = [];
+    // 纯 external-filename 形态（无 src 字段）＝真实 mpv 返回形态，锁死谓词兼容
+    p.command = (...args) => {
+        calls.push(args);
+        if (args[0] === 'get_property' && args[1] === 'track-list') {
+            return Promise.resolve([
+                { type: 'video', 'external-filename': 'C:/video.mp4' },
+                { type: 'audio' },
+                { type: 'sub', 'external-filename': p.assPath, title: '彈幕' },
+            ]);
+        }
+        return Promise.resolve();
+    };
+    p.loadDanmakuBatch([{ p: '1.0,1,16777215,uid', m: '第一轮' }]);
+    await new Promise((r) => setImmediate(r));
+    p.loadDanmakuBatch([{ p: '2.0,1,16777215,uid', m: '第二轮' }]);
+    await new Promise((r) => setImmediate(r));
+    const adds = calls.filter((c) => c[0] === 'sub-add');
+    assert.equal(adds.length, 0, '已有弹幕轨（external-filename 匹配）时重复批量装载只 sub-reload，不得再 sub-add');
+    assert.equal(calls.filter((c) => c[0] === 'sub-reload').length, 2, '每轮批量装载各一次 sub-reload 热更新');
+    try { fs.rmSync(p.assPath, { force: true }); } catch (e) { /* ignore */ }
+});
+
+test('loadDanmakuBatch(): track-list 属性不可用时静默跳过（不误发命令）', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p.danmakuEnabled = true;
+    p._connected = true;
+    p.assPath = path.join(require('os').tmpdir(), `yuki-danmaku-probe-fail-${Date.now()}.ass`);
+    const calls = [];
+    p.command = (...args) => { calls.push(args); return Promise.resolve(); };
+    p.getProperty = () => Promise.reject(new Error('property unavailable'));
+    p.loadDanmakuBatch([{ p: '1.0,1,16777215,uid', m: '弹幕' }]);
+    await new Promise((r) => setImmediate(r));
+    assert.ok(!calls.some((c) => c[0] === 'sub-reload' || c[0] === 'sub-add'),
+        '无法判断轨状态时不得盲目下发 reload/add');
+    try { fs.rmSync(p.assPath, { force: true }); } catch (e) { /* ignore */ }
 });
 
 // ---------------------------------------------------------------- 视频缓冲缓存（只走内存）
@@ -316,8 +635,8 @@ test('_cacheArgs(): 在线播放缓存只进内存，不落磁盘', () => {
     const p = Object.create(MpvPlayer.prototype);
     const a = p._cacheArgs(true);
     assert.ok(a.includes('--cache=yes'));
-    assert.ok(a.includes('--demuxer-max-bytes=512MiB'));      // 内存缓冲上限
-    assert.ok(a.includes('--demuxer-max-back-bytes=128MiB')); // 回退缓冲（同为内存）
+    assert.ok(a.includes('--demuxer-max-bytes=256MiB'));      // 内存缓冲上限
+    assert.ok(a.includes('--demuxer-max-back-bytes=64MiB')); // 回退缓冲（同为内存，与上限 4:1）
     assert.ok(a.includes('--demuxer-readahead-secs=60'));
     assert.ok(a.includes('--cache-on-disk=no'));              // 显式关闭，压过用户 mpv.conf
     assert.ok(!a.some((x) => x.startsWith('--demuxer-cache-dir=')));
@@ -480,12 +799,15 @@ test('buildM3u(): #EXTINF 集名与 URL 成对；换行/Tab 压空格；空列�
     assert.equal(MpvPlayer.buildM3u(null), '');
 });
 
-test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用一次，ready 照常逐次发出', () => {
+test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用一次，ready 照常逐次发出', async () => {
     const p = Object.create(MpvPlayer.prototype);
     p._pending = new Map();
     const seeks = [];
     p.command = (...args) => {
-        if (args[0] === 'seek') seeks.push(args); // 只捕获 seek；file-loaded 还会查 playlist-pos
+        if (args[0] === 'seek') seeks.push(args); // 只捕获 seek
+        // 轨守卫走 get_property time-pos：桩回片头附近（无 watch-later 恢复）→ seek 放行
+        if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(0.4);
+        if (args[0] === 'get_property') return Promise.resolve(0);
         return Promise.resolve();
     };
     p._activeSession = { id: 30, ready: false, pendingSeekSec: 95.5, seekApplied: false, itemStartMs: Date.now() };
@@ -493,6 +815,7 @@ test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用�
     p.on('ready', () => { readyCount += 1; });
     p._onEvent({ event: 'file-loaded' });
     p._onEvent({ event: 'file-loaded' }); // 第二集装载：不再 seek
+    await new Promise((r) => setImmediate(r)); // 守卫读 time-pos 异步返回后才 seek
     assert.deepEqual(seeks, [['seek', 95.5, 'absolute+exact']]);
     assert.equal(readyCount, 2); // waitForReady 依赖每次 file-loader 的 ready 事件
     assert.equal(p._activeSession.seekApplied, true);

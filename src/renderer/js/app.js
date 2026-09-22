@@ -296,8 +296,24 @@ const App = {
 $(async function bootstrap() {
     // 渲染端未捕获错误落盘：转发到主进程 electron-main.log（脱敏由主进程 writer 负责）。
     // 尽早注册，晚于此的启动错误也能被记录。
+    // 熔断（2026-09 拒绝风暴回归）：logRenderer 上报本身失败（IPC 被拒等）会再产生
+    // unhandledrejection，与本监听形成「拒绝→上报→再拒绝」自激循环——旧会话曾
+    // 6 秒刷出 12000+ 条日志把 UI 拖死。双保险：
+    //   ① 上报 promise 显式 .catch，掐断本循环的成环点（拒绝不再逃成全局未捕获）；
+    //   ② 每秒最多 20 条的计数熔断，任何来源的同构风暴（上报→拒绝→再上报）都在
+    //      这里被截断；窗口每秒重置，正常低频上报不受影响。
+    let _fwdCount = 0;
+    let _fwdWindowStart = 0;
     const _forwardRendererError = (level, message) => {
-        try { if (window.yuki && window.yuki.logRenderer) window.yuki.logRenderer(level, String(message || '').slice(0, 4000)); } catch (e) { /* 上报失败不影响运行 */ }
+        const now = Date.now();
+        if (now - _fwdWindowStart >= 1000) { _fwdWindowStart = now; _fwdCount = 0; }
+        if (++_fwdCount > 20) return; // 超限静默丢弃：宁可少记日志也不让上报链自激
+        try {
+            if (window.yuki && window.yuki.logRenderer) {
+                const p = window.yuki.logRenderer(level, String(message || '').slice(0, 4000));
+                if (p && typeof p.catch === 'function') p.catch(() => { /* 上报失败不逃成 unhandledrejection */ });
+            }
+        } catch (e) { /* 上报失败不影响运行 */ }
     };
     window.addEventListener('error', (e) => {
         const msg = e && e.error && e.error.stack ? e.error.stack : `${e && e.message} @ ${e && e.filename}:${e && e.lineno}:${e && e.colno}`;

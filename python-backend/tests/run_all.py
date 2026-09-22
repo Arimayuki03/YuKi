@@ -22,6 +22,8 @@ STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
+    # Bangumi 评分/吐槽（rate/comment 单条透传）+ 验证码自动识别（animeko 思路，可选降级）
+    ('kazumi-bgm-rating', [PY, os.path.join(HERE, 'test_kazumi_bgm_rating.py')]),
     ('kazumi-cover-proxy', [PY, os.path.join(HERE, 'test_kazumi_cover_proxy.py')]),
     ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('webdav-conn', [PY, os.path.join(HERE, 'test_webdav_conn.py')]),
@@ -32,6 +34,8 @@ STAGES = [
     ('spider-content-cache', [PY, os.path.join(HERE, 'test_spider_content_cache.py')]),
     # Kazumi 规则源搜索/章节的会话缓存（复用 mem_cache 底座）
     ('kazumi-cache', [PY, os.path.join(HERE, 'test_kazumi_cache.py')]),
+    # HLS 广告段过滤（尽力而为）：DISCONTINUITY+跨host+路径词组合判定与防错杀护栏
+    ('ad-filter', [PY, os.path.join(HERE, 'test_ad_filter.py')]),
     # RM-4：playerContent 解析结果持久缓存（跨重启跳过查源 + 失效重解析）
     ('play-cache', [PY, os.path.join(HERE, 'test_play_cache.py')]),
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
@@ -39,6 +43,9 @@ STAGES = [
     ('runtime-supervisor', [PY, os.path.join(HERE, 'test_runtime_supervisor.py')]),
     ('site-health', [PY, os.path.join(HERE, 'test_site_health.py')]),
     ('config-compat', [PY, os.path.join(HERE, 'test_config_compat.py'), '--offline']),
+    # 真实世界公共仓格式兼容回归（饭太硬/菜妮丝系 spider 数组/;;;主备/GBK/注释/
+    # 图片伪装/省略 type 的 csp_ 条目等）：解析层 + 路由层，全程离线。
+    ('config-realworld-formats', [PY, os.path.join(HERE, 'test_config_realworld_formats.py')]),
     ('port-generalization', [PY, os.path.join(HERE, 'test_port_generalization.py')]),
     ('quark-pan', [PY, os.path.join(HERE, 'test_quark_pan.py')]),
     ('proxy-contract', [PY, os.path.join(HERE, 'test_proxy_contract.py')]),

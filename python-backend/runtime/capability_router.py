@@ -167,6 +167,17 @@ def route_site(item, *, api=None, ext='', site_key='', android_enabled=None):
     # R1 CMS：type 0/1 是苹果 CMS 的 JSON/XML HTTP 接口，必须是 http(s)。
     if site_type in (0, 1):
         if not resolved_api.lower().startswith(('http://', 'https://')):
+            # 「条目**省略** type 且 api 是 csp_ 类名 / .jar 直链」：TVBox 手写仓
+            # 常见的省略写法。FongMi 桌面端 BaseLoader 实际按 api 形态装载
+            # spider（csp_/jar → Java spider），type 缺省为 0 只是 Gson 的 int
+            # 默认值——按 CMS 报「api 必须是 http(s)」会把整仓 jar 源全判死
+            # （用户看到的就是「导入不了」）。这里按 jar 契约改判；显式写
+            # type: 0/1 的条目仍按 CMS 契约如实报错（type=0/1 是声明，不是缺省）。
+            if raw_type is None and looks_like_jar(resolved_api):
+                return _decide(key, site_type, 'jar', 'R4-jvm-jar',
+                               'type 缺省但 api 是 csp_ 类名或 .jar 直链'
+                               '（TVBox 手写仓常见省略），按 JAR 字节分级后路由',
+                               needs_jar=True)
             return _decide(key, site_type, 'unsupported', 'R1-cms',
                            'CMS 站点的 api 必须是 http(s) 接口',
                            error_code='L2_SITE_INVALID')

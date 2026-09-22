@@ -36,7 +36,12 @@ contextBridge.exposeInMainWorld('yuki', {
      * 供复制或交外部播放器。reason='mpv-missing' 时渲染层走 <video> 预览兜底。
      */
     playUrl: (url, meta) => ipcRenderer.invoke('yuki:play', { url, meta }),
-    /** 播放控制：cmd ∈ pause/resume/toggle/seek/volume/speed/quit */
+    /**
+     * 播放控制透传：cmd 直接交主进程 yuki:player 分发表。
+     * 控制类 ∈ pause/resume/toggle/seek/volume/speed/quit（成功 {ok:true}，失败 {ok:false, reason}）；
+     * 查询类 get-pos 返回 { ok: true, pos: <秒(浮点)|null> }——无会话/未起播/属性不可用时 pos=null，
+     * 「拿不到位置」不按错误处理（渲染层按无位置降级），主进程侧按观察缓存+实时查询实现。
+     */
     playerControl: (cmd, value) => ipcRenderer.invoke('yuki:player', cmd, value),
     /** 播放器状态 { available, playing } */
     playerState: () => ipcRenderer.invoke('yuki:player-state'),

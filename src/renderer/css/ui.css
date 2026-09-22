@@ -1870,6 +1870,50 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 }
 .bangumi-search-grid { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); }
 
+/* ===== Bangumi 评分/吐槽（bgm-rate.js；对齐 Kazumi 评分能力） ===== */
+/* 搜索结果卡「评分」操作条：卡片底部悬浮按钮（点击不进详情） */
+.bgm-card-rate {
+    position:absolute; left:6px; bottom:6px; z-index:2;
+    padding:3px 9px; border:none; border-radius:var(--radius-pill);
+    font-size:11px; font-weight:600; cursor:pointer; color:#F2F1EB;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
+    transition:background var(--dur-fast) var(--ease);
+}
+.bangumi-card { position:relative; }
+.bgm-card-rate:hover { background:var(--md-primary); }
+/* 收藏网格 Bangumi 卡「评分」操作（rec-badge 同位风格） */
+.rec-bgm-rate {
+    position:absolute; left:6px; bottom:6px; z-index:2;
+    padding:3px 9px; border:none; border-radius:var(--radius-pill);
+    font-size:11px; font-weight:600; cursor:pointer; color:#F2F1EB;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
+    transition:background var(--dur-fast) var(--ease);
+}
+.rec-bgm-rate:hover { background:var(--md-primary); }
+/* 多选删除模式下隐藏评分操作，避免与勾选点击区重叠 */
+.vod-grid.selecting .rec-bgm-rate, .vod-grid.selecting .bgm-card-rate { display:none; }
+/* 「我的评分」徽章（bangumiCard my_rate 字段渲染，封面左上角） */
+.bangumi-myrate-badge { position:absolute; top:6px; left:6px; z-index:2;
+    padding:2px 7px; border-radius:var(--radius-sm); font-size:10.5px; font-weight:700;
+    color:var(--md-on-primary-container); background:rgba(0,0,0,.6);
+    border:1px solid var(--md-primary-container); }
+/* 评分对话框 */
+#bgmRateDialog .md-dialog { width:460px; max-width:calc(100vw - 48px); }
+.bgm-rate-name { font-size:14px; font-weight:600; margin-bottom:10px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bgm-rate-stars-row { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
+.bgm-rate-star {
+    border:none; background:transparent; cursor:pointer; padding:2px 3px;
+    font-size:22px; line-height:1; color:var(--md-outline-variant);
+    transition:color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.bgm-rate-star:hover { transform:scale(1.15); }
+.bgm-rate-star.active { color:#F5B50A; }
+.bgm-rate-meta { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.bgm-rate-label { font-size:13px; color:var(--md-on-surface-variant); }
+/* 吐槽输入框 */
+#bgm-rate-comment { width:100%; resize:vertical; min-height:84px; }
+
 /* 下载管理（卡片化：与直链/工具页同为 tool-card，限宽居中） */
 .downloads-wrap { max-width:980px; margin:0 auto; }
 .dl-input-bar { display:flex; gap:10px; align-items:center; margin-bottom:14px; }

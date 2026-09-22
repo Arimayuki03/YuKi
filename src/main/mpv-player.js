@@ -31,6 +31,10 @@ const WIN = process.platform === 'win32';
 // 合法转义见 _screenshotArgs 注释（%tX / %0Xn；裸 %w 会让 mpv 判为非法模板并放弃截图）。
 const SHOT_TEMPLATE = 'yuki-%tY%tm%td-%tH%tM%tS-%03n';
 
+// 片头判定阈值（秒）：file-loaded 时当前 time-pos 超过该值，视为 mpv 已自行
+// 应用 watch-later 续播位置，opEd/续播 seek 不再下发（见 _onEvent file-loaded）。
+const RESUME_POS_GUARD_SEC = 5;
+
 function traceFields(value) {
     const result = {};
     if (value && value.requestId) result.requestId = String(value.requestId);
@@ -140,6 +144,8 @@ class MpvPlayer extends EventEmitter {
             ? `\\\\.\\pipe\\yuki-mpv-${process.pid}-${Date.now()}`
             : path.join(os.tmpdir(), `yuki-mpv-${process.pid}-${Date.now()}.sock`);
         this.assPath = path.join(os.tmpdir(), `yuki-danmaku-${process.pid}.ass`);
+        // 弹幕临时文件为所有会话共享的同一路径，延迟到「确认要装载弹幕」时才首次写盘：
+        // 默认（danmakuEnabled=false）全程不生成含观看文本的临时文件。
         this._reqId = 0;
         this._buf = '';
         this._connected = false;
@@ -159,6 +165,10 @@ class MpvPlayer extends EventEmitter {
         this.subLang = '';         // 字幕语言偏好（非空时注入 --slang）
         this.anime4kShaders = '';  // Anime4K 着色器链（分号分隔路径；非空时注入 --glsl-shaders）
         this.screenshotDir = '';   // 截图保存目录（非空时注入 --screenshot-directory，mpv 原生 s 键也存这里）
+        this.danmakuEnabled = false; // 弹幕轨装载开关（对应设置键 danmakuEnable，默认关）。
+        // 必须默认 false：起播时 _connectIpc 会无条件 sub-add 一条空 ASS 轨，若这里默认
+        // 开启，即便渲染层因 danmakuEnable=false 不推弹幕，mpv 播放器侧的弹幕
+        // （sub-delay/sub-visibility）仍处于装载态，与「默认关闭弹幕」的产品语义相悖。
         this._queueLen = 0;        // 当前播放队列长度（ended 事件附带，供渲染层判定队列末尾）
         this._sessionId = 0;       // 起播会话号（每次 play 自增；exit 事件附带，供渲染层匹配新旧进程）
         this._lastFs = false;      // 播放期间全屏状态（实时追踪，exit 时无需查询）
@@ -243,19 +253,23 @@ class MpvPlayer extends EventEmitter {
      * 用户就再也关不掉，表现为「代码默认值已改成内存但实测仍在写盘」——持久化值压过默认值。
      * 残留的两个设置键与 mpv-cache-*.dat 由 index.js 启动时一次性迁移清理。
      *
-     * 在线播放（isNet）统一加大预缓冲抗 CDN/转发抖动（含网盘 go-proxy 分段实时转发流），
-     * 本地文件不需要预缓冲。注：mpv 默认 `--demuxer-cache-unlink-files=immediate`，历史上
-     * 落盘的缓存文件建好即 unlink、播完消失，故排查时只见磁盘写入吞吐、目录里找不到文件。
+     * 在线播放（isNet）统一预缓冲抗 CDN/转发抖动（含网盘 go-proxy 分段实时转发流），
+     * 本地文件不需要预缓冲。内存上限取 256MiB（回退 64MiB，保持 4:1）而非更高的
+     * 默认：缓冲窗口全驻内存，低配机（8GB 且核显共享内存）叠加系统/浏览器占用后
+     * 512MiB 档位易触发换页反而卡顿；256MiB 在常见码率下仍够 4K 起播流水化。
+     * 注：mpv 默认 `--demuxer-cache-unlink-files=immediate`，历史上落盘的缓存文件
+     * 建好即 unlink、播完消失，故排查时只见磁盘写入吞吐、目录里找不到文件。
      */
     _cacheArgs(isNet) {
         const args = [];
         if (isNet) {
             // 网盘(夸克)go-proxy 转流 CDN 常限速（~5MB/s），并发分段几乎无增益。
-            // 加大读缓冲窗口让有限的带宽流水化填充缓存，减少 4K 起播/连播卡顿；
-            // 保持起播即时（不强制先缓冲满，否则等太久）。这些即为内存占用上限。
+            // 预缓冲窗口上限 256MiB（回退 64MiB），减少 4K 起播/连播卡顿的同时
+            // 控制内存峰值；保持起播即时（不强制先缓冲满，否则等太久）。
+            // 这些即为内存占用上限。
             args.push('--cache=yes',
-                      '--demuxer-max-bytes=512MiB', '--demuxer-readahead-secs=60',
-                      '--demuxer-max-back-bytes=128MiB');
+                      '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=60',
+                      '--demuxer-max-back-bytes=64MiB');
             // 网盘 go-proxy 转发（do=pan）首次起播可能要先解析分享/转存（5-20s），
             // 加大网络超时避免 mpv 等待首字节超时断开（此前 10054 播放失败）。
             args.push('--network-timeout=120');
@@ -334,8 +348,9 @@ class MpvPlayer extends EventEmitter {
         let deferredSeekSec = null;
         let playlistPath = '';
         let startIndex = -1; // 原生队列实际起播的 m3u 下标（-1=非原生队列/未起播）
+        // 弹幕行缓冲在每次起播时清空重置（真正的 ASS 写盘延迟到首次追加弹幕时，
+        // 见 _writeAss 的按需写入；弹幕轨是否随 IPC 连接装载由 danmakuEnabled 门控）。
         this._danmakuLines = [];
-        this._writeAss();
 
         const args = [
             '--idle=no', '--no-terminal',
@@ -345,9 +360,9 @@ class MpvPlayer extends EventEmitter {
             // 注意 v0.41 起 --focus-on-open 已移除，改用 --focus-on（open=新窗口时获得焦点）。
             '--focus-on=open',
             `--input-ipc-server=${this.ipcPath}`,
-            // 窗口始终置顶（win32 gdi 后端）：从根源上杜绝 mpv 窗口落在主窗口背后，
-            // 与 _bringToFront 的激活兜底互补（前置只是改 z 序，不一定抢到输入焦点）。
-            '--ontop',
+            // 不注入 --ontop：常驻置顶会让 mpv 压在其他应用之上（切出去做别的事
+            // 视频仍挡在屏幕最前），干扰正常多窗口使用。「不被主窗遮住」改由
+            // _bringToFront 的前置+激活兜底保证（spawn 时与 file-loaded 各一次）。
             '--sub-auto=no', '--sub-visibility=yes',
             // OSD 起播消息先转义 $（mpv 在 osd-msg 里把 ${property}/$?{…} 当属性展开
             // 占位，片名里裸 $ 会被吞掉或展开出错，见 escapeOsdText）。
@@ -502,7 +517,8 @@ class MpvPlayer extends EventEmitter {
                 ...trace,
             };
         }
-        // 起播即带入前台：前置(ontop)保证不被主窗遮住，激活兜底尽可能抢到输入焦点。
+        // 起播即带入前台：前置 + 激活兜底，让 mpv 窗口出现在主窗之上并尽可能抢到
+        // 输入焦点（不用 --ontop 常驻置顶，见起播 argv 处注释）。
         // （务必在 proc 赋值后调用；fire-and-forget，不阻塞起播。）
         this._frontTimer = null;
         this._frontTries = 0;
@@ -597,6 +613,11 @@ class MpvPlayer extends EventEmitter {
             this._removeAssFile(sessionId); // P3-24：会话退出即清弹幕临时文件（含观看文本）
             this.emit('exit', info);
         });
+        // 弹幕开启时先落一份仅含 ASS header 的占位文件再连接 IPC：_connectIpc 的
+        // sub-add 在文件不存在时不建轨（mpv 对缺失文件直接报错），此后 loadDanmakuBatch
+        // 的 sub-reload 无轨可刷，弹幕整场静默失效。占位内容不含弹幕文本，弹幕行
+        // 到达后由 _writeAss 覆盖写并 sub-reload 热更新。
+        if (this.danmakuEnabled) this._writeAssPlaceholder();
         this._connectIpc(0, sessionId);
         return {
             ok: true,
@@ -743,7 +764,8 @@ class MpvPlayer extends EventEmitter {
     /** 删除 ASS 弹幕临时文件（%TEMP%/yuki-danmaku-<pid>.ass，P3-24）。
      *  文件内容含观看文本（片名/弹幕内容），原先从不清理、残留整个进程生命周期，
      *  且其他本机进程可读。会话 teardown 与进程退出路径各清一次（幂等；写入点
-     *  在下一次 play 前由 _writeAss 覆盖重建，删除不影响后续播放）。
+     *  在弹幕装载时由 _writeAss 按需重建，删除不影响后续播放；弹幕开关默认关，
+     *  此时文件根本不会生成，这里也自然无文件可删）。
      *  仅在会话号匹配时才删：assPath 是所有会话共享的同一路径，快速 stop→play
      *  时旧会话的 exit 事件延迟到达，若无条件删除会把新会话刚 sub-add 的弹幕
      *  文件删掉（sub-reload 静默失败，弹幕消失）。 */
@@ -758,10 +780,11 @@ class MpvPlayer extends EventEmitter {
      * 背景：Electron 应用（尤其无边框/自绘标题栏模式）点击「播放」时自身已持有前台焦点，
      * Windows 前台锁（foreground lock）会拒绝后台进程激活窗口——mpv 窗口因此常静默落在
      * 主窗口背后（「播放器不出现在前台」）。--focus-on-open 只是请求，不可靠。
-     * 方案双重保证：起播参数注入 --ontop（z 序置顶，从根源上不被主窗遮住）+
-     * 这里从 Electron 主进程侧兜底（spawn PowerShell 辅助进程周期性尝试激活 mpv
+     * 方案：这里从 Electron 主进程侧兜底（spawn PowerShell 辅助进程周期性尝试激活 mpv
      * 顶层窗口：Win32 AttachThreadInput + SetForegroundWindow，前台锁只允许持有
      * 前台线程的关联线程成功激活），mpv 窗口真正出现在前台后辅助进程自行退出。
+     * 不再注入 --ontop 常驻置顶：前置/激活只改变当下 z 序与焦点，用户切走后 mpv
+     * 回到正常窗口层级，不会一直压在其他应用之上。
      *
      * @param {number} [pid] 目标进程 PID（缺省取当前会话 proc.pid）
      */
@@ -787,8 +810,14 @@ class MpvPlayer extends EventEmitter {
             this._connected = true;
             sock.on('data', (chunk) => this._onData(chunk));
             sock.on('error', () => { /* 进程退出时管道断开 */ });
-            // 装载 ASS 弹幕轨
-            this.command('sub-add', this.assPath, 'select', '彈幕').catch(() => { });
+            // 装载 ASS 弹幕轨（受 danmakuEnabled 门控）：默认关闭时不 sub-add——
+            // 空轨被 select 后弹幕样式/可见性等设置仍作用于播放器，用户会感知为
+            // 「设置关了弹幕却还在（默认）开启」。sub-add 的目标文件由 play() 在
+            // 起播前写成仅含 header 的占位（见 _writeAssPlaceholder），此处建轨
+            // 必然成功；真实弹幕行到达后由 loadDanmakuBatch 覆盖写并 sub-reload。
+            if (this.danmakuEnabled) {
+                this.command('sub-add', this.assPath, 'select', '彈幕').catch(() => { });
+            }
             // 追踪全屏/倍速状态（退出时无需再查询，避免窗口已关闭拿到错误值）
             this.command('observe_property', 0x101, 'fullscreen').catch(() => { });
             this.command('observe_property', 0x102, 'speed').catch(() => { });
@@ -903,10 +932,26 @@ class MpvPlayer extends EventEmitter {
                 }).catch(() => { });
                 // 原生队列的首集续播位置：--start 会作用到每一集（全局选项），故只在
                 // 首次 file-loaded 后经 IPC seek 一次，后续集数从头播。
+                // 下发前先读当前 time-pos 守卫：mpv 的 --save-position-on-quit 会把
+                // watch-later 记录的续播位置在装载时自行应用（time-pos 已落在记录处），
+                // 此时的 opEd/续播 seek 若无条件执行会把播放位置拉回目标秒（典型表现：
+                // 看到中途退出，重进同一集被拽回片头/跳片点）。仅当位置仍在片头附近
+                // （未发生任何续播跳转）时才应用本次 seek。
                 if (active.pendingSeekSec != null && !active.seekApplied) {
                     active.seekApplied = true;
                     const sec = active.pendingSeekSec;
-                    this.command('seek', sec, 'absolute+exact').catch(() => { /* 起播 seek 失败不致命 */ });
+                    this.getProperty('time-pos').then((v) => {
+                        // 结果到达时会话可能已切换，只对原会话生效
+                        if (this._activeSession !== active) return;
+                        const cur = (typeof v === 'number' && isFinite(v) && v >= 0) ? v : 0;
+                        if (cur > RESUME_POS_GUARD_SEC) return; // mpv 已自行续播，跳过
+                        this.command('seek', sec, 'absolute+exact').catch(() => { /* 起播 seek 失败不致命 */ });
+                    }).catch(() => {
+                        // 属性读不到（起播瞬态等）：按无续播恢复处理，保持 opEd/续播 seek 生效
+                        if (this._activeSession === active) {
+                            this.command('seek', sec, 'absolute+exact').catch(() => { });
+                        }
+                    });
                 }
                 this.emit('ready', { sessionId: active.id, ...traceFields(active) });
             }
@@ -1014,6 +1059,22 @@ class MpvPlayer extends EventEmitter {
     getProperty(name) { return this.command('get_property', name); }
 
     /**
+     * 当前播放位置（秒，浮点）。优先走 IPC 实时查询（起播后 time-pos 立即可用，
+     * 属性不可用时回退观察缓存），无会话/未连接时为 null。同步方法：渲染层
+     * 经 yuki:player 'get-pos' 消费，仅作位置展示/估算，不承担精确时钟职责。
+     */
+    getTimePos() {
+        const active = this._activeSession;
+        if (!this.proc || !active || !this._connected || !this.socket) return null;
+        this.getProperty('time-pos').then((v) => {
+            if (typeof v === 'number' && isFinite(v) && v >= 0 && this._activeSession === active) {
+                active.pos = v; // 顺带刷新观察缓存（observe time-pos 按变化上报，存在滞后）
+            }
+        }).catch(() => { /* 媒体尚未起播/属性不可用：保持缓存原值 */ });
+        return (typeof active.pos === 'number' && active.pos >= 0) ? active.pos : null;
+    }
+
+    /**
      * 截图：把当前视频帧存为 PNG（subtitles 模式含字幕/OSD，所见即所得）。
      * filePath 必须以 .png 结尾（mpv 按扩展名推断格式）。
      */
@@ -1028,8 +1089,11 @@ class MpvPlayer extends EventEmitter {
 
     // ------------------------------------------------------------ ASS 弹幕
 
-    /** 追加弹幕；line 文本形如 "[time,mode,size,color]content"（CatVod 面板协议）。 */
+    /** 追加弹幕；line 文本形如 "[time,mode,size,color]content"（CatVod 面板协议）。
+     *  danmakuEnabled=false 时忽略：关闭态下 mpv 侧未装载弹幕轨（见 _connectIpc），
+     *  追加/sub-reload 都无处生效，直接短路以保持「设置关=全程无弹幕」语义。 */
     addDanmaku(lineText, atSec) {
+        if (!this.danmakuEnabled) return;
         const d = MpvPlayer.parseDanmaku(lineText);
         if (!d) return;
         if (typeof atSec !== 'number' || !isFinite(atSec)) atSec = this._danmakuLines.length * 1.2;
@@ -1044,9 +1108,14 @@ class MpvPlayer extends EventEmitter {
      *   - 时间：绝对秒（浮点），直接作为弹幕出现时刻（非 addDanmaku 的相对累加）；
      *   - 模式：弹弹 play 1/2/3/6→滚动，4→底部，5→顶部；
      *   - 颜色：十进制 0xRRGGBB。
-     * 全部转成 ASS Dialogue 行后写盘，已连接则 sub-reload 生效。返回装载条数。
+     * danmakuEnabled=false（设置键 danmakuEnable 关，默认态）时直接返回 0：不写盘、
+     * 也不补 sub-add——关闭态下 IPC 连接时就没有装载弹幕轨，re-load 无处生效。
+     * 开启态下按 track-list 现状分流：已装载弹幕轨（正常路径，_connectIpc sub-add
+     * 成功）只需 sub-reload 刷新；轨缺失（sub-add 失败/晚到会话等）时补 sub-add。
+     * 返回装载条数。
      */
     loadDanmakuBatch(comments) {
+        if (!this.danmakuEnabled) return 0;
         if (!Array.isArray(comments) || !comments.length) return 0;
         this._danmakuLines = [];
         this._laneCounter = 0;
@@ -1061,8 +1130,28 @@ class MpvPlayer extends EventEmitter {
             this._danmakuLines.push(this._assDialogue(d, 0)); // atSec=0：d.time 即绝对时刻
         }
         this._writeAss();
-        if (this._connected) this.command('sub-reload').catch(() => { });
+        if (this._connected) this._refreshDanmakuTrack();
         return this._danmakuLines.length;
+    }
+
+    /**
+     * 把弹幕临时文件的内容刷进播放器：有弹幕轨则 sub-reload（重读文件，热更新），
+     * 无轨则补 sub-add 建轨。调用前提：danmakuEnabled=true 且 ASS 文件已写盘。
+     * 仅 IPC 已连接时有意义；命令失败静默（占位文件损坏等极端态下弹幕缺席，
+     * 不影响播放本体）。
+     */
+    _refreshDanmakuTrack() {
+        this.getProperty('track-list').then((tracks) => {
+            // 真实 mpv（v0.41+ 实测）track-list 条目带 external-filename、无 src 字段；
+            // 老版本 mpv 用 src。两形态都兼容，只认指向本弹幕 ASS 文件的 sub 轨。
+            const hasDanmaku = Array.isArray(tracks) && tracks.some((t) => t
+                && t.type === 'sub'
+                && ((t['external-filename'] || t.src) === this.assPath));
+            const cmd = hasDanmaku
+                ? this.command('sub-reload')
+                : this.command('sub-add', this.assPath, 'select', '彈幕');
+            cmd.catch(() => { });
+        }).catch(() => { /* 属性不可用时无从判断，保持现状 */ });
     }
 
     /**
@@ -1223,7 +1312,31 @@ class MpvPlayer extends EventEmitter {
     }
 
     _writeAss() {
-        const header = `[Script Info]
+        // 按需写盘：仅当「弹幕开关开启且已有弹幕行」时才生成 ASS 文件。
+        // 不再在 play() 开头无条件写一次空文件——关闭态下磁盘上不应出现含观看
+        // 上下文的临时文件，开启态下 IPC 连接 sub-add 之前也必有真实弹幕行
+        // （loadDanmakuBatch 转换完成才会触发写盘），不差这次空写。
+        if (!this.danmakuEnabled || !this._danmakuLines.length) return;
+        fs.writeFileSync(this.assPath, '\uFEFF' + MpvPlayer.assHeader() + this._danmakuLines.join('\n') + '\n', 'utf8');
+    }
+
+    /**
+     * ASS 弹幕占位文件（仅 header，无 Dialogue）。play() 在起播前写入：
+     * mpv 的 sub-add 要求文件在命令下达时已存在，缺失文件不建轨且后续
+     * sub-reload 无轨可刷——弹幕轨装载必须以占位文件为前提，真实弹幕行
+     * 追加后经 sub-reload 热更新到该轨。占位内容不含任何观看上下文。
+     */
+    _writeAssPlaceholder() {
+        try {
+            fs.writeFileSync(this.assPath, '\uFEFF' + MpvPlayer.assHeader(), 'utf8');
+        } catch (e) {
+            console.warn(`[mpv] 弹幕占位文件写入失败：${e && e.message}`);
+        }
+    }
+
+    /** ASS 最小合法结构：Script Info + V4+ Styles + Events 段头（弹幕 Dialogue 之前的部分）。 */
+    static assHeader() {
+        return `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
 PlayResY: 720
@@ -1237,8 +1350,6 @@ Style: Default,Microsoft YaHei,25,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
-        const body = this._danmakuLines.join('\n');
-        fs.writeFileSync(this.assPath, '\uFEFF' + header + body + '\n', 'utf8');
     }
 }
 

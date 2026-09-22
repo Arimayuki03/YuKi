@@ -422,6 +422,27 @@ class FieldMatrixTest(unittest.TestCase):
                          './jar/shared.jar;00000000000000000000000000000000',
                          '顶层原始 spider 仍然原样保留')
 
+    def test_spider_array_takes_first_element_for_diagnostics(self):
+        """spider 数组（菜妮丝等仓的镜像写法）：诊断页取第一个元素展示，
+        不得把整串 Python repr（"['https://...', ...]"）当 spider 显示。
+        简版语义（取首个非空元素）与 config.py `_resolve_spider_jar`
+        的完整解析（依序取第一个 http(s) 镜像）不同，此处仅诊断展示。"""
+        parsed = ParsedConfig.from_json(
+            {'spider': ['./jar/primary.jar;' + 'a' * 32,
+                        'https://mirror.invalid/y.jar;' + 'b' * 32],
+             'sites': []},
+            base_url=PARSE_BASE)
+        self.assertEqual(parsed.spider, './jar/primary.jar;' + 'a' * 32)
+        # 全空数组：收敛为空串，不抛错
+        empty = ParsedConfig.from_json({'spider': ['', '  '], 'sites': []})
+        self.assertEqual(empty.spider, '')
+        # 空列表同样收敛为空串
+        self.assertEqual(ParsedConfig.from_json({'spider': []}).spider, '')
+        # 字符串形态不受影响（回归）
+        plain = ParsedConfig.from_json(
+            {'spider': './jar/shared.jar;' + '0' * 32, 'sites': []})
+        self.assertEqual(plain.spider, './jar/shared.jar;' + '0' * 32)
+
     def test_split_jar_ref_keeps_disguised_suffixes(self):
         """TVBox 的 jar 常伪装成 .jpg/.png/.bin，拆引用时不能按后缀过滤。"""
         self.assertEqual(split_jar_ref('https://x.invalid/f.jpg;abc'),

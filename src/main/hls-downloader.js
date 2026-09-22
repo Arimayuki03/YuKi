@@ -8,7 +8,8 @@
  * - 任务级并发上限（maxActive，对应设置页「并发任务数」）：活跃任务达到上限时
  *   新任务进入 waiting 队列排队，任一任务终态后 FIFO 补位启动；
  * - AES-128 加密流（含 #EXT-X-KEY）自动回退 ffmpeg 模式（ffmpeg 自动解密）；
- * - 广告过滤（adFilter）复用 filterAdSegments，在解析阶段过滤广告分片；
+ * - 广告过滤（adFilter）两段式：filterAdSegments 按 CUE-OUT/CUE-IN/路径特征
+ *   过滤，filterAdBlocks 按 DISCONTINUITY 广告块启发式过滤（ad_filter.py 同规则）；
  * - 任务状态结构与 aria2 flatten 对齐（kind:'hls' 供渲染层区分），
  *   由主进程 1s 轮询合并推送；完成/失败经 EventEmitter 通知。
  */
@@ -74,20 +75,25 @@ function isAdUri(uri) {
  * 主机制：#EXT-X-CUE-OUT … #EXT-X-CUE-IN 之间的分段为广告（标准插播协议）；
  * 辅助：#EXT-X-DATERANGE 带 X-ASSET-URI/ad 标记的行去除；分段 URL 命中广告路径特征也去除。
  * 保留其它标签（KEY/TARGETDURATION/MEDIA-SEQUENCE/ENDLIST）与正常分段，相对地址解析为绝对地址。
+ * 返回 { filtered, removed, removedSec }：removedSec 为被删分片的 EXTINF 标称
+ * 时长累计（无 EXTINF 配对的裸 URI 删除不计入），供日志「过滤 N 段（X s）」
+ * 口径完整——否则 CUE 删除计入 removed 却 0 秒。
  */
 function filterAdSegments(playlist, baseUrl) {
     const lines = playlist.split(/\r?\n/);
     const out = [];
     let inAd = false;
     let pendingInf = null;
+    let pendingSec = 0;     // 当前 pendingInf 的标称时长（随配对 URI 收口或随广告删除累计）
     let removed = 0;
+    let removedSec = 0;
     const abs = (uri) => {
         try { return new URL(uri, baseUrl).href; } catch (e) { return uri; }
     };
     for (const raw of lines) {
         const line = raw.trim();
         if (!line) continue;
-        if (/^#EXT-X-CUE-OUT/.test(line)) { inAd = true; pendingInf = null; continue; }
+        if (/^#EXT-X-CUE-OUT/.test(line)) { inAd = true; pendingInf = null; pendingSec = 0; continue; }
         if (/^#EXT-X-CUE-IN/.test(line)) { inAd = false; continue; }
         if (/^#EXT-X-DATERANGE/.test(line)) {
             if (/X-ASSET-URI|CLASS="[^"]*ad/i.test(line)) removed++;
@@ -99,15 +105,274 @@ function filterAdSegments(playlist, baseUrl) {
             out.push(line.replace(/URI="([^"]+)"/, (m, u) => `URI="${abs(u)}"`));
             continue;
         }
-        if (/^#EXTINF/.test(line)) { pendingInf = line; continue; }
+        if (/^#EXTINF/.test(line)) {
+            const m = line.match(/^#EXTINF:([\d.]+)/);
+            pendingInf = line;
+            pendingSec = m ? parseFloat(m[1]) : 0;
+            continue;
+        }
         if (line.startsWith('#')) { out.push(line); continue; }
         const uri = abs(line);
-        if (inAd || isAdUri(uri)) { removed++; pendingInf = null; continue; }
+        if (inAd || isAdUri(uri)) {
+            removed++;
+            removedSec += pendingSec; // CUE 删除的分片时长一并累计，保证日志秒数口径完整
+            pendingInf = null; pendingSec = 0;
+            continue;
+        }
         if (pendingInf) { out.push(pendingInf); pendingInf = null; }
+        pendingSec = 0;
         out.push(uri);
     }
     if (pendingInf) out.push(pendingInf);
-    return { filtered: out.join('\n'), removed };
+    return { filtered: out.join('\n'), removed, removedSec };
+}
+
+// ===== 启发式广告块过滤（与 python-backend/ad_filter.py 同规则）=====
+// 背景：国内源的 m3u8 常把广告分片用一对 #EXT-X-DISCONTINUITY 包裹混进正片
+// 播放列表，且不带 CUE-OUT/CUE-IN 标记。此类广告由下方启发式识别。设计原则
+// ——宁可漏过滤，不可错杀正片：一切判定都要求「位置特征 + 内容特征」多条
+// 独立证据叠加，单凭 DISCONTINUITY 包裹、时长短或跨 host 都不动手（片头/
+// 章节/编码切换同样产生 DISCONTINUITY，独立压制 OP/ED 与多 CDN 分发也会跨
+// host）；跨 host 分支同样要求 path_hit 作为第二证据（2026-09-22 修订，
+// 见 adSegmentVerdict），short_odd 仅作放大器；判为「正片主体」的分片
+// （时长加权出现最多的 host + 主流时长档）永不删除；清单以奇数个
+// DISCONTINUITY 收尾时块标记不可信，只允许严格组合；最后有 30% 安全阀，
+// 删除总时长超过全片 30% 视为大面积误判，整份放弃过滤。
+
+// 单个广告分片时长上限（电视台广告普遍 15~30s，正片分片典型 2~10s；仅作特征之一）
+const AD_MAX_SEG_SEC = 30.0;
+// 广告块（DISCONTINUITY 区间）分片数下限：孤立的单分片 discontinuity 块
+// 多为编码切换，删了就是错杀
+const AD_MIN_BLOCK_SEGS = 2;
+// 广告块累计时长上限：超过更可能是正片的一段（OP/ED 独立压制）
+const AD_MAX_BLOCK_SEC = 120.0;
+// 安全阀：删除总时长占全片比例超过该值即整份放弃过滤
+const AD_MAX_REMOVED_RATIO = 0.30;
+// 广告 URL 路径关键词（小写子串匹配；词边界用 [^a-z0-9] 而非 \b——\b 会把
+// ad-01 的连字符当边界，/video/ad-01.ts 并非广告路径）。命中是强特征但单独
+// 不足以删，必须叠加另一条独立证据。
+const AD_PATH_RE = /(?:^|[^a-z0-9])(?:ads?|advert(?:isement)?|guanggao|cm)(?:\/|\.ts|\.mp4|$|[?#])/i;
+
+/** Python 风格 round（银行家舍入）：ad_filter.py 的时长分桶依赖该语义。 */
+function roundHalfEven(x) {
+    const r = Math.round(x);
+    if (x - Math.floor(x) === 0.5 && r % 2 !== 0) return r - 1;
+    return r;
+}
+
+function adPathHit(uri) {
+    let path = String(uri || '');
+    try { path = new URL(path).pathname; } catch (e) {
+        // 相对地址：借伪基解析出路径部分；伪基路径不含广告词，不影响判定
+        try { path = new URL(path, 'http://adfilter.invalid/').pathname; } catch (e2) { /* 原样判 */ }
+    }
+    return AD_PATH_RE.test(path || '');
+}
+
+/** 分片解析：每条 EXTINF 开启一个分片，到 URI 行收口；中间注释标签归属该分片。 */
+function parseAdSegments(lines) {
+    const EXTINF_RE = /^#EXTINF:\s*([0-9]+(?:\.[0-9]+)?)/;
+    const segs = [];
+    let pending = null;     // 当前分片累积的原文行
+    let pendingDur = 0;
+    let pendingLine = 0;    // EXTINF 行号（删除时按行号区间整段剔除）
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].replace(/[\r\n]+$/, '');
+        const s = line.trim();
+        const m = EXTINF_RE.exec(s);
+        if (m && s.startsWith('#EXTINF:')) {
+            pending = [lines[i]]; pendingDur = parseFloat(m[1]); pendingLine = i;
+            continue;
+        }
+        if (pending) pending.push(lines[i]);
+        if (s && !s.startsWith('#')) {
+            if (!pending) {
+                // 裸 URI 行（无前置 EXTINF 的混写清单）必须用全新状态收口：
+                // 绝不能继承上一分片的 pendingDur/pendingLine，否则删除窗口
+                // 会按错误的行号覆盖到前一个正片分片（错杀正片、留下真广告）。
+                pending = [lines[i]]; pendingDur = 0; pendingLine = i;
+            }
+            segs.push({
+                lines: pending, duration: pendingDur,
+                uri: (s.split(/\s+/)[0]) || '', lineNo: pendingLine,
+            });
+            pending = null;
+        } else if (!s) {
+            // 空行不打断 pending（有的源 EXTINF 与 URI 之间夹空行）
+        }
+    }
+    return segs;
+}
+
+function adHostOf(uri) {
+    try { return new URL(String(uri)).host.toLowerCase(); } catch (e) { return ''; }
+}
+
+/** 标记每个分片是否位于一对 #EXT-X-DISCONTINUITY 之间：DISCONTINUITY 是区间
+ *  分隔符，按出现次数翻转开关（奇数次后=区间内）；-SEQUENCE 声明仅数值递增
+ *  不指示位置，不参与。返回清单结束时区间是否未闭合（奇数个 DISCONTINUITY，
+ *  写坏/截断清单会悬空开启——调用方应禁用块内宽松判定，见 filterAdBlocks）。 */
+function markDiscontinuityBlocks(lines, outFlags) {
+    let open = false;
+    let segI = 0;
+    for (const raw of lines) {
+        const s = raw.replace(/[\r\n]+$/, '').trim();
+        if (s.startsWith('#EXT-X-DISCONTINUITY-SEQUENCE')) continue;
+        if (s === '#EXT-X-DISCONTINUITY') { open = !open; continue; }
+        if (s.startsWith('#EXT-X-DISCONTINUITY')) continue; // 其他扩展形式不参与
+        if (s && !s.startsWith('#')) {
+            if (segI < outFlags.length) outFlags[segI] = open;
+            segI++;
+        }
+    }
+    return open;
+}
+
+/** 单分片广告判定：返回命中的原因描述；不是广告返回 null。
+ *  组合逻辑（与 ad_filter.py._is_ad_like 一致）：
+ *  1. DISCONTINUITY 包裹 +（路径命中 或 时长异常显著）——discontinuity 只算
+ *     位置证据，内容证据必须另有其一；shortOdd 仅作放大器（宽松判定用）；
+ *  2. 不在 DISCONTINUITY 内时要求更严：跨 host 且 路径命中且时长异常；
+ *  3. 与正片主体同 host 的分片永不因 host/时长删除，仅路径强命中 +
+ *     时长异常 + discontinuity 包裹三条齐备才动手。
+ *  跨 host 口径（防错杀对拍口径，2026-09-22 修订，与 py 同步）：跨 host 只是
+ *  来源不同这一条证据——独立压制的 OP/ED、多 CDN 分发、画质切换都会产生
+ *  跨 host 分片。任何删除都必须有 pathHit（路径广告词命中）作为第二证据；
+ *  shortOdd 只作为宽松通道的放大器，不再单独与跨 host 组成删除依据——
+ *  宁可漏过滤，不可错杀正片。 */
+function adSegmentVerdict(seg, majorityHost, baseHost, majorityDur, inBlock) {
+    const host = adHostOf(seg.uri) || baseHost;
+    const hostUnknown = !host && !majorityHost; // 全相对清单且无 baseUrl：host 特征不可用
+    const crossHost = !!majorityHost && !!host && host !== majorityHost;
+    // 时长异常（shortOdd）：单独不构成删除依据，只与路径命中叠加时放大
+    // 证据强度（同 host 通道 / 严格通道要求它）。
+    const shortOdd = seg.duration <= AD_MAX_SEG_SEC && seg.duration > 0
+        && (majorityDur <= 0 || seg.duration < majorityDur * 0.6);
+    const pathHit = adPathHit(seg.uri);
+    if (!crossHost) {
+        if (hostUnknown) {
+            if (inBlock && pathHit && shortOdd) return 'host-unknown ad-like path+duration in discontinuity';
+            return null;
+        }
+        if (inBlock && pathHit && shortOdd) return 'same-host ad-like path+duration in discontinuity';
+        return null;
+    }
+    // 跨 host（弱特征，单独不足以删）：路径命中是第二证据——满足即在
+    // discontinuity 包裹下整块处理（块级复核还有整块命中 + 时长上限两道闸）。
+    if (inBlock && pathHit) return 'cross-host segment in discontinuity block';
+    // 无 discontinuity 包裹的零散跨 host 广告：仍取最严组合
+    // （路径 + 时长异常 + 跨 host 三条齐备），缺一放过。
+    if (pathHit && shortOdd) return 'cross-host ad-like path with odd duration';
+    return null;
+}
+
+/**
+ * 启发式过滤 m3u8 文本中的疑似广告分片（ad_filter.py 同规则）：
+ * master 清单（#EXT-X-STREAM-INF）与无 EXTINF 的文本原样返回；分片 < 3 个时
+ * 无统计意义（无法确定「正片主体」），原样返回。
+ * 返回 { text, removed, removedSec, reasons, totalSegments, unclosedDiscontinuity }；
+ * unclosedDiscontinuity=true 表示清单以奇数个 DISCONTINUITY 收尾（本轮已禁用
+ * 块内宽松判定，只允许严格组合）；判定不安全时 text 为原文。
+ */
+function filterAdBlocks(playlist, baseUrl) {
+    const noOp = { text: playlist || '', removed: 0, removedSec: 0, reasons: [], unclosedDiscontinuity: false };
+    if (!playlist || typeof playlist !== 'string') return noOp;
+    // 保留行尾原样切分（splitlines(keepends=True) 语义），删除按整行进行
+    const lines = playlist.split(/(?<=\n)/);
+    if (lines.some((l) => l.trim().startsWith('#EXT-X-STREAM-INF'))) return noOp;
+    if (!lines.some((l) => l.trim().startsWith('#EXTINF:'))) return noOp;
+
+    const segs = parseAdSegments(lines);
+    if (segs.length < 3) return { ...noOp, totalSegments: segs.length };
+    const totalSegments = segs.length;
+    const baseHost = adHostOf(baseUrl) || adHostOf(segs.map((s) => s.uri).find((u) => u && !u.startsWith('#')) || '');
+    // 正片主体 host：按时长加权（个别源把最后一帧单独切成同 host 短片，条数口径会误判）。
+    // 众数取「首个最大值」——与 Python dict 迭代序对齐（Object 的整数样键会前置，产生歧义）
+    const hostTally = new Map();
+    for (const s of segs) {
+        const h = adHostOf(s.uri) || baseHost;
+        hostTally.set(h, (hostTally.get(h) || 0) + s.duration);
+    }
+    let majorityHost = '';
+    let bestSec = -1;
+    for (const [h, sec] of hostTally) {
+        if (sec > bestSec) { bestSec = sec; majorityHost = h; }
+    }
+    // 正片主流时长档：0.5s 粒度众数（键用 Map 保持插入序，理由同上）
+    const durTally = new Map();
+    for (const s of segs) {
+        const bucket = roundHalfEven(s.duration * 2) / 2;
+        durTally.set(bucket, (durTally.get(bucket) || 0) + 1);
+    }
+    let majorityDur = 0;
+    let bestCnt = -1;
+    for (const [b, c] of durTally) {
+        if (c > bestCnt) { bestCnt = c; majorityDur = b; }
+    }
+
+    const inBlock = new Array(segs.length).fill(false);
+    const discUnclosed = markDiscontinuityBlocks(lines, inBlock);
+
+    const remove = new Set();
+    // 命中原因在删除时即时记录（与 py 的 verdict 缓存同语义）：报告不做事后
+    // 重判，严格组合（无 discontinuity 包裹）删除的分片不会被误标成块内命中。
+    const reasons = [];
+    let blockBuf = [];
+    let blockDisc = false;
+    const flushBlock = () => {
+        if (blockBuf.length) {
+            // 整块复核：块内分片全部命中且块时长在广告位量级才整块删除；
+            // 混有「不像广告」分片的块整块放过——块内正片分片承担不起误删
+            if (blockDisc && blockBuf.length >= AD_MIN_BLOCK_SEGS) {
+                const verdicts = blockBuf.map((i) => [i, adSegmentVerdict(segs[i], majorityHost, baseHost, majorityDur, true)]);
+                const hits = verdicts.filter(([, why]) => why);
+                const blockSec = blockBuf.reduce((sec, i) => sec + segs[i].duration, 0);
+                if (hits.length && hits.length >= blockBuf.length && blockSec <= AD_MAX_BLOCK_SEC) {
+                    for (const [i, why] of hits) {
+                        remove.add(i);
+                        reasons.push(`#${i}(${segs[i].duration}s): ${why}`);
+                    }
+                }
+            }
+            blockBuf = [];
+        }
+        blockDisc = false;
+    };
+    for (let i = 0; i < segs.length; i++) {
+        if (inBlock[i] && !discUnclosed) {
+            // 未闭合 DISCONTINUITY 时整段「块」标记不可信：不走块内宽松
+            // 通道（整块复核），按零散分片只允许严格组合判定。
+            blockBuf.push(i); blockDisc = true; continue;
+        }
+        flushBlock();
+        const why = adSegmentVerdict(segs[i], majorityHost, baseHost, majorityDur, false);
+        if (why) {
+            remove.add(i);
+            reasons.push(`#${i}(${segs[i].duration}s): ${why}`);
+        }
+    }
+    flushBlock();
+
+    // 安全阀：删除总时长不得超过全片 30%，超过即认为启发式大面积误判
+    const totalSec = segs.reduce((sec, s) => sec + s.duration, 0) || 1.0;
+    const removedSec = [...remove].reduce((sec, i) => sec + segs[i].duration, 0);
+    if (removedSec / totalSec > AD_MAX_REMOVED_RATIO) {
+        return { text: playlist, removed: 0, removedSec: 0, reasons, totalSegments, unclosedDiscontinuity: discUnclosed };
+    }
+    if (!remove.size) return { text: playlist, removed: 0, removedSec: 0, reasons, totalSegments, unclosedDiscontinuity: discUnclosed };
+
+    // 重建输出：仅剔除被删分片的原文行（EXTINF 行起至 URI 行止），其余原样保留
+    const dropLines = new Set();
+    for (const i of remove) {
+        const start = segs[i].lineNo;
+        for (let j = start; j < lines.length; j++) {
+            dropLines.add(j);
+            const s = lines[j].replace(/[\r\n]+$/, '').trim();
+            if (s && !s.startsWith('#')) break;
+        }
+    }
+    const text = lines.filter((_, j) => !dropLines.has(j)).join('');
+    return { text, removed: remove.size, removedSec, reasons, totalSegments, unclosedDiscontinuity: discUnclosed };
 }
 
 class HlsDownloader extends EventEmitter {
@@ -354,7 +619,12 @@ class HlsDownloader extends EventEmitter {
         t.status = 'waiting';
         t._retried = false;       // copy/转码兜底重试额度复位（同 migrateDir）
         t._transcodeRetried = false;
-        t._adTemp = null;         // 广告过滤临时播放列表重新生成
+        // 广告过滤临时播放列表重新生成：先删磁盘文件再置空（对齐 migrateDir
+        // 的 fs.rmSync + 置 null 做法，否则 .adfilter.m3u8 残留到任务重跑）。
+        if (t._adTemp) {
+            try { fs.rmSync(t._adTemp, { force: true }); } catch (e) { /* ignore */ }
+            t._adTemp = null;
+        }
         t._input = null;
         if (!this._pending.includes(t)) this._pending.push(t);
         this._pump();
@@ -525,7 +795,13 @@ class HlsDownloader extends EventEmitter {
                 plUrl = new URL(best, task.url).href;
                 text = await (await proxyFetch(plUrl, { headers, signal: AbortSignal.timeout(15000), redirect: 'follow' })).text();
             }
-            const { filtered, removed } = filterAdSegments(text, plUrl);
+            const cue = filterAdSegments(text, plUrl);
+            const heuristic = filterAdBlocks(cue.filtered, plUrl);
+            const filtered = heuristic.text;
+            const removed = cue.removed + heuristic.removed;
+            // 秒数口径完整：CUE/路径删除（cue.removedSec）与启发式块删除（heuristic.removedSec）合并累计
+            const removedSec = cue.removedSec + heuristic.removedSec;
+            const reasons = [...heuristic.reasons];
             if (!removed) return; // 无广告分段，直接走原地址
             // 过滤后播放列表须保留 .m3u8 扩展名供 ffmpeg 推断 HLS 输入
             const tmp = task._dest + '.adfilter.m3u8';
@@ -533,7 +809,8 @@ class HlsDownloader extends EventEmitter {
             task._adTemp = tmp;
             task._input = tmp;
             task.adRemoved = removed;
-            console.log(`[hls] ${task.name}: 过滤 ${removed} 个广告分段`);
+            task.adRemovedSec = removedSec;
+            console.log(`[hls] ${task.name}: 过滤 ${removed} 个广告分段（${removedSec.toFixed(1)}s）${reasons.length ? ' ' + reasons.join('; ') : ''}`);
         } catch (e) { /* 过滤失败走原始 url */ }
     }
 
@@ -576,10 +853,12 @@ class HlsDownloader extends EventEmitter {
             plUrl = new URL(best, url).href;
             text = await (await proxyFetch(plUrl, { headers, signal: AbortSignal.timeout(15000), redirect: 'follow' })).text();
         }
-        // 广告过滤
+        // 广告过滤：CUE 标记过滤后再过一遍启发式（DISCONTINUITY 广告块，
+        // 与 python-backend/ad_filter.py 同规则；宁漏勿错杀 + 30% 安全阀）
         if (adFilter) {
-            const { filtered, removed } = filterAdSegments(text, plUrl);
-            if (removed > 0) text = filtered;
+            const cue = filterAdSegments(text, plUrl);
+            const heuristic = filterAdBlocks(cue.filtered, plUrl);
+            if (cue.removed + heuristic.removed > 0) text = heuristic.text;
         }
         // 解析分片
         const segments = [];
@@ -1065,6 +1344,9 @@ class HlsDownloader extends EventEmitter {
             errorMessage: t.errorMessage, files: t.files,
             uri: t.url || '', // 原始 URL，用于重启后恢复下载
             header: t.header || null, // L-8:Referer/UA 随任务输出，供持久化恢复
+            // 广告过滤统计透出给渲染层（adFilter 任务有值，否则 undefined 不占字段口径）
+            adRemoved: t.adRemoved || 0,
+            adRemovedSec: t.adRemovedSec || 0,
         };
     }
 
@@ -1078,3 +1360,4 @@ module.exports = HlsDownloader;
 // 导出纯函数供单测（组件测试：tests/js/hls-filter.test.js）
 module.exports.filterAdSegments = filterAdSegments;
 module.exports.isAdUri = isAdUri;
+module.exports.filterAdBlocks = filterAdBlocks;

@@ -36,10 +36,12 @@
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
     <script src="js/bangumi-search.js" defer></script>
+    <script src="js/bgm-rate.js" defer></script>
     <script src="js/detail.js" defer></script>
     <script src="js/kazumi.js" defer></script>
     <script src="js/timeline.js" defer></script>
     <script src="js/popular.js" defer></script>
+    <script src="js/ad-skip.js" defer></script>
     <script src="js/player.js" defer></script>
     <script src="js/records.js" defer></script>
     <script src="js/downloads.js" defer></script>
@@ -1468,6 +1470,30 @@
             </div>
             <div class="md-dialog-actions">
                 <button id="bgm-sync-progress-close" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dialog: Bangumi 评分/吐槽（bgm-rate.js；对齐 Kazumi 的评分与吐槽能力） -->
+    <div id="bgmRateDialog" class="md-dialog-overlay">
+        <div class="md-dialog" style="max-width:460px;">
+            <div class="md-dialog-title">评分 / 吐槽</div>
+            <div class="md-dialog-body">
+                <div id="bgm-rate-name" class="bgm-rate-name" title=""></div>
+                <div class="bgm-rate-stars-row" id="bgm-rate-stars" role="radiogroup" aria-label="评分 1 到 10 分"></div>
+                <div class="bgm-rate-meta">
+                    <span id="bgm-rate-label" class="bgm-rate-label">未评分</span>
+                    <button type="button" id="bgm-rate-clear" class="md-btn md-btn-tonal md-btn-sm" title="清除评分（同步为未评分）">清除评分</button>
+                </div>
+                <div class="md-field">
+                    <textarea id="bgm-rate-comment" class="md-input" rows="4" maxlength="10000"
+                        placeholder="吐槽（可选）：短评同步到 Bangumi 收藏备注…"></textarea>
+                </div>
+                <div id="bgm-rate-status" class="tip-line pad0" style="display:none;color:var(--md-error);"></div>
+            </div>
+            <div class="md-dialog-actions">
+                <button id="bgm-rate-cancel" class="md-dialog-btn">取消</button>
+                <button id="bgm-rate-submit" class="md-btn md-btn-filled md-btn-sm">提交</button>
             </div>
         </div>
     </div>

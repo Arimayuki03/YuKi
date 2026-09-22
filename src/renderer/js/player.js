@@ -11,10 +11,17 @@
  *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
-/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel */
+/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel, AdSkip */
 
 // 媒体直链后缀：已是直链则无需解析（share/播放页等才需解析）
 const DIRECT_MEDIA_RE = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
+
+/** 智能跳过片头/片尾（opEdSkip）的 AdSkip 依赖获取。
+ *  ad-skip.js 在 index.html 中先于本文件加载；单元测试只加载 player.js 时
+ *  AdSkip 未定义——所有 OP/ED 入口经此判空，缺失即整体禁用（不影响播放）。 */
+function _adSkip() {
+    return (typeof AdSkip !== 'undefined') ? AdSkip : null;
+}
 
 function mergePlayHeaders(...sources) {
     const out = {};
@@ -76,6 +83,10 @@ const Player = {
     _reconnectInProgress: false,
     _carrySpeed: null,       // 连播时从上一集延续的倍速
     _carryFullscreen: null,  // 连播时从上一集延续的全屏状态
+    _opEdSkipEnabled: true,  // opEdSkip 开关缓存（play() 起播时读取；登记入口/预览 tick 守卫用，读失败默认开）
+    _opEdEdFired: false,     // 本次会话已自动跳过片尾（每集只跳一次，防 seek 循环）
+    _opEdEdToasted: false,   // 本次会话已弹过「即将进入片尾」提示
+    _opEdStartPos: 0,        // 本次起播应用的片头位置（秒；0=未应用，供 Kazumi 分支换算毫秒）
 
     init() {
         $('#player-close').on('click', () => this._close());
@@ -111,6 +122,105 @@ const Player = {
         if (window.yuki && window.yuki.onExternalPlayerExit) {
             window.yuki.onExternalPlayerExit((info) => this._onExtPlayerExit(info));
         }
+        // 智能跳过片头/片尾快捷键（mpv 模式的唯一入口）：
+        //   Shift+O：把当前播放位置登记为该片名+线路的片头结束点；
+        //   Shift+E：登记为片尾起点（<video> 预览接近时自动跳过 + toast 提示）。
+        // mpv 模式当前位置经 yuki:player 'get-pos'（主进程契约）读回真实
+        // time-pos；主进程未放行该命令时调用失败/返回空——登记路径整体降级并提示。
+        document.addEventListener('keydown', (e) => this._onOpEdHotkey(e));
+        // <video> 预览兜底模式：有真实进度流，接入片尾自动跳过
+        const pv = document.getElementById('player-video');
+        if (pv) {
+            pv.addEventListener('timeupdate', () => this._onPreviewTick());
+        }
+    },
+
+    /** Shift+O / Shift+E 快捷键：登记片头/片尾位置到 AdSkip 存储（按片名+线路）。
+     *  输入框/可编辑元素内按键与 Ctrl/Alt/Meta 组合不拦截，避免劫持正常输入与系统快捷键。 */
+    _onOpEdHotkey(e) {
+        if (e.ctrlKey || e.altKey || e.metaKey) return; // 修饰键组合交给系统/编辑器
+        const t = e.target;
+        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+        if (!e.shiftKey) return;
+        if (!/^[OoEe]$/.test(e.key)) return; // 只拦截 O/E，避免 Shift 组合键误伤
+        const kind = (e.key === 'O' || e.key === 'o') ? 'op' : 'ed';
+        // 返回 promise 仅供测试/调用方等待完成；keydown 监听器不消费返回值
+        return this._recordOpEdFromPlayback(kind);
+    },
+
+    /** 快捷键/悬浮按钮共用的登记逻辑：读当前位置 → 存 AdSkip → toast 反馈。
+     *  async：mpv 模式需 await get-pos；登记入口（快捷键）fire-and-forget 不阻塞键盘事件。 */
+    async _recordOpEdFromPlayback(kind) {
+        const adskip = _adSkip();
+        if (!adskip) return;
+        // 开关守卫：opEdSkip 关闭时整个登记入口一并停用（与自动跳过同源同义）
+        if (this._opEdSkipEnabled === false) {
+            warnToast('跳过片头片尾功能已关闭');
+            return;
+        }
+        const meta = this._curMeta;
+        if (!meta || !meta.title) { warnToast('当前没有正在播放的影片，无法记录'); return; }
+        const sec = await this._estimateCurrentSec();
+        if (sec == null) { warnToast('无法获取播放位置'); return; } // get-pos 不可用：降级不登记
+        if (!sec || sec < 5) { warnToast('当前位置太靠前，不像片头/片尾'); return; }
+        adskip.recordOpEd(meta.title, meta.flag || this._flagOfPlayback(), kind, sec);
+        warnToast(kind === 'op'
+            ? `已记录片头结束点（${Math.round(sec)}s）：下次播放本片将自动跳过`
+            : `已记录片尾起点（${Math.round(sec)}s）：后续集数接近时会自动跳过`);
+    },
+
+    /** 当前线路名：_curMeta.flag 由 play() 维护；Kazumi 源 flag 可能缺省。 */
+    _flagOfPlayback() {
+        return (this._seq && this._seq.flag) || (this._currentPlayback && this._currentPlayback.flag) || '';
+    },
+
+    /**
+     * 读取当前播放位置（秒）；async，取不到时返回 null。
+     * <video> 预览模式：暂停/播放中均可读 currentTime（精确，暂停态也应可登记）。
+     * mpv 模式：经 yuki:player 'get-pos' 查询真实 time-pos（主进程契约：
+     * { ok: true, pos: <number|null> }）。调用 reject / ok:false / pos 为空 /
+     * 非有限正数一律视为「无法获取」返回 null——主进程尚未放行 get-pos 时
+     * （旧 preload/旧主进程），登记与估算路径优雅降级，绝不抛错影响播放。
+     */
+    async _estimateCurrentSec() {
+        const pv = document.getElementById('player-video');
+        if (pv && pv.currentTime > 0 && pv.duration > 0) {
+            return pv.currentTime;
+        }
+        try {
+            if (!window.yuki || typeof window.yuki.playerControl !== 'function') return null;
+            const r = await window.yuki.playerControl('get-pos');
+            if (!r || r.ok !== true || typeof r.pos !== 'number'
+                || !Number.isFinite(r.pos) || r.pos <= 0) return null;
+            return r.pos;
+        } catch (e) {
+            return null; // IPC reject：get-pos 未实现/会话已退出，按无法获取降级
+        }
+    },
+
+    /** <video> 预览 tick：接近记录的片尾点时 toast 提示 / 自动 seek 跳过。
+     *  受 opEdSkip 开关约束（play() 起播时缓存到 _opEdSkipEnabled，读失败默认开）。 */
+    _onPreviewTick() {
+        const adskip = _adSkip();
+        const pv = document.getElementById('player-video');
+        if (this._opEdSkipEnabled === false) return; // 开关关闭：不做片尾自动跳过
+        if (!adskip || !pv || !pv.duration || !this._curMeta) return;
+        const flag = this._curMeta.flag || this._flagOfPlayback();
+        const rec = adskip.getOpEd(this._curMeta.title, flag);
+        if (!rec || !rec.ed) return;
+        const action = adskip.decideEdAction(pv.currentTime, pv.duration, rec.ed);
+        if (!action) return;
+        if (action === 'toast') {
+            if (!this._opEdEdToasted) {
+                this._opEdEdToasted = true;
+                warnToast('即将进入片尾');
+            }
+            return;
+        }
+        if (this._opEdEdFired) return; // 每集只跳一次，防 seek 抖动循环
+        this._opEdEdFired = true;
+        pv.currentTime = rec.ed;
+        warnToast('即将进入片尾，已自动跳过');
     },
 
     /** 单集播完（end-file eof，附会话号）：按会话记录时间戳；旧集延迟 ended 不误判新集。 */
@@ -713,6 +823,42 @@ const Player = {
         const carryFullscreen = this._carryFullscreen;
         this._carrySpeed = null;
         this._carryFullscreen = null;
+        // 智能跳过片头/片尾（opEdSkip）：新起播重置会话级守卫与位置基准
+        this._opEdEdFired = false;
+        this._opEdEdToasted = false;
+        this._opEdStartPos = 0;  // 本次起播应用的片头位置（秒，仅 Kazumi 分支换算毫秒用）
+        // 读取 opEdSkip 开关（默认开）：登记入口/预览 tick 均按此守卫；
+        // settingsGet 失败时保持 true（降级为开启，不因读失败废掉功能）
+        try {
+            const s0 = (await window.yuki.settingsGet()) || {};
+            this._opEdSkipEnabled = s0.opEdSkip !== false;
+        } catch (e) { this._opEdSkipEnabled = true; }
+        // 读取该片名+线路已记录的片头位置：
+        // 记录存在时经 position=毫秒 交主进程换算 mpv --start（FongMi 语义），
+        // 实现「起播即落在片头之后」。nativeQueue 场景主进程已支持
+        // pendingSeekSec（首集装载后 IPC seek 一次），同样吃 position 参数。
+        // 注意：此时长未知（mpv 未加载），decideStartSec 跳过时长校验、
+        // 只信任用户手动登记值（AdSkip 只存手动登记，见 ad-skip.js）。
+        let opEdStartMs = 0;
+        try {
+            const adskip = _adSkip();
+            const s = (await window.yuki.settingsGet()) || {};
+            if (adskip && s.opEdSkip !== false && title) {
+                const startSec = adskip.resolveAutoOpSec(title, flag || '', null);
+                if (startSec > 0) {
+                    this._opEdStartPos = startSec;
+                    opEdStartMs = Math.round(startSec * 1000);
+                    warnToast(`已自动跳过片头（${startSec}s，按本片历史记录）`);
+                } else {
+                    // 本线路无片头记录时不自动套用其他线路的值（不同压制线路
+                    // 片头长度可能不同，错跳会毁正片），只提示用户可手动登记
+                    const hint = adskip.findSiblingHint ? adskip.findSiblingHint(title, flag || '', null) : null;
+                    if (hint) {
+                        warnToast(`线路「${hint.flag}」有片头记录（${hint.sec}s），如与本线路不同请 Shift+O 重新登记`);
+                    }
+                }
+            }
+        } catch (e) { /* 片头跳过失败不影响起播 */ }
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
         try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
@@ -728,6 +874,7 @@ const Player = {
             if (!String(site).startsWith('kazumi:') && typeof Detail !== 'undefined' && Detail.vodId) vodId = Detail.vodId;
         } catch (e) { /* ignore */ }
         this._curMeta = { site, title, subtitle: subtitle || '', vodId, kazumiSrc: kazumiSrc || '',
+            flag: flag || '',
             totalEps: (Array.isArray(episodes) ? episodes.length : 0) };
         // 尝试从当前视图取 vodId（详情页连播时记录观看进度）。仅 CatVod 源使用 Detail.vodId：
         // Kazumi 源从弹窗直接起播，Detail.vodId 可能残留上一次 CatVod 详情的 id，须隔离（T4）。
@@ -839,6 +986,13 @@ const Player = {
                     header: built.headers || undefined,
                     skipProbe: true, source: 'queue', quietFail: true,
                     speed: carrySpeed, fullscreen: carryFullscreen,
+                    // opEdSkip 片头位置（毫秒）：原生队列 --start 是全局选项，主进程
+                    // 改为首集装载后 IPC seek 一次（pendingSeekSec），此处安全注入。
+                    // 原生队列分支在 playerContent（data 声明）之前执行，不存在源站
+                    // 续播 position，直接应用 opEd 起播位（0 = 从头播）。
+                    // 原生队列分支在 playerContent 之前执行，无源站续播 position，
+                    // 直接应用 opEd 起播位（0 = 从头播）
+                    position: opEdStartMs,
                     // 不挂 requestId/playSessionId：起播后数秒内的杂散 cancelRuntime
                     // （详情页重复触发等）曾把已成功解析的原生队列误杀为 play-cancelled；
                     // 用户主动关闭仍经 mpv.stop() 生效，与此通道无关。
@@ -883,8 +1037,10 @@ const Player = {
         this._seq = (autoNext && Array.isArray(episodes) && (epIndex || 0) + 1 < episodes.length)
             ? { site, flag, title, episodes, index: epIndex || 0, vodId, kazumiSrc: kazumiSrc || '' }
             : null;
-        // 记录本次播放元信息（观看统计 / 最近观看用；断流重连与单集播放同样可累计）
+        // 记录本次播放元信息（观看统计 / 最近观看用；断流重连与单集播放同样可累计）。
+        // flag 同步入 _curMeta：Shift+O/E 片头/片尾登记按「片名+线路」为键（AdSkip）。
         this._curMeta = { site, title, subtitle: subtitle || '', vodId, kazumiSrc: kazumiSrc || '',
+            flag: flag || '',
             totalEps: (Array.isArray(episodes) ? episodes.length : 0) };
         // Kazumi 源封面持久化：起播时同步把 Bangumi 封面缓存落进本次播放元信息，
         // 历史/最近观看卡重启后仍能显示封面（Bangumi 缓存本身就是 localStorage 持久化的）。
@@ -1004,7 +1160,13 @@ const Player = {
                 return await this._playDirect(url, {
                     title, subtitle, flag, header: playHeader,
                     speed: carrySpeed, fullscreen: carryFullscreen,
-                    format: data.format, subs: data.subs, position: data.position,
+                    format: data.format, subs: data.subs,
+                    // 源站续播优先；无则用 opEdSkip 记录的片头位置（毫秒，mpv --start），
+                    // 与解析分支/逐集直链分支同口径（快路径此前漏了 opEd 兜底）
+                    position: (opEdStartMs && !data.position) ? opEdStartMs : data.position,
+                    // 只有实际注入了 opEd 起播位置才提示「已自动跳过片头」：
+                    // 源站自带续播（data.position）时用户是被续播到旧进度，不是跳片头
+                    opEdToasted: opEdStartMs > 0 && !data.position,
                     skipProbe: !!data.skipProbe, source: site, site,
                     ...trace,
                 });
@@ -1047,7 +1209,9 @@ const Player = {
                     // 这里统一竞速兜底（mpv 起播上限 30s + 边下边播注册余量）。
                     const r = await this._awaitTimeout(window.yuki.playUrl(resolved.url, {
                         title, subtitle, flag, header: mergedHeader, speed: carrySpeed, fullscreen: carryFullscreen,
-                        format: data.format, subs: data.subs, position: data.position,
+                        format: data.format, subs: data.subs,
+                        // 源站续播优先；无则用 opEdSkip 记录的片头位置（毫秒，mpv --start）
+                        position: (opEdStartMs && !data.position) ? opEdStartMs : data.position,
                         skipProbe: !!(data.skipProbe || resolved.probed), source: site, site,
                         ...trace,
                     }), 45000, trace);
@@ -1106,7 +1270,9 @@ const Player = {
             const r = await this._awaitTimeout(window.yuki.playUrl(url, {
                 title, subtitle, flag, parse, header: playHeader,
                 speed: carrySpeed, fullscreen: carryFullscreen,
-                format: data.format, subs: data.subs, position: data.position,
+                format: data.format, subs: data.subs,
+                // 源站续播优先；无则用 opEdSkip 记录的片头位置（毫秒，mpv --start）
+                position: (opEdStartMs && !data.position) ? opEdStartMs : data.position,
                 skipProbe: !!data.skipProbe, source: site, site,
                 ...trace,
             }), 45000, trace);
@@ -1488,6 +1654,9 @@ const Player = {
                 // （详情页/连播推进）永久等待，统一 45s 上限。
                 const r = await this._awaitTimeout(window.yuki.playUrl(resolved.url, {
                     title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
+                    // opEdSkip 片头位置（毫秒）：Kazumi 源无源站续播 position 可言，直接应用
+                    position: (typeof this._opEdStartPos === 'number' && this._opEdStartPos > 0)
+                        ? Math.round(this._opEdStartPos * 1000) : undefined,
                     ...trace,
                 }), 45000, trace);
                 // 换集竞态守卫（同 play() 直链分支）：已被取代的会话不绑会话/不写状态。
@@ -1540,7 +1709,9 @@ const Player = {
             }
             if (r && r.ok) {
                 hideLoading();
-                return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
+                // 直链快路径：仅当实际注入了 opEd 片头位置（meta.opEdToasted）才提示
+                // 「已自动跳过片头」，避免源站续播/从头播时 toast 误导
+                return this._mpvSuccess(r, url, meta.opEdToasted ? '已自动跳过片头，已在 mpv 窗口播放' : '已在 mpv 窗口播放');
             }
             if (r && r.launched) {
                 this._seq = null;

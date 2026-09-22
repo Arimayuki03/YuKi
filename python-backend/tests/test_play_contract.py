@@ -11,7 +11,10 @@ BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
-from play_contract import normalize_play_result  # noqa: E402
+from play_contract import (  # noqa: E402
+    _unwrap_duplicated_url,
+    normalize_play_result,
+)
 from server import _is_ephemeral_play_result  # noqa: E402
 from proxy_contract import decode_proxy_body, normalize_proxy_url  # noqa: E402
 
@@ -79,6 +82,53 @@ class TestPlayContract(unittest.TestCase):
         result = normalize_play_result('https://media.test/v.mp4')
         self.assertEqual(result['url'], 'https://media.test/v.mp4')
         self.assertEqual(result['parse'], 0)
+
+    # ---- 「<真实地址>.<同一真实地址>」双写直链容错（jisuzyv 源 mpv 400 回归）----
+    # 源返回的 url 为 ``https://vv.jisuzyv.com/play/eERq3x4a/index.m3u8.https://…``
+    # 形态时 mpv/ffmpeg 把第一个 ``.`` 之后的 https:// 当同 host 路径继续请求，
+    # 上游回 400 Bad Request，播放从未开始。normalize_play_result 必须取合法半段。
+
+    def test_duplicated_jisuzyv_url_is_unwrapped(self):
+        raw = ('https://vv.jisuzyv.com/play/eERq3x4a/index.m3u8.'
+               'https://vv.jisuzyv.com/play/eERq3x4a/index.m3u8')
+        result = normalize_play_result({'parse': 0, 'playUrl': '', 'url': raw})
+        self.assertEqual(result['url'], 'https://vv.jisuzyv.com/play/eERq3x4a/index.m3u8')
+        self.assertEqual(result['parse'], 0)
+
+    def test_duplicated_http_url_is_unwrapped(self):
+        self.assertEqual(
+            _unwrap_duplicated_url('http://a.test/v.mp4.http://a.test/v.mp4'),
+            'http://a.test/v.mp4')
+
+    def test_duplicated_url_unwrap_tolerates_trailing_slash_diff(self):
+        raw = 'https://a.test/x.m3u8.https://a.test/x.m3u8/'
+        self.assertEqual(_unwrap_duplicated_url(raw), 'https://a.test/x.m3u8/')
+
+    def test_normal_urls_pass_through_untouched(self):
+        # 正常直链、带版本号文件名、query 签名地址绝不改写
+        for url in ('https://vv.jisuzyv.com/play/eERq3x4a/index.m3u8',
+                    'https://a.test/v1.2.m3u8?sign=ab',
+                    'http://a.test/v.mp4'):
+            self.assertEqual(_unwrap_duplicated_url(url), url)
+
+    def test_two_different_urls_are_not_unwrapped(self):
+        # 两侧不同的拼接不是重复自写——保留原样等待后续链路定位，不猜测哪半合法
+        raw = 'https://a.test/x.m3u8.https://b.test/y.m3u8'
+        self.assertEqual(_unwrap_duplicated_url(raw), raw)
+
+    def test_path_like_concat_is_not_unwrapped(self):
+        # 斜杠连接/无 scheme 页面地址不是双写形态
+        self.assertEqual(
+            _unwrap_duplicated_url('http://a.test/v.mp4/https://b.test/v.mp4'),
+            'http://a.test/v.mp4/https://b.test/v.mp4')
+        self.assertEqual(_unwrap_duplicated_url('episode-page.html'), 'episode-page.html')
+        self.assertEqual(_unwrap_duplicated_url(''), '')
+
+    def test_parse_page_url_is_never_touched_by_unwrap(self):
+        # parse=1 的网页地址不匹配双 URL 形态，天然原样通过
+        result = normalize_play_result({'parse': 1, 'url': 'https://page.test/video.html'})
+        self.assertEqual(result['url'], 'https://page.test/video.html')
+        self.assertEqual(result['parse'], 1)
 
     def test_malformed_result_is_an_explicit_error(self):
         result = normalize_play_result('not a url')
