@@ -81,9 +81,19 @@ const Kazumi = {
         });
         // 选源弹窗关闭时清理 SSE 流与状态（T74：避免关闭后连接挂到 done）
         $('#kazumiSourceDialog').on('click', '.md-dialog-btn', () => {
-            this._closeDlgStream();
-            this._dlgState = null;
+            this._onSourceDlgClosed();
         });
+        // 关闭路径统一收口：Esc（dispatchEsc 直接 closeDialog，不经按钮回调）与
+        // 程序化关闭（选集播放/批量下载）都观察不到上面的 click，改为观察弹窗
+        // 真正隐藏（退场动画后 display:none）兜底清理，防止 EventSource 残留连接
+        if (typeof document !== 'undefined' && typeof MutationObserver === 'function') {
+            const dlgEl = document.getElementById('kazumiSourceDialog');
+            if (dlgEl) {
+                new MutationObserver(() => {
+                    if (dlgEl.style.display === 'none' && !dlgEl.classList.contains('dlg-out')) this._onSourceDlgClosed();
+                }).observe(dlgEl, { attributes: true, attributeFilter: ['style', 'class'] });
+            }
+        }
         // T71：详情页图片点击放大（复用 detail.js cover-float 全屏浮层，滚轮缩放）
         $('#detail-body').on('click', 'img', (e) => {
             // 角色卡头像点击应打开人物详情（由 detail.js 处理），不触发封面放大
@@ -1600,8 +1610,10 @@ const Kazumi = {
         }
 
         // 初始化源状态：每张可用规则一张卡（pending）；已判定失效的源（validity === 'invalid'）
-        // 不建卡即在选源弹窗中隐藏，后端 /search/kazumi-stream 同步跳过该类源
-        const plugins = {};
+        // 不建卡即在选源弹窗中隐藏，后端 /search/kazumi-stream 同步跳过该类源。
+        // 字典用无原型对象：规则名（即键）来自外部规则文件，名为 "__proto__" 时
+        // 普通对象 {} 赋值会污染 Object.prototype，Object.create(null) 不受影响
+        const plugins = Object.create(null);
         this._rules.filter((r) => r.enabled !== false && r.validity !== 'invalid').forEach((r) => {
             plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
         });
@@ -1630,6 +1642,16 @@ const Kazumi = {
     /** 关闭选源弹窗的 SSE 流。 */
     _closeDlgStream() {
         if (this._dlgStream) { try { this._dlgStream.close(); } catch (e) { /* ignore */ } this._dlgStream = null; }
+    },
+
+    /**
+     * 选源弹窗关闭统一钩子：清 SSE 流 + 弹窗状态。弹窗的全部关闭路径
+     * （「关闭」按钮 / Esc / 选集播放 / 批量下载的程序化 closeDialog）都收口到这里。
+     * 幂等：SSE done/onerror 提前清理后重复调用无副作用。
+     */
+    _onSourceDlgClosed() {
+        this._closeDlgStream();
+        this._dlgState = null;
     },
 
     /** 应用一条源搜索结果到弹窗状态并刷新对应卡片。 */
@@ -1900,37 +1922,6 @@ const Kazumi = {
         }
     },
 
-    /** Bangumi 元数据补全：搜索首个结果取详情，插入弹窗顶部。 */
-    async _enrichBangumiMetadata(title, box, token) {
-        try {
-            const results = await this.bangumiSearch(title);
-            if (token !== this._dlgToken || !results.length) return;
-            const info = await this.bangumiInfo(results[0].id);
-            if (token !== this._dlgToken || !info) return;
-            const cover = bangumiCover(info.images, 'card');   // 弹窗横幅封面 80px（T75）
-            const summary = (info.summary || '').slice(0, 200);
-            const score = info.rating && info.rating.score ? `评分 ${info.rating.score}` : '';
-            const meta = [info.date, score, info.platform].filter(Boolean).join(' · ');
-            const banner = `<div class="kazumi-bangumi-banner" data-bangumi-id="${escHtml(String(info.id))}" data-bangumi-name="${escHtml(info.name_cn || info.name || title)}">
-                ${cover ? `<img class="kazumi-bangumi-cover" src="${escHtml(cover)}" referrerpolicy="no-referrer" data-fb-src="${escHtml(bangumiMirrorUrl(cover))}">` : ''}
-                <div class="kazumi-bangumi-info">
-                    <div class="kazumi-bangumi-title">${escHtml(info.name_cn || info.name || title)}</div>
-                    <div class="kazumi-bangumi-meta">${escHtml(meta)}</div>
-                    ${summary ? `<div class="kazumi-bangumi-summary">${escHtml(summary)}…</div>` : ''}
-                    <div class="kazumi-bangumi-actions">
-                        <button class="md-btn md-btn-tonal md-btn-sm kazumi-bangumi-detail" data-id="${escHtml(String(info.id))}">查看详情</button>
-                    </div>
-                </div>
-            </div>`;
-            box.prepend(banner);
-            // 绑定详情按钮：打开 Bangumi 完整详情弹窗
-            box.find('.kazumi-bangumi-detail').on('click', (e) => {
-                const id = parseInt($(e.currentTarget).data('id'), 10);
-                if (id) this.openBangumiDetail(id);
-            });
-        } catch (e) { /* 元数据失败不影响源选择 */ }
-    },
-
     // ---------------------------------------------------------------- Bangumi 完整详情弹窗
 
     /** 打开 Bangumi 番剧完整详情弹窗（概览/分集/角色/评论/关联/制作人员）。 */
@@ -1941,7 +1932,10 @@ const Kazumi = {
         openDialog('kazumiSourceDialog');
         try {
             const info = await this.bangumiInfo(subjectId);
-            if (token !== this._dlgToken || !info) {
+            // 拆分守卫：token 失效 = 弹窗已被更新操作（重开/关详情）接管，
+            // 绝不能动 DOM 覆盖新内容；info 为空 = 本次请求确实失败，才提示载入失败
+            if (token !== this._dlgToken) return;
+            if (!info) {
                 $('#kazumi-dialog-body').html('<div class="tip-line">详情载入失败</div>');
                 return;
             }
@@ -2371,6 +2365,8 @@ const Kazumi = {
                     playIdx = hit >= 0 ? hit : 0;
                 }
             }
+            // 选集播放：先走统一关闭钩子（清 SSE 流），再进播放器
+            this._onSourceDlgClosed();
             closeDialog('kazumiSourceDialog');
             Player.play('kazumi:' + pluginName, flag, url, title, name, playEpisodes, Math.max(0, playIdx), src || '');
         });
@@ -2415,6 +2411,7 @@ const Kazumi = {
             });
         }
         if (!targets.length) { warnToast('未能在该线路匹配到勾选的集'); return; }
+        this._onSourceDlgClosed(); // 批量下载同样先清 SSE 流再关弹窗
         closeDialog('kazumiSourceDialog');
         this._dlDownloadMode = null;
         warnToast(`开始解析并下载 ${targets.length} 集…`);
@@ -2622,7 +2619,17 @@ Kazumi.webdavSync = async function (url, username, password, remoteDirOverride) 
     try {
         const s = (await window.yuki.settingsGet()) || {};
         const data = {};
-        if (s.webDavEnableRules !== false) data.kazumiRules = this._rules || [];
+        // _rulesLoaded 只在 kazumiList 成功返回后置 true（失败时 _rules 被清空为 []）。
+        // 启动瞬时失败期间的自动同步若不设防，会把「空规则」当真实列表上传，覆盖云端规则备份。
+        if (s.webDavEnableRules !== false) {
+            if (!this._rulesLoaded) {
+                warnToast('规则列表尚未加载完成，本次同步已取消（避免空规则覆盖云端备份）');
+                // 返回 'skip' 区分「守卫跳过」与真实失败：调用方对跳过静默处理，
+                // 不再补发误导性的「WebDAV 同步失败」toast/失败状态
+                return 'skip';
+            }
+            data.kazumiRules = this._rules || [];
+        }
         if (s.webDavEnableCollect !== false) data.favorites = s.favorites || [];
         if (s.webDavEnableHistory !== false) data.history = s.history || [];
         if (s.webDavEnableSettings !== false) data.settings = this._webdavSettingsSnapshot(s);
@@ -2671,15 +2678,26 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
             if (d.kazumiRules && (this._rules || []).length) backup.kazumiRules = this._rules;
             const backedUp = Object.keys(backup).length > 1;
             if (backedUp) await window.yuki.settingsSet('webDavRestoreBackup', backup);
-            if (d.favorites) await window.yuki.settingsSet('favorites', d.favorites);
-            if (d.history) await window.yuki.settingsSet('history', d.history);
+            // 收藏/历史改走 recSet：写 settings 的同时经 FavHub.changed 广播给订阅者
+            // （详情页收藏按钮/我的页/时间表），否则恢复后订阅者仍持有旧数据。
+            // watchStats 无订阅者（FavHub 只认 favorites），保持 settingsSet 即可。
+            if (Array.isArray(d.favorites)) await recSet('favorites', d.favorites);
+            if (Array.isArray(d.history)) await recSet('history', d.history);
             if (d.watchStats) await window.yuki.settingsSet('watchStats', d.watchStats);
             if (d.kazumiRules) {
-                // 规则逐个导入
+                // 非 Array 直接按格式错误报出（此前 undefined.length 抛 TypeError，
+                // 落入外层 catch 提示「WebDAV 恢复失败：网址/账号有误」，误导排查）
+                if (!Array.isArray(d.kazumiRules)) { warnToast('WebDAV 恢复失败：云端规则数据格式不正确'); return false; }
+                // 规则逐个导入：单条损坏只跳过计数，不再中断整批
+                let okRules = 0, failRules = 0;
                 for (const rule of d.kazumiRules) {
-                    await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+                    try {
+                        const r = await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+                        if (r && r.code === 200) okRules++; else failRules++;
+                    } catch (err) { failRules++; }
                 }
                 await this.refreshRuleList();
+                if (failRules) warnToast(`规则导入完成：${okRules} 成功，${failRules} 条失败已跳过`);
             }
             let needRestartHint = false;
             if (d.settings) {
@@ -2692,7 +2710,10 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
                 for (const [key, val] of Object.entries(d.settings)) {
                     if (!WEBDAV_RESTORE_ALLOWED.has(key)) continue;
                     await window.yuki.settingsSet(key, val);
-                    if (['playerHotkeys', 'proxyEnable', 'proxyUrl', 'panFastPath'].indexOf(key) >= 0) needRestartHint = true;
+                    // 触发重启提示的键（真实键名，与 index.js setProxy/setPanFastPath 一致）：
+                    // 代理键经 setProxy 写入时已即时重启后端，但恢复流程只写 settings，
+                    // 环境变量/会话代理不会重建，故仍需提示重启；playerHotkeys 需重建快捷键。
+                    if (['playerHotkeys', 'proxyEnable', 'proxyUrl'].indexOf(key) >= 0) needRestartHint = true;
                 }
                 // 外观类设置即时重放（主题/缩放/字体等），其余多数在使用时读取自然生效
                 if (typeof applySkin === 'function') applySkin(d.settings);
@@ -2739,6 +2760,7 @@ Kazumi.webdavSyncUI = async function () {
     showLoading();
     const ok = await this.webdavSync(url, username, password, remoteDir);
     hideLoading();
+    if (ok === 'skip') return; // 规则未加载守卫：仅提示不判失败，不再补「同步失败」toast
     this._markWebdavTime(ok);
     warnToast(ok ? 'WebDAV 同步完成' : 'WebDAV 同步失败');
 };
@@ -2837,10 +2859,13 @@ Kazumi._webdavAutoTick = async function () {
     try {
         const s = (await window.yuki.settingsGet()) || {};
         const ok = await this.webdavSync(s.webDavUrl || '', s.webDavUsername || '', s.webDavPassword || '');
-        const time = new Date().toTimeString().slice(0, 5);
-        const $st = $('#webdav_auto_status');
-        if ($st.length) $st.text(ok ? `上次自动同步：${time}` : '上次自动同步失败');
-        if (!ok) warnToast('WebDAV 自动同步失败，请检查地址与账号');
+        if (ok !== 'skip') {
+            // 'skip' = 规则未加载守卫跳过：静默轮转下一轮，不算失败
+            const time = new Date().toTimeString().slice(0, 5);
+            const $st = $('#webdav_auto_status');
+            if ($st.length) $st.text(ok ? `上次自动同步：${time}` : '上次自动同步失败');
+            if (!ok) warnToast('WebDAV 自动同步失败，请检查地址与账号');
+        }
     } catch (e) { /* 本轮异常静默跳过，链路继续下一轮 */ }
     await this.scheduleWebdavAutoSync();
 };

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import asyncio
+import gc
+import itertools
 import os
 import socket
 import subprocess
@@ -12,6 +14,7 @@ import shutil
 import threading
 import time
 import unittest
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -25,6 +28,7 @@ import runtime  # noqa: E402
 import server  # noqa: E402
 from runtime.contracts import RuntimeRequest, bind_runtime_request  # noqa: E402
 from runtime.errors import RuntimeError  # noqa: E402
+from runtime import supervisor as supervisor_mod  # noqa: E402
 from runtime.supervised_runner import SupervisedRunner  # noqa: E402
 from runtime.supervisor import (  # noqa: E402
     RuntimePolicy,
@@ -696,6 +700,292 @@ class Spider(BaseSpider):
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
         self.assertEqual(home_result.get('value'), {'list': []})
+
+
+class _FakeSup:
+    """伪 Supervisor：只提供 LRU 淘汰扫描读取的最小属性面。
+
+    - ``pid`` 属性可注入（模拟已崩溃未重启的 Supervisor / 存活 Worker）；
+    - ``_call_lock`` 为真实 threading.Lock，可被外部占用以模拟「正忙」；
+    - ``alive_ref=False`` 时本类不保留自引用，调用方必须自行持强引用。
+
+    伪对象不进 _registry（WeakSet）——上限判定走 _registry 计数，测试直接
+    把 _max_workers/_max_jar_workers mock 成 0（下限钳制对 mock 不生效），
+    使 ``total >= limit`` 无条件成立，从而聚焦淘汰扫描本身的有界性。
+    """
+
+    def __init__(self, site_key, runtime='fixture', pid=None, busy=False,
+                 active=False, alive_ref=True):
+        self.site_key = site_key
+        self.runtime = runtime
+        self._pid = pid
+        self._active_request = object() if active else None
+        self._call_lock = threading.Lock()
+        if busy:
+            self._call_lock.acquire()
+        self._lifecycle_lock = threading.RLock()
+        if alive_ref:
+            # 自引用仅为保持弱引用存活（引用环，靠 tearDown 的 gc.collect 回收）
+            self._keepalive = self
+
+    @property
+    def pid(self):
+        return self._pid
+
+    def release_keepalive(self):
+        self.__dict__.pop('_keepalive', None)
+
+
+class GlobalSlotBoundedScanTest(unittest.TestCase):
+    """C-1 回归：全局上限触达时，淘汰扫描必须有界且不霸占 _registry_lock。
+
+    曾经的回归把「对快照 for 循环」改成 ``while True`` + 永远取 LRU 队头，
+    于是队头是 pid is None（已崩溃未重启）/ 运行时不匹配 / 正忙
+    （_call_lock 被占）的 Supervisor 时，每个「跳过」分支都只 continue
+    不前进，全程持有 _registry_lock 死循环 → 其它线程全部挂死。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs(ROOT, exist_ok=True)
+        hoststate.configure(
+            data_dir=os.path.join(ROOT, 'globalslot-data'),
+            cache_dir=os.path.join(ROOT, 'globalslot-cache'),
+            plugins_dir=os.path.join(ROOT, 'globalslot-cache', 'py'),
+            port=18651,
+            token='supervisor-test',
+        )
+        hoststate.ensure_dirs()
+
+    def setUp(self):
+        # 逐用例清空全局 LRU，避免同进程其它用例留下的条目干扰计数与顺序
+        self._fakes = []
+        self._acquire_registry_lock()
+        try:
+            supervisor_mod._GLOBAL_LRU.clear()
+        finally:
+            supervisor_mod._registry_lock.release()
+
+    def tearDown(self):
+        for sup in list(self._fakes):
+            try:
+                sup.release_keepalive()
+            except Exception:
+                pass
+        self._acquire_registry_lock()
+        try:
+            supervisor_mod._GLOBAL_LRU.clear()
+        finally:
+            supervisor_mod._registry_lock.release()
+        gc.collect()
+
+    # ---- 基础设施 -------------------------------------------------------
+
+    def _acquire_registry_lock(self, timeout=5.0):
+        """测试自身也要防死锁：拿不到 _registry_lock 直接 fail 而非挂死。"""
+        self.assertTrue(
+            supervisor_mod._registry_lock.acquire(timeout=timeout),
+            '测试线程无法获取 _registry_lock（疑似扫描死循环霸锁）')
+
+    _lru_key_counter = itertools.count(10 ** 9)
+
+    def _seed(self, sup):
+        """把伪 Supervisor 直接放进全局 LRU 最前端方向（调用方负责保活）。
+
+        刻意用合成 key 而非 id(sup)：伪对象被回收后 CPython 可能复用同一
+        内存地址（id 撞车），后续 seed 会覆盖已失效槽位，令「死弱引用清扫」
+        用例的前置失真。生产代码对条目 key 只做字典操作（caller 除外，
+        其 key 由被测函数用 id(caller) 自行写入）。
+        """
+        key = next(self._lru_key_counter)
+        self._acquire_registry_lock()
+        try:
+            supervisor_mod._GLOBAL_LRU[key] = weakref.ref(sup)
+        finally:
+            supervisor_mod._registry_lock.release()
+        self._fakes.append(sup)
+        return key
+
+    def _call_ensure(self, caller, results):
+        try:
+            results['value'] = supervisor_mod._ensure_global_slot_locked(caller)
+        except RuntimeError as error:
+            results['error'] = error
+        except BaseException as error:  # 只为把意外异常带回主线程断言
+            results['unexpected'] = error
+
+    def _run_bounded(self, caller, timeout=5.0):
+        """线程内调 _ensure_global_slot_locked；回归死循环时 join 超时 → fail。"""
+        results = {}
+        worker = threading.Thread(
+            target=self._call_ensure, args=(caller, results))
+        worker.start()
+        worker.join(timeout)
+        self.assertFalse(
+            worker.is_alive(),
+            '淘汰扫描必须在有限时间内结束（回归：队头不合格项被无限重扫，'
+            '持有 _registry_lock 死循环）')
+        return results
+
+    def _assert_registry_lock_free(self, timeout=2.0):
+        """回归的另一面：扫描若挂死，_registry_lock 被永久持有，他人无法获取。"""
+        acquired = threading.Event()
+
+        def probe():
+            if supervisor_mod._registry_lock.acquire(timeout=timeout):
+                supervisor_mod._registry_lock.release()
+                acquired.set()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(timeout + 1.0)
+        self.assertFalse(thread.is_alive(), '_registry_lock 探针线程不得挂起')
+        self.assertTrue(
+            acquired.is_set(), '扫描结束后 _registry_lock 必须可被其他线程获取')
+
+    def _lru_keys(self):
+        self._acquire_registry_lock()
+        try:
+            return list(supervisor_mod._GLOBAL_LRU)
+        finally:
+            supervisor_mod._registry_lock.release()
+
+    @staticmethod
+    def _force_total_limit():
+        return mock.patch('runtime.supervisor._max_workers', return_value=0)
+
+    # ---- 用例 -----------------------------------------------------------
+
+    def test_head_victim_without_pid_scan_picks_next_lru_entry(self):
+        # 队头：已崩溃未重启（pid is None）——回归中会被无限重扫
+        self._seed(_FakeSup(site_key='dead-head', pid=None))
+        victim = _FakeSup(site_key='idle-victim', pid=4242)
+        self._seed(victim)
+        caller = _FakeSup(site_key='caller', pid=None, alive_ref=False)
+        self._fakes.append(caller)
+
+        started = time.monotonic()
+        with self._force_total_limit():
+            results = self._run_bounded(caller)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('error', results)
+        self.assertIsNotNone(results.get('value'), '应选中 idle-victim 而非 BUSY')
+        evicted, own_lock = results['value']
+        self.assertIs(evicted, victim)
+        self.assertTrue(own_lock, 'victim _call_lock 占用权必须随 victim 交接')
+        self.assertNotIn(id(victim), self._lru_keys(), 'victim 应已从 LRU 摘除')
+        supervisor_mod._release_victim_lock(evicted)
+        self._assert_registry_lock_free()
+
+    def test_head_victim_with_held_call_lock_scan_picks_next_lru_entry(self):
+        # 队头：_call_lock 被占用（正忙）——回归中同样无限重扫
+        self._seed(_FakeSup(site_key='busy-head', pid=1111, busy=True))
+        victim = _FakeSup(site_key='idle-victim', pid=2222)
+        self._seed(victim)
+        caller = _FakeSup(site_key='caller', pid=None, alive_ref=False)
+        self._fakes.append(caller)
+
+        with self._force_total_limit():
+            results = self._run_bounded(caller)
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('error', results)
+        evicted, own_lock = results['value']
+        self.assertIs(evicted, victim)
+        self.assertTrue(own_lock)
+        supervisor_mod._release_victim_lock(evicted)
+        self._assert_registry_lock_free()
+
+    def test_all_victims_unqualified_raises_busy_and_never_spins(self):
+        # 池里全是「跳过」类条目 + caller 自己：必须扫完一轮即 raise BUSY
+        self._seed(_FakeSup(site_key='dead', pid=None))
+        self._seed(_FakeSup(site_key='busy', pid=3333, busy=True))
+        caller = _FakeSup(site_key='caller', pid=None, alive_ref=False)
+        self._seed(caller)
+
+        started = time.monotonic()
+        with self._force_total_limit():
+            results = self._run_bounded(caller)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('value', results)
+        self.assertIn('error', results)
+        self.assertEqual(results['error'].code, 'L3_RUNTIME_BUSY')
+        self._assert_registry_lock_free()
+
+    def test_jar_limit_skips_mismatched_runtime_head_and_picks_jar_tail(self):
+        # jar 上限触达：队头是 runtime 不匹配的 python Worker——回归中无限重扫
+        self._seed(_FakeSup(site_key='python-head', runtime='python', pid=4444))
+        jar_victim = _FakeSup(site_key='jar-victim', runtime='jar', pid=5555)
+        self._seed(jar_victim)
+        caller = _FakeSup(site_key='jar-caller', runtime='jar', pid=None,
+                          alive_ref=False)
+        self._fakes.append(caller)
+
+        with mock.patch('runtime.supervisor._max_workers', return_value=64), \
+                mock.patch('runtime.supervisor._max_jar_workers', return_value=0):
+            results = self._run_bounded(caller)
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('error', results)
+        evicted, own_lock = results['value']
+        self.assertIs(evicted, jar_victim)
+        self.assertTrue(own_lock)
+        supervisor_mod._release_victim_lock(evicted)
+        self._assert_registry_lock_free()
+
+    def test_dead_weakref_slots_are_swept_and_scan_stays_bounded(self):
+        # 弱引用失效槽位 + 忙条目 + caller：空壳被顺带清扫、忙项被跳过 → BUSY（有界）
+        dead_key = self._seed_dead_and_collect()
+        self._seed(_FakeSup(site_key='busy-tail', pid=7777, busy=True))
+        caller = _FakeSup(site_key='caller', pid=None, alive_ref=False)
+        self._seed(caller)
+
+        # 前置：伪造的空壳槽位确实已失效（弱引用解引用为 None）
+        supervisor_mod._registry_lock.acquire(timeout=5)
+        try:
+            ref = supervisor_mod._GLOBAL_LRU[dead_key]
+        finally:
+            supervisor_mod._registry_lock.release()
+        self.assertIsNone(
+            ref() if ref is not None else None,
+            '测试前置失败：弱引用应已失效，用例退化为普通 BUSY 场景')
+
+        with self._force_total_limit():
+            results = self._run_bounded(caller)
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('value', results)
+        self.assertIn('error', results)
+        self.assertEqual(results['error'].code, 'L3_RUNTIME_BUSY')
+        self.assertNotIn(dead_key, self._lru_keys(), '失效弱引用槽位应被扫描顺带清扫')
+        self._assert_registry_lock_free()
+
+    def _seed_dead_and_collect(self):
+        """构造一个「弱引用已失效」的 LRU 空壳槽位并返回其 key。
+
+        必须在独立栈帧里建对象、摘自 _fakes、再 del：若对象残留在本测试
+        方法或框架保存的帧局部变量/回溯里，弱引用就不会失效（CPython 3.14
+        上实测会被外层帧引用拖活），用例前置即退化。
+        """
+        dead = _FakeSup(site_key='collected', pid=6666)
+        key = self._seed(dead)
+        dead.release_keepalive()
+        self._fakes.remove(dead)
+        dead = None
+        gc.collect()
+        return key
+
+    def test_only_caller_in_table_returns_busy_without_spinning(self):
+        # 全表只有 caller 自己（无 pid）：同样必须立即 BUSY，不能自旋等自己
+        caller = _FakeSup(site_key='lonely-caller', pid=None, alive_ref=False)
+        self._fakes.append(caller)
+        with self._force_total_limit():
+            results = self._run_bounded(caller)
+        self.assertNotIn('unexpected', results)
+        self.assertNotIn('value', results)
+        self.assertIn('error', results)
+        self.assertEqual(results['error'].code, 'L3_RUNTIME_BUSY')
+        self._assert_registry_lock_free()
 
 
 if __name__ == '__main__':

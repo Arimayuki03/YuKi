@@ -22,6 +22,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { EventEmitter } = require('events');
 
 const TOKEN_RE = /^\/pl\/([A-Za-z0-9_-]{8,64})\/(\d{1,4})(?:\.[a-z0-9]{1,5})?$/i;
@@ -126,11 +127,13 @@ class PlaylistProxy extends EventEmitter {
                 resolve(`http://127.0.0.1:${this.server.address().port}`);
             });
         });
-        // 会话清理：TTL 过期即弃（播放器早已退出）；防长时间运行无限增长
+        // 会话清理：只清不活跃会话（TTL 自最近一次访问滚动计时）。pipe 模式下
+        // 长视频一播就是数小时，按 createdAt 硬删会在播放中把 /pl、/seg 全变 404
+        // 静默断流（实测）；命中请求经 _touch 持续续期，清扫不再误伤活跃会话。
         this.sweeper = setInterval(() => {
             const now = Date.now();
             for (const [tok, s] of this.sessions) {
-                if (now - s.createdAt > SESSION_TTL_MS) this.sessions.delete(tok);
+                if (now - (s.lastAccess || s.createdAt) > SESSION_TTL_MS) this.sessions.delete(tok);
             }
         }, 30 * 60 * 1000);
         if (this.sweeper.unref) this.sweeper.unref();
@@ -167,6 +170,7 @@ class PlaylistProxy extends EventEmitter {
             pluginName: String(ctx.pluginName || ''),
             seriesTitle: String(ctx.title || ''),
             vipFlags: String(ctx.vipFlags || '[]'), eps, createdAt: Date.now(),
+            lastAccess: Date.now(), // 最近访问（TTL 滚动续期 / 淘汰按活跃度排序）
             headers: null,      // 会话级规则头（Kazumi 预热产出；全局头由此而来）
             cache: new Map(),   // index → 已解析直链（预热命中的集不再重复解析）
             pipe: !!ctx.pipe,   // 管道模式：数据面经本代理转发（外部播放器会话）
@@ -190,8 +194,16 @@ class PlaylistProxy extends EventEmitter {
             }
         }
         this.sessions.set(token, sess);
+        // 容量淘汰按最近访问：正被播放的会话（lastAccess 持续刷新）不能被删，
+        // 否则连播中整个列表 /pl、/seg 全 404 断流。
         while (this.sessions.size > MAX_SESSIONS) {
-            this.sessions.delete(this.sessions.keys().next().value);
+            let oldestTok = null, oldest = Infinity;
+            for (const [tok, s] of this.sessions) {
+                const t = s.lastAccess || s.createdAt || 0;
+                if (t < oldest) { oldest = t; oldestTok = tok; }
+            }
+            if (oldestTok === null || oldestTok === token) break;
+            this.sessions.delete(oldestTok);
         }
         let headers = null;
         if (kind === 'static') {
@@ -231,15 +243,23 @@ class PlaylistProxy extends EventEmitter {
                 return { ok: false, reason: warm.reason };
             }
             sess.cache.set(start, warm.url);
+            // Cookie 域归属：会话头里的 Cookie 是预热直链所在域的（抓流/预热时的登录态），
+            // 记下来供 /seg 跨域转发时剥离（见 _pipeRemote）。会话域名白名单同时预登记
+            // 预热直链域——清单重写尚未发生时（渐进式 MP4 无清单）分片也合法。
+            try { sess._cookieHost = new URL(warm.url).hostname.toLowerCase(); } catch (e) { /* 非法 URL 不记 */ }
+            this._allowUpstreamHost(sess, warm.url);
             if (warm.header && typeof warm.header === 'object' && Object.keys(warm.header).length) {
                 sess.headers = warm.header;
                 headers = warm.header;
             }
             // catvod 列表总时长：PotPlayer 打开 m3u 会立即探测全部条目累加时长，
             // 懒解析下探测等待解析完成，总时长随缓冲慢慢增加（实测）。改为
-            // **同步预取全部集目**（限流 4，并发等待），注册完成时全部直链已就绪，
-            // 探测即命中 0ms，总时长打开即完整。8 集约 2 批 × 3s ≈ 6s 内完成；
-            // 超长列表（>60 集）截断预取前 60 集，避免千集注册耗时爆炸。
+            // **后台预取集目**（并发窗口 4）：强鉴权列表（带 Referer/Cookie 的源）
+            // 逐集解析 2-5s，59 集全量同步等完要 30-75s，必撞渲染层 20s 竞速
+            // （超时回退逐集链路，整季注册行为回归）。注册在预取**启动后立即返回**，
+            // 预取在后台继续：播放器探测先行条目时直链多半已就绪，未就绪条目经
+            // _resolveCatvodWithInflight 与在途 promise 合流，不会重复请求。
+            // 超长列表（>60 集）截断预取前 60 集，避免千集解析风暴。
             const hKeys2 = Object.keys(sess.headers || {}).map((k) => String(k).toLowerCase());
             const strongAuth2 = hKeys2.some((k) => ['referer', 'cookie', 'authorization'].includes(k));
             if (strongAuth2 && eps.length > 1) {
@@ -247,15 +267,28 @@ class PlaylistProxy extends EventEmitter {
                 const allRest = eps.map((_, i) => i).filter((i) => i !== start);
                 // 超长列表截断：只预取前 60 集（含首集已完成的其余 59）
                 const prefetchList = allRest.slice(0, 59);
-                const pending = prefetchList.map((i) => {
+                // 并发窗口 4：map 一次性全量并发在 playerContent 全慢（2-5s）时
+                // 对源站压力过大（59 集同时打到后端）；窗口化后同时 in-flight 的
+                // 解析恒 ≤4，总耗时 ≈ ceil(N/4) 批次的单次解析时间，且注册路径
+                // 零等待（fire-and-forget，不阻塞 entries 返回）。
+                const PREFETCH_CONCURRENCY = 4;
+                let cursor = 0;
+                const runNext = () => {
+                    if (cursor >= prefetchList.length) return Promise.resolve();
+                    const i = prefetchList[cursor++];
                     const p = this._withRetry(() => this._resolve(sess, i));
                     sess.catvodInflight.set(i, p);
                     return p.then((r) => {
-                        if (r.ok) sess.cache.set(i, r.url);
-                    }).catch(() => {}).finally(() => sess.catvodInflight.delete(i));
-                });
-                // 等待全部预取完成再返回 entries，确保 PotPlayer 探测零等待
-                await Promise.allSettled(pending);
+                        if (r.ok) {
+                            sess.cache.set(i, r.url);
+                            this._allowUpstreamHost(sess, r.url);
+                        }
+                    }).catch(() => {}).finally(() => sess.catvodInflight.delete(i))
+                        .then(runNext);
+                };
+                // 后台启动预取窗口：不 await——注册立即返回 entries，预取失败静默
+                // （拉取时经 inflight 合流或现场重试兜底，探测/起播不依赖预取完成）
+                for (let w = 0; w < Math.min(PREFETCH_CONCURRENCY, prefetchList.length); w++) runNext();
             }
         }
         const entries = eps.map((e, i) => ({
@@ -281,6 +314,26 @@ class PlaylistProxy extends EventEmitter {
         });
     }
 
+    /** 请求命中即续期：pipe 模式播放可超 2 小时，TTL 必须按活跃度滚动而非创建时刻
+     *  （见 constructor 会话清扫注释）；注册排队期间一并记录。 */
+    _touch(sess) {
+        if (sess) sess.lastAccess = Date.now();
+    }
+
+    /** /seg 上游域名白名单：会话内已知域名集合（清单重写时登记），跨域一律拒绝。 */
+    _upstreamAllowed(sess, upstreamUrl) {
+        if (!sess.upstreamHosts || !sess.upstreamHosts.size) return false;
+        let host = '';
+        try { host = new URL(String(upstreamUrl)).hostname.toLowerCase(); } catch (e) { return false; }
+        return sess.upstreamHosts.has(host);
+    }
+
+    /** 登记会话内已知上游域名（清单重写产出的 /seg 端点全部指向这些域）。 */
+    _allowUpstreamHost(sess, urlStr) {
+        if (!sess.upstreamHosts) sess.upstreamHosts = new Set();
+        try { sess.upstreamHosts.add(new URL(String(urlStr)).hostname.toLowerCase()); } catch (e) { /* 非法 URL 不登记 */ }
+    }
+
     async _handleAsync(req, res) {
         const rawPath = String(req.url || '').split('?')[0] || '';
         // 分片/子清单端点（管道模式）：解码上游地址 → 带会话头转发
@@ -296,12 +349,23 @@ class PlaylistProxy extends EventEmitter {
                 res.statusCode = 404; res.end();
                 return;
             }
+            // 上游域名白名单：/seg 的上游地址来自播放器按清单原样回放，token 虽是
+            // 随机门控，仍不应把任意地址（如重写清单被篡改/播放器规范化引出的跨域）
+            // 无条件转发并附上会话鉴权头（Cookie/Referer 泄漏面）。只在清单重写时
+            // 登记过的会话内已知域名放行，其余一律 404。
+            if (!this._upstreamAllowed(sess, upstream)) {
+                console.log(`[播放列表] /seg 上游域名不在会话白名单: ${upstream.slice(0, 80)}`);
+                res.statusCode = 404; res.end();
+                return;
+            }
+            this._touch(sess);
             await this._pipeRemote(sess, index, upstream, req, res);
             return;
         }
         const m = TOKEN_RE.exec(rawPath);
         const sess = m ? this.sessions.get(m[1]) : null;
         const index = m ? parseInt(m[2], 10) : -1;
+        if (sess) this._touch(sess); // 命中即续期（播放器可能几小时不换会话）
         if (!sess || index < 0 || index >= sess.eps.length) {
             // R24（VLC 用户实测）：源站异常清单内容会被 VLC 当 URI 行按相对地址解析回
             // /pl/<token>/ 目录下（…/%12、…/Z 等，复现台九种清单形态定位为源站内容触发）。
@@ -389,26 +453,30 @@ class PlaylistProxy extends EventEmitter {
             const needAuth = keys.length > 0;
             console.log(`[播放列表] 第 ${index + 1} 集应答 ${sess.pipe && (needAuth || sess.forcePipe) ? 'pipe' : '302'} → ${url.slice(0, 80)}`);
             if (sess.pipe && (needAuth || sess.forcePipe)) {
+                // 403/410 重解析判定在 _pipeRemote 内、写响应头之前完成
+                // （headersSent 之后判定恒不可达，见该函数注释）。
                 const st = await this._pipeRemote(sess, index, url, req, res);
                 console.log(`[播放列表] 第 ${index + 1} 集 pipe 完成 st=${st}`);
-                // 直链签名时效过期（上游 403/410）：PotPlayer 已在播放中或刚起播，
-                // page 解析直链常带短时效 sign —— 时好时坏的根源。代理清该集缓存
-                // 强制重解析（refresh=1）并用新直链重试一次，仅在响应尚未开始时
-                // 触发且仅重试一次防循环。
-                if ((st === 403 || st === 410) && !res.headersSent) {
-                    console.log(`[播放列表] 第 ${index + 1} 集直链失效(${st})，重解析刷新…`);
-                    const rr = await this._reresolveEntry(sess, index);
-                    if (rr.ok && rr.url !== url) {
-                        return this._pipeRemote(sess, index, rr.url, req, res);
-                    }
-                }
                 return;
             }
             res.writeHead(302, { Location: url });
             res.end();
             return;
         }
+        // 本地路径白名单：只回读本应用抓流产物（os.tmpdir() 下 kazumi_stream_*.m3u8，
+        // 见 index.js 启动清扫/parse-window 抓流）。源站返回的 file:///盘符/UNC 等任意
+        // 本地路径若直接回读，等于开放本地任意文件读取面——一律 502 拒绝。
         const localPath = url.replace(/^file:\/\//i, '').replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\');
+        const artDir = process.env.YUKI_ARTIFACT_DIR || os.tmpdir();
+        const absLocal = path.resolve(localPath);
+        const isArtifact = /^kazumi_stream_\d+\.m3u8$/i.test(path.basename(absLocal))
+            && path.dirname(absLocal) === path.resolve(artDir);
+        if (!isArtifact) {
+            console.log(`[播放列表] 本地路径不在抓流产物白名单，拒绝: ${localPath.slice(0, 80)}`);
+            res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('forbidden local path');
+            return;
+        }
         let stat = null;
         try { stat = fs.statSync(localPath); } catch (e) { /* 不存在的本地路径按 502 处理 */ }
         if (!stat || !stat.isFile()) {
@@ -426,8 +494,7 @@ class PlaylistProxy extends EventEmitter {
         if (sess.pipe && type !== 'video/mp4') {
             let text = '';
             try { text = fs.readFileSync(localPath, 'utf8'); } catch (e) { /* 读失败按原样空清单 */ }
-            const body = this._rewriteManifest(text.slice(0, MANIFEST_MAX_BYTES), null, sess, index, req);
-            const buf = Buffer.from(body, 'utf8');
+            const body = this._rewriteManifest(text.slice(0, MANIFEST_MAX_BYTES), null, sess, index, req);            const buf = Buffer.from(body, 'utf8');
             res.writeHead(200, {
                 'Content-Type': type, 'Cache-Control': 'no-store',
                 'Content-Length': String(buf.length), // 定长完整清单（同 _pipeRemote 注释）
@@ -553,40 +620,81 @@ class PlaylistProxy extends EventEmitter {
      * 小体积响应的 EOF 会先于重挂到达，end 事件将永久丢失（实测挂死）。
      */
     async _pipeRemote(sess, index, upstreamUrl, req, res) {
-        // 清单短时缓存：PotPlayer 拖动时会反复拉取同一媒体清单计算时长/分片映射，
+        const range = String(req.headers.range || '');
+        // 清单短时缓存键：PotPlayer 拖动时会反复拉取同一媒体清单计算时长/分片映射，
         // 每次重取上游（367 分片、38 个 DISCONTINUITY 的大清单）引入 300-800ms 往返，
         // 拖动卡顿主因。MANIFEST_CACHE_TTL_MS 内复用重写结果，拖动即时响应，音画重同步等待缩短。
+        // 键含上游地址：403/410 重解析换新直链后自然落新键，不串旧清单。
         const cacheKey = `${sess.token}:${index}:${upstreamUrl}`;
-        if (!sess._manifestCache) sess._manifestCache = new Map();
-        const cached = sess._manifestCache.get(cacheKey);
-        const now = Date.now();
-        if (cached && now - cached.ts < MANIFEST_CACHE_TTL_MS && !String(req.headers.range || '')) {
-            try {
-                res.writeHead(200, {
-                    'Content-Type': 'application/vnd.apple.mpegurl',
-                    'Cache-Control': 'no-store',
-                    'Content-Length': String(cached.buf.length),
-                });
-                res.end(cached.buf);
-                return 200;
-            } catch (e) { /* 缓存发送失败回落重取 */ }
-        }
-        const headers = {};
-        // 只注入会话规则头；入站请求头一律不透传，避免把 127.0.0.1 上下文泄漏给源站
-        Object.assign(headers, sess.headers || {});
-        // 无会话头的强制管道会话（PotPlayer m3u8 规范化包装）：Node http 不自动带
-        // UA，部分 CDN WAF 拒收无 UA 请求 → 补浏览器 UA（与 sniffMediaExt/R22 的
-        // Mozilla/5.0 口径一致；有会话头时以规则头为准不覆盖）。
-        if (!Object.keys(headers).length) headers['User-Agent'] = 'Mozilla/5.0';
-        const range = String(req.headers.range || '');
-        if (range) headers.Range = range;
+        // 首次请求直链失效（403/410，签名时效过期）时允许重解析；带 Range 的取流
+        // （播放中 seek）不重试——上游对 Range 已回 403 同样适用于重解析后的新直链，
+        // 但重解析链路成本高，只对起播/清单请求兜底（见下方判定）。
+        let retriedReresolve = false;
         let rs;
-        try { rs = await this._upstreamGet(upstreamUrl, headers, 2); }
-        catch (e) {
-            console.log(`[播放列表] 上游取流失败: ${e && e.message}`);
-            res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('upstream error');
-            return 0;
+        let headers; // 上游请求头（含 Range；Range 整取重试复用，仅剥 Range）
+        for (;;) {
+            if (!sess._manifestCache) sess._manifestCache = new Map();
+            const cached = sess._manifestCache.get(cacheKey);
+            const now = Date.now();
+            if (cached && now - cached.ts < MANIFEST_CACHE_TTL_MS && !range) {
+                try {
+                    res.writeHead(200, {
+                        'Content-Type': 'application/vnd.apple.mpegurl',
+                        'Cache-Control': 'no-store',
+                        'Content-Length': String(cached.buf.length),
+                    });
+                    res.end(cached.buf);
+                    return 200;
+                } catch (e) { /* 缓存发送失败回落重取 */ }
+            }
+            headers = {};
+            // 只注入会话规则头；入站请求头一律不透传，避免把 127.0.0.1 上下文泄漏给源站
+            Object.assign(headers, sess.headers || {});
+            // 跨域剥离 Cookie：会话 Cookie 绑定解析直链所在域（抓流/预热时的登录态），
+            // 转发到其他域是纯泄漏面（Cookie 顺手送给无关 CDN）。清单重写产出的
+            // /seg 全部指向已登记域名，正常分片不受影响。
+            {
+                let upHost = '';
+                try { upHost = new URL(upstreamUrl).hostname.toLowerCase(); } catch (e) { /* 已过白名单，必合法 */ }
+                if (upHost && sess._cookieHost && upHost !== sess._cookieHost) delete headers.Cookie;
+            }
+            // 无会话头的强制管道会话（PotPlayer m3u8 规范化包装）：Node http 不自动带
+            // UA，部分 CDN WAF 拒收无 UA 请求 → 补浏览器 UA（与 sniffMediaExt/R22 的
+            // Mozilla/5.0 口径一致；有会话头时以规则头为准不覆盖）。
+            if (!Object.keys(headers).length) headers['User-Agent'] = 'Mozilla/5.0';
+            if (range) headers.Range = range;
+            try { rs = await this._upstreamGet(upstreamUrl, headers, 2); }
+            catch (e) {
+                console.log(`[播放列表] 上游取流失败: ${e && e.message}`);
+                res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end('upstream error');
+                return 0;
+            }
+            // 直链签名时效过期（上游 403/410）：判定前移到写响应头之前——旧实现等
+            // _pipeRemote 全部返回路径（均已 writeHead）回到 _serveResolved 再看
+            // headersSent，恒为 true，_reresolveEntry 整条修复链不可达，播放中签名
+            // 过期即断流。此处此刻响应头尚未写出，可安全清缓存重解析并换新直链重试
+            // （仅一次防循环；带 Range 的取流不重试，重解析成本高且 seek 可再入）。
+            if ((rs.status === 403 || rs.status === 410) && !range && !retriedReresolve) {
+                retriedReresolve = true;
+                console.log(`[播放列表] 第 ${index + 1} 集直链失效(${rs.status})，重解析刷新…`);
+                try { rs.stream.destroy(); } catch (e) { /* ignore */ }
+                const rr = await this._reresolveEntry(sess, index);
+                if (rr.ok && rr.url && rr.url !== upstreamUrl
+                    && !/^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(rr.url)) {
+                    // 换新直链从头走一遍（缓存键、头注入、清单判定全复用本函数逻辑）
+                    upstreamUrl = rr.url;
+                    continue;
+                }
+                // 重解析失败/同址/本地产物：落回原直链按原状态直通，让播放器自行失败跳集
+                try { rs = await this._upstreamGet(upstreamUrl, headers, 2); }
+                catch (e2) {
+                    res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    res.end('upstream error');
+                    return 0;
+                }
+            }
+            break;
         }
         const ct0 = String(rs.headers['content-type'] || '').toLowerCase();
         // R22（VLC 实锤）：清单判定只看 Content-Type/扩展名，与入站 Range **解耦**。
@@ -620,7 +728,7 @@ class PlaylistProxy extends EventEmitter {
         if (forceRaw) {
             if (rs.status !== 200) console.log(`[播放列表] 上游非200直通 st=${rs.status} ct=${ct || '∅'}`);
             this._passthrough(res, rs);
-            // 返回上游状态码：403/410 通常是直链签名时效过期，调用方据此触发重解析
+            // 返回上游状态码供日志与调用方观测（403/410 的重解析已在上方写头前完成）
             return rs.status;
         }
 
@@ -792,6 +900,8 @@ class PlaylistProxy extends EventEmitter {
             if (!abs.search && baseUrl) {
                 try { const b = new URL(baseUrl); if (b.search) abs.search = b.search; } catch (e2) { /* ignore */ }
             }
+            // 重写即登记：/seg 端点的上游域名白名单与清单产出严格一致
+            this._allowUpstreamHost(sess, abs.toString());
             return segBase + b64u(abs.toString());
         };
         return String(text || '').split(/\r?\n/).map((line) => {

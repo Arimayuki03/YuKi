@@ -496,7 +496,7 @@ class TestRuleEngineCookie(unittest.TestCase):
         import types
         from kazumi.cookie_jar import CookieJar
         from kazumi.models import PreparedRuleRequest
-        import kazumi.rule_engine as re_mod
+        from unittest import mock
 
         jar = CookieJar(file_path=test_file('cookies-'))
         jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'xyz'}])
@@ -511,20 +511,111 @@ class TestRuleEngineCookie(unittest.TestCase):
             def raise_for_status(self):
                 pass
 
-        orig = re_mod.http_client.get
-
+        # 高危#16：原实现手工赋值 re_mod.http_client.get 却还原到
+        # re_mod.requests.get——fake 永久留在 http_client.get 上，污染同进程
+        # 后续全部用例。改用 mock.patch 上下文管理器，作用域结束自动还原。
         def fake_get(url, **kw):
             captured['cookie'] = kw.get('headers', {}).get('cookie', '')
             return FakeRsp()
 
-        re_mod.http_client.get = fake_get
-        try:
+        with mock.patch('http_client.get', side_effect=fake_get) as m:
             cfg = types.SimpleNamespace(base_url='https://example.com', user_agent='')
             req = PreparedRuleRequest(method='GET', url='https://example.com/s', headers={})
             engine._do_request(req, cfg)
-        finally:
-            re_mod.requests.get = orig
         self.assertIn('sid=xyz', captured['cookie'])
+        # 佐证还原语义：mock 出作用域后 http_client.get 必须回到真实实现
+        import http_client as hc_mod
+        self.assertIsNot(m.mock, hc_mod.get)
+
+
+class _RedirectRsp:
+    """_send_guarded 重定向测试的响应桩：传入 Location 则 302，否则 200。"""
+
+    def __init__(self, location=None):
+        self._location = location
+
+    @property
+    def status_code(self):
+        return 302 if self._location else 200
+
+    @property
+    def headers(self):
+        return {'Location': self._location} if self._location else {}
+
+    def close(self):
+        pass
+
+    def raise_for_status(self):
+        pass
+
+    @property
+    def text(self):
+        return '<html></html>'
+
+
+class TestRuleEngineRedirectCredentials(unittest.TestCase):
+    """M-1 回归：_send_guarded 手动跟重定向不得把首跳 Cookie/referer 带给
+    跨域跳转目标（高危#10 同域边界的重定向旁路）。"""
+
+    def setUp(self):
+        import types
+        from kazumi.cookie_jar import CookieJar
+        from unittest import mock
+
+        self.jar = CookieJar(file_path=test_file('cookies-'))
+        self.jar.set_domain_cookies('example.com', [{'name': 'sid', 'value': 'xyz'}])
+        self.engine = RuleEngine(cookie_jar=self.jar)
+        self.cfg = types.SimpleNamespace(base_url='https://example.com', user_agent='')
+        self.locations = []
+        self.captured = []
+
+        def fake_get(url, **kw):
+            self.captured.append({'url': url, 'headers': dict(kw.get('headers') or {})})
+            return _RedirectRsp(self.locations.pop(0) if self.locations else None)
+
+        patcher = mock.patch('http_client.get', side_effect=fake_get)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, target, location='https://cdn.third-party.net/final'):
+        """走 _do_request（referer/Cookie 派生的真实入口）发起两跳请求。"""
+        from kazumi.models import PreparedRuleRequest
+        self.locations = [location] if location else []
+        req = PreparedRuleRequest(method='GET', url=target, headers={})
+        return self.engine._do_request(req, self.cfg)
+
+    def test_cross_host_redirect_drops_cookie_and_referer(self):
+        rsp = self._run('https://example.com/s')
+        self.assertEqual(len(self.captured), 2)
+        first, second = self.captured
+        # 首跳：同域，带会话 Cookie 与 referer（_do_request 派生）
+        self.assertIn('sid=xyz', first['headers'].get('cookie', ''))
+        self.assertIn('example.com', first['headers'].get('referer', ''))
+        # 跳转目标：跨 host，会话 Cookie 必须为空、referer 必须被剥掉
+        self.assertNotIn('sid=xyz', second['headers'].get('cookie', ''))
+        self.assertNotIn('referer', second['headers'])
+        self.assertEqual(second['url'], 'https://cdn.third-party.net/final')
+        self.assertEqual(rsp, '<html></html>')
+
+    def test_same_host_redirect_keeps_cookie_and_referer(self):
+        # 同 host 跳转（只是换路径）不受影响
+        self._run('https://example.com/s', location='https://example.com/final')
+        first, second = self.captured
+        self.assertIn('sid=xyz', first['headers'].get('cookie', ''))
+        self.assertIn('sid=xyz', second['headers'].get('cookie', ''))
+        self.assertIn('example.com', second['headers'].get('referer', ''))
+
+    def test_no_cookie_jar_keeps_rule_static_cookie(self):
+        # 规则自带的静态 cookie 头（非会话态）在无 jar 时不被清理
+        import types
+        engine = RuleEngine(cookie_jar=None)
+        self.locations = ['https://cdn.third-party.net/final']
+        engine._send_guarded('GET', 'https://example.com/s',
+                             types.SimpleNamespace(base_url='https://example.com',
+                                                   user_agent=''),
+                             headers={'cookie': 'static_token=abc'})
+        self.assertEqual(len(self.captured), 2)
+        self.assertEqual(self.captured[1]['headers'].get('cookie', ''), 'static_token=abc')
 
 
 class TestBangumiSync(unittest.TestCase):

@@ -146,6 +146,40 @@ class PythonBridge extends EventEmitter {
             if (this.logWriter) this.logWriter.write('WARN', '[python:stderr]', chunk.toString('utf8').trimEnd());
             process.stderr.write(`[python] ${chunk}`);
         });
+        // 'error' 事件有两类，处理不同：
+        // (a) spawn 失败（ENOENT/权限不足等）：进程从未存在，Node 不会再发
+        //     exit——此处就是本次 spawn 的终态，直接走与 exit 相同的重启路径。
+        // (b) 运行期 error（进程仍存活：proc.kill() 以 EPERM 失败、IPC 通道
+        //     错误等）：不能只清句柄就重启——旧进程沦为不受管理的僵尸，且
+        //     守卫（this.proc !== proc）会让其后的 exit 全部失效，僵尸永久
+        //     留存。必须先杀完整进程树，再走同一条重启链；杀掉后的 exit 由
+        //     该守卫挡住，不会双重启。
+        proc.on('error', (err) => {
+            if (this.proc !== proc) return; // H-9：stop→start 已换新进程，旧进程的错误直接忽略
+            const running = proc.exitCode === null && proc.pid != null;
+            if (running) {
+                this._killTree(proc);
+            } else {
+                // 纯 spawn 失败：无进程可杀，立刻收口句柄进入重启
+                this._stopHealthCheck();
+                this.info = null;
+                this.proc = null;
+            }
+            if (this.stopping) return;
+            if (this.logWriter) {
+                this.logWriter.write('ERROR', '[python-bridge]',
+                    running ? `backend runtime error: ${err.message}` : `backend spawn failed: ${err.message}`);
+            }
+            console.error(`[python-bridge] ${running ? 'runtime error' : 'spawn failed'}: ${err.message}`);
+            this.emit('state', 'restarting');
+            const delay = this.backoff;
+            this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
+            if (this._restartTimer) clearTimeout(this._restartTimer);
+            this._restartTimer = setTimeout(() => {
+                this._restartTimer = null;
+                this._spawn();
+            }, delay);
+        });
         proc.on('exit', (code) => {
             // H-9：stop→start 已换新进程时旧进程的迟到 exit——直接忽略，
             // 不清掉新进程的 info/proc，也不再安排多余的 _spawn（防进程翻倍）
@@ -177,13 +211,38 @@ class PythonBridge extends EventEmitter {
                 if (!rsp.ok) throw new Error(`status ${rsp.status}`);
             } catch (e) {
                 console.warn(`[python-bridge] health check failed: ${e.message}, killing for restart`);
-                if (this.proc) this.proc.kill();
+                // 健康检查失败必须杀完整进程树：仅 kill() 留下的 Worker/JVM 后代
+                // 会随周期性失败重启不断累积成孤儿进程
+                this._killTree();
             }
         }, HEALTH_INTERVAL);
     }
 
     _stopHealthCheck() {
         if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
+    }
+
+    /**
+     * 终止后端进程的完整进程树（Windows 用 taskkill /T /F；其它平台 kill）。
+     * 健康检查失败与 stop() 共用：只 proc.kill() 会留下 Worker/JVM 等后代进程，
+     * 周期性健康检查失败重启会累积孤儿进程。
+     * @param {object} [target] 待杀进程；缺省取 this.proc（stop() 清空句柄后需显式传入）。
+     */
+    _killTree(target) {
+        const proc = target || this.proc;
+        if (!proc) return;
+        if (process.platform === 'win32' && proc.pid) {
+            try {
+                const result = spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
+                    windowsHide: true,
+                    stdio: 'ignore',
+                    timeout: 5000,
+                });
+                if (result.error || result.status !== 0) proc.kill();
+            } catch (e) { proc.kill(); }
+        } else {
+            proc.kill();
+        }
     }
 
     /** 供 IPC 调用：已就绪返回 info，否则等待（最多 timeoutMs）。 */
@@ -232,18 +291,7 @@ class PythonBridge extends EventEmitter {
             this.proc = null;
             // Windows 的 ChildProcess.kill() 只结束 Python 宿主，不保证清理其
             // spawn Worker、JVM 或 Node 后代。退出/设置重置必须杀完整进程树。
-            if (process.platform === 'win32' && proc.pid) {
-                try {
-                    const result = spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
-                        windowsHide: true,
-                        stdio: 'ignore',
-                        timeout: 5000,
-                    });
-                    if (result.error || result.status !== 0) proc.kill();
-                } catch (e) { proc.kill(); }
-            } else {
-                proc.kill();
-            }
+            this._killTree(proc);
         }
     }
 }

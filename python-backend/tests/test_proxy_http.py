@@ -106,7 +106,7 @@ class _FixtureSites:
         self.current = key
 
 
-def _request(url, *, method='GET', data=None, headers=None):
+def _request(url, *, method='GET', data=None, headers=None, no_redirect=False):
     body = None
     request_headers = dict(headers or {})
     if data is not None:
@@ -118,6 +118,22 @@ def _request(url, *, method='GET', data=None, headers=None):
             body = data
     request = urllib.request.Request(url, data=body, headers=request_headers,
                                      method=method)
+    openers = []
+    if no_redirect:
+        # 不跟随 30x：断言原始状态码（do=ck 的 302 形态断言用）
+        openers.append(urllib.request.HTTPRedirectHandler)
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            with opener.open(request, timeout=8) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, error.headers, error.read()
+            finally:
+                error.close()
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             return response.status, response.headers, response.read()
@@ -177,7 +193,7 @@ class TestProxyHttp(unittest.TestCase):
 
     def test_fastapi_post_merges_body_headers_and_query(self):
         url = (f'http://127.0.0.1:{self.port}/proxy'
-               '?siteKey=py-fixture&do=py&x=query')
+               '?siteKey=py-fixture&do=py&x=query&token=' + TOKEN)
         status, headers, body = _request(
             url,
             method='POST',
@@ -231,12 +247,27 @@ class TestProxyHttp(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertIn(b'invalid proxy token', body)
 
+    def test_fastapi_anonymous_proxy_rejected(self):
+        """R 组：/proxy 不带 token 一律 401（仅 do=ck 健康探测豁免）。"""
+        # 无 token 且非 ck：本地任意进程不能再匿名借道代理
+        status, _headers, body = _request(
+            f'http://127.0.0.1:{self.port}/proxy?do=js&siteKey=js-fixture')
+        self.assertEqual(status, 401)
+        self.assertIn(b'proxy token required', body)
+        # do=ck 健康探测：不触网、不派发 spider，保持免 token（蜘蛛端口扫描
+        # 依赖）。既有契约返回裸字符串 'ok' → normalize 为 302 Location: ok，
+        # 故用不跟随重定向的请求断言「未被 token 门禁 401」即可。
+        status, _headers, _body = _request(
+            f'http://127.0.0.1:{self.port}/proxy?do=ck', no_redirect=True)
+        self.assertEqual(status, 302)
+        self.assertEqual(_headers.get('Location'), 'ok')
+
     def test_legacy_listener_reuses_same_dispatcher(self):
         port = _free_port()
         self.assertTrue(go_proxy.ensure_listener(port))
         try:
             query = urllib.parse.urlencode({
-                'siteKey': 'js-fixture', 'do': 'js', 'x': 'legacy',
+                'siteKey': 'js-fixture', 'do': 'js', 'x': 'legacy', 'token': TOKEN,
             })
             status, headers, body = _request(
                 f'http://127.0.0.1:{port}/proxy?{query}')

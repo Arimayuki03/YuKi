@@ -41,6 +41,7 @@ function denyAllPermissions(ses) {
 }
 
 let win = null;
+let opening = false; // clearStorageData 异步间隙的建窗守卫：防二次调用重复建窗
 let resolveCb = null;
 let rejectCb = null;
 let pollTimer = null;
@@ -96,21 +97,30 @@ function settle(ok, result) {
 }
 
 /** 打开官方登录窗口；成功 resolve({cookies})，取消/失败 reject。 */
-function openLoginWindow() {
-    return new Promise((resolve, reject) => {
-        if (win) {
-            reject(new Error('登录窗口已打开'));
-            return;
-        }
+async function openLoginWindow() {
+    if (win || opening) {
+        throw new Error('登录窗口已打开');
+    }
+    opening = true;
+
+    // 清理旧 session（上次登录的 cookie 清掉，保证新会话干净）：
+    // 必须 await 完成后再建窗加载登录页，否则二次登录的轮询会读到
+    // 上次会话遗留的 __puus/__pus，把「未登录」误判成「已登录」。
+    // 清理失败（异常 session）不阻断登录，仅记录。
+    try {
+        await ses().clearStorageData();
+    } catch (e) {
+        console.warn('[pan-qr-window] clearStorageData failed:', e && e.message);
+    }
+    // P2-12：远程登录页的会话全拒权限请求
+    denyAllPermissions(ses());
+
+    try {
+        return await new Promise((resolve, reject) => {
         resolveCb = resolve;
         rejectCb = reject;
         settled = false;
         startedAt = Date.now();
-
-        // 清理旧 session（上次登录的 cookie 清掉，保证新会话干净）
-        ses().clearStorageData().catch(() => {});
-        // P2-12：远程登录页的会话全拒权限请求
-        denyAllPermissions(ses());
 
         win = new BrowserWindow({
             width: 460,
@@ -164,7 +174,11 @@ function openLoginWindow() {
                 closeLoginWindow();
             }
         }, POLL_MS);
-    });
+        });
+    } finally {
+        // 建窗结束（成功/异常均算）：解除并发守卫
+        opening = false;
+    }
 }
 
 /** 关闭登录窗口（幂等） */

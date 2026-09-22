@@ -81,7 +81,7 @@ npm run build:py
 17. **播放源解析**：`vod_play_from` 按 `$$$` 分源、`vod_play_url` 按 `$$$` 对齐、每源内 `#` 分集、集内 `$` 分名址。选集点击走 `do=playerContent` 得 `{url, parse}`。
 18. **播放 IPC 契约**：`window.yuki.playUrl(url, meta)` → 主进程 `yuki:play` 返回 `{ok, reason, anime4k}`；mpv 缺失返回 `{ok:false, reason:'mpv-missing'}`，渲染层提示后走 `<video>` 预览（m3u8 不给内嵌预览，只留复制地址）。
 19. **Esc 派发**：`common.js dispatchEsc()` 先关对话框栈，再自顶向下调用视图 `registerEsc` 处理器；全局仅一处 keydown 监听（`app.js`）。
-20. **弹幕链路已移除**（用户要求）：面板页签/设置项/主进程轮询全删；后端 `/danmaku` 端点与 mpv ASS 基建保留但无人调用。**新增功能勿再引入弹幕。**
+20. **弹幕链路已重构为可选真实功能**（勘误 2026-09-22：早期版本曾整体移除，现已恢复）：渲染层「设置 → 播放」有「自动加载弹幕」开关（`danmakuEnable`，默认关，`index.html` #set_danmaku）；开启后 player.js `_maybeLoadDanmaku` 起播时调 `Kazumi.loadDanmaku` → 后端 `/kazumi/action` 的 `kazumiDanmakuSearch/Episode/Comments`（弹弹play API），再经 `yuki:load-danmaku` IPC 转 ASS 推给 mpv。请求以凭据为门槛：`plugin_manager.py _dandan_creds()` 读 `DANDANAPI_APPID/DANDANAPI_KEY`（无内置 key，用户在设置里自填 AppId/AppSecret，主进程经 `bridge.extraEnv` 注入并重启后端），缺凭据直接返回空、不发出外网请求。
 21. **经典脚本全局词法陷阱**：渲染层顶层 `const X` 不会成为 window 属性。跨脚本全局对象一律 `typeof X !== 'undefined'` 判断后直接用标识符，**禁止 window.X 探测**。
 
 ### 文件管理
@@ -174,7 +174,7 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 4. **确认操作**用 confirmDialog，不用原生 confirm。
 5. **播放器功能联动文件链**：`mpv-player.js`（核心）→ `index.js`（IPC + 启动初始化）→ `preload.js`（桥接）→ 渲染层 JS + `index.html`（UI）。
 6. **UI 文案统一简体中文**：新增文案勿用繁体/台式用词（视窗→窗口、资料夹→文件夹、档案→文件、侦测→检测、支援→支持、视讯→视频、搜寻→搜索、重新整理→刷新、影片→视频）。
-7. **不要重新引入已回滚功能**：弹幕功能。（2026-08 解禁）视频缓存到硬盘切换与直播源后台探测已应用户要求恢复为正式功能（见 §8.8 T1/T3）；二者历史上曾回滚，重新实现须保证：探测全程静默无阻塞、换缓存路径必须清理旧目录且防误删。
+7. **弹幕勿随意改动**：（勘误 2026-09-22）弹幕功能已恢复为可选真实功能（开关默认关 + 用户自填 DanDanPlay 凭据才请求 API，见决策 20 勘误），修改播放链路时须保持「无凭据/未开启开关不发起弹幕网络请求」的门槛语义。（2026-08 解禁）视频缓存到硬盘切换与直播源后台探测已应用户要求恢复为正式功能（见 §8.8 T1/T3）；二者历史上曾回滚，重新实现须保证：探测全程静默无阻塞、换缓存路径必须清理旧目录且防误删。
 8. **封面防盗链**：所有 `<img>` 加 `referrerpolicy="no-referrer"`；`//` 开头补 https（common.js normalizePic，非 http(s)/data 协议视为无封面走占位）；兜底图 assets/cover-fallback.svg，onerror=null 防循环。
 
 ### 已实现功能概览（U 批次 U1~U115 摘要，细节见对应决策号）

@@ -13,6 +13,7 @@
  *   由主进程 1s 轮询合并推送；完成/失败经 EventEmitter 通知。
  */
 const fs = require('fs');
+const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
@@ -130,29 +131,56 @@ class HlsDownloader extends EventEmitter {
     /** 更换下载目录时迁移在途任务：杀掉活跃进程 → 成品/临时分片目录随迁 →
      *  更新任务路径并重新排队。分片并发模式重跑时跳过已存在分片（断点续传）；
      *  ffmpeg 顺序拉流模式无法续传，从头重下（分片模式是默认，concurrency>1）。
-     *  已结束（complete/error）任务的成品文件同样随迁。 */
+     *  已结束（complete/error）任务的成品文件同样随迁。
+     *  同卷 rename 即时完成；跨盘（EXDEV）等 rename 不可达时改为 fs.promises
+     *  后台分块拷贝（不冻结主进程），在途任务待拷贝 settle 后才重新入队。
+     *  迁移期间再次调用 migrateDir 是合法的（用户来回换目录）：每轮持有唯一
+     *  token，在途拷贝任务的挂起归属随之转移到新一轮，旧轮 gate 只放行
+     *  token 仍归自己的任务，防止旧轮提前放行与新一轮后台拷贝竞态。 */
     migrateDir(newDir) {
         if (!newDir) return 0;
         const oldDir = this.dir; // 番剧子目录相对路径以旧引擎目录为基准，须先于 this.dir 覆盖捕获
         this.dir = newDir;
+        // 本轮迁移唯一 token：任务挂起时记录归属，gate 回调只放行 token 仍归属
+        // 本轮的任务——期间再次 migrateDir 会给任务换新 token，上一轮的 gate
+        // 提前放行会让任务与第二轮仍在进行的后台拷贝读写同路径竞态。
+        const roundToken = Symbol('migrate-round');
         try { fs.mkdirSync(newDir, { recursive: true }); } catch (e) { /* ignore */ }
-        const move = (src, dest) => {
+        // Windows 下刚 kill 的 ffmpeg 句柄未必立即释放，紧随其后的 rename 会 EPERM/EBUSY：
+        // 带短重试的 rename（总 ~1s），耗尽后仍失败则回落 move 的 copy 分支兜底
+        const sleepSync = (ms) => {
+            try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+            catch (e) { const end = Date.now() + ms; while (Date.now() < end) { /* 无 Atomics 时退化为自旋 */ } }
+        };
+        const renameWithRetry = (src, dest) => {
+            const delays = [50, 100, 200, 300, 400];
+            for (let i = 0; ; i++) {
+                try { fs.renameSync(src, dest); return true; } catch (e) {
+                    if (e && e.code === 'EXDEV') return false; // 跨盘：重试不可能成功，直接走异步拷贝回退
+                    if (i >= delays.length) return false;
+                    sleepSync(delays[i]); // 同步等待：migrateDir 同步段不引入异步语义
+                }
+            }
+        };
+        // 本轮调度到后台的异步拷贝（rename 不可达时逐个推入）。循环体同步执行，
+        // 单个任务的全部 move 调用推入后，据此决定是否延迟重新入队（见循环尾部）。
+        let taskMoves = [];
+        const move = (src, dest, opts = {}) => {
             try {
                 if (!fs.existsSync(src)) return false;
-                fs.renameSync(src, dest);
-                return true;
-            } catch (e) {
-                try {
-                    if (fs.statSync(src).isDirectory()) {
-                        fs.cpSync(src, dest, { recursive: true });
-                        fs.rmSync(src, { recursive: true, force: true });
-                    } else {
-                        fs.copyFileSync(src, dest);
-                        fs.rmSync(src, { force: true });
-                    }
+                if (opts.retry) {
+                    if (renameWithRetry(src, dest)) return true;
+                } else {
+                    fs.renameSync(src, dest);
                     return true;
-                } catch (e2) { return false; }
-            }
+                }
+            } catch (e) { /* 回落异步 copy 分支 */ }
+            // 跨盘（EXDEV）等 rename 不可达时不再同步 cpSync/copyFileSync——GB 级视频
+            // 会冻结主进程数分钟；改为 fs.promises 后台分块拷贝（libuv 线程池执行，
+            // 事件循环不受阻），拷贝成功才删源、失败保留源文件（失败回退语义与原
+            // 同步 copy 分支一致：数据不丢，仅迁移未完成，moved 计数为调度口径）。
+            taskMoves.push(this._asyncMove(src, dest));
+            return true;
         };
         /** 番剧子目录布局（RM-1）：产物相对旧引擎目录的路径原样带到新目录（保持两级
          *  结构）；相对路径异常（旧目录为空/产物在旧目录外）回退按 basename 平铺。 */
@@ -161,9 +189,11 @@ class HlsDownloader extends EventEmitter {
             return rel ? path.join(newDir, rel) : path.join(newDir, path.basename(oldDest));
         };
         let moved = 0;
+        const reruns = []; // 有异步拷贝的在途任务：待拷贝 settle 后再补延迟入队（见 _asyncMove 内）
         for (const t of this._tasks.values()) {
+            taskMoves = []; // 每任务重置：当前任务推入的异步 move 集合
             const newDest = destFor(t._dest);
-            try { fs.mkdirSync(path.dirname(newDest), { recursive: true }); } catch (e) { /* move 的 copy 分支同样依赖父目录存在 */ }
+            try { fs.mkdirSync(path.dirname(newDest), { recursive: true }); } catch (e) { /* 异步拷贝同样依赖父目录存在 */ }
             const oldDest = t._dest;
             const finished = ['complete', 'error', 'removed'].includes(t.status);
             if (finished) {
@@ -178,12 +208,12 @@ class HlsDownloader extends EventEmitter {
             t._gen = (t._gen || 0) + 1;
             if (t._proc) { try { t._proc.kill(); } catch (e) { /* ignore */ } t._proc = null; }
             if (t._speedTimer) { clearInterval(t._speedTimer); t._speedTimer = null; }
-            if (move(oldDest, newDest)) moved++;
-            move(oldDest + '.incomplete' + path.extname(oldDest), newDest + '.incomplete' + path.extname(newDest));
+            if (move(oldDest, newDest, { retry: true })) moved++;
+            move(oldDest + '.incomplete' + path.extname(oldDest), newDest + '.incomplete' + path.extname(newDest), { retry: true });
             // 广告过滤临时播放列表重启后会重新生成，直接清理
             if (t._adTemp) { try { fs.rmSync(t._adTemp, { force: true }); } catch (e) { /* ignore */ } }
             const newSegs = `${newDest}.${t.gid}.segs`;
-            if (move(t._segsDir, newSegs)) moved++;
+            if (move(t._segsDir, newSegs, { retry: true })) moved++;
             t._dest = newDest;
             t._segsDir = newSegs;
             t.dir = path.dirname(newDest);
@@ -193,13 +223,101 @@ class HlsDownloader extends EventEmitter {
             t._retried = false;       // 重启后 copy/转码兜底重试额度复位
             t._transcodeRetried = false;
             t.speed = 0;
-            // 暂停状态保持不动（分片已随迁，继续时断点续传）；active/waiting 重新排队
-            if (t.status === 'paused') continue;
-            t.status = 'waiting';
-            if (!this._pending.includes(t)) this._pending.push(t);
+            // 本任务走了异步拷贝：保持原状态但挂起调度（_awaitingMove 门控），
+            // 等拷贝 settle 后再入队——立即重跑会与后台拷贝读写同一路径竞态；
+            // active 转 waiting 释放并发槽位（拷贝可能持续数分钟），paused 保持暂停。
+            // 已在等待队列的先出队，防 _pump 在拷贝期间启动任务
+            if (taskMoves.length) {
+                if (t.status !== 'paused') t.status = 'waiting';
+                this._pending = this._pending.filter((x) => x !== t);
+                t._awaitingMove = true;
+                t._awaitingMoveToken = roundToken; // 归属本轮：gate 只放行 token 仍匹配的任务
+                reruns.push({ task: t, moves: taskMoves });
+            } else if (t.status === 'paused') {
+                continue; // 暂停状态保持不动（分片已随迁，继续时断点续传）
+            } else if (t.status !== 'removed') {
+                t.status = 'waiting';
+                if (!this._pending.includes(t)) this._pending.push(t);
+            }
         }
         this._pump();
+        if (reruns.length) {
+            // 延迟入队：本轮全部后台拷贝 settle 后统一放行（任务在此前不会被 _pump
+            // 启动——不在 _pending 中；期间用户暂停/删除由下方状态检查收敛）。
+            // 期间再次 migrateDir 会给任务挂新 token：本轮 gate 回调校验 token 归属，
+            // 不再放行已被接管/暂停/删除的任务（避免与新一轮后台拷贝竞态）。
+            const allMoves = reruns.flatMap((r) => r.moves);
+            Promise.all(allMoves).then(() => {
+                for (const { task: t } of reruns) {
+                    if (t._awaitingMoveToken !== roundToken) continue; // 已被新一轮迁移接管：本轮无权放行
+                    t._awaitingMoveToken = null;
+                    t._awaitingMove = false;
+                    if (t.status !== 'waiting') continue; // 期间被暂停/删除：保持现状
+                    if (!this._pending.includes(t)) this._pending.push(t);
+                }
+                this._pump();
+            }).catch(() => { /* _asyncMove 全捕获不 reject，兜底防未处理拒绝 */ });
+        }
         return moved;
+    }
+
+    /** 跨盘迁移的异步分块拷贝：fs.promises 在 libuv 线程池执行，不阻塞主进程事件
+     *  循环；按 4MiB 分块读写以控制单次内存占用（原同步 cpSync 会整段占内存）。
+     *  成功后删除源；拷贝阶段失败保留源文件并 resolve false（迁移失败不抛、
+     *  不删数据，重试语义交给上层重新迁移/任务重跑）。拷贝已完成后删源失败
+     *  仅记日志：此时数据已完整落在新目录，catch 不再回头删 dest——否则删源
+     *  一次抖动就把已拷出的成品/分片整体丢掉（两端都剩半空）。 */
+    async _asyncMove(src, dest) {
+        const CHUNK = 4 * 1024 * 1024;
+        let srcFd = null;
+        let destFd = null;
+        let finished = false; // 拷贝（含子项递归）是否已完成：catch 据此决定是否删 dest
+        try {
+            const st = await fsp.stat(src);
+            if (st.isDirectory()) {
+                // 目录：递归逐项迁移（mkdir 保证层级，文件逐个走分块拷贝）
+                await fsp.mkdir(dest, { recursive: true });
+                const children = await fsp.readdir(src);
+                let ok = true;
+                for (const child of children) {
+                    const r = await this._asyncMove(path.join(src, child), path.join(dest, child));
+                    if (!r) ok = false;
+                }
+                if (ok) {
+                    // 全部子项成功才删源；删源失败不算迁移失败——dest 已完整
+                    finished = true;
+                    try { await fsp.rm(src, { recursive: true, force: true }); } catch (e) { console.warn(`[hls] 迁移拷贝完成但删除源目录失败（保留源，不影响新目录）: ${src}`); }
+                }
+                return ok;
+            }
+            srcFd = await fsp.open(src, 'r');
+            destFd = await fsp.open(dest, 'w');
+            const buf = Buffer.allocUnsafe(CHUNK);
+            let pos = 0;
+            for (;;) {
+                const { bytesRead } = await srcFd.read(buf, 0, CHUNK, pos);
+                if (!bytesRead) break;
+                await destFd.write(buf, 0, bytesRead, pos);
+                pos += bytesRead; // 分块推进：让出微任务队列，事件循环可持续响应
+            }
+            await srcFd.close(); srcFd = null;
+            await destFd.close(); destFd = null;
+            finished = true; // 数据已完整写入 dest：此后任何失败都不得删 dest
+            try { await fsp.rm(src, { force: true }); } catch (e) { console.warn(`[hls] 迁移拷贝完成但删除源文件失败（保留源，不影响新目录）: ${src}`); }
+            return true;
+        } catch (e) {
+            // 拷贝阶段失败：半成品目标删除，源文件保留（不丢数据）；fd 泄漏防护。
+            // finished=true 后进这里的只可能是删源失败（上面已兜底）等收尾抖动，
+            // 绝不回头删已拷出的 dest。
+            if (!finished) {
+                try { if (destFd) await destFd.close(); } catch (e2) { /* ignore */ }
+                try { await fsp.rm(dest, { force: true }); } catch (e2) { /* ignore */ }
+            }
+            return false;
+        } finally {
+            try { if (srcFd) await srcFd.close(); } catch (e2) { /* ignore */ }
+            try { if (destFd) await destFd.close(); } catch (e2) { /* ignore */ }
+        }
     }
     setConcurrency(n) { this.concurrency = Math.max(1, Math.min(32, n | 0)); }
     /** 调整同时进行的任务数上限（设置页「并发任务数」）；调大后立即补位启动排队任务。 */
@@ -228,10 +346,11 @@ class HlsDownloader extends EventEmitter {
 
     /** 继续暂停的任务：重新排队等待调度。分片并发模式复用已存在分片（断点续传）；
      *  ffmpeg 顺序拉流模式无法续传，从头重下（与 migrateDir 语义一致）。
+     *  迁移后台拷贝未完成（_awaitingMove）时拒绝唤醒，避免与拷贝读写竞态。
      *  返回是否唤醒成功（任务存在且处于 paused）。 */
     unpause(gid) {
         const t = this._tasks.get(gid);
-        if (!t || t.status !== 'paused') return false;
+        if (!t || t.status !== 'paused' || t._awaitingMove) return false;
         t.status = 'waiting';
         t._retried = false;       // copy/转码兜底重试额度复位（同 migrateDir）
         t._transcodeRetried = false;
@@ -337,6 +456,17 @@ class HlsDownloader extends EventEmitter {
         // 防御：无扩展名时补 .mp4，避免 ffmpeg 因无法推断格式而合成失败（边下边播等调用方漏传扩展名）
         if (!path.extname(name)) name += '.mp4';
         const dest = path.join(baseDir, name);
+        // 同名并发防护：同 dest 已有活跃（active/waiting/paused）任务时直接复用返回
+        // 其 gid——否则两个任务互覆盖 _dest 成品与 .adfilter.m3u8 临时播放列表
+        // （后者文件名不含 gid，后写者清掉前者的输入）。复用不抛错：调用方多处
+        // 未包 try/catch，与「已在下载→静默跳过」的 dlDedupe 语义一致；终态/已删除
+        // 任务不拦截，照常新建（重新下载语义）。
+        for (const t of this._tasks.values()) {
+            if (t._dest === dest && !['complete', 'error', 'removed'].includes(t.status)) {
+                console.log(`[hls] ${name}: 同名任务已在进行（${t.gid}），复用不重复下载`);
+                return t.gid;
+            }
+        }
         const conc = Math.max(1, Math.min(32, parseInt(concurrency, 10) || 1));
         // 并发任务数已满则排队（waiting），任一活跃任务终态后由 _pump 补位启动
         const queued = this._activeCount() >= this.maxActive;
@@ -591,9 +721,20 @@ class HlsDownloader extends EventEmitter {
             proc.on('exit', (code) => {
                 task._proc = null;
                 if (task._gen !== gen) return reject(new Error('migrating')); // 目录迁移杀进程：不自弃会按旧路径重试/报错
+                if (task.status === 'removed') return reject(new Error('removed')); // 已删除：不再进重试链 spawn 注定失败的 ffmpeg
                 if (code === 0 && fs.existsSync(part)) {
                     try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
-                    fs.renameSync(part, task._dest);
+                    try {
+                        fs.renameSync(part, task._dest);
+                    } catch (e) {
+                        // Windows 目标被占用（播放器在播旧文件）/保留设备名时 EPERM：
+                        // 保留 .incomplete 供后续重试，按错误终态收敛（回退 ffmpeg 重下也不会好）
+                        task.status = 'error';
+                        task.errorMessage = '成品落盘失败（目标文件可能被占用）';
+                        this._cleanAdTemp(task);
+                        this.emit('error', this._flatten(task));
+                        return reject(new Error(`成品落盘失败: ${e.message}`));
+                    }
                     resolve();
                 } else if (withBsf) {
                     // aac_adtstoasc 对 fMP4/m4s 流会失败，去掉 bsf 重试
@@ -624,9 +765,19 @@ class HlsDownloader extends EventEmitter {
             proc.on('exit', (code) => {
                 task._proc = null;
                 if (task._gen !== gen) return reject(new Error('migrating')); // 目录迁移杀进程：旧续体自弃
+                if (task.status === 'removed') return reject(new Error('removed')); // 已删除：不再进报错链
                 if (code === 0 && fs.existsSync(part)) {
                     try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
-                    fs.renameSync(part, task._dest);
+                    try {
+                        fs.renameSync(part, task._dest);
+                    } catch (e) {
+                        // 同 _concatSegments：rename 失败保留 .incomplete，按错误终态收敛
+                        task.status = 'error';
+                        task.errorMessage = '成品落盘失败（目标文件可能被占用）';
+                        this._cleanAdTemp(task);
+                        this.emit('error', this._flatten(task));
+                        return reject(new Error(`成品落盘失败: ${e.message}`));
+                    }
                     resolve();
                 } else {
                     reject(new Error(`ffmpeg 转码合并失败 (code=${code}): ${errBuf.slice(-500)}`));
@@ -673,6 +824,9 @@ class HlsDownloader extends EventEmitter {
             this.emit('completed', this._flatten(task));
         } catch (e) {
             if (dead()) { if (task.status === 'removed') this._cleanSegsDir(task); return; }
+            // 合并落盘失败（rename EPERM 等）已在 _concatSegments 内按错误终态收敛：
+            // 回退 ffmpeg 重下也躲不开同一目标路径，直接停在这里
+            if (task.status === 'error') return;
             console.warn(`[hls] ${task.name}: 分片并发失败，回退 ffmpeg 模式: ${e.message}`);
             // 清理分片临时目录
             this._cleanSegsDir(task);
@@ -749,7 +903,17 @@ class HlsDownloader extends EventEmitter {
             if (task.status === 'removed') return;
             if (code === 0 && fs.existsSync(part)) {
                 try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
-                fs.renameSync(part, task._dest);
+                try {
+                    fs.renameSync(part, task._dest);
+                } catch (e) {
+                    // Windows 目标被占用（播放器在播旧文件）/保留设备名时 EPERM：
+                    // 保留 .incomplete 供后续重试，按错误终态收敛（不再走重试链）
+                    task.status = 'error';
+                    task.errorMessage = '成品落盘失败（目标文件可能被占用）';
+                    this._cleanAdTemp(task);
+                    this.emit('error', this._flatten(task));
+                    return;
+                }
                 task.status = 'complete';
                 task.percent = 100;
                 this._cleanAdTemp(task);
@@ -814,7 +978,17 @@ class HlsDownloader extends EventEmitter {
             if (task.status === 'removed' || task._gen !== gen) return;
             if (code === 0 && fs.existsSync(part)) {
                 try { fs.rmSync(task._dest, { force: true }); } catch (e) { /* ignore */ }
-                fs.renameSync(part, task._dest);
+                try {
+                    fs.renameSync(part, task._dest);
+                } catch (e) {
+                    // Windows 目标被占用（播放器在播旧文件）/保留设备名时 EPERM：
+                    // 保留 .incomplete 供后续重试，按错误终态收敛（不再走重试链）
+                    task.status = 'error';
+                    task.errorMessage = '成品落盘失败（目标文件可能被占用）';
+                    this._cleanAdTemp(task);
+                    this.emit('error', this._flatten(task));
+                    return;
+                }
                 task.status = 'complete';
                 task.percent = 100;
                 this._cleanAdTemp(task);

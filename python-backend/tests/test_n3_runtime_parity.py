@@ -229,5 +229,265 @@ class TestN35ProxyGateway(unittest.TestCase):
         self.assertEqual(len(bundle2.modules), 2)
 
 
+class TestN36EsmModuleParity(unittest.TestCase):
+    """ESM 多模块运行时对齐回归：循环依赖 live binding / re-export 转发 /
+    多声明符与解构导出 / spider 重复加载重置 / local KV 原子写。"""
+
+    def _engine(self):
+        return JsEngine(site_key='n36_parity')
+
+    @staticmethod
+    def _fetch(files):
+        def fetch(url):
+            for prefix, src in files.items():
+                if url.startswith(prefix):
+                    return src
+            raise AssertionError('unexpected module url: ' + url)
+        return fetch
+
+    def test_circular_dependency_live_bindings(self):
+        """循环依赖 a↔b：调用期经 getter 读到对方导出（旧 var 快照实现取到 undefined/TypeError）。
+
+        注：导入别名避开 cat.js 顶层词法常量名（cat.js 转换后常驻全局词法环境，
+        单字母/常见短名会被其 let/const 遮蔽，任何实现都取不到 globalThis 值）。
+        """
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-cycle/a.js': (
+                'import { hiFn } from "./b.js";\n'
+                'export function greet() { return "a:" + hiFn(); }\n'
+                'export const SITE_NAME = "A";\n'
+                'export default { greet: greet, hiFn: hiFn };'
+            ),
+            'http://t-cycle/b.js': (
+                'import { SITE_NAME } from "./a.js";\n'
+                'export function hiFn() { return "hi-" + SITE_NAME; }'
+            ),
+        })
+        self.assertTrue(engine.load_spider_url('http://t-cycle/a.js', fetch))
+        self.assertEqual(engine.call('greet'), 'a:hi-A')
+        self.assertEqual(engine.call('hiFn'), 'hi-A')
+
+    def test_multiline_import_and_reexport_forwarding(self):
+        """多行命名 import + export * from 转发：转发函数可调、本模块用导入值正常。"""
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-reexport/entry.js': (
+                'import {\n'
+                '  helperFn,\n'
+                '  tagLabel as tagAlias\n'
+                '} from "./extra.js";\n'
+                'export * from "./extra.js";\n'
+                'export default {\n'
+                '  helperFn: helperFn,\n'
+                '  useAlias: function() { return helperFn() + ":" + tagAlias; }\n'
+                '};'
+            ),
+            'http://t-reexport/extra.js': (
+                'export function helperFn() { return "H"; }\n'
+                'export const tagLabel = "T";'
+            ),
+        })
+        self.assertTrue(engine.load_spider_url('http://t-reexport/entry.js', fetch))
+        # 转发进来的函数（经 globalThis getter 取依赖命名空间）可调用
+        self.assertEqual(engine.call('helperFn'), 'H')
+        # 本模块使用导入值的函数
+        self.assertEqual(engine.call('useAlias'), 'H:T')
+        # export * 已把 extra.js 的命名导出合并进入口命名空间（不含 default）
+        self.assertEqual(engine.ctx.eval('globalThis.__MODULE_EXPORTS__.tagLabel'), 'T')
+
+    def test_multi_declarator_and_destructuring_exports(self):
+        """export const a=1, b=2 多声明符与对象/数组解构导出：命名空间拿到全部绑定。
+
+        绑定名避开 cat.js 顶层词法常量（单字母/短名被遮蔽会导致 eval redeclaration）。
+        """
+        engine = self._engine()
+        src = (
+            'const srcObj = {dv: 10, k: 20};\n'
+            'const srcArr = [1, 2, 3];\n'
+            'export const mv1 = 1, mv2 = srcObj.dv;\n'
+            'export const { dv, k: dvAlias, extra = 99, ...resto } = srcObj;\n'
+            'export const [arrFirst, , arrThird] = srcArr;\n'
+            'export default {};'
+        )
+        self.assertTrue(engine.load_spider(src))
+        exports = json.loads(engine.ctx.eval(
+            'JSON.stringify(globalThis.__MODULE_EXPORTS__)'))
+        self.assertEqual(exports['mv1'], 1)
+        self.assertEqual(exports['mv2'], 10)
+        self.assertEqual(exports['dv'], 10)
+        self.assertEqual(exports['dvAlias'], 20)   # k: dvAlias 重命名
+        self.assertEqual(exports['extra'], 99)     # 默认值穿透
+        self.assertEqual(exports['resto'], {})     # ...rest
+        self.assertEqual(exports['arrFirst'], 1)
+        self.assertEqual(exports['arrThird'], 3)   # 数组洞跳过
+        self.assertIn('default', exports)
+
+    def test_reload_spider_replaces_previous(self):
+        """重复 load_spider / load_spider_url（站点重载/换源）：新 spider 方法生效（旧实现返回旧值）。"""
+        engine = self._engine()
+        self.assertTrue(engine.load_spider(
+            'export default { info: function() { return "v1"; } };'))
+        self.assertEqual(engine.call('info'), 'v1')
+        # 第二次加载：旧实现 __JS_SPIDER__ 已存在被 loader 守卫跳过，仍返回 v1
+        self.assertTrue(engine.load_spider(
+            'export default { info: function() { return "v2"; } };'))
+        self.assertEqual(engine.call('info'), 'v2')
+
+    def test_reload_spider_url_replaces_previous(self):
+        """load_spider_url 换源重载：旧 __JS_SPIDER__/__MODn__ 命名空间被清空重建。"""
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-reload/one.js': 'export default { info: function() { return "u1"; } };',
+            'http://t-reload/two.js': 'export default { info: function() { return "u2"; } };',
+        })
+        self.assertTrue(engine.load_spider_url('http://t-reload/one.js', fetch))
+        self.assertEqual(engine.call('info'), 'u1')
+        self.assertTrue(engine.load_spider_url('http://t-reload/two.js', fetch))
+        self.assertEqual(engine.call('info'), 'u2')
+        # 旧命名空间已清理，无 __MODn__ 残留（one.js 仅 1 个模块，第二个源同名 MOD0 已重建）
+        self.assertEqual(engine.ctx.eval(
+            'Object.getOwnPropertyNames(globalThis).filter('
+            'function(k){return /^__MOD\\d+__$/.test(k);}).length'), 1)
+        # H4 负向：残留绑定机制（__fixups__）不残留在 globalThis（无 __GET 等
+        # getter 名），宿主 API（http）在重载后仍可调用
+        self.assertEqual(engine.ctx.eval(
+            'Object.getOwnPropertyNames(globalThis).filter('
+            'function(k){return /^__GET\\d+_\\d+__$/.test(k);}).length'), 0)
+        self.assertEqual(engine.ctx.eval(
+            'typeof globalThis.http'), 'function')
+
+    def test_import_alias_conflicts_with_host_global(self):
+        """H1 负向：import 别名占用宿主全局名（http）时整站仍可加载。
+
+        绑定收敛进 IIFE 作用域（var 快照/回填），不再对 globalThis 做裸名
+        defineProperty——撞 non-configurable 宿主属性（http）抛 TypeError
+        导致整站加载失败的场景不再存在。
+        """
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-alias/lib.js': (
+                'export function http(u) { return "wrapped:" + u; }\n'
+                'export default {};'
+            ),
+            'http://t-alias/main.js': (
+                'import { http } from "./lib.js";\n'
+                'export default { fetchName: function() { return http("x"); } };'
+            ),
+        })
+        self.assertTrue(engine.load_spider_url('http://t-alias/main.js', fetch))
+        # IIFE 内 var 遮蔽宿主 globalThis.http：模块内读到的是导入值
+        self.assertEqual(engine.call('fetchName'), 'wrapped:x')
+        # 宿主全局 http 未被破坏
+        self.assertEqual(engine.ctx.eval('typeof globalThis.http'), 'function')
+
+    def test_sibling_modules_same_alias_from_different_deps(self):
+        """H2 负向：两个兄弟模块从不同依赖导入同名导出，各自取对值。
+
+        绑定为各模块 IIFE 内独立 var：不再生成 globalThis 同名 getter 被
+        后定义者覆盖（旧实现 m1:A/m2:B 静默变成 m1:B/m2:B）。
+        """
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-sib/depA.js': 'export const who = "A";',
+            'http://t-sib/depB.js': 'export const who = "B";',
+            'http://t-sib/m1.js': (
+                'import { who } from "./depA.js";\n'
+                'export function m1Who() { return who; }\n'
+                'export default {};'
+            ),
+            'http://t-sib/m2.js': (
+                'import { who } from "./depB.js";\n'
+                'export function m2Who() { return who; }\n'
+                'export default {};'
+            ),
+            'http://t-sib/main.js': (
+                'import { m1Who } from "./m1.js";\n'
+                'import { m2Who } from "./m2.js";\n'
+                'export default {\n'
+                '  p1: function() { return m1Who(); },\n'
+                '  p2: function() { return m2Who(); }\n'
+                '};'
+            ),
+        })
+        self.assertTrue(engine.load_spider_url('http://t-sib/main.js', fetch))
+        self.assertEqual(engine.call('p1'), 'A')
+        self.assertEqual(engine.call('p2'), 'B')
+
+    def test_regex_literal_comma_in_multi_declarator_export(self):
+        """M1/M3 负向：多声明符导出中初始化值含正则字面量（逗号/转义/字符类）
+        与跨行续写（无尾逗号）时全部声明符正确注册，且正则可执行。"""
+        engine = self._engine()
+        src = (
+            'const testStr = "1a,b2x,y3a/b";\n'
+            'export const rx = /a,b/.test(testStr), split = /x[1,3]y/.test(testStr),\n'
+            '  esc = /a\\/b/.test(testStr), num = 7,\n'
+            '  cont = "a" +\n'
+            '    "-b", second = 2;\n'
+            'export default { test: function() { return rx && split && esc; } };'
+        )
+        self.assertTrue(engine.load_spider(src))
+        exports = json.loads(engine.ctx.eval(
+            'JSON.stringify(globalThis.__MODULE_EXPORTS__)'))
+        self.assertIs(exports['rx'], True)
+        self.assertIs(exports['split'], True)     # 字符类内逗号未误切
+        self.assertIs(exports['esc'], True)       # 转义斜杠未终止正则
+        self.assertEqual(exports['num'], 7)
+        self.assertEqual(exports['cont'], 'a-b')  # M3 续行收集
+        self.assertEqual(exports['second'], 2)
+
+    def test_string_export_name_reexport(self):
+        """M2 负向：字符串导出名 re-export（`export {v as "a-b"} from`）生成
+        合法括号访问而非非法 `ns."a-b"`；转发值与再导入均正确。"""
+        engine = self._engine()
+        fetch = self._fetch({
+            'http://t-strex/dep.js': (
+                'export function v() { return "V"; }\n'
+                'export const tag = "T";'
+            ),
+            'http://t-strex/mid.js': (
+                'export { v as "a-b", tag } from "./dep.js";\n'
+                'export default {};'
+            ),
+            'http://t-strex/main.js': (
+                'import { "a-b" as fn, tag } from "./mid.js";\n'
+                'export default {\n'
+                '  call: function() { return fn() + ":" + tag; }\n'
+                '};'
+            ),
+        })
+        self.assertTrue(engine.load_spider_url('http://t-strex/main.js', fetch))
+        self.assertEqual(engine.call('call'), 'V:T')
+        # 字符串导出名已注册到中转模块命名空间（括号访问，非非法 ns."a-b"）
+        self.assertEqual(engine.ctx.eval(
+            'globalThis.__MOD1__["a-b"]()'), 'V')
+
+    def test_local_kv_atomic_write_leaves_no_tmp(self):
+        """_local_kv_save 原子写：落盘后无临时文件残留、JSON 可解析（崩溃不再静默清空）。"""
+        import tempfile
+        import quickjs_host
+        tmpdir = tempfile.mkdtemp(prefix='yuki_kv_test_')
+        old_dir, old_file = quickjs_host.LOCAL_KV_DIR, quickjs_host.LOCAL_KV_FILE
+        try:
+            quickjs_host.LOCAL_KV_DIR = tmpdir
+            quickjs_host.LOCAL_KV_FILE = os.path.join(tmpdir, 'js_local-test.json')
+            set_fn = quickjs_host._native_local_set('atom_site')
+            set_fn('key1', 'val1')
+            names = os.listdir(tmpdir)
+            self.assertEqual(names, ['js_local-test.json'],
+                             f'原子写不应留下临时文件: {names}')
+            with open(quickjs_host.LOCAL_KV_FILE, encoding='utf-8') as f:
+                data = json.load(f)
+            self.assertEqual(data.get('atom_site' + quickjs_host.KV_SCOPE_SEP + 'key1'), 'val1')
+        finally:
+            quickjs_host.LOCAL_KV_DIR, quickjs_host.LOCAL_KV_FILE = old_dir, old_file
+            for n in os.listdir(tmpdir):
+                try:
+                    os.remove(os.path.join(tmpdir, n))
+                except OSError:
+                    pass
+            os.rmdir(tmpdir)
+
+
 if __name__ == '__main__':
     unittest.main()

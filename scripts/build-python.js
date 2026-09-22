@@ -121,6 +121,13 @@ for (const dir of dataDirs) {
     }
 }
 
+// 4.5 清理不经 COPY_EXCLUDE_NAMES 的产物目录：PyInstaller --add-data 直接复制源目录
+// 整棵树，js-engine/spiders/base 的 __pycache__（以及源目录树里可能已产生的 FM/、
+// .test-runtime/ 等网盘 Cookie 运行态——曾在源码根真实泄露过）会原样打进 _internal。
+// 对整个 python-dist 递归执行同一份排除清单，兜住 add-data 与根副本两条复制路径。
+console.log('[build-python] 清理产物中的排除目录（__pycache__/FM 等）…');
+cleanExcludedDirs(DIST);
+
 // 5. 清理临时文件
 console.log('[build-python] 清理临时文件…');
 try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
@@ -148,5 +155,21 @@ function copyDir(src, dst) {
         // venv 含 junction 时冻结包不完整。
         if (st.isDirectory()) { copyDir(s, d); }
         else if (st.isFile()) { fs.copyFileSync(s, d); }
+    }
+}
+
+/** 递归删除产物树里命中 COPY_EXCLUDE_NAMES 的目录（PyInstaller --add-data 不走
+ * copyDir 的排除清单，__pycache__/FM 等会打进 _internal，这里做统一兜底清理）。 */
+function cleanExcludedDirs(root) {
+    let entries;
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) { return; }
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const p = path.join(root, entry.name);
+        if (COPY_EXCLUDE_NAMES.has(entry.name)) {
+            try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+            continue;
+        }
+        cleanExcludedDirs(p);
     }
 }

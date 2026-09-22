@@ -15,8 +15,8 @@
 | aria2c | [aria2/aria2](https://github.com/aria2/aria2) 官方 releases Windows x64 zip；lock 锁定 tag 与 sha256 | **GPLv2**（含 OpenSSL 例外条款） | 允许再分发；随附 GPL 许可证文本与上游源码地址 |
 | Anime4K v4.1 着色器 | [bloc97/Anime4K](https://github.com/bloc97/Anime4K) `glsl/`（Restore / Upscale / Darken 共 6 个 .glsl 文件）；逐文件 sha256 锁定 | **MIT** | 允许再分发；保留版权声明即可（着色器文件头自带） |
 | MiSans 字体子集 | npm 包 [misans@4.1.0](https://www.npmjs.com/package/misans)（dsrkafuu 基于 Noto Sans SC 码位范围做的 woff2 分片子集，锁内含 Regular/Bold 两个字重子集与 min.css），经 jsdelivr 分发；逐文件 sha256 锁定 | 字体版权 © 小米科技，按小米官方 MiSans 字体许可协议**免费商用、无需授权、允许随软件再分发**；npm 打包代码 MIT | 允许再分发；在发布页与本文件中注明字体出处即可 |
-| dex-tools（dex2jar）v2.4 | [pxb1988/dex2jar](https://github.com/pxb1988/dex2jar) v2.4 发行包，随仓库 `vendor/dex-tools/` 打包（非 download-binaries 分发，随源码树入库） | **Apache-2.0**（另捆绑 gson / kotlin-stdlib / okhttp3 / okio / org-json 各 jar，均为 Apache-2.0/MIT/BSD 系宽松许可） | 允许再分发；保留 LICENSE 与版权声明 |
-| dexdeps | AOSP（[platform_dalvik](https://android.googlesource.com/platform/dalvik) dexdeps 工具），随仓库 `vendor/dexdeps/` 打包 | **Apache-2.0** | 允许再分发；保留 NOTICE 与版权声明 |
+| dex-tools（dex2jar）v2.4 | [pxb1988/dex2jar](https://github.com/pxb1988/dex2jar) v2.4 发行包，运行时置于 `vendor/dex-tools/`（**不入库**：`vendor/` 整体被 .gitignore 忽略，且不经 download-binaries.js 下载，需自行从上游 Release 解压放置；打包时经 electron-builder extraResources 随包分发） | **Apache-2.0**（另捆绑 gson / kotlin-stdlib / okhttp3 / okio / org-json 各 jar，均为 Apache-2.0/MIT/BSD 系宽松许可） | 允许再分发；保留 LICENSE 与版权声明 |
+| dexdeps | AOSP（[platform_dalvik](https://android.googlesource.com/platform/dalvik) dexdeps 工具），运行时置于 `vendor/dexdeps/`（**不入库**：`vendor/` 整体被 .gitignore 忽略，需自行从 AOSP 获取放置；打包时随 `vendor/` 经 electron-builder extraResources 随包分发，与 dex-tools 行一致） | **Apache-2.0** | 允许再分发；保留 NOTICE 与版权声明 |
 | spider-runner.jar | 本项目自建（`python-backend/jar-runner/` 构建产物，构建脚本 `build.py` 复制到 `vendor/`） | **GPLv3**（随 YuKi 本体） | 本项目自有代码；再分发安装包即视为提供对应源码（公开仓库满足义务） |
 
 > GPL 组件合规操作：发布 Release 时附带《GNU 通用公共许可证》文本（根目录 `LICENSE` 为 GPLv3；mpv/aria2 的 GPLv2 文本见各自上游仓库），并在 Release Notes 中给出 mpv / ffmpeg / aria2 上游源码链接。若未来改用 LGPL 构建替换任一组件，需重新核实义务并更新本表。

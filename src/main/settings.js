@@ -4,7 +4,7 @@
  * JSON 文件存于 <userData>/settings.json；简单键值（含嵌套对象），写即落盘。
  * 约定键：
  * - lastConfigUrl  最近一次成功加载的配置 URL（启动自动重载）
- * - danmaku        播放时是否加载弹幕（默认 true）
+ * - danmakuEnable 播放时是否自动加载弹幕（默认关闭，panels.js「设置 → 播放」开关）
  * - playerVolume   mpv 默认音量（0-100，0 表示不设置）
  */
 const fs = require('fs');

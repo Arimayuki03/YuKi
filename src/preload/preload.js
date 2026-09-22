@@ -48,17 +48,14 @@ contextBridge.exposeInMainWorld('yuki', {
     onPlayerExit: (cb) => {
         ipcRenderer.on('yuki:player-exit', (_e, info) => cb(info));
     },
-    /** 断流重连起播新会话 {sessionId, url}：渲染层更新会话号与实际播放地址 */
-    onPlayerSession: (cb) => {
-        ipcRenderer.on('yuki:player-session', (_e, info) => cb(info));
-    },
-    /** 旧版线路切换事件兼容接口；当前播放失败不再自动切换，正常不会触发 */
-    onPlayRetry: (cb) => {
-        ipcRenderer.on('yuki:play-retry', (_e, info) => cb(info));
-    },
-    onPlayFailed: (cb) => {
-        ipcRenderer.on('yuki:play-failed', (_e, info) => cb(info));
-    },
+    // 死接口清理（2026-09-22）：onPlayerSession / onPlayRetry / onPlayFailed 三通道已移除。
+    // - yuki:player-session：主进程全库从不发送。旧「主进程自动断流重连」架构已被渲染层
+    //   驱动的重连取代（mpv 退出 → 渲染层 _onExit 自动 refresh=1 重调 play，新会话号经
+    //   play() 返回值 + _rememberSession 回收），该事件无正确发送时机，渲染层订阅为
+    //   永不触发的死代码（player.js 侧的旧特性检测已一并移除，现无任何订阅方）。
+    // - yuki:play-retry：主进程从不发送、渲染层无订阅（播放失败不再自动切换线路）。
+    // - yuki:play-failed：主进程虽在解析队列失败处（index.js）发送，但渲染层从未订阅，
+    //   事件落空，preload 桥接无意义。
     /** 播放器右键菜单切换 Anime4K 档位后广播 {enabled, mode, label}：设置页控件同步 */
     onA4kChanged: (cb) => {
         ipcRenderer.on('yuki:a4k-changed', (_e, info) => cb(info));

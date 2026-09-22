@@ -72,21 +72,75 @@ def _dpapi_transform(raw: bytes, *, decrypt: bool) -> bytes:
 
 
 def _fallback_key_path():
+    # 非 Windows 下密钥不再与密文同目录明文混放：移入 keys/ 子目录并收紧为
+    # 0600，缩小「一次目录泄露 = 密钥+密文双双到手」的面。
+    return os.path.join(hoststate.get_data_dir(), 'keys', 'pan_cookies.key')
+
+
+def _fallback_legacy_key_path():
+    # 旧版密钥路径（与密文同目录）；仅用于一次性迁移，不在此重建。
     return os.path.join(hoststate.get_data_dir(), 'pan_cookies.key')
 
 
-def _fallback_key():
-    """非 Windows 的本地密钥兜底（Linux/macOS 无 DPAPI）。"""
-
-    path = _fallback_key_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def _read_key_file(path):
+    """读取 32 字节密钥；不存在/长度不符返回 None。"""
     try:
         with open(path, 'rb') as f:
             key = f.read()
-        if len(key) == 32:
-            return key
+        return key if len(key) == 32 else None
     except OSError:
-        pass
+        return None
+
+
+def _fallback_key():
+    """非 Windows 的本地密钥兜底（Linux/macOS 无 DPAPI）。
+
+    新密钥写入 keys/ 子目录（0600）；旧路径已存在的密钥原样迁移过去，
+    保证升级后仍能解开旧密文，不会读不到历史数据。"""
+
+    path = _fallback_key_path()
+    legacy_path = _fallback_legacy_key_path()
+    # 1) 新路径已有密钥（顺带把历史文件权限收紧到 0600）
+    key = _read_key_file(path)
+    if key is not None:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return key
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # 2) 旧路径密钥存在：迁移到新目录（0600），迁移成功后删除旧文件，
+    #    让密钥与密文分离；失败则继续用旧文件解密，下次再试。
+    legacy_key = _read_key_file(legacy_path)
+    if legacy_key is not None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(path, flags, 0o600)
+            try:
+                os.write(fd, legacy_key)
+            finally:
+                os.close(fd)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                pass
+            return legacy_key
+        except FileExistsError:
+            # 并发窗口：另一协程已抢先建文件但可能尚未写完，此刻重读可能拿到
+            # 空/无效内容。短暂重试等对方写完；仍无效则直接报错——绝不能
+            # fall-through 到「全新生成」分支，否则会覆盖对方正在写入的密钥，
+            # 之后双方用不同密钥加解密导致历史密文永远解不开。
+            for _ in range(3):
+                time.sleep(0.02)
+                key = _read_key_file(path)
+                if key is not None:
+                    return key
+            raise RuntimeError('invalid local Cookie encryption key')
+    # 3) 全新生成
     key = secrets.token_bytes(32)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
@@ -96,8 +150,10 @@ def _fallback_key():
         finally:
             os.close(fd)
     except FileExistsError:
-        with open(path, 'rb') as f:
-            key = f.read()
+        key = _read_key_file(path)
+        if key is None:
+            raise RuntimeError('invalid local Cookie encryption key')
+        return key
     if len(key) != 32:
         raise RuntimeError('invalid local Cookie encryption key')
     try:

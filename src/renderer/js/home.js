@@ -54,6 +54,9 @@ function isDemoOnlySites(list) {
 // 网络返回后以最新覆盖，TTL 只决定「多久以内的旧内容可用于即时上屏」）
 const HOME_FEED_CACHE_PREFIX = 'home::feed::v1::';   // + site → { ts, pagecount, items[] }
 const HOME_FEED_CACHE_TTL = 2 * 60 * 60 * 1000;
+// 合并窗口（分类/「全部」feed）单次加载最多串行补拉的源页数：原上限 200 次串行
+// 请求，深页跳转最坏卡死数分钟；超出护栏的页直接按无数据占位（不再继续补拉）
+const CAT_WIN_MAX_FETCH = 30;
 
 /**
  * doAction 失败响应识别：后端 spider 出错/超时/风控时返回 RuntimeResponse
@@ -104,6 +107,7 @@ const Home = {
     _pageSizeDirty: false, // 每页条数在设置里被改过：回到首页视图时按新条数自动重载（T80）
     _loadAbort: null,      // 与 _loadToken 同代的 AbortController：切分类/切源真正中止在途请求
     _loadToken: 0, // 加载令牌：切源/切分类后旧拉取自动作废
+    _homeListSite: '', // _homeList 的归属源：feed 失败保留旧内容时防跨源错位渲染（#13）
     _sitesLoadToken: 0, // 配置刷新令牌：旧的站点列表请求不得覆盖新配置
     _probeToken: 0, // 探测世代：源集合变更（配置重载）后旧探测结果作废
     _emptyCls: {},   // T60：site → Set<空分类 type_id>（探测确认无影片的分类，持久化）
@@ -887,6 +891,12 @@ const Home = {
         const token = this._nextLoadToken();
         const size = await this._pageSize();
         if (token !== this._loadToken) return;
+        // 用户手动刷新（#force）：失效「全部」feed 的合并窗口与页缓存，强制重拉
+        // 最新内容——否则窗口/缓存命中永远返回旧数据，刷新按钮形同虚设。
+        if (opts && opts.userRefresh) {
+            this._catWinDelete(this.site, '__all__');
+            this._cacheDropPage(this.site, '__all__', this.page);
+        }
         $('#home-pager').empty();
         // 防闪现：遮罩延迟 250ms 再上。缓存即时上屏路径会先撤掉定时器，
         // 只有真正进入网络等待时用户才会看到加载态（消除「短暂显示加载中」）。
@@ -901,6 +911,10 @@ const Home = {
             loadingShown = false;
         };
         this._feedCacheBooted = false;
+        // #13：记录本次加载的目标源。feed 首拉失败会保留旧画面（_homeList），
+        // 但旧画面属于上一个源——渲染/保留前必须校验归属，否则新源站点 + 旧源
+        // vod_id 进详情必然错位。
+        const reqSite = this.site;
         try {
             // 冷启动即时上屏：先用缓存的分类标签渲染（避免空标签栏闪现），网络返回后以最新结果覆盖
             const cachedCls = this._loadClassCache(this.site);
@@ -910,15 +924,16 @@ const Home = {
             }
             // 首屏并行：homeContent（分类+推荐位）与「全部」feed 同时发起，
             // feed 先返回时先渲染，分类返回后再刷新分类栏（T77 并行提速）
+            const ac0 = this._loadAbort; // 与令牌同代：切源时中止在途 homeContent（#signal）
             const pFirstScreen = Promise.all([
-                doAction('homeContent', { site: this.site, filter: 'false' }),
+                doAction('homeContent', { site: this.site, filter: 'false' }, undefined, { signal: ac0 ? ac0.signal : undefined }),
                 this._fetchHomeFeed(this.page, size),
             ]);
             // 持久化 feed 缓存已即时上屏 → 提前撤掉全局遮罩（遮罩会挡住缓存画面，
             // 慢源网络期间用户被迫看转圈）；网络返回后令牌校验通过才静默覆盖。
             if (this._feedCacheBooted) dismissLoading();
             const [data, feedItems] = await pFirstScreen;
-            if (token !== this._loadToken) return;
+            if (token !== this._loadToken || reqSite !== this.site) return; // 切源/换代：旧响应作废
             if (data && Array.isArray(data.class)) {
                 this.classes = data.class;
                 this._saveClassCache(this.site, this.classes);
@@ -928,6 +943,7 @@ const Home = {
             if (this.page === 1 && !feedItems.length) {
                 // 源无「全部」feed：回退自适应首页（推荐位 + 分类铺满）
                 this._homeList = ((data && data.list) || []).slice();
+                this._homeListSite = reqSite; // #13：记录归属源
                 this._fillTid = this.classes.length
                     ? String(this.classes[0].type_id != null ? this.classes[0].type_id : '')
                     : '';
@@ -937,11 +953,16 @@ const Home = {
                 this._extendHome(token);
                 this.pagecount = 1;
             }
+            // #13：归属校验——feed 失败包络会要求「保留当前画面」，但仅限旧画面
+            // 有归属记录且不属于当前源时；无记录（遗留状态）按原语义保留，
+            // 跨源旧内容直接清空渲染空态，防新源站点配旧 vod_id。
+            if (this._homeListSite && this._homeList.length && this._homeListSite !== this.site) this._homeList = [];
             this.renderGrid(this._homeList);
             this.renderPager();
             $('#view-home').scrollTop(0);
         } catch (e) {
-            warnToast(this.page > 1 ? '全部载入失败' : '首页载入失败');
+            // 被新一代中止（切源/切分类）不是失败，不弹提示；真正的网络错误仍提示
+            if (token === this._loadToken && (!e || e.name !== 'AbortError')) warnToast(this.page > 1 ? '全部载入失败' : '首页载入失败');
         } finally {
             dismissLoading();
         }
@@ -957,12 +978,14 @@ const Home = {
     async _fetchHomeFeed(pg, size) {
         const site = this.site;          // M-30b：快照本次加载的源与令牌
         const token = this._loadToken;
+        const ac = this._loadAbort;      // 与令牌同代的 AbortController（切源中止在途请求）
         // 冷启动加速：仅当首次进入、无内存窗口时，尝试用本地持久化缓存用旧 feed 先渲染
         this._feedCacheBooted = false;
         if (pg === 1 && !this._catWin.has(site + '|__all__') && !this._homeCacheBooted) {
             const boot = this._cacheHomeGet(site);
             if (boot && boot.items.length) {
                 this._homeList = boot.items.slice(0, size);
+                this._homeListSite = site; // #13：即时上屏的缓存归属当前源
                 if (boot.pagecount > 0) this.pagecount = boot.pagecount;
                 this.renderGrid(this._homeList);
                 this.renderPager();
@@ -974,8 +997,9 @@ const Home = {
         const need = pg * size; // 累计需覆盖到该页末尾
         let guard = 0;
         let fetchFailed = false; // 失败包络≠无内容（配置恢复中当前源还不在后端等）
-        while (win.items.length < need && guard++ < 200) {
-            const data = await doAction('homeVideoContent', { site, pg: String(win.sourcePg + 1) });
+        // #depth：串行补拉上限（CAT_WIN_MAX_FETCH 页）：深页跳转不再连发 200 次请求
+        while (win.items.length < need && guard++ < Math.min(200, CAT_WIN_MAX_FETCH)) {
+            const data = await doAction('homeVideoContent', { site, pg: String(win.sourcePg + 1) }, undefined, { signal: ac ? ac.signal : undefined });
             if (token !== this._loadToken || site !== this.site) return; // M-30b：切源即中止
             if (actionResponseFailed(data)) { fetchFailed = true; break; }
             const list = (data && data.list) || [];
@@ -993,14 +1017,19 @@ const Home = {
             win.sourcePg += 1;
             if (!added) { break; /* 全是重复，已拉空 */ }
         }
-        // 网络失败（失败包络）且一条新数据都没拿到：保留当前已显示的内容——冷启动
-        // 缓存上屏、或刷新前的旧内容。「暂不可用」不是「没有内容」，不能翻成
-        // 「暂无内容」；恢复完成后 configTask 守望/重载事件会重新 loadHome 刷新。
-        if (fetchFailed && !win.items.length && this._homeList.length) {
-            if (this._userRefresh) warnToast('源暂不可用，已保留当前显示');
-            return this._homeList;
+        // #13：旧画面必须归属当前源（site 已在循环内校验等于当前源）——跨源旧
+        // 内容直接清空，防止把上一源的 vod_id 交给新源站点查详情。
+        // _homeListSite 为空 = 旧状态无归属记录（如会话内未记录的遗留内容）：按
+        // 原语义保留（真正的跨源错位只会发生在「有归属记录却不匹配」时）。
+        if (fetchFailed && !win.items.length) {
+            if (this._homeListSite && this._homeList.length && this._homeListSite !== site) { this._homeList = []; return this._homeList; }
+            if (this._homeList.length) {
+                if (this._userRefresh) warnToast('源暂不可用，已保留当前显示');
+                return this._homeList;
+            }
         }
         this._homeList = win.items.slice((pg - 1) * size, pg * size);
+        this._homeListSite = site; // #13：窗口内容归属当前源
         if (win.total > 0) {
             this.pagecount = Math.max(1, Math.ceil(win.total / size));
         } else if (win.items.length < need) {
@@ -1237,7 +1266,8 @@ const Home = {
         const need = pg * size; // 累计需覆盖到的条数
         let guard = 0;
         this._catError = '';
-        while (win.items.length < need && guard++ < 200) {
+        // #depth：串行补拉上限（CAT_WIN_MAX_FETCH 页）：深页跳转不再连发 200 次请求
+        while (win.items.length < need && guard++ < Math.min(200, CAT_WIN_MAX_FETCH)) {
             const data = await doAction('categoryContent', {
                 site, tid, pg: String(win.sourcePg + 1), filter: 'false', extend: '{}',
             }, undefined, { signal: ac ? ac.signal : undefined });

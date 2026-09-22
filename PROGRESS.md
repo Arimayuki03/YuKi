@@ -186,7 +186,7 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 2026-09-20 三报告交叉审查全项目修复批次（P1×5 / P2×19 / P3×24）：
 
-- **背景**：三份独立安全审查报告（hy4/ds/glm，临时文档，验证后已删除）交叉验证并逐条复核，确认 P1×5、P2×19、P3×24，推翻 4 条、重大修正 8 条、验证中新发现 8 条。按文件域分两批并行修复（每批 3 个子代理：Python 后端 / Electron 主进程 / 渲染层），修复后 `npm run test:all` 全绿。明细见 CHANGELOG [未发布] 段。
+- **背景**：三份独立安全审查报告（hy4/ds/glm，临时文档，验证后已删除）交叉验证并逐条复核，确认 P1×5、P2×19、P3×24，推翻 4 条、重大修正 8 条、验证中新发现 8 条。按文件域分两批并行修复（每批 3 个子代理：Python 后端 / Electron 主进程 / 渲染层），修复后 `npm run test:all` 全绿。明细见 CHANGELOG [0.2.5] - 2026-09-22 段。
 - **P1 全部闭环**：①主 token 明文落盘 play-cache（volatile 检查前置 + 失败结果不落盘）；②`do=pan` 免鉴权（token 门禁 + HLS token 纪律 + 两个构造点与 jar 硬编码通道补 token）；③JVM 强杀后网盘 Cookie 明文残留（kill 路径补删 TVBox/*_cookie.txt，路径与 Java cacheRoot 逐层对齐——审查代理曾发现首版清理路径多一层 `cache/` 恒空转，已修）；④Worker hoststate 全空（spec 注入 proxy_port/proxy_token/data_dir + Worker 构建 configure）；⑤`dist/` 历史泄露产物（820MB 含 FM/.quark 真实 Cookie 的 v0.2.1 安装包与 win-unpacked）已全部删除——**线上 v0.2.1–v0.2.4 四个 Release 资产与夸克/UC 会话吊销仍需账号侧处置**。
 - **P2/P3 覆盖**：Host 白名单、SSRF 三处对齐、senderFrame 校验 + deleteFiles 显式 opt-in、delFolder 三道防线、after-pack fail-closed + FM/.test-runtime 拷贝排除、权限处理器全拒、退出撤销定时关机、CSP 白名单、kazumi id 转义与 localStorage 净化、detail/popular 世代守卫、WebDAV 敏感键、HLS 分片续传校验、playlist-proxy 异常保护、`/health` 收敛、Kazumi Cookie 加密落盘、假绿测试 ×3 修复等（完整清单见 CHANGELOG）。
 - **测试**：新增 `test_security_regressions.py`（33 用例）接入 run_all；`test_quark_pan.py` 桩签名适配新 `_stream_forward` 契约；`test_runtime_supervisor.py` 慢机余量（`_call` 默认 deadline 1s→5s、墙钟断言接 `_BUDGET_ASSERT_SLACK`；HEAD 基线即随机复现，与功能修复无关）。最终 `npm run test:all` 全绿：run_all 56 阶段 ALL PASS、编译 188 文件 0 error、JS 单元 540/540、ESLint 0 error（73 条既有 warning 不变）、Ruff 全过。
@@ -194,7 +194,7 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 2026-09-15 安装包杀软误报修复批次：
 
-- **背景**：安装时杀软对包内「关键系统 DLL 名」文件报「程序试图修改关键程序 DLL」（360 等已知误报，见 CHANGELOG [未发布] Fixed），先后命中两处：Electron 自带的 `d3dcompiler_47.dll`、PyInstaller 后端捆绑的 UCRT（`yuki-backend/_internal/` 下 `ucrtbase.dll` + 44 个 `api-ms-win-*` API-Set 转发器）。
+- **背景**：安装时杀软对包内「关键系统 DLL 名」文件报「程序试图修改关键程序 DLL」（360 等已知误报，见 CHANGELOG [0.2.2] / [0.2.3] 段），先后命中两处：Electron 自带的 `d3dcompiler_47.dll`、PyInstaller 后端捆绑的 UCRT（`yuki-backend/_internal/` 下 `ucrtbase.dll` + 44 个 `api-ms-win-*` API-Set 转发器）。
 - **修复**：`scripts/after-pack.js` 实现为 electron-builder `afterPack` 钩子，NSIS 打包前剔除上述系统自带冗余 DLL——Win10+ 由 System32 / API Set 加载器直接提供，包内副本仅为 Win7/8 兼容存在（Electron 31 本就不支持）；`VCRUNTIME140*.dll`（系统不保证自带）与 `python314.dll`（解释器本体）保留；`package.json` build 接线，`YUKI_KEEP_SYSTEM_DLLS=1` 逃生口可保留全部供诊断对比。
 - 验证：`tests/js/after-pack.test.js` 5/5（d3d 剔除/UCRT 剔除且 VC 运行库与 python 保留/无匹配 no-op/钩子默认剔除/环境变量保留）；剔除 UCRT 后后端 exe 两轮实机冒烟——独立副本与打包产物内 `yuki-backend.exe` 均 READY 就绪、`/health` 200（站点与 Kazumi 规则正常加载）；实机 `npx electron-builder --win --dir` 复打——afterPack 剔除 44 个（约 7MB），win-unpacked 递归检索 UCRT 文件 0 残留、其余运行时文件（YuKi.exe/ffmpeg.dll/libEGL/libGLESv2/vk_swiftshader/app.asar）齐全，打包版 CDP 冒烟（remote-debugging）启动渲染页正常加载后退出；JS 单元 487/487、ESLint 0 error。
 

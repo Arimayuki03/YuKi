@@ -268,6 +268,79 @@ class RequestsGetJarGuardTest(_StrictMixin, unittest.TestCase):
         self.assertIn('too many redirects', str(caught.exception))
 
 
+class CloudMetadataHostNormalizationTest(unittest.TestCase):
+    """M-2 回归：非点分/混合进制 IPv4 绕过 _is_cloud_metadata_host。
+
+    `http://0xA9FEA9FE/`、`http://2852039166/` 等形态 ipaddress.ip_address
+    直接抛 ValueError（旧实现据此放行）——先做 inet_aton 风格归一再比对
+    元数据表；「看起来像 IP 但无法归一」的 host 按域名放行（不误伤）。
+    """
+
+    def test_dotted_decimal_metadata_ip_blocked(self):
+        self.assertTrue(http_client._is_cloud_metadata_host('169.254.169.254'))
+
+    def test_known_names_blocked(self):
+        for host in ('metadata.google.internal', 'metadata.goog', 'fd00:ec2::254',
+                     '::ffff:169.254.169.254'):
+            self.assertTrue(http_client._is_cloud_metadata_host(host), host)
+
+    def test_non_dotted_forms_blocked(self):
+        # 与 inet_aton 语义逐一对齐（BSD/glibc）：a.b.c.d / a.b.c / a.b / 整数
+        for host in ('0xA9FEA9FE', '0xa9fea9fe', '0Xa9fea9fe',  # 整数十六进制
+                     '2852039166',                              # 整数十进制
+                     '169.16689662',                            # a.b（b 承载 24 位）
+                     '169.254.43518',                           # a.b.c（c 承载 16 位）
+                     '0251.0376.0251.0376',                     # 全八进制点分
+                     '169.0376.169.0376',                       # 混合十/八进制
+                     '0xa9.0xfe.0xa9.0xfe',                     # 全十六进制点分
+                     '0xA9.254.169.254'):                       # 混合十六/十进制
+            self.assertTrue(http_client._is_cloud_metadata_host(host), host)
+
+    def test_normalization_matches_inet_aton(self):
+        """归一与 inet_aton 逐例一致（可解析形态），不解析形态两边同为 None。
+
+        已知例外：`4294967295`/`037777777777`（= 2^32-1）——Windows WinSock 的
+        inet_aton 拒绝，BSD/glibc 接受（Linux 上 URL 可解析），从宽归一为
+        255.255.255.255（不在元数据表，不构成拦截差异）。"""
+        import socket
+        checks = ('0xa9fea9fe', '2852039166', '169.16689662', '169.254.43518',
+                  '0251.0376.0251.0376', '0xa9.0xfe.0xa9.0xfe', '0xA9.254.169.254',
+                  '1.2.3.4', '1.2.3', '1.2', '0xa9fe', '42826', '0', '2.3',
+                  '1.2.3.4.5', '257.1.1.1', '0x', '0xzz',
+                  '12345678901234567890', '08.1.1.1')
+        for host in checks:
+            try:
+                libc = '.'.join(str(b) for b in socket.inet_aton(host))
+            except (OSError, UnicodeEncodeError):
+                libc = None
+            mine = http_client._normalize_inet_aton_host(host)
+            self.assertEqual(
+                mine, libc,
+                f'{host!r}: mine={mine} inet_aton={libc}（归一与 inet_aton 语义漂移）')
+
+    def test_domains_and_invalid_forms_not_blocked(self):
+        for host in ('example.com', '169.254.169.254.example.com',
+                     'example169.254.169.254', '999.999.999.999', '0xzz', '0x',
+                     'abc', '', '1.2.3.4.5', '257.1.1.1', '-1.2.3.4', '1..2.3',
+                     '12345678901234567890', '4294967296', '08.1.1.1', '0x1_2'):
+            self.assertFalse(http_client._is_cloud_metadata_host(host), host)
+
+    def test_guard_basic_url_blocks_non_dotted_metadata(self):
+        for url in ('http://0xA9FEA9FE/x', 'http://2852039166/',
+                    'http://169.16689662/', 'http://0251.0376.0251.0376/'):
+            with self.assertRaises(ValueError, msg=url) as caught:
+                http_client.guard_basic_url(url)
+            self.assertIn('cloud metadata', str(caught.exception))
+
+    def test_guard_basic_url_still_allows_normal_hosts(self):
+        for url in ('http://example.com/', 'http://10.0.0.1/',
+                    'http://127.0.0.1:9978/'):
+            try:
+                http_client.guard_basic_url(url)
+            except ValueError as e:
+                self.fail(f'{url} unexpectedly blocked: {e}')
+
+
 class DestroyAllNoDeadlockTest(unittest.TestCase):
     """#6 回归：destroy_all 不得在 _jar_bridges_lock 内调用 destroy()。
 

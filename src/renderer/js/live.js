@@ -37,6 +37,8 @@ const Live = {
     _inited: false,
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
     _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
+    _loadGen: 0,       // lives 载入世代：并发 load（工具面板改源 vs 后台静默重载）时旧响应不得覆盖新响应
+    _loadingShown: 0,  // 最后一次上 loading 遮罩的批次令牌：遮罩由该轮负责收尾（防滞留/误关）
     _probeBar: null,   // 频道探测进度条状态
     _statusTimer: null, // 缓存命中状态条的 5s 自动隐藏 timer（P3-24：存 id 防游离叠加）
 
@@ -122,9 +124,11 @@ const Live = {
      *  opts.silent=true：启动自动载入/重载完成的后台刷新，不上全局 loading 遮罩。 */
     async load(opts) {
         ++this._probeToken; // 作废进行中的探测批次（重载下拉）
+        const gen = ++this._loadGen; // 并发 load 守卫（见 _loadGen 注释）
         this._clearProbeBar();
         try {
             const st = await getJson('/sites');
+            if (gen !== this._loadGen) return; // 期间已有更新的 load，旧响应整体作废
             // 部分配置用 {group, channels:[{name, urls}]} 嵌套形式，先展平再归一化
             const flat = [];
             ((st && st.lives) || []).forEach((l) => {
@@ -138,10 +142,12 @@ const Live = {
             });
             this.lives = flat.map((l) => this.normalizeLive(l)).filter(Boolean);
         } catch (e) {
-            this.lives = [];
+            // 旧轮 /sites 失败不得清空新轮刚装配的 lives（并发 load 守卫同上）
+            if (gen === this._loadGen) this.lives = [];
         }
         try {
             const s = (await window.yuki.settingsGet()) || {};
+            if (gen !== this._loadGen) return; // 慢返回的自定义源不得并入新 load 的列表
             // customLives 兼容旧版纯 URL 字符串与新版 {name,url} 条目（TVBox 配置导入）
             (Array.isArray(s.customLives) ? s.customLives : []).forEach((l) => {
                 if (typeof l === 'string') {
@@ -189,9 +195,13 @@ const Live = {
         this._pageSize = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
         this._page = 1;
         $('#live-status').hide();
-        if (!quietLoad) showLoading(); // 手动切源/刷新即时反馈；后台静默刷新不上遮罩
+        if (!quietLoad) { showLoading(); this._loadingShown = token; } // 手动切源/刷新即时反馈；后台静默刷新不上遮罩
         try {
             const data = await doAction('fetchText', { url: live.url });
+            // 换源竞态守卫：慢源返回期间用户已切到别的源/刷新（token 被取代），
+            // 旧源的结果不得覆盖新源的频道列表，静默丢弃（loading 收尾由 finally 的
+            // token 比对兜底，不会误关新请求的遮罩）
+            if (token !== this._probeToken) return;
             const text = (data && data.text) || '';
             const channels = live.url.split('?')[0].endsWith('.m3u') || text.trim().startsWith('#EXTM3U')
                 ? this.parseM3u(text)
@@ -201,6 +211,9 @@ const Live = {
             if (!force && channels.length) {
                 try {
                     const s = (await window.yuki.settingsGet()) || {};
+                    // settingsGet await 期间用户可能已切源/刷新（token 被取代）：
+                    // 旧源不得把按缓存过滤的结果覆盖到新源渲染上
+                    if (token !== this._probeToken) return;
                     const c = (s.liveProbeCache || {})[live.url];
                     if (c && Array.isArray(c.dead)) {
                         const dead = {};
@@ -241,7 +254,9 @@ const Live = {
             if (token === this._probeToken) $('#live-list').html('<div class="tip-line">直播源载入失败</div>');
             return;
         } finally {
-            if (!quietLoad && token === this._probeToken) hideLoading();
+            // 遮罩收尾归属「最后一次上遮罩的轮次」：手动刷新若被随后的静默重载接管
+            // （token 已被取代），仍要收掉自己上的遮罩，否则指示器滞留常显
+            if (this._loadingShown === token) { hideLoading(); this._loadingShown = 0; }
         }
         // 频道立即渲染完毕，可用性在后台静默分批探测（首次进入/手动刷新；不再占用 loading 遮罩）
         if (window.yuki && window.yuki.probeUrls) this._probeChannels(token, live.url);

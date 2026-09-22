@@ -177,6 +177,77 @@ def reset_dns_cache():
         _DNS_CACHE.clear()
 
 
+def _resolve_ips(host, timeout=DNS_SCOPE_TIMEOUT):
+    """解析主机名的**全部** IP 地址（去重后排序）；失败/超时返回空集合。
+
+    与 _resolve_scope 的差别：本函数返回具体地址集而非分级，供 rebinding 缓解做
+    「前后两次解析比对」。超时/失败返回空集合——调用方必须把空集合视为「无法
+    证实一致」，按放行处理（否则一个慢 DNS 会阻断所有正常请求）。
+    """
+    box = {'ips': None}
+
+    def lookup():
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            ips = {item[4][0] for item in infos}
+            box['ips'] = sorted(ips)
+        except Exception:
+            box['ips'] = None
+
+    worker = threading.Thread(target=lookup, name='dns-rebind-check', daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive() or box['ips'] is None:
+        return set()
+    return box['ips']
+
+
+def _guard_dns_rebinding(url, parts, policy, kind='config'):
+    """严格 SSRF 模式下的 DNS rebinding 缓解（连接前二次解析比对）。
+
+    背景：`guard_url` 与随后的真实连接是**两次独立解析**。攻击者控制权威 DNS 时
+    可在守卫阶段返回公网 IP（放行）、连接阶段返回 127.0.0.1/内网 IP（rebinding），
+    绕过整个私网拦截。本缓解在守卫放行**之后**、发起请求**之前**再解析一次并与
+    守卫阶段结论比对，两次结果出现「公网 → 私网」翻转即拒绝。
+
+    残余风险（务实取舍，如实说明）：
+    1. 缓解只把攻击窗口从「秒级」压缩到「毫秒级」（两次解析之间的一次翻转），
+       不能证明连接阶段实际对端的 IP——requests 的传输层不回传对端地址，无法在
+       本层做到「固定守卫解析出的 IP 发起连接」的完全防护（需自定义 urllib3
+       适配器固定 IP + SNI，超出本模块能力）；
+    2. 第二次解析超时/失败时按放行处理（与 _resolve_scope 的 unknown 语义一致，
+       否则慢 DNS 会阻断正常源）；攻击者若能在两次解析间稳定给出不同答案，
+       理论上仍可穿过。
+    """
+    if policy.allow_private_network:
+        return
+    host = (parts.hostname or '').strip().strip('[]').lower()
+    if not host or _is_ip_literal(host):
+        return
+    if host == 'localhost' or host.endswith(
+            ('.localhost', '.local', '.home.arpa', '.internal',
+             '.invalid', '.test')):
+        return
+    with _DNS_LOCK:
+        guard_scope = _DNS_CACHE.get(host)
+    if guard_scope not in ('loopback', 'private', 'public'):
+        # 守卫阶段没有可信结论（unknown / 走了缓存外的路径）：无从比对，放行
+        # ——连接失败仍是权威信号。
+        return
+    second = _resolve_ips(host)
+    if not second:
+        return
+    second_scopes = {_ip_scope(ip) for ip in second}
+    suspicious = {'loopback', 'private', 'invalid'} & second_scopes
+    if guard_scope == 'public' and suspicious:
+        raise ConfigSecurityError(
+            'dns_rebinding_suspected',
+            '地址 %s 的 DNS 解析在守卫后发生翻转（公网 → %s），疑似 DNS rebinding '
+            '攻击，已被严格 SSRF 防护拒绝。' % (host, '/'.join(sorted(suspicious))),
+            code='L2_SITE_BLOCKED' if kind != 'config' else 'L1_CONFIG_BLOCKED',
+            url=url, scope=guard_scope)
+
+
 # --------------------------------------------------------------- 策略与信任根
 
 
@@ -348,6 +419,9 @@ def guard_url(url, *, policy, trust, kind='config', base_url='', site_key=''):
                 '（YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1），远端配置不能静默访问本地'
                 '服务；取消该环境变量即可放开。' % (host, kind),
                 code=code, url=raw, scope=scope)
+    # 严格模式 DNS rebinding 缓解：守卫放行的公网地址在返回前再做一次解析，
+    # 与守卫结论比对（见 _guard_dns_rebinding 的残余风险说明）。
+    _guard_dns_rebinding(raw, parts, policy, kind)
     return urlunsplit((scheme, parts.netloc, parts.path, parts.query, ''))
 
 

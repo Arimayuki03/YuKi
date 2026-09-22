@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""#7 / #8 修复的针对性回归。
+"""#7 / #8 修复及 C 组（H-6 / H-7）修复的针对性回归。
 
 #7：go_proxy._SegStream 的 _put 错捕 queue.Empty（实抛 queue.Full）导致
     下载线程死亡 + stream 永久挂死。回归点：
@@ -8,6 +8,15 @@
 #8：/proxy 的 ？url= 通道免鉴权 + 任意转发（开放代理）。回归点：
     c) 无 token 被拒；带有效 token 且目标公网放行；
        YUKI_CONFIG_BLOCK_PRIVATE_NETWORK=1 时私网目标被拒。
+H-6：_SegStream._dl 接受 HTTP 200 且不校验 Content-Range、不按段长截断。
+    回归点：
+    d) 上游忽略 Range 回 200 → 按错误重试并中断流，不灌数据；
+    e) 206 但 Content-Range 区间错位 → 同样按错误处理；
+    f) 206 区间正确但响应体超出段长 → 按段长截断。
+H-7：HLS 重写仅在 total 未知分支执行，Range 探测回 206+Content-Range
+    （nginx CDN 常态）时跳过 m3u8 重写直接透传。回归点：
+    g) ？url= 通道探测回 206+Content-Range 且 Content-Type 为 m3u8 → 仍重写；
+    h) do=pan 数据面（_stream_forward）同上仍重写。
 """
 
 from __future__ import annotations
@@ -42,9 +51,9 @@ class _FakeThread:
 class _FakeResponse:
     """最小 _fetch 响应：status 206 + 可迭代 chunk。"""
 
-    def __init__(self, chunks, status=206, delay=0.0):
+    def __init__(self, chunks, status=206, delay=0.0, headers=None):
         self.status_code = status
-        self.headers = {'Content-Range': 'bytes 0-99/100'}
+        self.headers = dict(headers or {'Content-Range': 'bytes 0-99/100'})
         self._chunks = list(chunks)
         self._delay = delay
 
@@ -53,6 +62,18 @@ class _FakeResponse:
             if self._delay:
                 time.sleep(self._delay)
             yield chunk
+
+    def close(self):
+        pass
+
+
+class _Response:
+    """最小静态响应：带 content 字段（_send_hls_playlist 整体读取用）。"""
+
+    def __init__(self, status, headers=None, content=b''):
+        self.status_code = status
+        self.headers = headers or {}
+        self.content = content
 
     def close(self):
         pass
@@ -206,14 +227,122 @@ class TestQueueFullSegStream(unittest.TestCase):
         w = go_proxy._SegStream('https://cdn.test/a.mp4', {}, 0, 11, 3)
         w.get_timeout = 5.0
         segs = [[b'ab', b'cd'], [b'ef', b'gh'], [b'ij']]
-        responses = [_FakeResponse(segs[i]) for i in range(3)]
+        # H-6 后上游契约：206 + 与请求区间一致的 Content-Range
+        responses = [
+            _FakeResponse(segs[i], status=206,
+                          headers={'Content-Range': 'bytes %d-%d/12'
+                                   % (i * 4, min((i + 1) * 4 - 1, 11))})
+            for i in range(3)
+        ]
         with patch.object(go_proxy, '_fetch',
-                          side_effect=lambda *a, **k: responses.pop(0)):
+                          side_effect=lambda url, headers, s, e, timeout=60:
+                              responses.pop(0)):
             w.start()
             out = io.BytesIO()
             w.stream(out)
         self.assertEqual(out.getvalue(), b'abcdefghij')
         for t in w._threads:
+            self.assertFalse(t.is_alive())
+
+
+class TestSegStreamRangeContract(unittest.TestCase):
+    """H-6：_dl 必须要求 206 + Content-Range 区间校验 + 按段长截断。
+
+    上游忽略 Range 回 200 时，每个分段线程都会灌入整文件数据（n 倍重复）；
+    206 但区间错位时字节序错乱。二者都必须按错误走重试阶梯，耗尽后中断流。
+    走真实下载线程（不替换 start），get_timeout 缩短加速收场。
+    """
+
+    def _seg(self, n=2):
+        w = go_proxy._SegStream('https://cdn.test/a.mp4', {}, 0, 99, n)
+        # 测试加速：空闲拍等待缩短
+        w.get_timeout = 0.2
+        w.get_max_idle_ticks = 2
+        return w
+
+    @staticmethod
+    def _drain(w):
+        out = io.BytesIO()
+        try:
+            w.stream(out)
+        except Exception:
+            pass
+        return out.getvalue()
+
+    def test_http_200_is_rejected_not_ingested(self):
+        """上游忽略 Range 回 200：不灌任何数据，重试耗尽后中断流。"""
+        w = self._seg(n=1)
+        # 重试阶梯含真实退避（0.3s/0.6s）：空闲拍上限放宽到足以让 3 次
+        # 尝试全部跑完，错误哨兵到达即提前收场。
+        w.get_max_idle_ticks = 15
+        fetches = []
+
+        def fake_fetch(url, headers, s, e, timeout=60):
+            fetches.append((s, e))
+            # 返回 200（忽略 Range），响应体故意塞入远超段长的数据：
+            # 修复前会被整体灌进队列造成 n 倍重复字节
+            return _FakeResponse([b'0123456789'] * 20, status=200,
+                                 headers={'Content-Length': '200'})
+
+        with patch.object(go_proxy, '_fetch', side_effect=fake_fetch):
+            w.start()
+            out = self._drain(w)
+        self.assertEqual(out, b'', 'HTTP 200 must not be ingested into the stream')
+        # 重试阶梯耗尽（3 次）
+        self.assertGreaterEqual(len(fetches), 3)
+        self.assertTrue(w._cancel.is_set())
+        for t in w._threads:
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
+
+    def test_mismatched_content_range_is_rejected(self):
+        """206 但 Content-Range 与请求区间错位：按错误处理，不灌数据。"""
+        w = self._seg(n=1)
+        # 请求区间是 bytes 0-99，响应谎称 bytes 100-199
+        resp = _FakeResponse([b'x' * 100], status=206,
+                             headers={'Content-Range': 'bytes 100-199/200'})
+
+        with patch.object(go_proxy, '_fetch', return_value=resp):
+            w.start()
+            out = self._drain(w)
+        self.assertEqual(out, b'', 'mismatched Content-Range must not be ingested')
+        self.assertTrue(w._cancel.is_set())
+
+    def test_matching_content_range_allows_ingest(self):
+        """206 且 Content-Range 区间与请求一致：正常灌数（回归既有行为）。"""
+        w = self._seg(n=2)
+        segs = {0: [b'ab', b'cd'], 1: [b'ef', b'gh', b'ij', b'kl']}
+
+        def fake_fetch(url, headers, s, e, timeout=60):
+            return _FakeResponse(
+                segs[0 if s == 0 else 1], status=206,
+                headers={'Content-Range': 'bytes %d-%d/100' % (s, e)})
+
+        with patch.object(go_proxy, '_fetch', side_effect=fake_fetch):
+            w.start()
+            out = self._drain(w)
+        self.assertEqual(out, b'abcdefghijkl')
+        for t in w._threads:
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
+
+    def test_oversized_response_is_truncated_to_segment_length(self):
+        """206 区间正确但响应体超出段长：必须截断，多余字节不进队列。"""
+        # 区间 0-99 共 100 字节；响应体给了 130 字节
+        w = self._seg(n=1)
+
+        def fake_fetch(url, headers, s, e, timeout=60):
+            return _FakeResponse([b'x' * 30, b'y' * 100], status=206,
+                                 headers={'Content-Range': 'bytes 0-99/100'})
+
+        with patch.object(go_proxy, '_fetch', side_effect=fake_fetch):
+            w.start()
+            out = self._drain(w)
+        self.assertEqual(out, b'x' * 30 + b'y' * 70,
+                         'output must be truncated to the requested segment length')
+        self.assertEqual(len(out), 100)
+        for t in w._threads:
+            t.join(timeout=5)
             self.assertFalse(t.is_alive())
 
 
@@ -299,6 +428,85 @@ class TestGoProxyUrlChannelAuth(unittest.TestCase):
             events = self._request('?url=' + go_proxy.urllib.parse.quote(target, safe='')
                                    + '&token=tok-123')
         self.assertIn(('status', 403), events)
+
+
+class TestHlsRewriteOnKnownTotal(unittest.TestCase):
+    """H-7：Content-Type 是 m3u8 就必须重写，与探测是否拿到 total 无关。
+
+    Range 探测（bytes=0-0）对 nginx 一类源站常态回 206+Content-Range
+    （total 已知）：修复前重写仅挂在「total 未知」分支，m3u8 被当普通
+    媒体透传——相对分片按代理基址解析必 404，绝对分片直连 CDN 缺
+    Cookie/Referer 被拒。
+    """
+
+    M3U8 = b'#EXTM3U\n#EXTINF:2.0,\nseg0.ts?auth=k\n'
+
+    @staticmethod
+    def _stub_writer(handler):
+        """替身响应写出：真实 send_response 会访问 requestline 等连接态。"""
+        handler._headers_sent = False
+        handler.wfile = io.BytesIO()
+        handler.send_response = lambda code: (
+            setattr(handler, '_headers_sent', True),
+            handler.wfile.write(b'HTTP/1.0 %d\r\n' % code))
+        handler.send_header = lambda k, v: handler.wfile.write(
+            ('%s: %s\r\n' % (k, v)).encode('utf-8'))
+        handler.end_headers = lambda: handler.wfile.write(b'\r\n')
+
+    @classmethod
+    def _url_handler(cls):
+        """？url= 通道（_handle）的处理器替身。"""
+        handler = object.__new__(go_proxy._Handler)
+        handler.headers = {}
+        handler.path = ('/proxy?url=https%3A%2F%2Fcdn.quark.test%2Flive%2Fhls.m3u8'
+                        '&token=tok-123')
+        handler.command = 'GET'
+        cls._stub_writer(handler)
+        return handler
+
+    def test_url_channel_206_probe_still_rewrites_hls(self):
+        """探测回 206+Content-Range 且 Content-Type 为 m3u8 → 仍整体取回重写。"""
+        handler = self._url_handler()
+        probe = _Response(206, {'Content-Type': 'application/vnd.apple.mpegurl',
+                                'Content-Range': 'bytes 0-0/1234'},
+                          content=self.M3U8)
+        fetch = _Response(200, {'Content-Type': 'application/vnd.apple.mpegurl'},
+                          content=self.M3U8)
+        old_state = {'token': hoststate.get_token(), 'port': hoststate.get_port()}
+        hoststate.configure(token='tok-123')
+        try:
+            with patch.object(go_proxy, '_fetch', side_effect=[probe, fetch]):
+                handler._handle()
+        finally:
+            hoststate.configure(**old_state)
+        written = handler.wfile.getvalue().decode('utf-8')
+        # 相对分片必须被包回代理转发，而不是按 127.0.0.1 基址原样透传
+        self.assertIn('http://127.0.0.1:9978/proxy?url=', written)
+        self.assertIn('seg0.ts', written)
+        self.assertIn('application/vnd.apple.mpegurl', written)
+
+    @classmethod
+    def _stream_forward_handler(cls):
+        """do=pan 数据面（_stream_forward）的处理器替身。"""
+        handler = object.__new__(go_proxy._Handler)
+        handler.headers = {}
+        cls._stub_writer(handler)
+        return handler
+
+    def test_pan_stream_forward_206_probe_still_rewrites_hls(self):
+        """H-7（do=pan 数据面）：探测回 206+Content-Range 且 m3u8 仍重写。"""
+        handler = self._stream_forward_handler()
+        probe = _Response(206, {'Content-Type': 'application/vnd.apple.mpegurl',
+                                'Content-Range': 'bytes 0-0/4321'},
+                          content=self.M3U8)
+        fetch = _Response(200, {'Content-Type': 'application/vnd.apple.mpegurl'},
+                          content=self.M3U8)
+        with patch.object(go_proxy, '_fetch', side_effect=[probe, fetch]):
+            handler._stream_forward('https://cdn.quark.test/live/hls.m3u8',
+                                    {}, False, valid_token='tok-123')
+        written = handler.wfile.getvalue().decode('utf-8')
+        self.assertIn('http://127.0.0.1:9978/proxy?url=', written)
+        self.assertIn('seg0.ts', written)
 
 
 class TestServerTokenAttach(unittest.TestCase):

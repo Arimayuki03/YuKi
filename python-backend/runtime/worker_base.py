@@ -56,9 +56,6 @@ def worker_main(connection, spec, policy):
             op = str((message or {}).get('op') or '')
             if op == 'shutdown':
                 break
-            if op == 'ping':
-                send_json(connection, {'op': 'pong', 'id': message.get('id'), 'ok': True})
-                continue
             if op != 'call':
                 error = RuntimeError('L3_RUNTIME_PROTOCOL_ERROR', raw_error='unknown worker op')
                 send_json(connection, {'id': message.get('id'), 'ok': False,

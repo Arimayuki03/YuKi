@@ -18,6 +18,7 @@ import time
 import zlib
 import hashlib
 import logging
+import tempfile
 import threading
 import re
 
@@ -34,7 +35,6 @@ if ENGINE_DIR not in sys.path:
 
 from esm_transform import esm_to_script  # noqa: E402
 from module_resolver import ModuleBundle, binding_statements  # noqa: E402
-
 logger = logging.getLogger('yuki.jsengine')
 
 
@@ -69,8 +69,32 @@ def _local_kv_load():
 def _local_kv_save(data):
     try:
         os.makedirs(LOCAL_KV_DIR, exist_ok=True)
-        with open(LOCAL_KV_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
+        # 原子写：先写临时文件再 os.replace。原实现直接覆写 js_local.json，
+        # 进程崩溃/断电可留下半截 JSON——之后 load 永远失败、KV 被静默清空。
+        # os.replace 在 Windows/POSIX 上都原子替换，读侧要么旧文件要么新文件。
+        payload = json.dumps(data, ensure_ascii=False)
+        fd, tmp = tempfile.mkstemp(prefix='.js_local-', suffix='.tmp', dir=LOCAL_KV_DIR)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            for i in range(4):
+                try:
+                    os.replace(tmp, LOCAL_KV_FILE)
+                    break
+                except PermissionError:
+                    # Windows：目标被并发读/替换时短暂拒绝，短退避重试
+                    #（对齐 cache_store.set 的写法）
+                    if i == 3:
+                        raise
+                    time.sleep(0.05)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
     except Exception as e:
         logger.warning('local kv save failed: %s', e)
 
@@ -465,8 +489,17 @@ class JsEngine:
         port = self.proxy_port or 0
         encoded_site = quote(str(site_key), safe='')
         encoded_flag = quote(str(flag), safe='')
+        # /proxy 已强制 token（R 组）：地址由播放器直接消费，必须自带有效
+        # token。宿主 token 已注入本进程 hoststate（site_worker spec 注入），
+        # 未配置（仅测试）时不补。
+        try:
+            import hoststate
+            token = str(hoststate.get_token() or '')
+        except Exception:
+            token = ''
+        token_part = f'&token={quote(token, safe="")}' if token else ''
         return (f'http://127.0.0.1:{port}/proxy?do=js&siteKey={encoded_site}'
-                f'&flag={encoded_flag}')
+                f'&flag={encoded_flag}{token_part}')
 
     def _eval_file(self, path):
         with open(path, encoding='utf-8') as f:
@@ -482,10 +515,46 @@ class JsEngine:
             for g in names:
                 self.ctx.eval(f'try {{ globalThis.{g} = __CAT__.{export}; }} catch (e) {{}}')
 
+    def _reset_spider_globals(self):
+        """清除上一轮 spider 加载残留（load_spider / load_spider_url 共用）。
+
+        spider-loader.js 以 `if (!globalThis.__JS_SPIDER__)` 守卫，站点重载/换源
+        重复加载时旧 spider 残留会让新 spider 永不生效；旧 __MODULE_EXPORTS__ /
+        __MODn__ 命名空间（含其上的 __fixups__ 数组）同理必须一并清掉，避免
+        指向已删除命名空间的残留语句在新一轮里误触发。全部以 configurable:true
+        定义，可 delete。
+        """
+        self.ctx.eval(
+            '(function(){'
+            'try { delete globalThis.__JS_SPIDER__; } catch (e) {}'
+            'try { delete globalThis.__MODULE_EXPORTS__; } catch (e) {}'
+            'Object.getOwnPropertyNames(globalThis).forEach(function (k) {'
+            '  if (/^__MOD\\d+__$/.test(k)) { try { delete globalThis[k]; } catch (e) {} }'
+            '});'
+            '})();')
+
+    def _drain_import_fixups(self, mod_count):
+        """回填循环依赖（回边）的 import 绑定（详见 module_resolver.binding_statements）。
+
+        回边绑定生成 `var alias;` + 补赋闭包挂到 __MODi__.__fixups__。每轮
+        模块 eval 完成后统一执行：此时全部命名空间已填充，回填结果与 ESM
+        调用期 live binding 对齐。函数引用的命名空间全局存在（预建空对象），
+        重复执行幂等；加载失败残留的 fixups 随 __MODn__ 在下一轮重置时清除。
+        """
+        if mod_count <= 0:
+            return
+        self.ctx.eval(
+            '(function(){for(var i=0;i<' + str(mod_count) + ';i++){'
+            'var ns=globalThis["__MOD"+i+"__"];'
+            'if(ns&&ns.__fixups__){for(var j=0;j<ns.__fixups__.length;j++){'
+            'try{ns.__fixups__[j]();}catch(e){}}}}})();')
+
     def load_spider(self, src):
         """加载 spider 源码（ESM），执行 spider.js 协议；返回是否成功。"""
         with self.lock:
             try:
+                # 重复加载（站点重载/换源）前重置，否则旧 spider 残留、新 spider 永不生效
+                self._reset_spider_globals()
                 self.ctx.eval(esm_to_script(src, ns='__MODULE_EXPORTS__'))
                 self._eval_file(LOADER_JS)
                 return self.ctx.eval('typeof globalThis.__JS_SPIDER__') == 'object'
@@ -497,11 +566,23 @@ class JsEngine:
         """加载多模块 ESM spider：递归抓取依赖，逐模块 IIFE 隔离执行。
 
         每个模块顶层声明封闭在各自 IIFE 内避免同名冲突，exports 收集到
-        独立命名空间 __MODn__，import 绑定以 var 前缀语句注入。
+        独立命名空间 __MODn__。import 绑定按依赖拓扑序分两类（见
+        module_resolver.binding_statements）：前向边（依赖拓扑序在前）在
+        IIFE 内 var 快照；回边（循环依赖）var 声明 + 延迟回填（__fixups__，
+        全部模块 eval 完成后由 _drain_import_fixups 统一执行，调用期解析
+        对齐 ESM live binding）。re-export 以 dep_map（原始说明符 → 依赖
+        命名空间）转发。
         """
         bundle = ModuleBundle().build(entry_url, fetch_text)
         self.init_protocol = 'fongmi'
         with self.lock:
+            # 重复加载（站点重载/换源）前重置，否则旧 spider 残留、新 spider 永不生效
+            self._reset_spider_globals()
+            # 预建全部命名空间为空对象：回边补赋闭包与 re-export 转发按
+            # __MODn__ 名引用依赖命名空间，若首个模块的 preamble 先于依赖
+            # 命名空间创建执行会 ReferenceError（循环依赖下顺序不可保证）。
+            for i in range(len(bundle.modules)):
+                self.ctx.eval(f'globalThis.__MOD{i}__ = globalThis.__MOD{i}__ || {{}};')
             for i, (url, src) in enumerate(bundle.modules):
                 # JS 前置探测：站点挂了/反爬页时抓到的往往是 HTML 而非 JS。
                 # 直接 eval 会造成 SyntaxError + 完整堆栈；改记 WARNING 并返回 False，
@@ -514,12 +595,19 @@ class JsEngine:
                     return False
                 ns = f'__MOD{i}__'
                 preamble = []
-                for clause, dep_url in bundle.imports.get(url, []):
+                dep_map = {}
+                for clause, dep_url, spec in bundle.imports.get(url, []):
                     dep_idx = bundle.index.get(dep_url)
                     if dep_idx is None:
                         continue
-                    preamble.extend(binding_statements(clause, f'__MOD{dep_idx}__'))
-                body = esm_to_script(src, ns=ns)
+                    dep_ns = f'__MOD{dep_idx}__'
+                    dep_map[spec] = dep_ns
+                    # 真回边（DFS 截断标记）：var 声明 + 延迟回填；
+                    # 前向边：IIFE 内 var 快照（见 binding_statements）
+                    is_back = (url, dep_url) in bundle.back_edges
+                    preamble.extend(binding_statements(clause, dep_ns,
+                                                       mod_idx=i, back_edge=is_back))
+                body = esm_to_script(src, ns=ns, dep_map=dep_map)
                 script = f'(function(){{\n' + '\n'.join(preamble) + '\n' + body + f'\n}})();\n//# sourceURL={url}'
                 try:
                     self.ctx.eval(script)
@@ -527,6 +615,8 @@ class JsEngine:
                     self._warn_missing_global(e, url)
                     logger.warning('js module eval failed: %s (%s)', url, e)
                     raise
+            # 回填循环依赖的 import 绑定（回边 var 此刻才取到依赖导出值）
+            self._drain_import_fixups(len(bundle.modules))
             last = len(bundle.modules) - 1
             self.ctx.eval(f'globalThis.__MODULE_EXPORTS__ = globalThis.__MOD{last}__;')
             self._eval_file(LOADER_JS)

@@ -1877,8 +1877,13 @@ app.whenReady().then(() => {
     // settings-set 键白名单（M-1）：仅放行渲染层实际使用的偏好/数据键，防页面脚本写任意键；
     // 敏感路径键（播放器/缓存/下载目录，可指向本地任意位置）不在此列，只能经
     // yuki:pick-player / yuki:pick-cache-dir / yuki:dl pickDir 等主进程对话框设置，走 settings-set 一律忽略。
+    // 注意：本表须与 kazumi.js 的 WEBDAV_RESTORE_ALLOWED 保持超集关系——恢复流程
+    // 对允许表内的键逐个走 settings-set 落盘，若键只存在于恢复表而缺在这里，恢复
+    // 与设置页开关的写入会被静默 ignored（H-1：mediaProbe/autoLineFallback/
+    // legacyParser/uiStateMemory 四个开关曾因此失效，panels.js 是其唯一写入口）。
     const SETTINGS_SET_ALLOWED = new Set([
         'anime4k', 'anime4kMode', 'animEnabled', 'autoNext', 'autoUpdate',
+        'autoLineFallback', 'legacyParser', 'mediaProbe', 'uiStateMemory',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
         'bangumiMirrorRoot', 'bangumiProgressSync', 'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
@@ -1908,8 +1913,13 @@ app.whenReady().then(() => {
     // 直播频道探活：并发检测 HTTP/HTTPS 流地址是否可达（非 HTTP 协议默认放行）。
     // 两段式防误杀：先 HEAD（3s）；出错/超时或响应 403/405/501 时回退 GET（4s），
     // GET 收到任意响应即判活，立即强制销毁连接不拉流，防止后台无限跑流量；3xx 视为可用。
+    // 不做内网封锁：用户自定义直播源常为局域网流（自建 Emby/Jellyfin、组播转 HTTP 等），
+    // 封内网会误杀合法用法。作为折衷，对同一 origin（协议+主机+端口）做并发=1 频控，
+    // 抬高被注入页面借本通道扫描内网主机的成本（每次探测必须串行排队）。
     ipcMain.handle('yuki:probe-urls', async (_e, urls) => {
         if (!Array.isArray(urls) || !urls.length) return [];
+        // 同 origin 串行队列：链尾 Promise 连接成 FIFO，探测完再放行下一个同源目标
+        const originChains = new Map();
         const probeOne = (url) => new Promise((resolve) => {
             const str = String(url);
             if (!/^https?:\/\//i.test(str)) { resolve(true); return; } // RTMP/RTSP 默认放行
@@ -1932,7 +1942,7 @@ app.whenReady().then(() => {
                         const code = res.statusCode || 0;
                         // 收到响应头后立即停止接收后续 stream 数据并销毁响应流，防直播流持续在后台下载
                         try { res.destroy(); } catch (e) { /* ignore */ }
-                        
+
                         // 直播流首帧即判活：mpv/ffplay 等播放器都按「有响应即视为可用」处理。
                         // HEAD/GET 拿到任何 2xx/3xx 都算可用；4xx（403 防盗链等）因可能有
                         // 伪造头/时间戳要求，一律放行，避免把真实可播频道误判为死链。
@@ -1950,13 +1960,28 @@ app.whenReady().then(() => {
                 else resolve(head);
             });
         });
+        // 带 origin 频控的单次探测：非 http(s) 直接过；同源请求挂到该 origin 的串行链上
+        const probeQueued = (url) => {
+            const str = String(url);
+            let origin = '';
+            try {
+                const u = new URL(str);
+                if (/^https?:$/.test(u.protocol)) origin = `${u.protocol}//${u.host}`;
+            } catch (e) { /* 非法 URL 交给 probeOne 走兜底 */ }
+            if (!origin) return probeOne(str);
+            const prev = originChains.get(origin) || Promise.resolve();
+            const p = prev.then(() => probeOne(str));
+            // 链尾更新失败也要吞掉：单个探测异常不中断后续同源排队
+            originChains.set(origin, p.then(() => {}, () => {}));
+            return p;
+        };
         const results = new Array(urls.length);
         let idx = 0;
         const CONCURRENCY = 12;
         const worker = async () => {
             while (idx < urls.length) {
                 const i = idx++;
-                results[i] = await probeOne(urls[i]);
+                results[i] = await probeQueued(urls[i]);
             }
         };
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, urls.length) }, worker));
@@ -3675,6 +3700,11 @@ app.whenReady().then(() => {
         // 便携合并段会算错来源；此处按最终二进制重写一次（幂等，纯本地文件写）。
         writeMpvAssets();
     }
+    // 条目 3 补调：首次 writeMpvAssets 跑在 settings 就绪前（模块级注册段，约 1211 行），
+    // 读到的全是空设置——用户自定义键位（playerHotkeys.keys）与 Anime4K 档位快照静默
+    // 丢失（无 Anime4K/自定义 mpv 时没人触发后续重写，input.conf 一直用默认键位）。
+    // writeMpvAssets 幂等（纯本地文件重写），此处按已就绪的设置重写一次收口。
+    writeMpvAssets();
     const spd = parseFloat(settings.get('playerSpeed'));
     if (spd && spd > 0) mpv.defaultSpeed = Math.max(0.25, Math.min(4, spd));
     // 语言偏好（音轨/字幕）：读设置注入播放器
@@ -3984,34 +4014,47 @@ app.whenReady().then(() => {
     /** 校验 pid 对应进程是否仍是预期的外部播放器（P3-11：防 PID 复用误杀）。
      *  taskkill 前用 PowerShell Get-Process 比对进程名与启动配置的可执行名
      *  （去扩展名、忽略大小写）；查询失败/进程已退出/名字不匹配一律返回 false，
-     *  调用方跳过强杀只清记录。 */
-    function isExpectedExtPlayerPid(pid, execPath) {
-        const { execFileSync } = require('child_process');
-        try {
-            const out = execFileSync(
-                'powershell.exe',
-                ['-NoProfile', '-NonInteractive', '-Command',
-                    `(Get-Process -Id ${parseInt(pid, 10)} -ErrorAction Stop).ProcessName`],
-                { encoding: 'utf8', windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] },
-            ).trim().toLowerCase();
-            if (!out) return false;
-            const expected = String(execPath || '').replace(/\\/g, '/').split('/').pop()
-                .replace(/\.exe$/i, '').toLowerCase();
-            return !!expected && out === expected;
-        } catch (e) { return false; } // 进程已退出/无权限/超时：一律不杀
+     *  调用方跳过强杀只清记录。
+     *  条目 4：改异步（execFile + Promise）。此前 execFileSync 同步等 PowerShell
+     *  最长 4s，主进程事件循环被整个卡住（窗口/播放器全部冻结）；现由调用方 await，
+     *  时序语义不变（见 killPrevExtPlayer）。 */
+    function isExpectedExtPlayerPidAsync(pid, execPath) {
+        const { execFile } = require('child_process');
+        return new Promise((resolve) => {
+            try {
+                execFile(
+                    'powershell.exe',
+                    ['-NoProfile', '-NonInteractive', '-Command',
+                        `(Get-Process -Id ${parseInt(pid, 10)} -ErrorAction Stop).ProcessName`],
+                    { encoding: 'utf8', windowsHide: true, timeout: 4000 },
+                    (err, stdout) => {
+                        if (err) { resolve(false); return; } // 进程已退出/无权限/超时：一律不杀
+                        const out = String(stdout || '').trim().toLowerCase();
+                        if (!out) { resolve(false); return; }
+                        const expected = String(execPath || '').replace(/\\/g, '/').split('/').pop()
+                            .replace(/\.exe$/i, '').toLowerCase();
+                        resolve(!!expected && out === expected);
+                    });
+            } catch (e) { resolve(false); }
+        });
     }
 
     /** kill 上一次外部播放器进程（收敛语义：同意图重播只保留最新窗口）。
      *  P3-11：强杀前先校验进程身份——记录的 pid 在期间可能被系统复用给无关进程，
      *  /T /F 会连同子树误杀。身份不匹配（或进程已退出）则跳过 taskkill 只清记录，
-     *  保持无进程时的静默成功语义。 */
-    function killPrevExtPlayer(pid, execPath) {
+     *  保持无进程时的静默成功语义。
+     *  条目 4：改异步。调用点（launchExternalPlayerItems）位于 extLaunchChain 串行链
+     *  头部，await 本函数后立即 spawn——kill 与 spawn 仍严格先后、无并发逃逸窗口。 */
+    async function killPrevExtPlayer(pid, execPath) {
         if (!pid || process.platform !== 'win32') return;
-        if (!isExpectedExtPlayerPid(pid, execPath)) return;
-        try {
-            const { execSync } = require('child_process');
-            execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
-        } catch (e) { /* 已退出则忽略 */ }
+        if (!(await isExpectedExtPlayerPidAsync(pid, execPath))) return;
+        const { execFile } = require('child_process');
+        await new Promise((resolve) => {
+            try {
+                execFile('taskkill', ['/PID', String(pid), '/T', '/F'],
+                    { windowsHide: true, timeout: 4000 }, () => resolve()); // 已退出/被拒均忽略
+            } catch (e) { resolve(); }
+        });
     }
 
     /** 外部启动串行链：所有 launchExternalPlayerItems 调用在此队列上严格依次执行。
@@ -4038,11 +4081,12 @@ app.whenReady().then(() => {
             let sessionId = 0;
             try {
                 const { spawn } = require('child_process');
-                // 此刻位于串行链头部：kill 上一个 pid 后立刻 spawn，中间无 await，
-                // 与任何并发交错都不可能产生第二个存活窗口。
+                // 此刻位于串行链头部：await kill 完旧 pid 后再 spawn，中间无其他 await，
+                // 与任何并发交错都不可能产生第二个存活窗口（kill 改异步后由串行链
+                // 保证 kill→spawn 原子有序，语义与原同步版一致）。
                 if (lastExtLaunchPid) {
                     console.log(`[外部播放器] 收敛：kill 旧进程 pid=${lastExtLaunchPid}`);
-                    killPrevExtPlayer(lastExtLaunchPid, lastExtLaunchPath);
+                    await killPrevExtPlayer(lastExtLaunchPid, lastExtLaunchPath);
                 }
                 // 观看会话开账：beginSession 内部会显式结清上一条在播会话（taskkill
                 // 失败/非 win32 时旧进程 exit 事件不可依赖），保证任何时刻至多一条

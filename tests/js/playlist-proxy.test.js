@@ -631,3 +631,240 @@ test('清单短时缓存：TTL 内命中不重取上游；写入时惰性淘汰�
     await proxy.close();
     await up.close();
 });
+
+// ---------------------------------------------------------------- B 组（2026-09-22 评审修复）
+
+test('B4：pipe 直链 403 → 写头前触发重解析并换新直链回写（旧实现 headersSent 恒真死代码）', async () => {
+    let resolveCalls = 0;
+    const up = await makeUpstream([
+        // 第一个直链 403（签名过期），重解析后的新直链正常出清单
+        { match: '/old/master.m3u8', status: 403, contentType: 'text/plain', body: 'expired' },
+        {
+            match: '/new/master.m3u8', contentType: 'application/vnd.apple.mpegurl',
+            body: '#EXTM3U\n#EXT-X-ENDLIST\n',
+        },
+    ]);
+    const proxy = new PlaylistProxy({
+        getBackend: OK_BACKEND,
+        fetchFn: async () => {
+            resolveCalls += 1;
+            // 第 1 次（预热）给旧直链；重解析（refresh=1）给新直链
+            return {
+                json: async () => ({
+                    url: `http://127.0.0.1:${up.port}/${resolveCalls === 1 ? 'old' : 'new'}/master.m3u8`,
+                    parse: 0,
+                    header: { Referer: 'http://src.page/' },
+                }),
+            };
+        },
+    });
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]', pipe: true,
+        eps: [{ id: 'ep0', name: '第1集' }],
+    });
+    assert.ok(reg.ok);
+
+    const rsp = await reqFull(reg.entries[0].url);
+    assert.equal(rsp.status, 200, `重解析后应回 200 清单，实际 ${rsp.status}`);
+    assert.match(rsp.contentType, /mpegurl/);
+    assert.equal(resolveCalls >= 2, true, '应至少重新解析一次');
+    assert.ok(up.seen.some((s) => s.path === '/new/master.m3u8'), '上游应收到新直链请求');
+    // 新直链已进缓存：再次请求命中且不再 403
+    const sess = proxy.sessions.get(reg.token);
+    assert.equal(sess.cache.get(0), `http://127.0.0.1:${up.port}/new/master.m3u8`);
+
+    await proxy.close();
+    await up.close();
+});
+
+test('B4：pipe 直链 403 重解析失败/同址 → 按原状态直通不悬挂', async () => {
+    const up = await makeUpstream([
+        // 始终 403 且重解析仍返回同一直链（刷新无效）——必须把 403 原样回给播放器
+        { match: '/dead.m3u8', status: 403, contentType: 'text/plain', body: 'expired' },
+    ]);
+    const proxy = new PlaylistProxy({
+        getBackend: OK_BACKEND,
+        fetchFn: async () => ({
+            json: async () => ({ url: `http://127.0.0.1:${up.port}/dead.m3u8`, parse: 0, header: { Referer: 'http://src.page/' } }),
+        }),
+    });
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]', pipe: true,
+        eps: [{ id: 'ep0', name: '第1集' }],
+    });
+    assert.ok(reg.ok);
+
+    const rsp = await reqFull(reg.entries[0].url);
+    assert.equal(rsp.status, 403, '重解析后同址失效应按原状态直通');
+    await proxy.close();
+    await up.close();
+});
+
+test('B5：会话命中刷新 lastAccess，TTL 清扫只删不活跃会话', async () => {
+    const up = await makeUpstream([{
+        match: '/master.m3u8', contentType: 'application/vnd.apple.mpegurl',
+        body: '#EXTM3U\n#EXT-X-ENDLIST\n',
+    }]);
+    const proxy = new PlaylistProxy({
+        getBackend: OK_BACKEND,
+        fetchFn: async () => ({
+            json: async () => ({
+                url: `http://127.0.0.1:${up.port}/master.m3u8`, parse: 0,
+                header: { 'User-Agent': 'UA-1' },
+            }),
+        }),
+    });
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]', pipe: true,
+        eps: [{ id: 'ep0', name: '第1集' }],
+    });
+    assert.ok(reg.ok);
+    const sess = proxy.sessions.get(reg.token);
+    assert.ok(sess, '会话应存在');
+
+    // 手造「注册于 3 小时前、刚刚访问过」的活跃会话：按 createdAt 硬删的旧逻辑会误杀
+    sess.createdAt = Date.now() - 3 * 60 * 60 * 1000;
+    sess.lastAccess = Date.now();
+    const before = sess.lastAccess;
+    // 模拟清扫一轮（sweeper 内部逻辑与 _touch 口径一致：lastAccess 优先）
+    const now = Date.now();
+    for (const [tok, s] of proxy.sessions) {
+        if (now - (s.lastAccess || s.createdAt) > 2 * 60 * 60 * 1000) proxy.sessions.delete(tok);
+    }
+    assert.ok(proxy.sessions.has(reg.token), '活跃会话不得被 TTL 清扫');
+
+    // 命中请求刷新 lastAccess（_touch 挂接在 _handleAsync）
+    const old = Date.now() - 10 * 60 * 1000;
+    sess.lastAccess = old;
+    await reqFull(reg.entries[0].url);
+    assert.ok(sess.lastAccess > old, '命中 /pl 应续期 lastAccess');
+
+    // 不活跃会话（3 小时未访问）被清扫删除
+    const stale = proxy.sessions.get(reg.token);
+    stale.lastAccess = Date.now() - 3 * 60 * 60 * 1000;
+    for (const [tok, s] of proxy.sessions) {
+        if (Date.now() - (s.lastAccess || s.createdAt) > 2 * 60 * 60 * 1000) proxy.sessions.delete(tok);
+    }
+    assert.equal(proxy.sessions.has(reg.token), false, '不活跃会话应被清扫');
+    assert.notEqual(before, undefined);
+
+    await proxy.close();
+    await up.close();
+});
+
+test('B6：/seg 上游域名白名单——清单内域名放行，陌生域 404；跨域剥离 Cookie', async () => {
+    const routes = [
+        {
+            match: '/master.m3u8', contentType: 'application/vnd.apple.mpegurl',
+            body: '#EXTM3U\n#EXTINF:4,\nseg0.ts\n',
+        },
+        { match: '/seg0.ts', body: 'OKTS' },
+    ];
+    const up = await makeUpstream(routes);
+    const proxy = new PlaylistProxy({
+        getBackend: OK_BACKEND,
+        fetchFn: async () => ({
+            json: async () => ({
+                url: `http://127.0.0.1:${up.port}/master.m3u8`, parse: 0,
+                header: { Referer: 'http://src.page/', Cookie: 'sid=secret' },
+            }),
+        }),
+    });
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]', pipe: true,
+        eps: [{ id: 'ep0', name: '第1集' }],
+    });
+    assert.ok(reg.ok);
+    const origin = new URL(reg.entries[0].url).origin;
+
+    // 主清单重写产出 /seg（同会话已登记域名）
+    const r0 = await reqFull(reg.entries[0].url);
+    assert.equal(r0.status, 200);
+    const segLine = r0.body.split('\n').find((l) => l.includes('/seg/'));
+    assert.ok(segLine, `应包含 /seg 重写行：${r0.body}`);
+
+    // 白名单内分片：200 直通且带会话 Cookie（同域不剥离）
+    const rOk = await reqFull(segLine.trim());
+    assert.equal(rOk.status, 200);
+    assert.equal(rOk.body, 'OKTS');
+    const segSeen = up.seen.filter((s) => s.path === '/seg0.ts').pop();
+    assert.equal(segSeen.headers.cookie, 'sid=secret', '同域分片应携带 Cookie');
+
+    // 陌生域（未在会话清单重写中出现）：404 且上游零请求
+    const before = up.seen.length;
+    const bad = await reqFull(`${origin}/seg/${reg.token}/0/${b64u('http://evil.example.com/steal.ts')}`);
+    assert.equal(bad.status, 404);
+    assert.equal(up.seen.length, before, '陌生域不得打到上游');
+
+    // 已登记域名（host 相同，如换端口/路径的 CDN 分片）：放行但跨域剥离 Cookie，
+    // Referer/UA 等其余会话头保留（Cookie 归属预热直链所在域，不带出去）
+    const up2 = await makeUpstream([{ match: '/other.ts', body: 'OTHER', respondReceivedHeaders: true }]);
+    const r2 = await reqFull(`${origin}/seg/${reg.token}/0/${b64u(`http://127.0.0.1:${up2.port}/other.ts`)}`);
+    assert.equal(r2.status, 200);
+    const echoed = JSON.parse(r2.body);
+    assert.equal(echoed.referer, 'http://src.page/', 'Referer 应保留');
+    assert.equal(echoed.cookie || '', '', '跨域转发必须剥离 Cookie');
+    await up2.close();
+
+    await proxy.close();
+    await up.close();
+});
+
+test('B8：catvod 预取并发窗口 4——同时 in-flight 的解析不超过 4，注册不等待预取', async () => {
+    let cur = 0, peak = 0;
+    const fetchFn = async () => {
+        cur += 1;
+        peak = Math.max(peak, cur);
+        await new Promise((r) => setTimeout(r, 15));
+        cur -= 1;
+        return { json: async () => ({ url: 'http://cdn/warm.m3u8', parse: 0, header: { Referer: 'http://src.page/' } }) };
+    };
+    const proxy = new PlaylistProxy({ getBackend: OK_BACKEND, fetchFn });
+    // 12 集：全量并发旧实现峰值 12，窗口 4 应封顶 4
+    const eps = Array.from({ length: 12 }, (_, i) => ({ id: `ep${i}`, name: `第${i + 1}集` }));
+    const reg = await proxy.register({
+        site: 'csp_site', flag: 'flag1', vipFlags: '[]',
+        eps,
+    });
+    assert.ok(reg.ok);
+    // 注册立即返回（强鉴权长列表全量等完必撞渲染层 20s 竞速——预取转后台）：
+    // 返回时刻预取已在后台进行中，且尚未全量并发
+    const sess = proxy.sessions.get(reg.token);
+    assert.ok(sess.catvodInflight.size > 0, '注册返回时预取应在后台进行中');
+    assert.equal(peak < 12, true, `注册返回时不应全量并发，实际峰值 ${peak}`);
+    // 后台预取继续推进直至完成，并发峰值断言保持（≤4）
+    for (let i = 0; i < 200 && sess.cache.size < eps.length; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(sess.cache.size, eps.length, '后台预取最终应完成全部集目');
+    assert.equal(peak <= 4, true, `预取并发峰值应 ≤4，实际 ${peak}`);
+    await proxy.close();
+});
+
+test('B4b：MAX_SESSIONS 淘汰按最近访问——刚访问过的活跃会话不被新注册挤掉', async () => {
+    const proxy = new PlaylistProxy({ getBackend: OK_BACKEND, fetchFn: OK_FETCH });
+    // 灌满 8 个会话
+    const tokens = [];
+    for (let i = 0; i < 8; i++) {
+        const r = await proxy.register({
+            site: 's', flag: 'f', vipFlags: '[]', eps: [{ id: `e${i}`, name: `第${i + 1}集` }],
+        });
+        assert.ok(r.ok);
+        tokens.push(r.token);
+    }
+    // 「正在播」的会话：命中请求续期（_touch 在解析前触发，解析失败也不影响续期）
+    const alive = tokens[0];
+    const regUrl = `http://127.0.0.1:${proxy.server.address().port}/pl/${alive}/0`;
+    await req(regUrl);
+    // 新注册挤入：应淘汰「最久未访问」者而非刚续期的 alive
+    const r9 = await proxy.register({
+        site: 's', flag: 'f', vipFlags: '[]', eps: [{ id: 'e9', name: '第10集' }],
+    });
+    assert.ok(r9.ok);
+    assert.equal(proxy.sessions.size <= 8, true, `容量应保持 ≤8，实际 ${proxy.sessions.size}`);
+    assert.ok(proxy.sessions.has(alive), '最近访问的会话不得被淘汰');
+    // 其余会话中 lastAccess 最旧的（tokens[1]，从未访问）应已被淘汰
+    assert.equal(proxy.sessions.has(tokens[1]), false, '最久未访问的会话应被淘汰');
+    await proxy.close();
+});
+

@@ -1,5 +1,5 @@
 {
-  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 锁定 BtbN/FFmpeg-Builds 的版本化资产（ffmpeg-n9.0-latest-win64-gpl-9.0.zip，同 tag 资产随上游重构建会更新——升级或上游重推后须重新核对 sha256）；sha256 与 GitHub release asset 的官方 digest 核对一致。升级=改 version/url 后同步 sha256。",
+  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 锁定 BtbN/FFmpeg-Builds 的月度快照 tag（autobuild-2026-08-31-13-27，BtbN 逐月末固化、内容不可变，避免锁 latest 时同 tag 资产随上游重构建而失配）+ 版本化资产；sha256 已与该 release 官方 checksums.sha256 核对一致。升级=改 version/url 后同步 sha256。",
   "mpv": {
     "tag": "20260814",
     "asset": "mpv-x86_64-20260814-git-7b8915bc1d.7z",
@@ -11,9 +11,9 @@
     "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
   },
   "ffmpeg": {
-    "version": "9.0",
-    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip",
-    "sha256": "c070cc8b9d69e397d24abdf98882b7ae0167edf8bf09de03e28a113504fbeb3c"
+    "version": "9.0.1-11-ge47273f4d9",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip",
+    "sha256": "ec9db2cda1f5894ab95446076ad8bf49379db4b53c02e778ad3b49adf91fec83"
   },
   "anime4k": {
     "Anime4K_Clamp_Highlights.glsl": "a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a",

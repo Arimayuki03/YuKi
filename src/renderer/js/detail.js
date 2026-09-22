@@ -293,6 +293,10 @@ const Detail = {
     async _restore(snapshot) {
         if (!snapshot) return false;
         Object.assign(this, snapshot);
+        // 嵌套返回自增主请求世代：嵌套打开番剧（关联→新详情）期间旧详情的主请求
+        // 仍在途，返回恢复后若不自增，慢响应会带着过期世代比对通过，把旧影片的
+        // _vod/sources 覆盖到刚恢复的页面上（与 load()/openBangumi() 同一守卫口径）
+        this._loadGen++;
         this._bgmExtraGen++; // 作废在途的上一部番剧补充数据加载，防返回后旧结果叠加渲染（多余卡片/闪烁）
         this._comments = [];
         this._characters = [];
@@ -305,12 +309,13 @@ const Detail = {
         return true;
     },
 
-    back() {
-        // 嵌套跳转回退：优先从栈上恢复上一详情页（关联→新详情→返回原详情），
-        // 栈空时再回到外部进入视图（home/search/timeline 等）。
+    /** 嵌套跳转回退：优先从栈上恢复上一详情页（关联→新详情→返回原详情），
+     *  栈空时再回到外部进入视图（home/search/timeline 等）。 */
+    async back() {
         if (this._backStack && this._backStack.length) {
             const prev = this._backStack.pop();
-            if (this._restore(prev)) return;
+            // _restore 是 async：必须 await 后判断结果，真值判断 Promise 恒真，守卫成死代码
+            if (await this._restore(prev)) return;
         }
         App.showView(this.backView || 'home');
     },
@@ -1061,18 +1066,6 @@ const Detail = {
         this._onCommentPageScroll = null;
     },
 
-    /** 评论时间：兼容 Unix 秒/毫秒时间戳与字符串。 */
-    _fmtCommentTime(ts) {
-        if (!ts) return '';
-        if (typeof ts === 'string' && !/^\d+$/.test(ts)) return ts;
-        let n = Number(ts);
-        if (!n) return '';
-        if (n < 1e12) n *= 1000; // 秒 → 毫秒
-        const d = new Date(n);
-        if (isNaN(d.getTime())) return '';
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    },
-
     /**
      * 渲染评论正文的 BBCode（Bangumi 吐槽为 BBCode 文本）。
      * 重点修复：[quote][b]某人[/b] ...[/quote] 是「回复某人」的引用块，
@@ -1461,7 +1454,10 @@ const Detail = {
             .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
             .map((x) => x.s);
         box.html(sorted.length ? `<div class="detail-staff-grid">${sorted.map((s) => {
-            const jobs = (s.jobs || (s.relation ? [s.relation] : [])).join(' / ');
+            // 与 _staffJobRank 同口径：jobs 兼容数组 / 字符串 / 空值——镜像源可能返回
+            // 字符串形态，直接 .join 会抛 TypeError 导致整个制作页签渲染失败
+            const jobArr = Array.isArray(s.jobs) ? s.jobs : (s.jobs ? [s.jobs] : (s.relation ? [s.relation] : []));
+            const jobs = jobArr.join(' / ');
             // 中文名优先显示（若存在），否则用原名；副标题展示另一个名字。
             const cn = s.name_cn || (s.infobox && Detail._pickCharNameCn({ infobox: s.infobox })) || '';
             const orig = s.name || '';
@@ -1644,6 +1640,9 @@ const Detail = {
         this.activeSource = idx;
         $('#detail-tab-content .play-src').removeClass('active');
         $(`#detail-tab-content .play-src[data-idx="${idx}"]`).addClass('active');
+        // 换线路先清空勾选：ep-btn 节点跨线路复用（renderEpisodes 只重排不重建），
+        // 残留的 checked 会让批量播放/下载仍按旧线路的 data-idx 取新线路的集
+        $('#detail-tab-content .ep-check').removeClass('checked');
         this.renderEpisodes();
         this._saveLastSource();
     },

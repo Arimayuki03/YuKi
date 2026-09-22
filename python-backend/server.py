@@ -4,7 +4,7 @@
 端点：
 - GET  /health            健康检查（免 token）
 - GET/POST /cache         spider 缓存协议 get/set/del（免 token，仅 127.0.0.1）
-- GET/POST /proxy         spider localProxy 媒体代理（免 token）
+- GET/POST /proxy         spider localProxy 媒体代理（需有效 token，do=ck 健康检查豁免）
 - POST /action            内容 API + 面板指令（需 token）
 
 本地文件面板（原 /file /upload 等占位）Phase 5 起改走 Electron 主进程
@@ -95,6 +95,13 @@ cache_store = None  # create_app() 时初始化（依赖 hoststate 目录）
 kazumi_mgr = None
 kazumi_engine = None
 kazumi_cookies = None
+
+# Kazumi 搜索共享线程池（R 组）：/search/kazumi-stream（SSE）与
+# /kazumi/action kazumiSearch 原先每请求各建 min(8, N) 线程池，并发请求
+# 线程数无全局上限。改为模块级共享池（16 线程封顶）：超出并发的搜索任务
+# 在池内排队，单请求最慢源仍由 as_completed/预算控制，线程总量有界。
+_KAZUMI_SEARCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=16, thread_name_prefix='kazumi-search')
 
 # Phase 4 弹幕队列：面板 do=danmaku 入队；主进程播放器轮询 /danmaku?do=poll 取走
 _danmaku_queue = []
@@ -366,6 +373,27 @@ def _form_flag(form, name):
     或 `"0"/"false"` 都视为关，避免把「参数没传」读成「用户同意」。
     """
     return str((form or {}).get(name, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+class _FormValueError(ValueError):
+    """表单整数值非法（R 组）：由 dispatch_kazumi_action 捕获转 400，
+    不再作为未处理异常落 500。"""
+
+
+def _form_int(form, name, default):
+    """表单整数读取：缺键/空串回默认值；非法数值抛 _FormValueError（→400）。
+
+    原 ``int(form.get(...))`` 对 'abc' 这类输入抛裸 ValueError，在
+    dispatch_kazumi_action 的兜底 except 里被归为服务器内部错误（500），
+    实际是客户端参数问题。
+    """
+    raw = (form or {}).get(name, '')
+    if raw is None or str(raw).strip() == '':
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise _FormValueError(f'{name} must be an integer') from None
 
 
 def cancel_config_task(reason='cancelled'):
@@ -915,10 +943,25 @@ def _normalize_play_result(body, flag='', site=None, original_id=''):
     return json.dumps(data, ensure_ascii=False)
 
 
-# 全局 spider 并发上限（C3）：阻塞 spider 调用经 anyio 默认线程池（~40 线程）
-# 无节制执行；超载请求在此排队而非线程暴涨/雪崩。16 = 线程池容量的 40%。
+# 全局 spider 并发上限（C3）：阻塞 spider 调用不再占用 anyio 默认线程池
+# （~40 线程）——原实现信号量排队发生在 40 线程池内，40 个并发 /action
+# 会把 /proxy、/cache 一并饿死。改为模块级专用 executor：16 线程 + 同容量
+# 有界信号量，spider 排队线程不再挤占控制面/数据面的任何线程预算。
 # 注意：aggregate_search 内部的 8 线程池不经此信号量（自身已限），无嵌套死锁。
 _SPIDER_SEMAPHORE = threading.BoundedSemaphore(16)
+_SPIDER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=16, thread_name_prefix='spider-action')
+
+
+async def _run_in_spider_pool(func, *args):
+    """把阻塞 spider 调度投到模块级专用线程池（R 组条目：独立 executor）。
+
+    与 ``run_in_threadpool``（anyio 共享 ~40 线程池）隔离：spider 慢源排队
+    只消耗本池线程，/proxy、/cache、/health 等控制面/数据面请求不受牵连。
+    协程形态：调用方 ``asyncio.create_task`` 需要协程而非裸 Future。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_SPIDER_EXECUTOR, lambda: func(*args))
 
 
 def dispatch_action(form, runtime_request=None):
@@ -1844,9 +1887,13 @@ def create_app():
                     'msg': r.get('msg', ''),
                 }, ensure_ascii=False)
 
-            # 手动管理线程池（M-20）：as_completed 超时/异常也要发 done 事件，
-            # shutdown(wait=False) 防卡死 worker 阻塞生成器退出
-            pool = ThreadPoolExecutor(max_workers=min(8, len(plugins)))
+            # 手动管理线程池（M-20）：as_completed 超时/异常也要发 done 事件。
+            # R 组：改用模块级共享池（_KAZUMI_SEARCH_EXECUTOR，全局 16 线程
+            # 上限）——原实现每个 SSE 流请求各建 8 线程池，N 个并发搜索 =
+            # 8N 线程无上限。池归全局所有，这里只 submit，绝不 shutdown。
+            # 超时/断连时未完成任务继续在共享池跑完并自行丢弃（_search_one
+            # 内部吞异常，结果无人消费即释放），不阻塞生成器退出。
+            pool = _KAZUMI_SEARCH_EXECUTOR
             complete = False
             try:
                 try:
@@ -1863,11 +1910,10 @@ def create_app():
                         yield f'data: {payload}\n\n'
                     complete = True
                 except GeneratorExit:
-                    raise  # 客户端断连：交给 finally 清理后照常向外传播
+                    raise  # 客户端断连：交给 finally 做缓存失效后照常向外传播
                 except Exception as e:
                     logger.warning('kazumi sse search overall timeout: %s', e)
                 finally:
-                    pool.shutdown(wait=False)
                     # 未正常跑完（超时/异常，或客户端断连令生成器中途关闭）：
                     # 索引里只有中断前完成源的部分结果且无残缺标记，整词失效
                     # 禁止下次同词请求把「只搜出来几个源」重放成完整答案。
@@ -1935,6 +1981,22 @@ def create_app():
         if any(value and not hoststate.valid_proxy_token(value)
                for value in supplied_tokens):
             return JSONResponse({'code': 401, 'msg': 'invalid proxy token'}, status_code=401)
+        # R 组：/proxy 强制 token。原语义「带了才校验」让本地任意非浏览器
+        # 进程可匿名借道抓任意 URL（SSRF 跳板）。渲染层从不直连 /proxy：
+        # 播放地址的消费者是 mpv/外部播放器，地址由 spider getProxyUrl /
+        # JAR Proxy.getUrl / js2Proxy 生成（均已带宿主 token），因此这里
+        # 直接要求有效 token（query/body/专用头任一位置）。仅豁免 do=ck
+        # 健康探测——它只回 'ok' 不触网，不构成跳板（蜘蛛扫描端口依赖）。
+        # 注意 valid_proxy_token('') 恒 True（旧地址空值兼容语义），强制
+        # 判据与 go_proxy._request_valid_proxy_token 对齐：至少一个**非空**
+        # token 值命中。宿主未配置 token（仅测试）时退回放行。
+        def _has_valid_proxy_token():
+            if not str(hoststate.get_token() or ''):
+                return True
+            return any(str(value) and hoststate.valid_proxy_token(value)
+                       for value in supplied_tokens)
+        if str(query.get('do', '')).lower() != 'ck' and not _has_valid_proxy_token():
+            return JSONResponse({'code': 401, 'msg': 'proxy token required'}, status_code=401)
         param = merge_request_params(query, dict(request.headers), form, raw_body)
         runtime_request = RuntimeRequest.create(
             request_id=param.get('requestId') or request.headers.get('x-request-id', ''),
@@ -1971,7 +2033,7 @@ def create_app():
         form['requestId'] = runtime_request.request_id
         if runtime_request.play_session_id:
             form['playSessionId'] = runtime_request.play_session_id
-        action_task = asyncio.create_task(run_in_threadpool(
+        action_task = asyncio.create_task(_run_in_spider_pool(
             dispatch_action, form, runtime_request))
         disconnect_task = asyncio.create_task(
             _watch_action_disconnect(request, runtime_request))
@@ -2566,8 +2628,13 @@ def dispatch_kazumi_action(form):
                     except Exception as e:
                         logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
                         results[idx] = {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
-                with ThreadPoolExecutor(max_workers=min(8, len(plugins))) as pool:
-                    pool.map(lambda args: _search_one(*args), enumerate(plugins))
+                # R 组：改用模块级共享池（全局 16 线程上限），不再每请求建池。
+                # 逐个 submit 后等全部完成（等价原 pool.map 的同步阻塞语义），
+                # 共享池本身不销毁。异常已在 _search_one 内消化，futures 不会抛。
+                futures = [_KAZUMI_SEARCH_EXECUTOR.submit(_search_one, idx, p)
+                           for idx, p in enumerate(plugins)]
+                for fut in futures:
+                    fut.result()
                 return 200, json.dumps({'code': 200, 'results': [r for r in results if r is not None]}, ensure_ascii=False)
             # 同关键词重复搜索命中即回，不再全量请求各规则源（会话级 TTL）
             return _cached_kazumi_search(form, _build_search)
@@ -2680,7 +2747,7 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBangumiSearch':
             def _build():
                 keyword = form.get('keyword', '')
-                limit = int(form.get('limit', '10'))
+                limit = _form_int(form, 'limit', 10)
                 results = kazumi_mgr.bangumi_search(keyword, limit)
                 return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
             return _cached_bangumi(do, form, _build)
@@ -2710,8 +2777,8 @@ def dispatch_kazumi_action(form):
                     score_min=_num('scoreMin'),
                     score_max=_num('scoreMax'),
                     weekdays=weekdays,
-                    limit=int(form.get('limit', '20')),
-                    offset=int(form.get('offset', '0')),
+                    limit=_form_int(form, 'limit', 20),
+                    offset=_form_int(form, 'offset', 0),
                 )
                 return 200, json.dumps({'code': 200, 'items': data.get('items', []),
                                         'total': data.get('total', 0),
@@ -2736,16 +2803,16 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200, 'calendar': data}, ensure_ascii=False)
 
         if do == 'kazumiBangumiTrends':
-            limit = int(form.get('limit', '24'))
-            offset = int(form.get('offset', '0'))
+            limit = _form_int(form, 'limit', 24)
+            offset = _form_int(form, 'offset', 0)
             data = kazumi_mgr.bangumi_trends(min(limit, 120), max(offset, 0))
             return 200, json.dumps({'code': 200, 'trends': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
 
         if do == 'kazumiBangumiListByTag':
             def _build():
                 tag = form.get('tag', '')
-                limit = int(form.get('limit', '100'))
-                offset = int(form.get('offset', '0'))
+                limit = _form_int(form, 'limit', 100)
+                offset = _form_int(form, 'offset', 0)
                 data = kazumi_mgr.bangumi_list_by_tag(tag, min(limit, 120), max(offset, 0))
                 return 200, json.dumps({'code': 200, 'items': data.get('items', []), 'total': data.get('total', 0)}, ensure_ascii=False)
             return _cached_bangumi(do, form, _build)
@@ -2781,8 +2848,8 @@ def dispatch_kazumi_action(form):
 
         if do == 'kazumiBangumiComments':
             subject_id = form.get('id', '')
-            limit = int(form.get('limit', '20'))
-            offset = int(form.get('offset', '0'))
+            limit = _form_int(form, 'limit', 20)
+            offset = _form_int(form, 'offset', 0)
             data = kazumi_mgr.bangumi_comments(subject_id, limit, offset)
             return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
 
@@ -2804,8 +2871,8 @@ def dispatch_kazumi_action(form):
             if fetch_all:
                 items = kazumi_mgr._bangumi_all_collections(token)
             else:
-                limit = int(form.get('limit', '100'))
-                offset = int(form.get('offset', '0'))
+                limit = _form_int(form, 'limit', 100)
+                offset = _form_int(form, 'offset', 0)
                 items = kazumi_mgr.bangumi_user_collections(token, limit=min(limit, 100), offset=max(offset, 0))
             return 200, json.dumps({'code': 200, 'items': items}, ensure_ascii=False)
 
@@ -2849,7 +2916,7 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBangumiCollectionSet':
             token = form.get('token', '')
             subject_id = form.get('id', '')
-            ctype = int(form.get('type', '0'))
+            ctype = _form_int(form, 'type', 0)
             ok, msg = kazumi_mgr.bangumi_update_collection(token, subject_id, ctype)
             return (200 if ok else 400), json.dumps({'code': 200 if ok else 400, 'msg': msg}, ensure_ascii=False)
 
@@ -2885,13 +2952,13 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200, 'results': results}, ensure_ascii=False)
 
         if do == 'kazumiDanmakuEpisode':
-            bangumi_id = int(form.get('bangumiId', '0'))
-            episode = int(form.get('episode', '1'))
+            bangumi_id = _form_int(form, 'bangumiId', 0)
+            episode = _form_int(form, 'episode', 1)
             episode_id = kazumi_mgr.danmaku_get_episode_id(bangumi_id, episode)
             return 200, json.dumps({'code': 200, 'episodeId': episode_id}, ensure_ascii=False)
 
         if do == 'kazumiDanmakuComments':
-            episode_id = int(form.get('episodeId', '0'))
+            episode_id = _form_int(form, 'episodeId', 0)
             comments = kazumi_mgr.danmaku_get_comments(episode_id)
             return 200, json.dumps({'code': 200, 'comments': comments}, ensure_ascii=False)
 
@@ -2900,6 +2967,10 @@ def dispatch_kazumi_action(form):
             # 前端上传图片 base64 或 URL（对齐 Kazumi trace_api.dart：POST + anilistInfo=2 取完整元数据）
             # T74 修复：trace.moe URL 搜索返回 403（反爬/需它自行抓取），统一改为后端先下载字节再原始上传；
             # Content-Type 按文件头判断（Kazumi 硬编码 jpeg，PNG 上传会被拒）。
+            # R 组：图片 URL 补齐与 /kazumi/cover 同级的 scheme 白名单 + 8MB
+            # 大小上限——URL 来自用户粘贴/远端内容，无校验时是任意 SSRF 通道。
+            # scheme 必须是 http(s)；host 白名单放行 trace.moe 官方域（渲染层
+            # 粘贴识别图地址的常见来源）+ 常见图床，其余一律拒绝。
             image_url = form.get('url', '')
             image_b64 = form.get('base64', '')
             results = []
@@ -2909,12 +2980,31 @@ def dispatch_kazumi_action(form):
                 ua = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'}
                 raw = None
                 if image_url:
+                    parts = urllib.parse.urlsplit(image_url)
+                    allowed_hosts = (
+                        'trace.moe', 'api.trace.moe',
+                        'i.imgur.com', 'imgur.com', 'cdn.discordapp.com',
+                        'i.ibb.co', 'postimg.cc', 'i.postimg.cc',
+                        'lain.bgm.tv', 'lain.bangumi.tv',
+                        'lain.bangumi.pro', 'lain.bangumi.vip',
+                    )
+                    host = (parts.hostname or '').lower()
+                    if parts.scheme not in ('http', 'https') or not host \
+                            or (host not in allowed_hosts
+                                and not host.endswith('.trace.moe')):
+                        return 403, json.dumps({'code': 403, 'msg': 'host not allowed'},
+                                               ensure_ascii=False)
                     ir = http_client.get(image_url, timeout=15, verify=True, headers=ua)
                     ir.raise_for_status()
                     raw = ir.content
                 elif image_b64:
                     import base64
                     raw = base64.b64decode(image_b64)
+                # base64 与 URL 两条通道同权限制：8MB 上限（对齐 /kazumi/cover），
+                # 防把上传通道当任意大文件中转打爆内存/带宽。
+                if raw and len(raw) > 8 * 1024 * 1024:
+                    return 413, json.dumps({'code': 413, 'msg': 'image too large'},
+                                           ensure_ascii=False)
                 if raw:
                     rsp = http_client.post('https://api.trace.moe/search', params={'anilistInfo': 2},
                                    data=raw, headers={**ua, 'Content-Type': _guess_image_type(raw)},
@@ -2980,6 +3070,9 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200}, ensure_ascii=False)
 
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
+    except _FormValueError as e:
+        # R 组：非法整数参数是客户端错误，转 400 而非兜底 500。
+        return 400, json.dumps({'code': 400, 'msg': str(e)}, ensure_ascii=False)
     except Exception as e:
         logger.exception('[kazumi] dispatch error do=%s', do)
         return 500, json.dumps({'code': 500, 'msg': str(e).replace('"', "'")}, ensure_ascii=False)

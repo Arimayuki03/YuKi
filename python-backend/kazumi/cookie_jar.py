@@ -89,14 +89,29 @@ class CookieJar:
         self._save()
         logger.info('[kazumi] cookies saved for %s: %d', domain, len(merged))
 
-    def cookie_header(self, url):
-        """按 URL 主机取匹配 Cookie（精确或父域），拼成 Cookie 头字符串；无则空串。"""
+    def cookie_header(self, url, base_url=''):
+        """按 URL 主机取匹配 Cookie（精确或父域），拼成 Cookie 头字符串；无则空串。
+
+        高危#10：仅当 `url` 与规则自身的 `base_url` **同域**（host 与其注册域
+        尾点一致）时才附带 Cookie。规则请求 URL 由第三方规则源控制（可指任意
+        域名），原先「按父域匹配任意 URL」会把 webview 验证会话 Cookie 发给
+        规则临时引用的第三方主机——等价于把登录态交出去。`base_url` 为空时
+        （旧调用方兼容）退回父域匹配语义，行为同旧版。
+        """
         try:
             host = (urlparse(url).hostname or '').lower()
         except Exception:
             return ''
         if not host:
             return ''
+        if base_url:
+            try:
+                base_host = (urlparse(base_url).hostname or '').lower().lstrip('.')
+            except Exception:
+                base_host = ''
+            # base 解析失败/无主机 → 无从建立同域关系，宁可空手不带
+            if not base_host or not self._same_site(host, base_host):
+                return ''
         parts = []
         with self._lock:
             for domain, cookies in self._domains.items():
@@ -107,6 +122,20 @@ class CookieJar:
                         if c and c.get('value'):
                             parts.append(f"{c['name']}={c['value']}")
         return '; '.join(parts)
+
+    @staticmethod
+    def _same_site(host_a, host_b):
+        """同域判定：host 相等，或其中一方是另一方的子域（父域尾点匹配）。
+
+        逐级父域匹配（a.b.example.com 与 example.com 同域、与 other.com 不同），
+        不做 PSL 公共后缀表查询——TVBox/Kazumi 生态的验证会话落在规则源自己
+        的域上，站点运营者控制的父域内部共享是预期行为。
+        """
+        a = str(host_a or '').strip().lower().rstrip('.')
+        b = str(host_b or '').strip().lower().rstrip('.')
+        if not a or not b:
+            return False
+        return a == b or a.endswith('.' + b) or b.endswith('.' + a)
 
     def has_cookies(self):
         with self._lock:

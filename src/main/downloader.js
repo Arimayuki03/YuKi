@@ -357,6 +357,13 @@ class Downloader extends EventEmitter {
 
     // ------------------------------------------------------------ 聚合视图
 
+    /** 宽容解码：URL 片段含裸 %（未转义）时 decodeURIComponent 抛 URIError，
+     *  上抛会让该任务永远 flatten 失败 → 无法从列表删除，下载页持续不可用。
+     *  失败回退原串，仅损失显示名的可读性。 */
+    static safeDecode(s) {
+        try { return decodeURIComponent(s); } catch (e) { return s; }
+    }
+
     /** 把 aria2 状态对象扁平化为渲染层友好结构。 */
     static flatten(s) {
         const total = parseInt(s.totalLength || '0', 10);
@@ -368,7 +375,7 @@ class Downloader extends EventEmitter {
         let uri = '';
         if (!name && first) {
             if (first.path) name = path.basename(first.path.replace(/[\\/]+$/, ''));
-            else if (first.uris && first.uris[0]) name = decodeURIComponent(first.uris[0].uri.split('?')[0].split('/').pop() || first.uris[0].uri);
+            else if (first.uris && first.uris[0]) name = Downloader.safeDecode(first.uris[0].uri.split('?')[0].split('/').pop() || first.uris[0].uri);
         }
         // 提取原始 URI（供持久化后恢复下载用；非 BT 用 uris[0].uri，BT 取 infoHash）
         if (first && first.uris && first.uris[0]) {

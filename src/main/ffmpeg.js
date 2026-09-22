@@ -82,25 +82,57 @@ function findFfmpeg() {
     return null;
 }
 
-/** 带重定向跟随的下载（写入 dest）。 */
+// 下载总超时：约 190MB 的 zip 在慢网下也要留足余量，10 分钟足够；
+// 断连后请求停摆时兜底失败，promise 不至永挂。
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** 带重定向跟随的下载（写入 dest）。error/aborted/超时均 reject，settled 防双重回调。 */
 function downloadFile(url, dest, redirects = 0) {
     return new Promise((resolve, reject) => {
         if (redirects > 5) return reject(new Error('too many redirects'));
-        const req = https.get(url, { headers: { 'User-Agent': 'yuki' } }, (rsp) => {
+        let settled = false;
+        let timer = null;
+        let rsp = null;   // 响应流：失败时销毁（见 fail），断连后 socket 不悬挂
+        let file = null;  // 写盘流：失败时销毁，释放 dest 文件句柄（Windows 句柄锁）
+        const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        const fail = (err) => {
+            if (settled) return;
+            settled = true;
+            clearTimer();
+            // 失败路径必须主动销毁在途资源：不销毁时 190MB 下载的 socket/写盘流
+            // 会继续占住句柄——下载无法真正取消，Windows 下 stage 目录因句柄
+            // 未释放而删不掉半截 zip，ensureFfmpeg 收尾的 rmSync 静默失败留垃圾。
+            try { req.destroy(); } catch (e) { /* 尚未创建/已销毁 */ }
+            try { rsp.destroy(); } catch (e) { /* 尚未收到响应 */ }
+            try { if (file) file.destroy(); } catch (e) { /* 尚未打开 */ }
+            reject(err);
+        };
+        const ok = (val) => {
+            if (settled) return;
+            settled = true;
+            clearTimer();
+            resolve(val);
+        };
+        timer = setTimeout(() => fail(new Error(`download timeout (${DOWNLOAD_TIMEOUT_MS / 60000} min)`)), DOWNLOAD_TIMEOUT_MS);
+        const req = https.get(url, { headers: { 'User-Agent': 'yuki' } }, (r) => {
+            rsp = r;
             if ([301, 302, 303, 307, 308].includes(rsp.statusCode)) {
                 rsp.resume();
-                return resolve(downloadFile(rsp.headers.location, dest, redirects + 1));
+                return ok(downloadFile(rsp.headers.location, dest, redirects + 1));
             }
             if (rsp.statusCode !== 200) {
                 rsp.resume();
-                return reject(new Error(`HTTP ${rsp.statusCode}`));
+                return fail(new Error(`HTTP ${rsp.statusCode}`));
             }
-            const file = fs.createWriteStream(dest);
+            // 响应中途断连/中止：reject 而非等待停摆（半截 zip 会在 sha256 校验处被拒）
+            rsp.on('error', fail);
+            rsp.on('aborted', () => fail(new Error('download aborted')));
+            file = fs.createWriteStream(dest);
             rsp.pipe(file);
-            file.on('finish', () => { file.close(); resolve(dest); });
-            file.on('error', reject);
+            file.on('finish', () => { file.close(); ok(dest); });
+            file.on('error', fail);
         });
-        req.on('error', reject);
+        req.on('error', fail);
     });
 }
 
@@ -195,20 +227,61 @@ const THUMB_EXT = new Set(['.mp4', '.mkv', '.ts', '.flv', '.avi', '.mov', '.wmv'
 const _thumbQueue = [];
 let _thumbRunning = 0;
 
+/** 本地文件抓帧成功判定：文件存在且非 0 字节（ffmpeg 失败可能遗留空文件）。
+ *  命中即返回 true；失败删除遗留的 0 字节 jpg，避免缓存层永久命中坏缩略图。 */
+function thumbOutputOk(outJpg) {
+    try {
+        if (fs.existsSync(outJpg) && fs.statSync(outJpg).size > 0) return true;
+    } catch (e) { /* 读不到按失败处理 */ }
+    try { fs.rmSync(outJpg, { force: true }); } catch (e) { /* ignore */ }
+    return false;
+}
+
+/** 本地文件抓帧：与 makeUrlThumb 同样 30s 总超时杀进程——损坏容器会让 ffmpeg
+ *  长时间空转，不设超时会占死并发队列（上限 4）。 */
 function makeThumb(videoPath, outJpg) {
     return new Promise((resolve) => {
         const bin = findFfmpeg();
         if (!bin) return resolve(false);
-        const args = ['-y', '-ss', '5', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg];
-        const proc = spawn(bin, args, { stdio: 'ignore', windowsHide: true });
-        proc.on('exit', (code) => {
-            if (code === 0 && fs.existsSync(outJpg)) return resolve(true);
+        let done = false;
+        let timer = null;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(ok);
+        };
+        // 超时杀进程后遗留的半写 jpg（非 0 字节的坏图）必须清除：exit 回调会因
+        // done=true 提前 return、不再走 thumbOutputOk 的清理分支，坏图会被后续
+        // 请求的 size>0 判定永久命中。异步删除（Windows 下 ffmpeg 进程未退时句柄
+        // 未释放会删除失败，exit 回调的兜底删除会在进程死后成功）。
+        const discardPartialOutput = () => {
+            try { fs.rm(outJpg, { force: true }, () => { /* ignore */ }); } catch (e) { /* ignore */ }
+        };
+        const armTimeout = (proc) => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                try { proc.kill(); } catch (e) { /* ignore */ }
+                discardPartialOutput();
+                finish(false);
+            }, 30000);
+        };
+        const proc = spawn(bin, ['-y', '-ss', '5', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
+            { stdio: 'ignore', windowsHide: true });
+        armTimeout(proc);
+        proc.on('exit', () => {
+            if (done) { discardPartialOutput(); return; } // 超时已判负：清掉杀进程遗留的半写 jpg
+            if (thumbOutputOk(outJpg)) return finish(true);
             // 短视频 5s 处无帧：从头抓一帧再试一次
             const retry = spawn(bin, ['-y', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg], { stdio: 'ignore', windowsHide: true });
-            retry.on('exit', (c2) => resolve(c2 === 0 && fs.existsSync(outJpg)));
-            retry.on('error', () => resolve(false));
+            armTimeout(retry);
+            retry.on('exit', () => {
+                if (done) { discardPartialOutput(); return; }
+                finish(thumbOutputOk(outJpg));
+            });
+            retry.on('error', () => { if (!done) finish(false); });
         });
-        proc.on('error', () => resolve(false));
+        proc.on('error', () => finish(false));
     });
 }
 
@@ -247,9 +320,20 @@ function makeUrlThumb(url, outJpg) {
             clearTimeout(timer);
             resolve(ok);
         };
+        // 超时杀进程后遗留的半写 jpg（非 0 字节的坏图）必须清除：exit 回调会因
+        // done=true 提前 return、不再走 thumbOutputOk 的清理分支，坏图会被后续
+        // 请求的 size>0 判定永久命中。异步删除（Windows 下 ffmpeg 进程未退时句柄
+        // 未释放会删除失败，exit 回调的兜底删除会在进程死后成功）。
+        const discardPartialOutput = () => {
+            try { fs.rm(outJpg, { force: true }, () => { /* ignore */ }); } catch (e) { /* ignore */ }
+        };
         const armTimeout = (proc) => {
             clearTimeout(timer);
-            timer = setTimeout(() => { try { proc.kill(); } catch (e) { /* ignore */ } finish(false); }, 30000);
+            timer = setTimeout(() => {
+                try { proc.kill(); } catch (e) { /* ignore */ }
+                discardPartialOutput();
+                finish(false);
+            }, 30000);
         };
         // 远程流 -ss 预 seek 部分服务不支持（403/无帧）：失败再从头抓一帧
         const proc = spawn(bin, ['-y', '-hide_banner', '-user_agent', URL_THUMB_UA,
@@ -257,16 +341,17 @@ function makeUrlThumb(url, outJpg) {
         { stdio: 'ignore', windowsHide: true });
         armTimeout(proc);
         proc.on('exit', () => {
-            if (done) return;
-            if (fs.existsSync(outJpg)) {
-                try { if (fs.statSync(outJpg).size > 0) return finish(true); } catch (e) { /* ignore */ }
-            }
+            if (done) { discardPartialOutput(); return; } // 超时已判负：清掉杀进程遗留的半写 jpg
+            if (thumbOutputOk(outJpg)) return finish(true);
             const retry = spawn(bin, ['-y', '-hide_banner', '-user_agent', URL_THUMB_UA,
                 '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
             { stdio: 'ignore', windowsHide: true });
             armTimeout(retry);
-            retry.on('exit', () => finish(fs.existsSync(outJpg)));
-            retry.on('error', () => finish(false));
+            retry.on('exit', () => {
+                if (done) { discardPartialOutput(); return; }
+                finish(thumbOutputOk(outJpg));
+            });
+            retry.on('error', () => { if (!done) finish(false); });
         });
         proc.on('error', () => finish(false));
     });
@@ -284,7 +369,8 @@ async function _pumpThumb() {
                     // 远程 URL 无 mtime/size：缓存 key 直接用 md5(url)
                     const key = crypto.createHash('md5').update(String(job.url)).digest('hex');
                     out = path.join(job.cacheDir, key + '.jpg');
-                    if (fs.existsSync(out)) return job.resolve({ ok: true, path: out });
+                    // 命中须校验非 0 字节：历史遗留的空文件重新抓帧，不永久返回坏图
+                    if (thumbOutputOk(out)) return job.resolve({ ok: true, path: out });
                     const ok = await makeUrlThumb(job.url, out);
                     job.resolve(ok ? { ok: true, path: out } : { ok: false });
                     return;
@@ -294,7 +380,8 @@ async function _pumpThumb() {
                 const key = crypto.createHash('md5')
                     .update(`${job.videoPath}|${st.mtimeMs}|${st.size}`).digest('hex');
                 out = path.join(job.cacheDir, key + '.jpg');
-                if (fs.existsSync(out)) return job.resolve({ ok: true, path: out });
+                // 命中须校验非 0 字节：历史遗留的空文件重新抓帧，不永久返回坏图
+                if (thumbOutputOk(out)) return job.resolve({ ok: true, path: out });
                 const ok = await makeThumb(job.videoPath, out);
                 job.resolve(ok ? { ok: true, path: out } : { ok: false });
             } catch (e) { job.resolve({ ok: false }); }

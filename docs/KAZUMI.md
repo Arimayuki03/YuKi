@@ -257,7 +257,7 @@ python-backend/
 ### 8.3 并发搜索锁竞争
 - 现象：聚合搜索时 Kazumi 规则结果长时间不返回。
 - 原因：与 CatVod 搜索共享线程池或锁。
-- 预防：Kazumi 使用独立 ThreadPoolExecutor，max_workers 限制为 5，与 CatVod 搜索隔离。
+- 预防：Kazumi 使用独立 ThreadPoolExecutor（模块级共享池 `_KAZUMI_SEARCH_EXECUTOR`，全局 16 线程封顶），与 CatVod 搜索隔离。
 
 ### 8.4 JSONPath 注入或死循环
 - 现象：恶意规则导致解析卡死或异常。
@@ -346,7 +346,7 @@ Kazumi 接口、schema 或解析链路变更必须先更新本文件，再修改
 Kazumi 规则解析失败不得影响 CatVod 站点；单条规则异常不得影响其他规则。
 
 ### 11.4 性能
-Kazumi 聚合搜索并行度限制为 5，避免与 CatVod 搜索争抢后端线程池。
+Kazumi 聚合搜索经模块级共享线程池（`_KAZUMI_SEARCH_EXECUTOR`，全局 16 线程封顶）执行，避免与 CatVod 搜索争抢后端线程池。
 
 ### 11.5 安全
 规则 JSON 导入时校验 api 版本与必填字段，拒绝恶意或损坏规则；播放页 URL 必须经 captureDirect 验证为真实媒体流后才交 mpv。
@@ -409,7 +409,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 规则模型（Plugin） | ✅ 完整 schema | ✅ 已实现（api≤8 校验，字段完整） | 无 |
 | XPath 策略 | ✅ lxml，相对节点查询，URL 归一化 | ✅ 已实现 | 无 |
 | API 策略（JSONPath） | ✅ 受限 JSONPath，模板渲染 | ✅ 已实现（jsonpath-ng） | 无 |
-| 规则搜索 | ✅ RuleEngine 编排，并发查询 | ✅ 已实现（ThreadPoolExecutor，并行度 5） | 无 |
+| 规则搜索 | ✅ RuleEngine 编排，并发查询 | ✅ 已实现（模块级共享池 `_KAZUMI_SEARCH_EXECUTOR`，全局 16 线程封顶） | 无 |
 | 规则剧集解析 | ✅ chapterRoads/chapterResult 解析 | ✅ 已实现 | 无 |
 | 规则管理 | ✅ PluginsController（CRUD/启用禁用/持久化） | ✅ 已实现（PluginManager） | 无 |
 | 规则导入/导出 | ✅ kazumi:// base64 分享链接 | ✅ 已实现（粘贴导入） | 无 |

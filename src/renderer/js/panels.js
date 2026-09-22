@@ -634,7 +634,9 @@ function loadLocalThumbs() {
             if (!ph) return;
             const img = document.createElement('img');
             img.className = 'local-thumb';
-            img.src = 'file:///' + String(r.path).replace(/\\/g, '/');
+            // 与 records.js localThumbUrl 同一缺陷的孪生：含 #/% 的文件名不编码
+            // 会被截断/误解析，复用 records.js 的逐段编码实现
+            img.src = window.localThumbUrl ? window.localThumbUrl(r.path) : ('file:///' + String(r.path).replace(/\\/g, '/'));
             img.alt = '';
             ph.replaceWith(img);
         });
@@ -908,6 +910,10 @@ function initAuxPanels() {
         });
     // 目录返回交由全局 Esc 派发（common.js dispatchEsc）
     registerEsc(function () {
+        // 先判本视图可见：view-tools 非当前激活视图（.view 无 active）时不得消费 Esc，
+        // 否则其它视图按 Esc 会让遗留的 dirNavStack 触发目录导航并吞掉按键
+        const view = document.getElementById('view-tools');
+        if (!view || !view.classList.contains('active')) return false;
         if (dirNavStack.length) { listFile(dirNavStack.pop()); return true; }
         return false;
     });
@@ -1201,6 +1207,8 @@ async function openQuarkQrLogin() {
     } else {
         $('#pan_qr_tip').text(String((res && res.message) || '登录取消'))
             .css('color', 'var(--md-error)');
+        // 失败/取消分支补上「重新登录」按钮（打开时默认隐藏，成功分支自动关窗无需按钮）
+        $('#pan_qr_refresh').show();
     }
 }
 
@@ -1276,8 +1284,12 @@ function initSettingsPanel() {
     // 播放设置：载入持久化值，改动即存
     window.yuki.settingsGet().then((s) => {
         s = s || {};
-        // 分类重新划分后旧记忆值（cache/asset）可能失效：仅在分类仍存在时恢复，否则回退外观
-        if (s.settingsCat && $(`#view-settings .tool-card[data-setcat="${String(s.settingsCat).replace(/"/g, '')}"]`).length) showSetCat(s.settingsCat);
+        // 分类重新划分后旧记忆值（cache/asset）可能失效：仅在分类仍存在时恢复，否则回退外观。
+        // try 隔离：持久化值直接拼选择器遇异常字符（引号/反斜杠等）会抛 SyntaxError，
+        // 被 .catch 吞掉后其后的上百行设置回填会整体静默跳过——单条失败不能拖垮其余回填。
+        try {
+            if (s.settingsCat && $(`#view-settings .tool-card[data-setcat="${CSS.escape(String(s.settingsCat))}"]`).length) showSetCat(s.settingsCat);
+        } catch (e) { /* 记忆分类恢复失败不影响其余回填 */ }
         if (s.playerVolume) $('#set_volume').val(s.playerVolume);
         // 上次配置回填 + 历史源列表
         if (s.lastConfigUrl) $('#setting_text').val(s.lastConfigUrl);
@@ -1296,9 +1308,12 @@ function initSettingsPanel() {
         $('#set_fontsize').val(snapSizeTier(s.fontSize ? (parseInt(s.fontSize, 10) || _legacyPct[s.fontSize] || 100) : 100));
         $('#set_textsize').val(snapSizeTier(s.textSize ? (parseInt(s.textSize, 10) || _legacyPct[s.textSize] || 100) : 100));
         if (s.textColor) {
-            // 预设项回填下拉，自定义色回填取色器
-            if ($('#set_textcolor option[value="' + s.textColor + '"]').length) $('#set_textcolor').val(s.textColor);
-            $('#set_textcolor_pick').val(s.textColor);
+            // 预设项回填下拉，自定义色回填取色器；try 隔离：textColor 为持久化值，
+            // 直拼属性选择器遇异常值抛 SyntaxError 时不得中断其后的设置回填
+            try {
+                if ($('#set_textcolor option[value="' + CSS.escape(String(s.textColor)) + '"]').length) $('#set_textcolor').val(s.textColor);
+                $('#set_textcolor_pick').val(s.textColor);
+            } catch (e) { /* 颜色回填失败不影响其余回填 */ }
         }
         if (s.wallpaperDim) $('#set_walldim').val(s.wallpaperDim);
         $('#set_system_titlebar').prop('checked', s.systemTitleBar === true);

@@ -21,6 +21,9 @@ function escXml(s) {
 
 const SSDP_ADDR = '239.255.255.250';
 const SSDP_PORT = 1900;
+// SOAP 请求超时：设备失联（断电/离网）时 TCP 可能长时间停摆，cast/stop 的
+// promise 不能永挂。5s 与 _fetchDeviceDesc 的 timeout 保持同量级。
+const SOAP_TIMEOUT_MS = 5000;
 const SSDP_SEARCH = [
     'M-SEARCH * HTTP/1.1',
     `HOST: ${SSDP_ADDR}:${SSDP_PORT}`,
@@ -170,11 +173,20 @@ class DlnaCaster extends EventEmitter {
                     'Content-Length': Buffer.byteLength(body),
                 },
             };
+            // settled 防双重回调：timeout/error/响应分支只允许首个生效
+            let settled = false;
+            const done = (fn, val) => {
+                if (settled) return;
+                settled = true;
+                req.destroy();
+                fn(val);
+            };
             const req = http.request(options, (rsp) => {
-                if (rsp.statusCode >= 200 && rsp.statusCode < 300) resolve();
-                else reject(new Error(`DLNA ${action} failed: ${rsp.statusCode}`));
+                if (rsp.statusCode >= 200 && rsp.statusCode < 300) done(resolve);
+                else done(reject, new Error(`DLNA ${action} failed: ${rsp.statusCode}`));
             });
-            req.on('error', reject);
+            req.setTimeout(SOAP_TIMEOUT_MS, () => done(reject, new Error(`DLNA ${action} timeout (${SOAP_TIMEOUT_MS}ms)`)));
+            req.on('error', (e) => done(reject, e));
             req.write(body);
             req.end();
         });

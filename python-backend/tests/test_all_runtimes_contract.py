@@ -89,8 +89,8 @@ class TestAllRuntimesSixMethodsAndProxyLoopback(unittest.TestCase):
         self.assertEqual(p_res['parse'], 0)
         self.assertEqual(p_res['url'], f'http://127.0.0.1:{self.port}/video.mp4')
 
-        p_fake = cms.playerContent('flag', 'http://127.0.0.1/detail.html', [])
-        self.assertEqual(p_fake['parse'], 1)  # HTML 页面防误判为直链
+        p_fake = cms.playerContent('flag', f'http://127.0.0.1:{self.port}/detail.html', [])
+        self.assertEqual(p_fake['parse'], 1)  # HTML 页面防误判为直链（漏端口会打到本机 80，审查 T-9）
 
         # 3. isVideoFormat
         self.assertTrue(cms.isVideoFormat('test.m3u8'))

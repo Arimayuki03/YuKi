@@ -28,7 +28,12 @@ const LOCK_PATH = path.join(__dirname, 'binaries.lock.json');
 
 function loadLock() {
     try { return JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); }
-    catch (e) { return null; }
+    catch (e) {
+        // fail-closed：lock 缺失/损坏时抛错终止下载，避免 mpv/aria2/anime4k/misans
+        // 退化为「未锁版本 + 无 sha256 校验」的静默放行（供应链防漂移的最后防线）
+        throw new Error(`binaries.lock.json 读取或解析失败（${e.message}）`
+            + '——拒绝在无完整性清单的情况下下载二进制，请先恢复 scripts/binaries.lock.json');
+    }
 }
 
 function sha256File(p) {
@@ -66,13 +71,13 @@ async function verifyDownload(p, expected, label) {
 // shinchiro 构建（mpv 官方推荐的 Windows 发行渠道）；release 经 lock 锁定，
 // 下载走 releases/download 直链（ghfast.top 镜像在前），API 动态解析仅兜底。
 const ARIA2_API = 'https://api.github.com/repos/aria2/aria2/releases/latest';
-// ffmpeg 官方构建（m3u8 合成 + 抓帧，约 190MB；与主进程 ffmpeg.js 同源）。
+// ffmpeg 官方构建（m3u8 合成 + 抓帧，约 161MB；与主进程 ffmpeg.js 同源）。
 // 实际下载 URL 与 sha256 一律取 binaries.lock.json 的 ffmpeg 段（BtbN/FFmpeg-Builds
-// 版本化资产）；此处常量仅作 lock 缺失/无 ffmpeg 段时的兜底。
+// 月度快照 tag 的版本化资产）；此处常量仅作 lock 缺失/无 ffmpeg 段时的兜底。
 // 原锁定源 gyan.dev 的 packages/ 版本化包已从服务器移除（HTTP 404），2026-09-22 迁移至
 // BtbN/FFmpeg-Builds——mpv 官方 wiki 同样推荐该构建渠道，且 GitHub release 资产自带
-// 服务端 digest 可核对。
-const FFMPEG_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip';
+// 服务端 digest 可核对。锁月度快照 tag 而非 latest：latest 同 tag 资产随上游重构建会更新。
+const FFMPEG_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip';
 // Anime4K v4.1 着色器（Mode A 链：高光钳制→恢复→2x 升频→再恢复→暗部增强）
 // 仓库按功能分子目录，下载后扁平存入 vendor/anime4k（主进程按文件名拼链）。
 // 多镜像（与主进程 index.js ensureAnime4k 同源）：raw 直连 → jsdelivr CDN → ghfast.top 加速代理
@@ -104,7 +109,14 @@ function download(url, dest, { redirects = 0, binary = true } = {}) {
         const req = https.get(url, { headers: { 'User-Agent': 'yuki' } }, (rsp) => {
             if ([301, 302, 303, 307, 308].includes(rsp.statusCode)) {
                 rsp.resume();
-                return resolve(download(rsp.headers.location, dest, { redirects: redirects + 1, binary }));
+                // Location 可能为相对地址（RFC 7231）：空则按 Location 缺失报错
+                const loc = rsp.headers.location;
+                if (!loc) return reject(new Error(`HTTP ${rsp.statusCode} 缺少 Location`));
+                let next;
+                try { next = new URL(loc, url).href; } catch (e) {
+                    return reject(new Error(`重定向地址无效: ${loc}`));
+                }
+                return resolve(download(next, dest, { redirects: redirects + 1, binary }));
             }
             if (rsp.statusCode !== 200) {
                 rsp.resume();
@@ -114,18 +126,29 @@ function download(url, dest, { redirects = 0, binary = true } = {}) {
                 let text = '';
                 rsp.on('data', (c) => { text += c; });
                 rsp.on('end', () => resolve(text));
+                // 下载中断：require 模式（主进程一键补装）下不挂监听会以未处理
+                // 'error' 事件打崩 Electron 主进程
+                rsp.on('error', (err) => reject(err));
                 return;
             }
             const total = parseInt(rsp.headers['content-length'] || '0', 10);
             let got = 0;
+            let done = false; // 竞态守卫：error/finish 只取第一个
             const file = fs.createWriteStream(dest);
             rsp.on('data', (chunk) => {
                 got += chunk.length;
                 if (total) process.stdout.write(`\r[download-binaries] ${(got / total * 100).toFixed(1)}% `);
             });
+            // 响应流中断（网络断开等）：必须销毁写盘流并 reject，否则 promise 悬挂且半截残档留存
+            rsp.on('error', (err) => {
+                if (done) return;
+                done = true;
+                try { file.destroy(); } catch (e2) { /* ignore */ }
+                reject(err);
+            });
             rsp.pipe(file);
-            file.on('finish', () => { file.close(); console.log(''); resolve(dest); });
-            file.on('error', reject);
+            file.on('finish', () => { if (!done) { done = true; file.close(); console.log(''); resolve(dest); } });
+            file.on('error', (err) => { if (!done) { done = true; reject(err); } });
         });
         req.on('error', reject);
     });
@@ -398,7 +421,25 @@ async function main() {
 
 // 作为脚本直接运行时才执行 CLI 主流程；被 require（主进程一键补装）时仅导出函数。
 if (require.main === module) {
-    main().catch((e) => { console.error(`[download-binaries] FAILED: ${e.message}`); process.exit(1); });
+    main().catch((e) => {
+        // lock 解析/校验类失败是 fail-closed 防线被触发（loadLock 抛错），不是网络问题：
+        // package.json 的 postinstall 用 `|| exit 0` 兜底（保证不阻塞 install），shell 层
+        // 会把非零退出码归零——若不在此处显式打到 stderr 并醒目区分，锁损坏会被
+        // 「静默成功」吞掉，构建/运行时拿到的是无完整性校验的二进制（R9-M2）。
+        const isLockError = /binaries\.lock\.json/.test(e && e.message);
+        if (isLockError) {
+            console.error('');
+            console.error('============================================================');
+            console.error('[download-binaries][error] 完整性清单校验失败（非网络问题）！');
+            console.error(`[download-binaries][error] ${e.message}`);
+            console.error('[download-binaries][error] 请立即恢复 scripts/binaries.lock.json 后重跑');
+            console.error('[download-binaries][error] node scripts/download-binaries.js anime4k');
+            console.error('============================================================');
+        } else {
+            console.error(`[download-binaries] FAILED: ${e.message}`);
+        }
+        process.exit(1);
+    });
 }
 
 module.exports = { downloadMpv, downloadAria2, downloadFfmpeg, downloadAnime4k, downloadMisans };

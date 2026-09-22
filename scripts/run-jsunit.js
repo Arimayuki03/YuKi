@@ -34,8 +34,23 @@ console.log(`[run-jsunit] 发现 ${files.length} 个测试文件，执行 node -
 // maxBuffer 必须显式放大：改为捕获输出后，spawnSync 默认只有 1MB，node --test 的
 // TAP 汇总在 500+ 用例下可能超限 → 子进程被 kill、result.status 变 null → 误判失败。
 // 原先的 stdio:'inherit' 没有这个上限，所以这一步是本次改动引入的新约束。
+// 超时上限（毫秒）：任一用例挂死时强杀子进程，防止 CI 永久挂起。
+// 默认 600s（全量 500+ 用例实测远小于此）；可用 JSUNIT_TIMEOUT_MS 环境变量覆盖。
+const timeoutMs = Number(process.env.JSUNIT_TIMEOUT_MS) || 600000;
 const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs });
+if (result.error && (result.error.code === 'ETIMEDOUT' || result.error.code === 'ABORT_ERR')) {
+    // Node v24 实测超时为 ETIMEDOUT（signal SIGTERM / status null）；旧版曾有 ABORT_ERR
+    console.error(`[run-jsunit] 测试超时（${timeoutMs}ms），子进程已被终止。`
+        + '若有用例挂死，可用 JSUNIT_TIMEOUT_MS 调大上限排查。');
+    // 超时时已捕获的输出（stdout/stderr）是定位挂死用例的唯一线索：最后一条
+    // TAP/spec 行通常就是卡住的用例。直接丢弃会让 CI 日志只剩一行超时告警，
+    // 无法排查——先完整回放再退出（R9-M1）。
+    const timedOut = (result.stdout || '') + (result.stderr || '');
+    if (timedOut) process.stdout.write(timedOut);
+    else console.error('[run-jsunit] 超时前未捕获到任何测试输出。');
+    process.exit(1);
+}
 if (result.error) {
     console.error(`[run-jsunit] 子进程执行异常: ${result.error.message}`);
     process.exit(1);

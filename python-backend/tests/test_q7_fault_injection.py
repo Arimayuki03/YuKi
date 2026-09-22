@@ -8,12 +8,14 @@
 - 端口冲突探测与自愈
 - mpv 缺失、首帧超时与播放中断处理
 """
+import builtins
 import http.client
 import os
 import sys
 import socket
 import tempfile
 import unittest
+import unittest.mock
 import requests
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -89,11 +91,31 @@ class TestQ7FaultInjectionAndResilience(unittest.TestCase):
             # 损坏数据必须优雅降级为空串，不抛出未捕获异常
             self.assertEqual(store.get('key_corrupt'), '')
 
-        # 2. 磁盘写失败时不崩溃，保持内存降级服务
+        # 2. 磁盘写失败时不崩溃，保持内存降级服务（审查 T-11：此前本用例没有任何
+        # 注入，只是顺序 set/get 自证——假绿。真实落盘函数是 CacheStore.set 里对
+        # 临时文件的 open()，在这里注入 PermissionError 模拟盘满/只读盘）。
         with tempfile.TemporaryDirectory() as ro_dir:
             store_ro = CacheStore(ro_dir)
             store_ro.set('mem_key', 'mem_val')
             self.assertEqual(store_ro.get('mem_key'), 'mem_val')
+
+            real_open = builtins.open
+
+            def _deny_write(path, mode='r', *args, **kwargs):
+                # 只拦写模式打开（set 的 tmp 落盘与 os.replace 前的写入路径），
+                # 读路径放行，模拟「磁盘只读」而非「全文件系统不可用」
+                if ('w' in str(mode)) or ('a' in str(mode)) or ('+' in str(mode)):
+                    raise PermissionError(13, 'injected: disk write denied', str(path))
+                return real_open(path, mode, *args, **kwargs)
+
+            with unittest.mock.patch('builtins.open', side_effect=_deny_write):
+                # 不抛异常：写失败被 set 内部吞掉（OSError 分支），内存层照常服务
+                store_ro.set('deny_key', 'deny_val')
+            self.assertEqual(store_ro.get('deny_key'), 'deny_val',
+                             '落盘失败必须回退内存层，值仍可读')
+            # 已有键重复 set 在写失败后仍保持旧值（不因失败把内存值弄丢/弄脏）
+            store_ro.set('mem_key', 'mem_val_v2')  # 本次不注入，正常落盘+写内存
+            self.assertEqual(store_ro.get('mem_key'), 'mem_val_v2')
 
     def test_http_fault_injection_403_500_dns(self):
         # 1. 403 权限失效

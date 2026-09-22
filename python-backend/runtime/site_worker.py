@@ -14,6 +14,23 @@ import time
 
 logger = logging.getLogger('yuki.site_worker')
 
+# 帧内 method 白名单（M 组审查修复）：Worker 收到的每一帧来自宿主，但普通方法
+# 最终以 getattr(self.runner, method) 触达 Runner 对象——无白名单时，宿主进程被
+# 攻破或配置异常时可借帧调用 Runner 上的任意属性（如 _invoke、_ctx_tls、dunder），
+# 扩大攻击面。白名单 = Runner 公开方法全集 + 帧级特殊方法：__runtimeStatus、
+# proxy（jar 静态代理走专用分支）与 KV/代理快捷方式（setCache/getCache/delCache/
+# getProxyUrl，经 _SpiderState 固定派发，同样不进 getattr(self.runner, ...)）。
+ALLOWED_CALL_METHODS = frozenset({
+    'init',
+    'getName', 'getDependence',
+    'homeContent', 'homeVideoContent', 'categoryContent', 'detailContent',
+    'searchContent', 'playerContent',
+    'jsonExt', 'liveContent', 'localProxy', 'proxy',
+    'isVideoFormat', 'manualVideoCheck', 'action',
+    '__runtimeStatus',
+    'setCache', 'getCache', 'delCache', 'getProxyUrl',
+})
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_DIR = os.path.join(BASE_DIR, 'js-engine')
 for path in (BASE_DIR, JS_DIR):
@@ -252,7 +269,31 @@ class SiteRuntimeWorker:
         spider = getattr(self.runner, 'spider', None)
         return str(getattr(spider, 'last_error', '') or '')
 
+    @staticmethod
+    def _reset_last_error(runner):
+        """调用前置空 spider.last_error（M 组审查修复）。
+
+        last_error 是 spider 实例上**跨调用残留**的状态（jar_spider 用线程局部
+        兜底、部分 Python spider 手工维护）。若调用成功后无条件读它，上一次
+        失败留下的陈旧文本会把本次成功改写成失败并丢弃刚拿到的结果。置空后
+        last_error 只可能由**本次调用**写入，语义回到「本次调用的错误」。
+        """
+        try:
+            spider = getattr(runner, 'spider', None)
+            if spider is not None and hasattr(spider, 'last_error'):
+                spider.last_error = ''
+        except Exception:
+            pass
+
     def call(self, method, args, request_data):
+        # 白名单校验放在最前：fixture 与特殊方法之外的任何未知 method 一律拒绝
+        #（含 Runner 私有属性、dunder、任意 getattr 可触达的对象）。
+        if method not in ALLOWED_CALL_METHODS:
+            raise RuntimeError(
+                'L3_RUNTIME_INVALID_REQUEST',
+                site_key=self.site_key, runtime=self.kind,
+                raw_error='method not allowed: %s' % str(method)[:80],
+            )
         if self.fixture is not None:
             return self.fixture.invoke(method, args)
         if method == '__runtimeStatus':
@@ -283,6 +324,9 @@ class SiteRuntimeWorker:
                     class_name=spider.class_name,
                     pan_cookies=_load_pan_cookies(),
                 )
+            # 调用前必须先清掉上一次调用残留的 last_error，否则成功结果会被
+            # 陈旧错误文本改写成失败（见 _reset_last_error 注释）。
+            self._reset_last_error(self.runner)
             result = getattr(self.runner, method)(*args)
             last_error = self.last_error
             if last_error:

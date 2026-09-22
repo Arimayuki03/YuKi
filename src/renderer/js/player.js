@@ -45,7 +45,9 @@ function isPanQueueSource(site, flag, episodes) {
     if (String(site || '').startsWith('kazumi:')) return false;
     const epsText = Array.isArray(episodes)
         ? episodes.map((e) => String((e && (e.url ?? e.id)) || '')).join('|') : '';
-    return /pan|quark|夸克|uc网盘|网盘|云盘|aliyun|ali|115|123|天翼|移动/i.test(
+    // 与主进程 pan-source.js PAN_SOURCE_RE 同口径（邻接边界 + 显式单列域名），
+    // 两处必须同步修改：company/japan/ep115 等普通词不再误判网盘
+    return /(?<![a-z])(?:pan|ali)(?![a-z0-9])|(?<![a-z0-9])(?:115|123)(?![0-9])|quark|aliyun|alipan|alidrive|alist|夸克|网盘|云盘|天翼|移动/i.test(
         `${String(site || '')}|${String(flag || '')}|${epsText}`);
 }
 
@@ -99,9 +101,8 @@ const Player = {
         if (window.yuki && window.yuki.onPlayerEnded) {
             window.yuki.onPlayerEnded((info) => this._onEnded(info));
             window.yuki.onPlayerExit((info) => this._onExit(info));
-            if (window.yuki.onPlayerSession) {
-                window.yuki.onPlayerSession((info) => this._adoptSession(info));
-            }
+            // 旧 onPlayerSession（主进程断流重连推新会话号）已随主进程架构移除：
+            // 重连由本文件 _onExit 驱动，新会话号经 play() 返回值在 _rememberSession 登记。
             if (window.yuki.onEpisodeSkip) {
                 window.yuki.onEpisodeSkip((info) => this._onEpisodeSkip(info));
             }
@@ -234,7 +235,12 @@ const Player = {
             (typeof info.duration === 'number') ? info.duration : 0);
     },
 
-    /** 断流重连：主进程用新会话号重播本集，渲染层把新会话并入旧观看链（元信息含 chainId）。 */
+    /**
+     * 断流重连会话并入观看链（观看统计口径：重连会话沿用旧链，只补增量、不重复计次）。
+     * 原「主进程自动重连推 player-session 事件」架构已移除，现无事件源；重连会话经
+     * _rememberSession（_reconnectInProgress 分支）登记，本方法保留供测试直接驱动与
+     * 未来事件通道复用。
+     */
     _adoptSession(info) {
         if (!info || typeof info.sessionId !== 'number') return;
         const previous = this._session;
@@ -642,10 +648,13 @@ const Player = {
             if (!s.danmakuEnable) return;
             const title = (meta && meta.title) || '';
             if (!title) return;
-            // 集数：从「第N集/N」形式的 subtitle 提取，缺省第 1 集
+            // 集数：优先「第N集/第N话/第N話」模式（避免「2024年…第3集」取到年份），
+            // 未命中再回退「N」裸数字启发式，缺省第 1 集
             let ep = 1;
             const sub = String((meta && meta.subtitle) || '');
-            const m = sub.match(/(\d+)/);
+            const mEp = sub.match(/第\s*(\d+)\s*(?:集|话|話)/);
+            const mNum = mEp ? null : sub.match(/(\d+)/);
+            const m = mEp || mNum;
             if (m) ep = parseInt(m[1], 10) || 1;
             const n = await Kazumi.loadDanmaku(title, ep);
             if (n > 0) warnToast(`已加载 ${n} 条弹幕`);
@@ -685,6 +694,13 @@ const Player = {
         };
         this._playAbort = playAbort;
         this._playContext = trace;
+        // 换集竞态守卫（仿 home/timeline 令牌模式，复用 _playContext 作世代标记）：
+        // 任一长等待（构建队列/解析/playUrl）返回后先校验——本会话已被新起播取代
+        // （_playContext 换代）或已被中止时，旧帧不得再写状态/绑会话/清 _seq/
+        // 发起线路回退/弹失败窗。守卫 return 一律不调用全局 hideLoading（L-1）：
+        // loading 是全局单元素且无引用计数，旧帧隐藏会闪掉新会话的 loading；
+        // 新会话自会 show/hide 自己的 loading 生命周期。
+        const playSuperseded = () => this._playContext !== trace || playAbort.signal.aborted;
         // 清除上一次失败线路残留的错误弹窗：多线路重试/连播时，前一线路失败会弹 playerDialog
         // （如「当前配置未含解析接口」），若后续线路成功起播 mpv 却不关旧弹窗，就会出现
         // 「已在 mpv 播放，却仍显示解析失败弹窗」的错位（用户报告的 bug）。新一次起播先关掉。
@@ -700,6 +716,11 @@ const Player = {
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
         try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
+        // 守卫：settingsGet await 期间已被新起播取代时，下方 _curMeta/队列分支/
+        // 连播链写入都不再属于本帧（旧帧元信息会覆盖/污染新会话）
+        if (playSuperseded()) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
+        }
         // 元信息必须先于原生队列分支装配：队列会话经 _rememberSession 读取 _curMeta
         // （观看统计/最近观看/历史都依赖它），放在分支之后会导致整季会话元信息为空。
         let vodId = '';
@@ -789,9 +810,18 @@ const Player = {
                 }).catch(() => null),
                 new Promise((res) => setTimeout(() => res(null), 20000)),
             ]).catch(() => null);
+            // 换集竞态守卫：建表/预热期间已另起播放则放弃本帧（新会话自会走自己的链路）
+            if (playSuperseded()) {
+                return { ok: false, reason: 'play-cancelled', ...trace };
+            }
             if (built && built.ok && Array.isArray(built.entries)
                 && built.entries.length === episodes.length) {
                 this._seq = null;
+                // 原生队列不走逐集重连链路，暂时摘掉 _currentPlayback；
+                // 队列起播失败静默回退逐集链路前按原参数恢复（下方回退路径共用），
+                // 否则回退链路再失败时断流重连（canRefresh）与「重试当前线路」按钮双双失效
+                const queuePlayback = this._currentPlayback;
+                const queueToken = this._playToken;
                 this._currentPlayback = null;
                 const entry = built.entries[built.startIndex] || built.entries[0];
                 // 加载文案推进：建表是瞬时的，真正的等待发生在首集解析——别让文案停在「构建播放列表」
@@ -814,6 +844,14 @@ const Player = {
                     // 用户主动关闭仍经 mpv.stop() 生效，与此通道无关。
                     requestId: '', playSessionId: '',
                 }).catch((e) => ({ ok: false, reason: String(e) }));
+                // 换集竞态守卫：队列会话特意不挂 playSessionId（防杂散 cancelRuntime 误杀，
+                // _playDirect 内守卫对其不生效），在 playUrl 返回后按令牌补一次校验——
+                // 被取代的旧队列会话不得登记观看会话/写 nativeEpisodes。
+                // 守卫 return 不调用 hideLoading（L-1：全局单元素无引用计数，会闪掉
+                // 新会话的 loading；新会话自会管理自己的 loading 生命周期）
+                if (r && (r.ok || r.launched) && playSuperseded()) {
+                    return { ok: false, reason: 'play-cancelled', ...trace };
+                }
                 // 外部主播放器：yuki:play 固定返回 ok:false+launched（无 file-loaded 可验证）。
                 // launched 即已 spawn 成功，必须在此收口返回——若按失败继续走下方回退，
                 // 会再 spawn 一次外部播放器弹出双窗口（用户实测）。
@@ -830,9 +868,17 @@ const Player = {
                 }
                 // 队列起播失败（首集解析超时/不支持等）：静默回退逐集链路，下次点击自动重试。
                 // page 型线路的拉黑由主进程按 parse=1 精确判定（见 yuki:playlist-build）。
+                // 回退前恢复 _currentPlayback（仅当期间无新起播覆盖：令牌未变才属同一会话）
+                if (queuePlayback && queueToken === this._playToken) this._currentPlayback = queuePlayback;
             } else {
                 // 原生播放列表构建失败：同样静默回退下方逐集连播，无需提示。
             }
+        }
+        // 守卫（H-1e）：队列分支被跳过（网盘源/单集）或回退至此前的多个 await
+        // （settingsGet/playerConfig/getVipFlags/队列起播）期间本会话可能已被新起播
+        // 取代——被取代的旧帧不得再写连播链/_curMeta/Kazumi 封面缓存
+        if (playSuperseded()) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
         }
         this._seq = (autoNext && Array.isArray(episodes) && (epIndex || 0) + 1 < episodes.length)
             ? { site, flag, title, episodes, index: epIndex || 0, vodId, kazumiSrc: kazumiSrc || '' }
@@ -872,16 +918,23 @@ const Player = {
             }, null, { requestId: trace.requestId, playSessionId: trace.playSessionId,
                 signal: playAbort.signal, timeoutMs: 30000 });
         } catch (e) {
-            hideLoading();
-            this._seq = null;
-            if (playAbort.signal.aborted) {
+            // 守卫：中止/被取代（新起播 abort 本请求）时不得清新会话的 _seq，
+            // 也不得调用全局 hideLoading（L-1：会闪掉新会话的 loading）
+            if (playSuperseded()) {
                 return { ok: false, reason: 'play-cancelled', ...trace };
             }
+            hideLoading();
+            this._seq = null;
             // U6.4：自动回退尝试同影片其他线路
             const fb = await this._tryFallbackRoute({ site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc }, '获取播放地址失败', trace);
             if (fb && fb.ok) return fb;
             warnToast('取播放地址失败');
             return { ok: false, reason: '取播放地址失败', ...trace };
+        }
+        // 守卫：playerContent await 期间被新起播取代（abort 未生效而正常返回）时，
+        // 下方 data.error/路由失败等尾迹不得再执行
+        if (playSuperseded()) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
         }
         hideLoading();
         const data = (rsp && typeof rsp === 'object') ? rsp : {};
@@ -910,6 +963,11 @@ const Player = {
         const rawUrl = String(data.url || '').trim();
         updatePlayState('选择解析线路');
         const route = await this._resolvePlayerRoute(data, rawUrl, { site, flag });
+        // 守卫：路由解析（getJson /sites）await 期间被新起播取代时，失败尾迹
+        // （清 _seq/线路回退/旧影片失败弹窗）不得再执行
+        if (playSuperseded()) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
+        }
         if (!route.ok) {
             this._seq = null;
             const note = route.reason || '播放地址为空';
@@ -956,6 +1014,13 @@ const Player = {
             try { resolved = await this._awaitTimeout(
                 window.yuki.resolveParse(url, route.parsers, { ...trace, ...(route.context || {}) }),
                 15000, trace); } catch (e) { /* 解析异常 */ }
+            // 换集竞态守卫（仿 home/timeline 令牌模式，复用 _playContext 判据）：
+            // 解析期间用户已另起播放（_playContext 换代）或中止本请求时，静默放弃——
+            // 新会话自会走自己的链路，旧帧不得再发 playUrl / 写状态。
+            // 守卫 return 不调用 hideLoading（L-1，见 playSuperseded 定义处说明）
+            if (playSuperseded()) {
+                return { ok: false, reason: 'play-cancelled', ...trace };
+            }
             if (!(resolved && resolved.ok)) {
                 // captureDirect 兜底：无解析接口时缩短超时，避免用户等太久
                 const fallbackMs = (resolved && resolved.reason === 'no-parses') ? 10000 : 15000;
@@ -965,6 +1030,12 @@ const Player = {
                             { ...trace, ...(route.context || {}), header: playHeader }), fallbackMs, trace);
                     if (cap && cap.ok) resolved = cap;
                 } catch (e) { /* 抓取异常 */ }
+                // 守卫（H-1a）：captureDirect await 期间本会话可能已被新起播取代——
+                // 失败尾迹（清新会话的 _seq/对旧影片发起线路回退/旧影片失败弹窗）
+                // 一律不得再执行
+                if (playSuperseded()) {
+                    return { ok: false, reason: 'play-cancelled', ...trace };
+                }
             }
             hideLoading();
             if (resolved && resolved.ok) {
@@ -980,6 +1051,13 @@ const Player = {
                         skipProbe: !!(data.skipProbe || resolved.probed), source: site, site,
                         ...trace,
                     }), 45000, trace);
+                    // 换集竞态守卫：playUrl 返回时本会话已被取代（用户另起播放/已中止）——
+                    // 任何出口（绑会话/清 _seq/失败弹窗/线路回退）都不得再执行，静默收口，
+                    // 否则旧会话元信息会绑到新影片上、观看记录错挂。
+                    // 守卫 return 不调用 hideLoading（L-1，见 playSuperseded 定义处说明）
+                    if (playSuperseded()) {
+                        return { ok: false, reason: 'play-cancelled', ...trace };
+                    }
                     if (r && r.ok) {
                         updatePlayState('已加载');
                         hideLoading();
@@ -994,6 +1072,12 @@ const Player = {
                         });
                     }
                 } catch (e) { /* 播放异常走兜底 */ }
+            }
+            // 守卫（H-1a）：内部 try 抛异常（playUrl IPC reject 等）会绕过上方守卫
+            // 直落此处——失败尾迹（清 _seq/线路回退/旧影片失败弹窗）不得对已被
+            // 取代的会话执行
+            if (playSuperseded()) {
+                return { ok: false, reason: 'play-cancelled', ...trace };
             }
             hideLoading();
             const note = (resolved && resolved.reason === 'no-parses') || (data.warning && data.warning.code === 'L4_PARSE_UNAVAILABLE')
@@ -1026,6 +1110,11 @@ const Player = {
                 skipProbe: !!data.skipProbe, source: site, site,
                 ...trace,
             }), 45000, trace);
+            // 换集竞态守卫（同解析分支）：已被取代的会话不绑会话、不写状态。
+            // 守卫 return 不调用 hideLoading（L-1，见 playSuperseded 定义处说明）
+            if (playSuperseded()) {
+                return { ok: false, reason: 'play-cancelled', ...trace };
+            }
             if (r && r.ok) {
                 updatePlayState('已加载');
                 hideLoading();
@@ -1037,6 +1126,12 @@ const Player = {
                 return this._mpvFailure(r, { title, subtitle, url, header: playHeader });
             }
         } catch (e) { /* IPC 异常，走预览兜底 */ }
+        // 守卫（H-1b）：playUrl 超时（_awaitTimeout 返回 null）不抛错、IPC 异常走 catch
+        // 时本会话可能都已被新起播取代——失败尾迹（清新会话的 _seq/对旧影片发起
+        // 线路回退/旧影片失败弹窗）一律不得再执行
+        if (playSuperseded()) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
+        }
         hideLoading();
         this._seq = null;
 
@@ -1057,9 +1152,15 @@ const Player = {
             playSessionId: trace.playSessionId };
     },
 
-    /** U6.4 自动回退：当前线路失败时尝试同影片其他可用线路（受次数和总时间限制） */
+    /** U6.4 自动回退：当前线路失败时尝试同影片其他可用线路（受次数和总时间限制）。
+     *  会话世代守卫（H-2）：发起前与 settingsGet await 返回后都比对 _playContext——
+     *  被无守卫失败尾迹调入（会话已被新起播取代）或回退自身合法启动后 await 期间
+     *  用户另起播放时，都不得再对旧影片改 Detail.activeSource / this.play()
+     *  主动顶掉用户新会话（_fallbackActive 只防回退并发，防不了世代跨越）。 */
     async _tryFallbackRoute(currentPlayback, reason, trace) {
         if (!currentPlayback || this._fallbackActive) return null;
+        // 世代校验：发起时本会话必须仍是当前播放世代（trace 由调用方传入）
+        if (trace && this._playContext && this._playContext !== trace) return null;
         // 网盘类源禁用线路回退（2026-08-26 转存风暴修复）：网盘解析失败多为
         // Cookie 失效/夸克风控，自动换线路只会对同一分享再打一轮完整链路
         // （token → v2/play → download → detail → sharepage/save），与后端
@@ -1069,6 +1170,9 @@ const Player = {
             currentPlayback.episodes)) return null;
         let s = {};
         try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { /* default settings */ }
+        // 世代校验（H-2）：settingsGet await 期间用户已另起播放则放弃——
+        // 回退一旦继续就会改 Detail.activeSource 并 this.play() 顶掉新会话
+        if (trace && this._playContext && this._playContext !== trace) return null;
         // R8.1 功能开关 auto_line_fallback（支持 autoLineFallback / autoFallbackRoute）
         if (s.autoLineFallback === false || s.autoFallbackRoute === false) return null;
 
@@ -1373,6 +1477,11 @@ const Player = {
             } catch (e) { /* 抓取异常 */ }
         } catch (e) { /* 解析异常 */ }
         hideLoading();
+        // 守卫（H-1d）：kazumiResolve abort 抛出或 captureDirect 失败后，本会话可能
+        // 已被新起播取代——失败尾迹（清新会话的 _seq/旧影片失败弹窗）不得再执行
+        if (this._playContext !== trace || signal.aborted) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
+        }
         if (resolved && resolved.ok !== false && resolved.url) {
             try {
                 // playUrl 竞速兜底：此处 loading 已隐藏，但 IPC 挂死仍会让调用方
@@ -1381,6 +1490,11 @@ const Player = {
                     title, subtitle, flag, header: resolved.header, speed: carrySpeed, fullscreen: carryFullscreen,
                     ...trace,
                 }), 45000, trace);
+                // 换集竞态守卫（同 play() 直链分支）：已被取代的会话不绑会话/不写状态。
+                // 守卫 return 不调用 hideLoading（L-1，见 play() playSuperseded 定义处说明）
+                if (this._playContext !== trace || signal.aborted) {
+                    return { ok: false, reason: 'play-cancelled', ...trace };
+                }
                 if (r && r.ok) return this._mpvSuccess(r, resolved.url, `Kazumi 源「${pluginName}」已在 mpv 播放`);
                 if (r && r.launched) { this._seq = null; hideLoading(); this._rememberExtSession(r); this._mpvToast(r, ''); return r; }
                 if (r && !r.ok) {
@@ -1390,6 +1504,10 @@ const Player = {
                     });
                 }
             } catch (e) { /* 播放异常走兜底 */ }
+        }
+        // 守卫（H-1d）：playUrl try 块抛异常直落此处时，本会话可能已被新起播取代
+        if (this._playContext !== trace || signal.aborted) {
+            return { ok: false, reason: 'play-cancelled', ...trace };
         }
         this._seq = null; // 本集未起播，连播链终止
         const note = resolved && resolved.reason ? `Kazumi 源解析失败：${resolved.reason}` : 'Kazumi 源未解析到可播放地址';
@@ -1405,9 +1523,21 @@ const Player = {
      *  成功 / 外部播放器已接管(launched) / 失败 / 异常兜底弹窗——都必须 hideLoading，
      *  否则网盘类 parse=1 直链源会一直转圈（外部播放器模式下 launched 返回同样卡死）。 */
     async _playDirect(url, meta) {
+        // 换集竞态守卫：await 期间本会话可能已被新起播取代（_playContext 换代）。
+        // playUrl 返回后先校验（放宽到所有 r 形态：null/失败/ok/launched 都查），
+        // 被取代时不得绑会话/清 _seq/弹旧地址的失败窗。守卫 return 一律不调用
+        // 全局 hideLoading（L-1：单元素无引用计数，会闪掉新会话的 loading）。
+        const isSuperseded = () => meta.playSessionId
+            && typeof this._playContext === 'object' && this._playContext !== null
+            && this._playContext.playSessionId !== meta.playSessionId;
         try {
             const r = await this._awaitTimeout(window.yuki.playUrl(url, meta), 45000,
                 { requestId: meta.requestId || '', playSessionId: meta.playSessionId || '' });
+            // H-1c：所有 r 形态先查会话世代——超时（r=null）/失败路径同样可能落在
+            // 新起播之后，其失败尾迹（清 _seq/弹窗）不得执行
+            if (isSuperseded()) {
+                return { ok: false, reason: 'play-cancelled' };
+            }
             if (r && r.ok) {
                 hideLoading();
                 return this._mpvSuccess(r, url, '已在 mpv 窗口播放');
@@ -1428,6 +1558,11 @@ const Player = {
             // playUrl IPC 超时（r 为 null）：主进程可能仍会稍后接管播放，
             // 这里按失败收尾并保证 loading 不悬挂。
         } catch (e) { /* IPC 异常 */ }
+        // 超时/异常收尾路径：世代再次校验（await 期间可能被取代），被取代时
+        // 不清 _seq、不弹旧影片的失败窗
+        if (isSuperseded()) {
+            return { ok: false, reason: 'play-cancelled' };
+        }
         hideLoading();
         this._seq = null;
         this._showDialog(meta.title, meta.subtitle, '', url,

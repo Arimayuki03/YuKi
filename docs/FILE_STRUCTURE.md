@@ -171,7 +171,7 @@ python-backend/
 
 | 目录 | 内容 | 来源 |
 |---|---|---|
-| `vendor/` | mpv/aria2c/ffmpeg/Anime4K/MiSans（download-binaries.js）+ dex-tools/dexdeps（随源码树）+ spider-runner.jar（自建产物） | 混合来源，见 [THIRD_PARTY.md](THIRD_PARTY.md) |
+| `vendor/` | mpv/aria2c/ffmpeg/Anime4K/MiSans（download-binaries.js）+ dex-tools/dexdeps（不入库，需自行从上游 Release/AOSP 获取放置）+ spider-runner.jar（自建产物） | 混合来源，见 [THIRD_PARTY.md](THIRD_PARTY.md) |
 | `python-dist/` | 后端 PyInstaller 产物 | `npm run build:py` |
 | `dist/` | 安装包（NSIS exe 等） | `electron-builder` |
 | `node_modules/` / `.venv/` | 依赖 | `npm install` / `pip install` |

@@ -337,6 +337,19 @@ const _localCoverRetryMs = 30000;         // 失败后重试冷却窗口
 const _localCoverInFlight = new Map();    // path -> Promise<url|null>（并发去重）
 const _localCoverCap = 500;
 
+/** file-thumb 返回的本地帧图绝对路径 → 可直接用于 img.src 的 file:// URL。
+ *  逐段 encodeURIComponent：文件名含 #（片段分隔符）/%（转义符）等字符时不编码
+ *  会被浏览器截断/误解析导致加载失败；逐段而非整串 encodeURI，同时避免把已合法
+ *  编码过的 % 序列二次转义成错误的字面量。 */
+function localThumbUrl(p) {
+    const norm = String(p || '').replace(/\\/g, '/');
+    const i = norm.indexOf('/');
+    // Windows 盘符段（C:/...）不作百分号编码，仅编码后续路径段
+    const drive = /^[A-Za-z]:$/.test(norm.slice(0, i)) ? norm.slice(0, i + 1) : '';
+    const rest = drive ? norm.slice(i + 1) : norm;
+    return 'file:///' + drive + rest.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+}
+
 function applyLocalCover(el, rel, url) {
     if (!el.isConnected || el.getAttribute('data-local-path') !== rel) return;
     const img = el.querySelector('img');
@@ -366,7 +379,7 @@ function fillLocalCovers(grid) {
             p = window.yuki.fileThumb(rel)
                 .then((r) => {
                     if (r && r.ok && r.path) {
-                        const u = 'file:///' + String(r.path).replace(/\\/g, '/');
+                        const u = localThumbUrl(r.path);
                         _localCoverCache.set(rel, u);
                         if (_localCoverCache.size > _localCoverCap) _localCoverCache.delete(_localCoverCache.keys().next().value);
                         return u;
@@ -572,11 +585,18 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 $(`#${viewName}-tagdropped`).on('click', () => this.tagChecked('dropped'));
             }
             $(`#${viewName}-delchecked`).on('click', () => this.removeChecked());
-            // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）；过滤条件变化回第一页
+            // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）；过滤条件变化回第一页。
+            // 200ms 防抖：render 全链路含 settingsGet IPC + 网格重建，逐键触发开销大；
+            // 停止输入 200ms 后按最新关键字渲染一次即可（定时器句柄挂视图，重复输入自动续期）。
+            this._searchTimer = null;
             $(`#${viewName}-search`).on('input', (e) => {
                 this._q = String(e.currentTarget.value || '').trim().toLowerCase();
                 this._page = 1;
-                this.render();
+                if (this._searchTimer) clearTimeout(this._searchTimer);
+                this._searchTimer = setTimeout(() => {
+                    this._searchTimer = null;
+                    this.render();
+                }, 200);
             });
             if (withTags) {
                 // 标签筛选：全部/想看/已看
@@ -868,4 +888,6 @@ const HistoryView = makeRecordView('view-history', 'history', '暂无播放历�
     root.YUKI.records = Records;
     root.YUKI.favorites = Favorites;
     root.YUKI.history = HistoryView;
+    // 供 panels.js 复用（panels.js 先于本文件加载，运行时才取值）
+    root.localThumbUrl = localThumbUrl;
 }(typeof window !== 'undefined' ? window : globalThis));

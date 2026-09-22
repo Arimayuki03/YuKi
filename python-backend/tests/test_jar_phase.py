@@ -111,7 +111,12 @@ def test_config_load_jar_sites():
     java_available = java_probe.find_java() is not None
 
     cfg = {
-        'spider': 'https://example.com/spider.jar;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        # fixture.invalid 是 RFC 2606 保留的 .invalid TLD：永不解析、永不发包。
+        # 此前用真实域名 example.com——有 JDK 的机器上 csp_ 站点构建会真的发起
+        # 公网请求（审查 T-8）。仍带 md5 且为 https：jar 下载完整性严格模式
+        # （YUKI_JAR_INSECURE_SOURCES）要求的是校验值存在，本用例预期失败路径
+        # 是「域名不可达」，不触网即可成立。
+        'spider': 'https://fixture.invalid/spider.jar;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         'sites': [
             {'key': 'py-site', 'name': 'Py源', 'type': 3, 'api': '''from base.spider import Spider
 class Spider(Spider):
@@ -140,10 +145,106 @@ class Spider(Spider):
         check('jar config: jar site skipped (no java)',
               'jar-site' in str(summary.get('skipped', [])), str(summary))
 
-    # state 中 site 带 spiderType 字段
+    # state 中 site 带 spiderType 字段（无条件断言，审查 T-8：此前
+    # `if st['sites']` 在站点列表为空时整条断言静默蒸发，假绿）
     st = server.config_mgr.state()
-    if st['sites']:
-        check('jar config: site has spiderType', all('spiderType' in s for s in st['sites']), str(st['sites']))
+    check('jar config: state non-empty', bool(st['sites']), str(st))
+    check('jar config: site has spiderType', all('spiderType' in s for s in st['sites']),
+          str(st['sites']))
+
+
+def test_methodref_patch_slot_alignment():
+    """jar_patch 常量池索引必须按真实槽位解析（审查 M-5）。
+
+    long/double（tag 5/6）在 JVM 常量池占 2 个槽位：其后条目的索引整体 +1。
+    此前实现用「列表下标 + 1」当槽位索引，含 long/double 常量的 class 里
+    Methodref/Class/NameAndType 全部错位，补丁静默漏打。这里手工构造
+    「Methodref 之前有 Long」的最小 class 验证补丁仍正确定位与重定向。
+    """
+    from jar_patch import patch_methodref_class
+
+    def u2(v):
+        return int(v).to_bytes(2, 'big')
+
+    def build(entries):
+        """构造最小 class 文件。entries: (tag, payload)；long/double 双槽位。"""
+        body = b''
+        slot = 1
+        for tag, payload in entries:
+            if tag == 1:
+                body += b'\x01' + u2(len(payload)) + payload
+            else:
+                body += bytes([tag]) + payload
+            slot += 2 if tag in (5, 6) else 1
+        # cp_count 落在最后一个槽位之后（long/double 额外吃一个槽位号）
+        count = slot + (1 if entries and entries[-1][0] in (5, 6) else 0)
+        return b'\xca\xfe\xba\xbe' + b'\x00\x00' + b'\x00\x00' + u2(count) + body
+
+    desc = b'(Landroid/content/Context;Ljava/lang/String;)V'
+    common = [
+        (1, b'java/lang/Object'),                       # slot 1
+        (7, u2(1)),                                     # slot 2: Class(Object)
+    ]
+
+    # ── 用例 1：Methodref 前有 Long（占 2 槽位）────────────────────────────
+    # 槽位：1 Utf8(Object) 2 Class(Object) 3-4 Long
+    # 5 Utf8(Pan) 6 Class(Pan) 7 Utf8(init) 8 Utf8(desc) 9 NAT 10 Methodref
+    # 11 Utf8(Spider) 12 Class(Spider)
+    with_long = [
+        *common,
+        (5, (1 << 62).to_bytes(8, 'big')),              # slots 3-4
+        (1, b'com/github/catvod/spider/Pan'),           # slot 5
+        (7, u2(5)),                                     # slot 6: Class(Pan)
+        (1, b'init'),                                   # slot 7
+        (1, desc),                                      # slot 8
+        (12, u2(7) + u2(8)),                            # slot 9: NAT
+        (10, u2(6) + u2(9)),                            # slot 10: Methodref(Pan, NAT)
+        (1, b'com/github/catvod/crawler/Spider'),       # slot 11
+        (7, u2(11)),                                    # slot 12: Class(Spider)
+    ]
+    data = build(with_long)
+    patched, count = patch_methodref_class(
+        data, 'com/github/catvod/spider/Pan', 'init', desc.decode(),
+        'com/github/catvod/crawler/Spider')
+    check('methodref patch: long/double class patched', count == 1, f'count={count}')
+    # Methodref 的 class_index 被改写为 12（Spider 的 Class 槽位）
+    from jar_patch import _parse_cp
+    es, _ = _parse_cp(patched)
+    by_slot = {e[4]: e for e in es}
+    mref = by_slot[10]
+    cidx = int.from_bytes(patched[mref[2]:mref[2] + 2], 'big')
+    check('methodref patch: redirected to Spider class slot', cidx == 12, f'cidx={cidx}')
+
+    # ── 用例 2：无 long/double 的普通 class（回归）─────────────────────────
+    plain = [
+        *common,                                        # 1, 2
+        (1, b'com/github/catvod/spider/Pan'),           # slot 3
+        (7, u2(3)),                                     # slot 4: Class(Pan)
+        (1, b'init'),                                   # slot 5
+        (1, desc),                                      # slot 6
+        (12, u2(5) + u2(6)),                            # slot 7: NAT
+        (10, u2(4) + u2(7)),                            # slot 8: Methodref(Pan, NAT)
+        (1, b'com/github/catvod/crawler/Spider'),       # slot 9
+        (7, u2(9)),                                     # slot 10: Class(Spider)
+    ]
+    data2 = build(plain)
+    patched2, count2 = patch_methodref_class(
+        data2, 'com/github/catvod/spider/Pan', 'init', desc.decode(),
+        'com/github/catvod/crawler/Spider')
+    check('methodref patch: plain class patched', count2 == 1, f'count={count2}')
+    es2, _ = _parse_cp(patched2)
+    by2 = {e[4]: e for e in es2}
+    mref2 = by2[8]
+    cidx2 = int.from_bytes(patched2[mref2[2]:mref2[2] + 2], 'big')
+    check('methodref patch: plain redirected to Spider', cidx2 == 10, f'cidx={cidx2}')
+
+    # ── 用例 3：new_owner 不在常量池时不修改 ───────────────────────────────
+    data3 = build(plain)
+    patched3, count3 = patch_methodref_class(
+        data3, 'com/github/catvod/spider/Pan', 'init', desc.decode(),
+        'com/example/NotThere')
+    check('methodref patch: missing target is no-op',
+          count3 == 0 and patched3 == data3, f'count={count3}')
 
 
 def main():
@@ -152,6 +253,7 @@ def main():
         test_norm_jar_src()
         test_jar_spider_direct()
         test_config_load_jar_sites()
+        test_methodref_patch_slot_alignment()
     finally:
         # 配置站点现在由 spawn Supervisor 持有，脚本结束必须走与应用退出
         # 相同的显式回收链，不能依赖 Future/解释器隐式退出。

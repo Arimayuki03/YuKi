@@ -54,7 +54,7 @@ FastAPI Python 后端
   `kazumiBangumiEpisodeCollections`（分集收藏查询，驱动看完全部自动「看过」联动）落地，
   无 Token / 匹配不到条目或分集时静默跳过，失败提醒 5 分钟节流，不影响播放链路。
   评分不参与同步（Bangumi 集成只写收藏类型与进度，无评分上报链路）。
-- 弹幕：产品当前不启用。后端保留弹弹play 对接与 `/danmaku` 中转代码、渲染层保留 `danmakuEnable` 开关代码，但产品未提供可用的弹幕入口，相关链路视为兼容基础（RM-3 未启动）。
+- 弹幕（可选真实功能，勘误 2026-09-22）：「设置 → 播放」的「自动加载弹幕」开关（`danmakuEnable`，默认关）+ 用户自填的 DanDanPlay AppId/AppSecret（主进程注入 `DANDANAPI_APPID/KEY` 环境变量）两者齐备后，mpv 起播时按片名+集数经后端 `/kazumi/action` 的 `kazumiDanmakuSearch/Episode/Comments` 请求弹弹play API 加载弹幕（ASS 推 mpv）；无凭据或未开启开关不发起弹幕网络请求。
 - WebDAV 设置同步（上传/恢复）：设置键以显式允许表（64 个纯数据键）为准，恢复为云端
   快照覆盖本地、上传排除敏感键；备份文件落 `<userData>`（设计文档见
   [WEBDAV_SYNC_MERGE_DESIGN.md](WEBDAV_SYNC_MERGE_DESIGN.md)）。
@@ -162,7 +162,6 @@ FastAPI Python 后端
 | 文件管理根目录 | `<userData>/file-manager.json` |
 | 下载记录 | `<userData>/dl-records.json` |
 | mpv 续播 | `<userData>/mpv-watch-later/` |
-| mpv 缓存 | 默认 `<userData>/mpv-cache/`，可配置 |
 
 设置恢复默认时必须保留收藏、历史、配置历史、下载/缓存路径、观看统计和 Bangumi token 等用户数据键。
 

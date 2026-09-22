@@ -122,51 +122,76 @@ class R8FeatureGateAndMigrationTest(unittest.TestCase):
 
     def test_legacy_records_uid_backfill_contract(self):
         """历史记录 uid 回填契约：缺 uid 的旧记录按 ts 序补 m<ts>-<i>，
-        已有 uid 不覆盖。旧测试直接在测试体内自造+自证（假绿，P3-19-②）；
-        这里保留同一契约，但以纯函数形式对契约本身断言（缺 uid 的记录
-        必须得到确定性回填、已有 uid 原样保留——与渲染层 records.js 的
-        兼容约定一致）。"""
-        def backfill(history):
-            # 迁移约定：uid 缺失时按 m{ts}-{index} 回填，不覆盖显式 uid
-            for i, item in enumerate(history):
-                if not item.get('uid'):
-                    item['uid'] = f"m{item.get('ts', 0)}-{i}"
-            return history
+        已有 uid 不覆盖。旧测试直接在测试体内自造+自证（假绿，P3-19-②）。
+        真实实现在渲染层 src/renderer/js/records.js 的 ensureRecUids——这里经
+        QuickJS 加载真实源码文件并执行真实函数，对同一契约断言。"""
+        sys.path.insert(0, os.path.join(BASE, 'js-engine'))
+        from quickjs_host import JsEngine  # noqa: PLC0415
 
-        history = [
-            {'site': 's1', 'name': '测试影片1', 'ts': 1600000000},
-            {'name': '测试影片2', 'ts': 1600000001, 'uid': 'custom_uid_2'},
-        ]
-        backfill(history)
+        records_js = os.path.join(
+            BASE, '..', 'src', 'renderer', 'js', 'records.js')
+        self.assertTrue(os.path.isfile(records_js), records_js)
+        with open(records_js, encoding='utf-8') as f:
+            source = f.read()
+        engine = JsEngine(site_key='r8_uid_backfill')
+        try:
+            # records.js 顶层只声明函数/常量，无 DOM/window 依赖，可直接 eval；
+            # 末尾把内部函数挂到 globalThis 供脚本取用。
+            engine.ctx.eval(source + '\n;globalThis.__ensureRecUids = ensureRecUids;')
+            hist_json = json.dumps([
+                {'site': 's1', 'name': '测试影片1', 'ts': 1600000000},
+                {'name': '测试影片2', 'ts': 1600000001, 'uid': 'custom_uid_2'},
+            ])
+            got = json.loads(engine.ctx.eval(
+                '(function(){var h=' + hist_json + ';'
+                'var changed=__ensureRecUids(h);'
+                'return JSON.stringify([changed, h]);})()'))
+        finally:
+            engine.destroy()
+        changed, history = got
+        self.assertTrue(changed, '存在缺 uid 记录时必须报告需要持久化')
+        # 缺 uid 的记录按 m{ts}-{index} 确定性回填（与渲染层兼容约定一致）
         self.assertEqual(history[0]['uid'], 'm1600000000-0')
+        # 已有 uid 原样保留，不被覆盖
         self.assertEqual(history[1]['uid'], 'custom_uid_2')
 
     def test_incompatible_cache_safe_discard_and_rebuild(self):
-        """损坏或不兼容旧缓存可安全丢弃并重建为 ConfigSnapshot。"""
-        # 1. 损坏的 JSON 缓存
-        corrupt_path = os.path.join(self.tmp_dir, 'corrupt.json')
-        with open(corrupt_path, 'w', encoding='utf-8') as f:
+        """损坏或不兼容旧缓存可安全丢弃并重建。走真实实现
+        runtime/config_cache.ConfigRepositoryCache（last.json 完整性校验缓存）：
+        损坏 JSON / 版本不匹配 / 哈希不符都必须优雅降级返回 None（可重建），
+        写入的合法载荷必须能原样读回。"""
+        from runtime.config_cache import ConfigRepositoryCache, CACHE_VERSION  # noqa: PLC0415
+
+        cache_dir = os.path.join(self.tmp_dir, 'config-cache')
+        store = ConfigRepositoryCache(cache_dir)
+        self.assertIsNone(store.load(), '空目录 load 必须返回 None')
+        os.makedirs(cache_dir, exist_ok=True)  # 手工落脏数据需要目录先存在
+
+        # 1. 损坏的 JSON 缓存：load 不得抛异常，降级为 None（可安全重建）
+        with open(store.path, 'w', encoding='utf-8') as f:
             f.write('{"invalid json: [}')
+        self.assertIsNone(store.load(), '损坏 JSON 必须降级为 None')
 
-        try:
-            with open(corrupt_path, 'r', encoding='utf-8') as f:
-                json.load(f)
-            parsed_ok = True
-        except Exception:
-            parsed_ok = False
-        self.assertFalse(parsed_ok)
+        # 2. 未来版本缓存（version 不匹配）同样整份丢弃
+        with open(store.path, 'w', encoding='utf-8') as f:
+            json.dump({'version': CACHE_VERSION + 99, 'text': 'future'}, f)
+        self.assertIsNone(store.load(), '未知版本必须整份丢弃')
 
-        # 降级并重建有效快照
-        valid_config = {
-            'sites': [{'key': 'site_a', 'name': '站点A', 'type': 0, 'api': 'http://example.com/cms'}],
-            'parses': [{'name': '解析1', 'type': 1, 'url': 'http://example.com/parse?url='}],
-            'flags': ['youku', 'qq']
+        # 3. 正文哈希与内容不符（被篡改/截断）也不可信
+        payload = {
+            'version': CACHE_VERSION, 'sourceUrl': 'https://fixture.invalid/tv.json',
+            'text': '真实正文', 'contentHash': '0' * 64,
         }
-        parsed = ParsedConfig.from_json(valid_config)
-        snapshot = ConfigSnapshot(parsed=parsed)
-        self.assertIsInstance(snapshot, ConfigSnapshot)
-        self.assertEqual(len(snapshot.parsed.entries), 1)
-        self.assertEqual(snapshot.parsed.entries[0].key, 'site_a')
+        with open(store.path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+        self.assertIsNone(store.load(), 'contentHash 不符必须拒绝')
+
+        # 4. 合法写入（save 走真实的 tmp+fsync+replace 落盘链路）必须原样读回
+        self.assertTrue(store.save('https://fixture.invalid/tv.json', '真实正文'))
+        loaded = store.load()
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.text, '真实正文')
+        self.assertEqual(loaded.source_url, 'https://fixture.invalid/tv.json')
 
     def test_rollback_ignores_unrecognized_worker_state(self):
         """回滚至旧版本时，未知新版本字段被安全忽略，不影响基础功能。"""

@@ -15,7 +15,14 @@
 
 // 站点/线路名与播放地址的网盘特征。「夸克」「云盘」为中文站点名补充——
 // 「夸克云盘」不命中 quark/pan/网盘 任一既有子串；「网盘」「云盘」互不包含，需并列。
-const PAN_SOURCE_RE = /pan|quark|夸克|uc网盘|网盘|云盘|aliyun|ali|115|123|天翼|移动/i;
+// 弱特征加邻接边界（2026-09-22 评审）：pan/ali 两侧不与字母相邻（防 company/japan/Alice
+// 等普通词误伤）；115/123 前侧不与字母数字相邻、后侧不与数字相邻（防 ep115/1234 等数字
+// 串误命中，123pan.com/115cdn.com 照常命中）。CJK/下划线/点/斜杠/行首尾均算边界：
+// pan.quark.cn、do=pan&、csp_ali、115网盘、aliyundrive 照常命中；第123集 等纯集数形态
+// 邻接为 CJK，与旧版一致不拦（如需拦截属产品口径变化，另议）。
+// quark/aliyun/alipan/alidrive/alist/天翼/移动/中文词为强特征，保持子串匹配
+// （alipan/alidrive/alist 原靠 ali 子串命中，加边界后需单列；uc网盘 含 网盘，无需单列）。
+const PAN_SOURCE_RE = /(?<![a-z])(?:pan|ali)(?![a-z0-9])|(?<![a-z0-9])(?:115|123)(?![0-9])|quark|aliyun|alipan|alidrive|alist|夸克|网盘|云盘|天翼|移动/i;
 
 /**
  * 播放列表建队请求是否网盘类源（原生播放列表对其禁用）。

@@ -1360,20 +1360,62 @@ class _SegStream:
             try:
                 r = _fetch(self.url, self.headers, s, e)
                 try:
-                    if r.status_code in (200, 206):
-                        for chunk in r.iter_content(SEG_CHUNK):
-                            if self._cancel.is_set():
-                                return
-                            if not chunk:
-                                continue
-                            if not self._put(q, chunk):
-                                return
-                        # 段结束哨兵：消费端仍在（未取消）时入队；已取消则
-                        # stream 侧早已退出，无需哨兵。
-                        self._put(q, None)
-                        return
-                    last_err = RuntimeError('段 %d HTTP %d' % (i, r.status_code))
-                    logger.warning('go-proxy 段 %d/%d HTTP %d（重试 %d/3）', i, self.n, r.status_code, attempt + 1)
+                    # 上游契约（H-6）：分段下载的字节序完全依赖 Range 语义。
+                    # 上游忽略 Range 返回 200（整段全量）时，每个分段线程都
+                    # 会灌入 n 倍重复数据；206 但区间错位时字节序错乱。分段
+                    # 模式必须严格要求 206 + Content-Range 区间一致，否则按
+                    # 错误走重试阶梯（单流 _stream_single 尚可按声明区间截断
+                    # 止损，多线程分段无此补救余地）。
+                    if r.status_code != 206:
+                        last_err = RuntimeError(
+                            '段 %d HTTP %d（需 206，上游忽略 Range）' % (i, r.status_code))
+                        logger.warning(
+                            'go-proxy 段 %d/%d HTTP %d 非 206（重试 %d/3）',
+                            i, self.n, r.status_code, attempt + 1)
+                    else:
+                        # 解析 Content-Range「bytes s-e/total」并做整数区间校验：
+                        # 字符串前缀比对会被「bytes 1-99/100」冒充「bytes 10-99」
+                        # 一类错位区间蒙混过关。
+                        cr = str(r.headers.get('Content-Range') or '').strip().lower()
+                        matched = False
+                        if cr.startswith('bytes '):
+                            part = cr[len('bytes '):].split('/', 1)[0].strip()
+                            bits = part.split('-')
+                            if len(bits) == 2:
+                                try:
+                                    matched = (int(bits[0]) == s and int(bits[1]) == e)
+                                except ValueError:
+                                    matched = False
+                        if not matched:
+                            # 区间不匹配：无法定位响应落在文件的哪一段，字节序
+                            # 不可信，必须按错误处理；重试阶梯耗尽后中断流。
+                            got = str(r.headers.get('Content-Range') or '')[:40]
+                            last_err = RuntimeError(
+                                '段 %d Content-Range 不符（期望 bytes %d-%d，实际 %s）'
+                                % (i, s, e, got))
+                            logger.warning(
+                                'go-proxy 段 %d/%d Content-Range 不符（重试 %d/3）: %s',
+                                i, self.n, attempt + 1, got)
+                        else:
+                            # 按段长截断：个别 CDN 回复区间略超请求 end 时，
+                            # 多余字节会挤占后续分段的数据，同样破坏字节序。
+                            remain = e - s + 1
+                            for chunk in r.iter_content(SEG_CHUNK):
+                                if self._cancel.is_set():
+                                    return
+                                if not chunk:
+                                    continue
+                                if len(chunk) > remain:
+                                    chunk = chunk[:remain]
+                                remain -= len(chunk)
+                                if not self._put(q, chunk):
+                                    return
+                                if remain <= 0:
+                                    break
+                            # 段结束哨兵：消费端仍在（未取消）时入队；已取消则
+                            # stream 侧早已退出，无需哨兵。
+                            self._put(q, None)
+                            return
                 finally:
                     r.close()
             except Exception as ex:
@@ -1666,15 +1708,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 total = None
             finally:
                 probe.close()
+            # HLS 优先判定（H-7）：内容类型是 m3u8 就必须整体取回重写分片，
+            # 与探测是否拿到总长无关——nginx 等源站对 bytes=0-0 探测常回
+            # 206+Content-Range（total 已知），若仅按「total 未知」分支走，
+            # m3u8 会被当作普通媒体透传：相对分片按 127.0.0.1 基址解析必
+            # 404，绝对分片直连 CDN 缺 Cookie/Referer 被拒。
+            if _is_hls_ctype(ctype):
+                _send_hls_playlist(self, url, headers, head_only, token=valid_token)
+                return
             if total is None or total <= 0:
-                # 无长度信息（HLS 等）。m3u8 同样整体取回并重写分片地址——
-                # do=pan 重写过的嵌套变体列表会经 ?url= 回到此处，二次重写
-                # 保证任意深度嵌套的分片都落在代理内。重写出的分片地址带上
-                # 本次请求已通过校验的 token，避免把宿主主 token 无条件回显。
-                if _is_hls_ctype(ctype):
-                    _send_hls_playlist(self, url, headers, head_only, token=valid_token)
-                    return
-                # 无长度信息（HLS 等）：先发 200 + 探测到的 Content-Type，
+                # 无长度信息：先发 200 + 探测到的 Content-Type，
                 # 不发 Content-Length，按开放区间（不带 Range）直接透传
                 self.send_response(200)
                 self.send_header('Content-Type', ctype)
@@ -2028,13 +2071,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             total = None
         finally:
             probe.close()
+        # HLS 优先判定（H-7）：内容类型是 m3u8 就必须整体取回重写分片，
+        # 与 total 是否已知无关——探测回 206+Content-Range（total 已知）时
+        # 若跳过重写，m3u8 被当普通媒体透传：相对分片按代理基址解析必 404，
+        # 绝对分片直连 CDN 缺凭据被拒。_send_hls_playlist 返回 False 表示
+        # 未应答（如上游无 body），继续按普通流处理。
+        if _is_hls_ctype(ctype):
+            if _send_hls_playlist(self, url, headers, head_only, token=valid_token):
+                return
         if total is None or total <= 0:
-            # 无长度信息（HLS 等）。m3u8 播放列表必须整体取回并重写分片地址：
-            # 相对分片按代理基址解析必 404，绝对分片直连 CDN 缺凭据被拒。
-            if _is_hls_ctype(ctype):
-                if _send_hls_playlist(self, url, headers, head_only, token=valid_token):
-                    return
-            # 其余未知长度流：先发 200 + 探测到的 Content-Type，
+            # 无长度信息：先发 200 + 探测到的 Content-Type，
             # 不发 Content-Length，按开放区间（不带 Range）直接透传
             self.send_response(200)
             self.send_header('Content-Type', ctype)

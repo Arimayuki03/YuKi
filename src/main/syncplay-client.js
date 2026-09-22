@@ -30,8 +30,14 @@ class SyncplayClient extends EventEmitter {
         this.clientRtt = 0;
         this.clientLatencyCalculation = 0;
         this._pingTimer = null;
+        this._recvBuf = '';   // TCP 接收缓冲：跨 chunk 拼帧，残包保留到下一 chunk（条目 7）
+        this._connectGen = 0; // connect 代际：重连/断开后递增，旧 socket 事件按代际失效（条目 8）
         // 兜底 error 监听，防 EventEmitter 抛 ERR_UNHANDLED_ERROR 致进程崩溃
         this.on('error', () => {});
+        // 在途 connect 的 reject：disconnect/重连 teardown 掉旧 socket 后，其
+        // close/error 监听已被摘除、代际守卫又会跳过 reject——promise 会永久
+        // 悬挂（IPC 调用方一直转圈）。teardown 时从这里收口。
+        this._connectReject = null;
     }
 
     /**
@@ -53,14 +59,28 @@ class SyncplayClient extends EventEmitter {
         const host = server || DEFAULT_SERVER;
         const p = port || DEFAULT_PORT;
 
+        // 条目 8：重连前先清旧 socket/定时器/接收缓冲。原实现直接覆盖 this.socket，
+        // 旧连接的 data/close 监听仍挂在旧 socket 上（close 还会再 emit 一次 disconnect），
+        // 且 ping 定时器在握手前关闭时无人回收。断开为静默清理（不留 disconnect 事件）。
+        const gen = ++this._connectGen;
+        this._teardownSocket();
+
         return new Promise((resolve, reject) => {
+            // 代际守卫：connect 被再次调用（或 disconnect）后，旧 socket 的事件不再落 handle
+            const stale = () => gen !== this._connectGen;
+            // 存到实例：disconnect()/_teardownSocket() 接管时（旧监听已摘除、
+            // 代际守卫跳过 reject）由这里收口在途 promise，不悬挂
+            this._connectReject = reject;
             const onError = (err) => {
+                if (stale()) return;
                 this.connected = false;
                 this.emit('error', err);
                 reject(err);
             };
             const onConnect = () => {
+                if (stale()) return;
                 this.connected = true;
+                this._connectReject = null; // promise 已 resolve，teardown 无需再收口
                 this._sendHello();
                 this._startPingLoop();
                 resolve();
@@ -74,27 +94,61 @@ class SyncplayClient extends EventEmitter {
                 this.socket = net.connect({ host, port: p }, onConnect);
             }
             this.socket.setEncoding('utf8');
-            this.socket.on('data', (data) => this._onData(data));
+            this.socket.on('data', (data) => { if (!stale()) this._onData(data); });
             this.socket.on('error', onError);
+            // 条目 8：握手完成前 socket 被 close（服务器拒连/网络断/TLS 握手失败）时，
+            // 原实现既不 resolve 也不 reject，connect promise 永久悬挂、IPC 调用方一直转圈。
+            // close 后仍按错误收口 promise；已 resolve 的连接断开走既有 disconnect 事件。
             this.socket.on('close', () => {
+                if (stale()) return;
                 this.connected = false;
-                // 服务器侧断开（最常见路径）同样要收掉 ping 定时器
                 this._stopPingLoop();
+                // 代际未变说明本次 connect 尚未被 disconnect 接管：视为本次连接失败
+                this._connectGen++;
+                this.socket = null;
+                this._connectReject = null; // promise 即将在此收口，teardown 无需再管
                 this.emit('disconnect');
+                reject(new Error('连接在完成握手前已关闭'));
             });
+            // close/error 双到时 reject 只生效一次（Promise 语义），无需额外去重
         });
+    }
+
+    /** 清理当前 socket 与接收缓冲（connect 重连前 / disconnect 共用，静默不发事件）。 */
+    _teardownSocket() {
+        this._stopPingLoop();
+        // 在途 connect 的 promise 收口：此时旧 socket 的 close/error 监听已被
+        // 摘除（下一行），其 reject 永远不会触发，只能由这里以错误结束。
+        if (this._connectReject) {
+            const reject = this._connectReject;
+            this._connectReject = null;
+            reject(new Error('连接被 disconnect/重连接管，未完成握手'));
+        }
+        if (this.socket) {
+            const sock = this.socket;
+            this.socket = null;
+            try {
+                // 摘掉业务监听（data/close 会 emit disconnect、污染新连接），但 error/close
+                // 必须补一个空 handler 再销毁：destroy 后内核仍可能吐 ECONNRESET，
+                // 无监听的 error 事件会以 ERR_UNHANDLED_ERROR 打崩主进程。
+                sock.removeAllListeners();
+                sock.on('error', () => {});
+                sock.on('close', () => {});
+            } catch (e) { /* ignore */ }
+            try { sock.end(); } catch (e) { /* ignore */ }
+            try { sock.destroy(); } catch (e) { /* ignore */ }
+        }
+        this._recvBuf = '';
+        this.connected = false;
     }
 
     /** 断开连接并离开房间。 */
     disconnect() {
-        this.connected = false;
-        // ping 定时器必须与连接同生共死，否则断线后每 5s 空转一次并锁住旧闭包
-        this._stopPingLoop();
-        if (this.socket) {
-            try { this.socket.end(); } catch (e) { /* ignore */ }
-            try { this.socket.destroy(); } catch (e) { /* ignore */ }
-            this.socket = null;
-        }
+        // 条目 8：代际递增使在途 connect 的回调/close 全部失效。其 promise 由
+        // _teardownSocket 里的 _connectReject 以错误收口（旧 socket 监听已摘除、
+        // 代际守卫又跳过 reject，不在此收口就会永久悬挂）；随后静默清理旧 socket。
+        this._connectGen++;
+        this._teardownSocket();
         this.emit('disconnect');
     }
 
@@ -167,9 +221,18 @@ class SyncplayClient extends EventEmitter {
     }
 
     _onData(data) {
-        // SyncPlay 消息以 \r\n 分隔
-        const lines = data.split(/\r?\n/);
-        for (const line of lines) {
+        // 条目 7：SyncPlay 消息以 \r\n 分帧，TCP 是字节流、单个 chunk 可能只含半条
+        // 消息或拼有多条消息。原实现按 chunk 直接 split，跨包截断的消息 JSON.parse
+        // 失败被静默丢弃（表现为状态/聊天随机丢消息）。这里维护接收缓冲：累积后按
+        // \r\n 切帧，最后一段残包留在缓冲里等下一个 chunk。
+        this._recvBuf += data;
+        // \r?\n 兼容：官方服务器发 \r\n，宽容处理裸 \n，避免异常服务器卡死缓冲
+        let idx;
+        while ((idx = this._recvBuf.search(/\r?\n/)) >= 0) {
+            const m = this._recvBuf.slice(idx).match(/^\r?\n/);
+            const sepLen = m ? m[0].length : 1;
+            const line = this._recvBuf.slice(0, idx);
+            this._recvBuf = this._recvBuf.slice(idx + sepLen);
             if (!line.trim()) continue;
             try {
                 const msg = JSON.parse(line);
@@ -178,6 +241,8 @@ class SyncplayClient extends EventEmitter {
                 /* 非 JSON 行忽略 */
             }
         }
+        // 防御上限：单帧超 1MB 视为恶意/异常数据，清空缓冲防内存被撑爆
+        if (this._recvBuf.length > 1024 * 1024) this._recvBuf = '';
     }
 
     _handleMessage(msg) {

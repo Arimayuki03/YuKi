@@ -11,6 +11,12 @@ from dataclasses import dataclass
 
 CACHE_VERSION = 1
 MAX_CONFIG_BYTES = 12 * 1024 * 1024
+# documents（多仓子文档）此前不限量：几十个子文档全量写入可把缓存文件撑到
+# 几十 MB，且 load 侧要全量读入并 json.load 解析完才被 contentHash 拒绝。
+# 给 documents 加总量上限；磁盘文件再按「正文+documents 的 2 倍」粗校验，
+# 超限直接拒绝，不再把异常大文件读进内存（JSON 转义膨胀留 2 倍余量）。
+MAX_DOCUMENTS_BYTES = 5 * 1024 * 1024
+MAX_CACHE_FILE_BYTES = (MAX_CONFIG_BYTES + MAX_DOCUMENTS_BYTES) * 2
 
 
 @dataclass
@@ -37,6 +43,14 @@ class ConfigRepositoryCache:
         raw = str(text).encode('utf-8')
         if len(raw) > MAX_CONFIG_BYTES:
             return False
+        docs = ({str(k): str(v) for k, v in (documents or {}).items()}
+                if documents else {})
+        # documents 总量（key+value 的 UTF-8 字节数）超上限则整体不落盘：
+        # 与正文同一待遇——缓存只救「上次的配置」，缺了无非重新拉取
+        docs_bytes = sum(len(k.encode('utf-8')) + len(v.encode('utf-8'))
+                         for k, v in docs.items())
+        if docs_bytes > MAX_DOCUMENTS_BYTES:
+            return False
         payload = {
             'version': CACHE_VERSION,
             'sourceUrl': str(source_url or ''),
@@ -46,8 +60,7 @@ class ConfigRepositoryCache:
             'savedAt': time.time(),
             'contentHash': hashlib.sha256(raw).hexdigest(),
             'text': str(text),
-            'documents': ({str(k): str(v) for k, v in (documents or {}).items()}
-                          if documents else {}),
+            'documents': docs,
         }
         try:
             os.makedirs(self.directory, mode=0o700, exist_ok=True)
@@ -72,6 +85,11 @@ class ConfigRepositoryCache:
         if not self.path:
             return None
         try:
+            # 先按文件大小粗校验再读：异常大（崩溃残留/被外部写入）的缓存文件
+            # 直接拒绝，不读入内存解析（正文与 documents 各有上限，2 倍余量兜
+            # JSON 转义膨胀）。正常 save 产物不会触及此阈值。
+            if os.path.getsize(self.path) > MAX_CACHE_FILE_BYTES:
+                return None
             with open(self.path, encoding='utf-8') as stream:
                 payload = json.load(stream)
             if not isinstance(payload, dict) or payload.get('version') != CACHE_VERSION:
@@ -83,6 +101,14 @@ class ConfigRepositoryCache:
             digest = hashlib.sha256(raw).hexdigest()
             if len(raw) > MAX_CONFIG_BYTES or digest != payload.get('contentHash'):
                 return None
+            docs_payload = payload.get('documents', {})
+            if not isinstance(docs_payload, dict):
+                docs_payload = {}
+            # documents 与正文同待遇：超上限整体判无效，宁可回源重拉
+            docs_bytes = sum(len(str(k).encode('utf-8')) + len(str(v).encode('utf-8'))
+                             for k, v in docs_payload.items())
+            if docs_bytes > MAX_DOCUMENTS_BYTES:
+                return None
             return CachedConfig(
                 source_url=str(payload.get('sourceUrl') or ''), text=text,
                 saved_at=float(payload.get('savedAt') or 0),
@@ -90,8 +116,7 @@ class ConfigRepositoryCache:
                 etag=str(payload.get('etag') or ''),
                 last_modified=str(payload.get('lastModified') or ''),
                 content_hash=digest,
-                documents=({str(k): str(v) for k, v in payload.get('documents', {}).items()}
-                           if isinstance(payload.get('documents', {}), dict) else {}),
+                documents={str(k): str(v) for k, v in docs_payload.items()},
             )
         except (OSError, TypeError, ValueError, UnicodeError):
             return None

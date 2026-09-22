@@ -22,9 +22,6 @@ def _site_key(params: dict[str, Any], sites: Any, do: str) -> tuple[str | None, 
     raw = params.get('siteKey')
     if raw in (None, ''):
         legacy = params.get('site')
-        # do=pan 的 site 是 Provider 名称，不是 SiteManager key。
-        if do == 'pan' and sites.get(legacy) is None:
-            return None, False
         raw = legacy
     if raw in (None, ''):
         return None, False

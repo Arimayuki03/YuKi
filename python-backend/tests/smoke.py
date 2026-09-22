@@ -185,13 +185,15 @@ def main():
     sp.setCache('exp_k', {'expiresAt': int(time.time()) - 10})
     check('spider.getCache expired -> None', sp.getCache('exp_k') is None)
 
-    # 6. /proxy localProxy
+    # 6. /proxy localProxy（R 组：端点已强制 token，须带有效 token）
     code, body = req('GET', '/proxy?do=py&x=1', with_token=False)
+    check('/proxy rejects anonymous', code == 401, str(code))
+    code, body = req('GET', '/proxy?do=py&x=1')
     check('/proxy localProxy', code == 200 and body == 'demo-proxy-ok', body)
 
-    # 7. getProxyUrl 形态
+    # 7. getProxyUrl 形态（R 组：地址自带宿主 token，能直接经 /proxy 消费）
     check('spider.getProxyUrl',
-          sp.getProxyUrl() == f'http://127.0.0.1:{PORT}/proxy?do=py&siteKey=demo', sp.getProxyUrl())
+          sp.getProxyUrl() == f'http://127.0.0.1:{PORT}/proxy?do=py&siteKey=demo&token={TOKEN}', sp.getProxyUrl())
 
     # 7.5 P1-5：Worker 进程 hoststate 必须由 spec 注入自给（supervised_runner
     # setdefault + site_worker._build configure）。此前 smoke 顶层 configure 被

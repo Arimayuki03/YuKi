@@ -85,7 +85,15 @@ function redactSecrets(value) {
         .replace(/([?&](?:token|access_token|refresh_token|api[_-]?key|secret|password)=)[^&#\s]*/gi, '$1[REDACTED]')
         .replace(/((?:authorization|proxy-authorization)\s*[:=]\s*)(?:bearer\s+|basic\s+)?[^\s,;]+/gi, '$1[REDACTED]')
         .replace(/((?:cookie|set-cookie)\s*[:=]\s*)[^\r\n]*/gi, '$1[REDACTED]')
-        .replace(/((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)['"]?[^\s,'"}\]]+/gi, '$1[REDACTED]');
+        // 键名允许 JSON 引号形态（"password": "x"）；值带引号时连同闭合引号一起遮盖
+        // （保留原引号字符），不带引号时才吃普通分隔符——正常文本中提及 password
+        // 字样（后无冒号）不受影响。值类同时排除 [ 与 ]：不吞前一条规则写入的
+        // [REDACTED] 占位符（否则会再包一层括号）。
+        .replace(/(["']?(?:password|passwd|pwd|token|secret|api[_-]?key)["']?\s*[:=]\s*)(["'])(?:([^"\\]|\\.)*"|(?:[^'\\]|\\.)*'|[^\s,'"}\[\]]+)|(["']?(?:password|passwd|pwd|token|secret|api[_-]?key)["']?\s*[:=]\s*)([^\s,'"}\[\]]+)/gi,
+            (m, k1, q1, _v1, k2, v2) => {
+                if (k1 != null) return `${k1}${q1}[REDACTED]${q1}`;
+                return `${k2}[REDACTED]`;
+            });
 }
 
 function formatArg(arg) {
@@ -120,6 +128,7 @@ class RotatingLogWriter {
     _rotate(nextBytes) {
         this._ensure();
         if (this._size + nextBytes <= this.maxBytes) return;
+        let renamedAll = true;
         for (let i = this.backups; i >= 1; i--) {
             const src = i === 1 ? this.file : `${this.file}.${i - 1}`;
             const dest = `${this.file}.${i}`;
@@ -127,9 +136,15 @@ class RotatingLogWriter {
                 if (!fs.existsSync(src)) continue;
                 if (i === this.backups && fs.existsSync(dest)) fs.rmSync(dest, { force: true });
                 fs.renameSync(src, dest);
-            } catch (e) { /* 单个历史文件占用时保留当前日志，不影响应用 */ }
+            } catch (e) {
+                // 单个历史文件占用（如被外部查看器锁定）时放弃本次轮转：
+                // 保留当前日志继续追加，_size 不重置，日志不会因计数漂移而无限增长
+                renamedAll = false;
+                break;
+            }
         }
-        this._size = 0;
+        // 仅历史链全部改名成功才按空文件重计尺寸；否则下次写入继续按旧尺寸判断轮转
+        if (renamedAll) this._size = 0;
     }
 
     write(level, ...args) {
@@ -162,10 +177,52 @@ function installConsoleLogger(logDir) {
     return writer;
 }
 
+/** 从文件尾部倒序读取行（每次向前扩一块，凑够 need 行或读完全文件即停）。
+ *  替代整文件同步读入——大日志（数十 MB）分页不再全量扫盘。
+ *  返回 { lines, total }：lines 为从新到旧的行数组；total 为已确认存在的
+ *  行数下界（读完全文件时即精确行数），仅影响总页数显示，不影响本页内容。 */
+function readTailLines(file, need) {
+    // stat/open/read 失败一律向上传播，由调用方记入「无法读取」条目（保持旧口径显式上报）
+    const st = fs.statSync(file);
+    if (st.isDirectory()) throw new Error('EISDIR'); // Windows 上目录 stat.size 为 0、可 open，需显式排除
+    const size = st.size;
+    if (size === 0) return { lines: [], total: 0 };
+    const CHUNK = 256 * 1024;
+    let start = size;
+    let lines = [];
+    let full = false;
+    while (true) {
+        start = Math.max(0, start - CHUNK);
+        if (start === 0) full = true;
+        const len = size - start;
+        const buf = Buffer.alloc(len);
+        let got = 0;
+        // open/read 失败（被轮转删除/锁定）不吞错：向上传播由调用方记入「无法读取」条目
+        const fd = fs.openSync(file, 'r');
+        try {
+            while (got < len) {
+                const n = fs.readSync(fd, buf, got, len - got, start + got);
+                if (n <= 0) break;
+                got += n;
+            }
+        } finally { fs.closeSync(fd); }
+        const parts = buf.toString('utf8').split(/\r?\n/);
+        if (start > 0) parts.shift(); // 起始字节截断的残行丢弃
+        lines = parts.filter(Boolean);
+        if (full || lines.length >= need) break;
+    }
+    const out = [];
+    for (let i = lines.length - 1; i >= 0; i--) out.push(lines[i]);
+    return { lines: out, total: full ? out.length : out.length + 1 };
+}
+
 function readRecentLogs(logDir, page, pageSize, source) {
     const pg = Math.max(1, parseInt(page, 10) || 1);
     const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 50));
     const filter = source ? String(source) : '';
+    // 倒序凑页：跳过前 (pg-1)*ps 行（最新行不读），再取 ps 行即停，不全量扫描
+    const skip = (pg - 1) * ps;
+    const need = skip + ps;
     const entries = [];
     const sources = new Set();
     let files = [];
@@ -179,6 +236,8 @@ function readRecentLogs(logDir, page, pageSize, source) {
         try { mtime = fs.statSync(file).mtimeMs; } catch (e) { mtime = 0; }
         return { name, file, mtime };
     }).sort((a, b) => b.mtime - a.mtime);
+    let total = 0;
+    let earlyStop = false;
     for (const item of items) {
         sources.add(baseSource(item.name));
         // 按来源过滤（含其轮转备份，如选 electron-main.log 时也纳入 .1/.2）。
@@ -186,16 +245,24 @@ function readRecentLogs(logDir, page, pageSize, source) {
         // 逐文件独立 try/catch：单个文件被锁定/权限拒绝（如 EPERM）时只跳过并显式上报，
         // 不再作废整个扫描结果。
         try {
-            const lines = fs.readFileSync(item.file, 'utf8').split(/\r?\n/).filter(Boolean);
-            for (let i = lines.length - 1; i >= 0; i--) entries.push({ file: item.name, line: lines[i] });
+            const { lines, total: fileTotal } = readTailLines(item.file, need - entries.length);
+            total += fileTotal;
+            for (let i = 0; i < lines.length && entries.length < need; i++) {
+                entries.push({ file: item.name, line: lines[i] });
+            }
         } catch (e) {
+            total += 1;
             entries.push({ file: item.name, line: `[无法读取 ${item.name}: ${e && e.code ? e.code : (e && e.message) || '未知错误'}]` });
         }
+        // 已凑够本页所需（含翻页偏移）：后续更旧的文件不再读取
+        if (entries.length >= need) { earlyStop = true; break; }
     }
-    const total = entries.length;
+    // 提前停止说明后面还有未读内容：把 total 抬到「至少还有一行」，保证
+    // 渲染层按 total 算总页数时下一页可达（total 为已确认行数的下界近似）。
+    if (earlyStop) total = Math.max(total, entries.length + 1);
     return {
         ok: true,
-        logs: entries.slice((pg - 1) * ps, pg * ps),
+        logs: entries.slice(skip, need),
         total,
         page: pg,
         pageSize: ps,

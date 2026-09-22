@@ -47,7 +47,10 @@ _registry = weakref.WeakSet()
 # 全局 Worker 进程数限制：配置多仓/多站点并发构建时无上限会同时拉起数十个
 # Python 子进程（每个站点一个 Supervisor）+ 若为 jar 则再派生 JVM，内存暴涨。
 # 默认总 Worker 8、其中 jar 最多 3，可用环境变量覆盖。
-_GLOBAL_LRU: OrderedDict[int, object] = OrderedDict()
+# 值必须是**弱引用**：_registry 用 WeakSet 表达「Supervisor 无人引用即可回收」，
+# 若这里持强引用，每个建过的 Supervisor 都会泄漏到进程退出（destroy 只是忘了
+# 从本表摘除时也无法靠 GC 兜底）。存活判定统一走弱引用解引用 + pid 检查。
+_GLOBAL_LRU: 'OrderedDict[int, weakref.ref]' = OrderedDict()
 _MAX_WORKERS_DEFAULT = 8
 _MAX_JAR_WORKERS_DEFAULT = 3
 
@@ -74,20 +77,16 @@ def _max_jar_workers() -> int:
     return _MAX_JAR_WORKERS_DEFAULT
 
 
-def _global_alive_count(runtime: str | None = None) -> int:
-    with _registry_lock:
-        if runtime is None:
-            return sum(1 for s in list(_registry) if s.pid is not None)
-        return sum(1 for s in list(_registry) if getattr(s, 'runtime', None) == runtime and s.pid is not None)
-
-
 def _touch_global(sup) -> None:
     with _registry_lock:
         k = id(sup)
         if k in _GLOBAL_LRU:
-            _GLOBAL_LRU.move_to_end(k)
-        else:
-            _GLOBAL_LRU[k] = sup
+            ref = _GLOBAL_LRU[k]
+            # 仅当槽位仍指向同一对象时才算命中（id 复用防护）
+            if ref is not None and ref() is sup:
+                _GLOBAL_LRU.move_to_end(k)
+                return
+        _GLOBAL_LRU[k] = weakref.ref(sup)
 
 
 def _remove_global(sup) -> None:
@@ -95,45 +94,59 @@ def _remove_global(sup) -> None:
         _GLOBAL_LRU.pop(id(sup), None)
 
 
-def _ensure_global_slot_locked(caller) -> object | None:
-    """在全局上限内为 caller 预留进程槽；需淘汰时返回 victim（调用方在锁外销毁）。
+def _ensure_global_slot_locked(caller) -> tuple[object, bool]:
+    """在全局上限内为 caller 预留进程槽；返回 ``(victim, own_lock)``。
 
-    须在 caller._lifecycle_lock 已持有且未持有 _registry_lock 时调用；内部会短暂
-    持有 _registry_lock 判断并挑选 victim，但不直接销毁（避免在 _registry_lock 内
-    重入 victim._lifecycle_lock 造成死锁或 ~1s 阻塞）。
+    需淘汰时返回 victim；``own_lock=True`` 表示 caller 已获得 victim._call_lock
+    的**占用权**（未释放），必须在完成销毁后调用 ``_release_victim_lock(victim)``
+    归还。须在 caller._lifecycle_lock 已持有且未持有 _registry_lock 时调用；内部
+    会短暂持有 _registry_lock 判断并挑选 victim，但不直接销毁（避免在
+    _registry_lock 内重入 victim._lifecycle_lock 造成死锁或 ~1s 阻塞）。
     """
     limit_total = _max_workers()
     limit_jar = _max_jar_workers()
     with _registry_lock:
         # 刷新 caller 在 LRU 中的位置（即使尚未有 pid，也占位以保证公平）
         k = id(caller)
-        if k in _GLOBAL_LRU:
+        ref = _GLOBAL_LRU.get(k)
+        if ref is not None and ref() is caller:
             _GLOBAL_LRU.move_to_end(k)
         else:
-            _GLOBAL_LRU[k] = caller
+            _GLOBAL_LRU[k] = weakref.ref(caller)
         # caller 已有存活进程则无需预留
         if caller.pid is not None:
-            return None
+            return None, False
         total = sum(1 for s in list(_registry) if s.pid is not None)
         jar_total = sum(1 for s in list(_registry) if getattr(s, 'runtime', None) == 'jar' and s.pid is not None)
         need_total = total >= limit_total
         need_jar = caller.runtime == 'jar' and jar_total >= limit_jar
         if not (need_total or need_jar):
-            return None
+            return None, False
         reason = 'total %d/%d' % (total, limit_total) if need_total else 'jar %d/%d' % (jar_total, limit_jar)
         logger.warning('global worker limit reached (%s), evicting LRU idle worker caller=%s',
                        reason, caller.site_key)
         # 从最久未用方向遍历，挑一个空闲（无 active_request 且 _call_lock 可非阻塞获取）的
-        # jar 上限触达时必须淘汰同为 jar 的空闲 Worker，淘汰 python 不能释放 jar 配额
+        # jar 上限触达时必须淘汰同为 jar 的空闲 Worker，淘汰 python 不能释放 jar 配额。
+        # 遍历必须**有界**：对快照做 for 循环，任何不合格的 victim 只被跳过不被重扫。
+        # 不可改成「while + 永远取队头」——pid is None / 运行时不匹配 / 正忙的条目会被
+        # 无限重看，持有 _registry_lock 死循环，全进程挂死（审查 C-1 回归）。
         required_runtime = 'jar' if need_jar else None
-        for vk, sup in list(_GLOBAL_LRU.items()):
+        for vk, ref in list(_GLOBAL_LRU.items()):
+            sup = ref() if ref is not None else None
+            if sup is None:
+                # 弱引用已失效（Supervisor 被 GC）：清掉空壳槽位
+                _GLOBAL_LRU.pop(vk, None)
+                continue
             if sup is caller:
+                # caller 已在函数入口被 move_to_end 到队尾，快照中本就是最后一项；
+                # 这里再提升一次（保持既有设计），然后跳过——caller 不淘汰自己
+                _GLOBAL_LRU.move_to_end(vk)
                 continue
             if sup.pid is None:
                 continue
             if required_runtime is not None and getattr(sup, 'runtime', None) != required_runtime:
                 continue
-            # 跳过正忙的
+            # 跳过正忙的（有在途请求或 call 锁被占用）
             try:
                 if getattr(sup, '_active_request', None) is not None:
                     continue
@@ -142,16 +155,12 @@ def _ensure_global_slot_locked(caller) -> object | None:
             lock = getattr(sup, '_call_lock', None)
             if lock is not None and not lock.acquire(blocking=False):
                 continue
-            try:
-                # 找到可淘汰的空闲 victim，从 LRU 摘除并返回（调用方负责真正 _dispose）
-                _GLOBAL_LRU.pop(vk, None)
-                return sup
-            finally:
-                if lock is not None:
-                    try:
-                        lock.release()
-                    except Exception:
-                        pass
+            # 找到可淘汰的空闲 victim：从 LRU 摘除并连同其 _call_lock 占用权一起
+            # 返回。锁**不再释放**——它是防淘汰竞态的令牌：victim 的 call() 拿不到
+            # _call_lock 就无法送出新的 `call` 帧，直到我们完成销毁。调用方负责
+            # 销毁后经 _release_victim_lock 归还。
+            _GLOBAL_LRU.pop(vk, None)
+            return sup, True
         # 无一可淘汰——池已耗尽且全忙，拒绝而非无限排队
         raise RuntimeError(
             'L3_RUNTIME_BUSY',
@@ -159,6 +168,14 @@ def _ensure_global_slot_locked(caller) -> object | None:
             runtime=getattr(caller, 'runtime', ''),
             raw_error='global worker pool exhausted (all workers busy)',
         )
+
+
+def _release_victim_lock(victim) -> None:
+    """淘汰完成后归还 victim._call_lock 的占用权（见 _ensure_global_slot_locked）。"""
+    try:
+        victim._call_lock.release()
+    except Exception:
+        pass
 
 
 def active_supervisors():
@@ -265,10 +282,13 @@ class RuntimeSupervisor:
         # 全局进程数限流：超限时先淘汰最久未用的空闲 Worker（LRU）
         victim = None
         try:
-            victim = _ensure_global_slot_locked(self)
+            victim, victim_locked = _ensure_global_slot_locked(self)
         except RuntimeError:
             raise
         if victim is not None:
+            # victim._call_lock 已由本线程占用（own 锁语义）：新请求在此排队，
+            # 不会在「空闲判定之后、销毁完成之前」的窗口里给 victim 送 call 帧，
+            # 从而避免刚接请求的 Worker 被杀、请求误报 L3_RUNTIME_CRASHED。
             logger.info('evicting idle worker %s (%s) pid=%s to free global slot for %s',
                         victim.site_key, victim.runtime, victim.pid, self.site_key)
             try:
@@ -278,6 +298,7 @@ class RuntimeSupervisor:
                 pass
             with _registry_lock:
                 _GLOBAL_LRU.pop(id(victim), None)
+            _release_victim_lock(victim)
         self._dispose_locked(kill=True)
         parent, child = self._ctx.Pipe(duplex=True)
         process = self._ctx.Process(
@@ -422,6 +443,8 @@ class RuntimeSupervisor:
         deadline = self._deadline(request)
         if not self._acquire_until(self._slots, deadline, request):
             error = self._timeout_error(request, 'deadline expired in supervisor queue')
+            # queued 标记：从未被准入执行，熔断不把排队超时计为站点失败
+            error.details = dict(error.details or {}, queued=True)
             self._circuit.record_failure(error)
             raise error
         acquired_call = False
@@ -430,6 +453,8 @@ class RuntimeSupervisor:
             acquired_call = self._acquire_until(self._call_lock, deadline, request)
             if not acquired_call:
                 error = self._timeout_error(request, 'deadline expired waiting for worker slot')
+                # queued 标记：同上，等待调用锁的阶段仍未被准入执行
+                error.details = dict(error.details or {}, queued=True)
                 self._circuit.record_failure(error)
                 raise error
             request.raise_if_cancelled()
@@ -535,6 +560,8 @@ class RuntimeSupervisor:
                     _touch_global(self)
                     return message.get('result'), str(message.get('lastError') or '')
             self._hard_stop()
+            # 预算耗尽发生在「call 帧已发出、等待响应」的阶段：请求已被准入，
+            # 属于真实执行超时，不加 queued 标记（熔断照常计数）。
             error = self._timeout_error(request)
             self._circuit.record_failure(error)
             raise error

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 from urllib.parse import urlsplit
@@ -30,22 +31,23 @@ class QuarkProvider(PanProvider):
         """我的网盘 fid：v2/play 失败时回退 file/download。"""
         resolver = getattr(gp, '_quark_personal_play_url', None)
         if callable(resolver):
+            kwargs = {'retries': 1}
+            # 按 inspect.signature 判参（同 _share_file_url），
+            # 避免 except TypeError 把桥内自身 TypeError 误判成旧签名。
+            if QuarkProvider._accepts_kw(resolver, 'quality'):
+                kwargs['quality'] = quality
             try:
-                try:
-                    resolved = resolver(file_id, headers, retries=1,
-                                        quality=quality)
-                except TypeError:
-                    # 兼容旧版桥接函数/第三方测试实现。
-                    resolved = resolver(file_id, headers, retries=1)
+                resolved = resolver(file_id, headers, **kwargs)
                 if resolved:
                     return resolved
             except Exception:
                 pass
+        resolver = getattr(gp, '_quark_v2play', None)
         try:
-            try:
-                url = gp._quark_v2play(file_id, headers, quality)
-            except TypeError:
-                url = gp._quark_v2play(file_id, headers)
+            if callable(resolver) and QuarkProvider._accepts_kw(resolver, 'quality'):
+                url = resolver(file_id, headers, quality=quality)
+            else:
+                url = resolver(file_id, headers)
         except Exception:
             # ``v2/play`` 对权限、文件类型和接口版本错误有时直接抛异常，
             # 不能让异常阻断个人文件的 download API 回退。
@@ -70,6 +72,22 @@ class QuarkProvider(PanProvider):
             if isinstance(url, str) and url:
                 return url
         return ''
+
+    @classmethod
+    def _call_bridged(cls, resolver, *args, quality: str = '') -> str:
+        """按签名判定后调用桥接函数；resolver 缺失/失败返回空串。
+
+        用 inspect.signature 判定是否支持 quality 关键字（替代 except TypeError
+        降参重试）：桥内代码自身的 TypeError 不再被误判成“旧签名”，避免
+        同一请求重复打上游并掩盖真实错误。"""
+        if not callable(resolver):
+            return ''
+        try:
+            if cls._accepts_kw(resolver, 'quality'):
+                return resolver(*args, quality=quality) or ''
+            return resolver(*args) or ''
+        except Exception:
+            return ''
 
     @staticmethod
     def _quality_key(value: str) -> str:
@@ -100,6 +118,22 @@ class QuarkProvider(PanProvider):
         return candidates[0][1]
 
     @staticmethod
+    def _accepts_kw(func, name: str) -> bool:
+        """函数签名是否接受关键字参数 name（**kwargs 也算接受）。"""
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            # 拿不到签名（C 扩展等）时保守假设支持 quality：随后带 quality 的调用
+            # 若真不支持会抛 TypeError，由各调用方的 except Exception 吞掉并走
+            # 降级链路（代价是丢一次直链机会，不会误判成旧签名重试）。
+            return True
+        param = sig.parameters.get(name)
+        if param is not None:
+            return param.kind in (param.POSITIONAL_OR_KEYWORD,
+                                  param.KEYWORD_ONLY)
+        return any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
+
+    @staticmethod
     def _share_file_url(gp, pwd_id: str, file_id: str, file_token: str,
                         headers: dict[str, str], quality: str = '',
                         share_id: str = '') -> str:
@@ -107,15 +141,16 @@ class QuarkProvider(PanProvider):
         resolver = getattr(gp, '_quark_share_file_play_url', None)
         if not callable(resolver):
             return ''
+        kwargs = {}
+        # 按 inspect.signature 判参，不用 except TypeError：桥内代码自身的
+        # TypeError（解析/序列化 bug）会被误判成“旧签名”而带降参重试，
+        # 既重复打上游又掩盖真实错误。
+        if QuarkProvider._accepts_kw(resolver, 'quality'):
+            kwargs['quality'] = quality
+        if QuarkProvider._accepts_kw(resolver, 'share_id'):
+            kwargs['share_id'] = share_id
         try:
-            return resolver(pwd_id, file_id, file_token, headers,
-                            quality=quality, share_id=share_id) or ''
-        except TypeError:
-            # 兼容旧版桥接函数/第三方测试实现（无 quality/share_id 参数）。
-            try:
-                return resolver(pwd_id, file_id, file_token, headers) or ''
-            except Exception:
-                return ''
+            return resolver(pwd_id, file_id, file_token, headers, **kwargs) or ''
         except Exception:
             return ''
 
@@ -144,7 +179,11 @@ class QuarkProvider(PanProvider):
         if not file_id and url:
             file_id = url
         resolved = ''
-        if pwd_id and file_id and 'pan.quark.cn/s/' not in file_id:
+        # “分享首集”分支（_quark_share_play_url 只取分享里第一个视频）只在
+        # 没有具体 fid 时才允许进入：否则 _share_file_url 失败后落回首集，
+        # 多集分享“点第 N 集播第 1 集”（串集）。
+        pinned_fid = bool(file_id) and 'pan.quark.cn/s/' not in file_id
+        if pwd_id and pinned_fid:
             # 分享内指定文件：share_fid_token 只在 sharepage/token 建立的会话里
             # 有效，所以这条必须排在下面的无会话尝试之前——否则
             # file/download?scene=share 回 400 code=14001「非法token」、v2/play
@@ -153,18 +192,14 @@ class QuarkProvider(PanProvider):
                                             headers, quality, share_id)
         if resolved:
             pass
-        elif not share_id and pwd_id:
-            try:
-                resolved = gp._quark_share_play_url(pwd_id, headers, quality) or ''
-            except TypeError:
-                resolved = gp._quark_share_play_url(pwd_id, headers) or ''
+        elif not share_id and pwd_id and not pinned_fid:
+            resolved = self._call_bridged(
+                gp._quark_share_play_url, pwd_id, headers, quality=quality)
         elif not share_id and 'pan.quark.cn/s/' in file_id:
             pwd = file_id.split('/s/', 1)[-1].split('?', 1)[0].split('#', 1)[0].strip()
-            try:
-                resolved = gp._quark_share_play_url(pwd, headers, quality) or ''
-            except TypeError:
-                resolved = gp._quark_share_play_url(pwd, headers) or ''
-        elif not share_id and file_id:
+            resolved = self._call_bridged(
+                gp._quark_share_play_url, pwd, headers, quality=quality)
+        elif not share_id and pinned_fid:
             try:
                 resolved = self._direct_personal_url(gp, file_id, headers,
                                                      quality=quality)
@@ -176,11 +211,15 @@ class QuarkProvider(PanProvider):
             except Exception:
                 resolved = ''
             if not resolved:
+                # v2/play 降级同样按签名判参，不用 except TypeError。
+                resolver = getattr(gp, '_quark_v2play', None)
                 try:
-                    resolved = gp._quark_v2play(file_id, headers, quality) or ''
-                except TypeError:
-                    # 保持与旧版测试/桥接函数的二参数兼容。
-                    resolved = gp._quark_v2play(file_id, headers) or ''
+                    if callable(resolver) and QuarkProvider._accepts_kw(resolver, 'quality'):
+                        resolved = resolver(file_id, headers, quality=quality) or ''
+                    else:
+                        resolved = resolver(file_id, headers) or ''
+                except Exception:
+                    resolved = ''
             # 不再回退到 share_play_url 的首集：多集分享下这会把“点了第 N 集”
             # 播成“第 1 集”（串集）。单文件分享的兜底已由上面的
             # pwd_id+file_id → _share_file_url 覆盖；此处失败后交由最后的
@@ -197,7 +236,6 @@ class QuarkProvider(PanProvider):
                 resolved = ''
         if not resolved:
             return None
-        quality = str(params.get('quality') or params.get('resolution') or '')
         quality_key = self._quality_key(quality)
         original_quality = quality_key == 'original'
         return PlayUrl(url=resolved, headers=dict(headers), file_id=file_id,

@@ -82,8 +82,13 @@ function buildM3u(episodes) {
         // 会原样出现在 mpv 标题与播放列表——统一回落「第N集」。
         let name = String(ep.title || '').replace(/[\r\n\t]+/g, ' ').trim();
         if (!name || /\.(m3u8?|mp4|mkv|ts|flv)$/i.test(name)) name = `第${n}集`;
+        // URL 净化：url 首尾空白剥掉、内嵌换行直接剔除——m3u 一行一个地址，
+        // 换行会让恶意/畸形 url 的后半段变成独立行（可注入 #EXTINF/指令行，
+        // 与真正的下一集混淆），导致播放列表错位。
+        const url = String(ep.url).replace(/[\r\n]+/g, '').trim();
+        if (!url) continue;
         lines.push(`#EXTINF:-1,${name}`);
-        lines.push(String(ep.url));
+        lines.push(url);
     }
     return lines.length > 1 ? lines.join('\n') + '\n' : '';
 }
@@ -328,6 +333,7 @@ class MpvPlayer extends EventEmitter {
         const nativeQueue = episodes.length > 1;
         let deferredSeekSec = null;
         let playlistPath = '';
+        let startIndex = -1; // 原生队列实际起播的 m3u 下标（-1=非原生队列/未起播）
         this._danmakuLines = [];
         this._writeAss();
 
@@ -343,7 +349,9 @@ class MpvPlayer extends EventEmitter {
             // 与 _bringToFront 的激活兜底互补（前置只是改 z 序，不一定抢到输入焦点）。
             '--ontop',
             '--sub-auto=no', '--sub-visibility=yes',
-            `--osd-playing-msg=${opts.title || 'YuKi'}`,
+            // OSD 起播消息先转义 $（mpv 在 osd-msg 里把 ${property}/$?{…} 当属性展开
+            // 占位，片名里裸 $ 会被吞掉或展开出错，见 escapeOsdText）。
+            `--osd-playing-msg=${MpvPlayer.escapeOsdText(opts.title || 'YuKi')}`,
             // 中文化（T8）：窗口标题模板 + OSD 中文字体（Windows 微软雅黑；其他平台走 mpv 默认字体回退）。
             // 注意 ${media-title} 是 mpv 属性展开，必须用普通字符串避免被 JS 模板插值。
         ];
@@ -385,8 +393,11 @@ class MpvPlayer extends EventEmitter {
             try { fs.mkdirSync(this.watchLaterDir, { recursive: true }); } catch (e) { /* ignore */ }
             args.push('--save-position-on-quit', `--watch-later-directory=${this.watchLaterDir}`);
         }
-        // 倍速：优先使用连播延续的当前速度，其次用设置的默认倍速
-        const speed = (opts.speed && opts.speed > 0) ? opts.speed : this.defaultSpeed;
+        // 倍速：优先使用连播延续的当前速度，其次用设置的默认倍速；
+        // 夹取到 mpv 可接受范围（0.1~4，对齐 setSpeed 的上限），避免异常配置
+        // 把离谱数值拼进 argv 让 mpv 直接拒绝起播。
+        const speedRaw = (opts.speed && opts.speed > 0) ? opts.speed : this.defaultSpeed;
+        const speed = MpvPlayer.clampSpeed(speedRaw);
         if (speed && speed !== 1) args.push(`--speed=${speed}`);
         // FongMi position 使用毫秒；mpv --start 使用秒。仅接受有限的非负数，
         // 防止源配置把任意字符串拼进播放器参数。
@@ -442,19 +453,39 @@ class MpvPlayer extends EventEmitter {
                     }
                 }
             } catch (e) { /* ignore */ }
+            // buildM3u 会跳过缺 url 的条目：m3u 里实际写入的集数可能少于 episodes。
+            // 记录「原数组下标 → m3u 实际下标」映射，startIndex 与逐集标题（_queueTitles
+            // 由 index.js 按原数组注入）都须重映射，否则选中的集数错位、末段越界。
+            const m3uIndexOf = [];
+            let m3uCount = 0;
+            for (let i = 0; i < episodes.length; i++) {
+                const ep = episodes[i];
+                if (ep && ep.url) m3uIndexOf[i] = m3uCount++;
+            }
             playlistPath = path.join(os.tmpdir(), `yuki-playlist-${process.pid}-${Date.now()}.m3u8`);
             fs.writeFileSync(playlistPath, buildM3u(episodes), 'utf8');
-            const startIndex = Number.isFinite(Number(opts.startIndex))
+            // 起始集下标：非负夹取后映射到 m3u 实际条目；映射不到（该集无 url）
+            // 或越界时回退 0，从清单第一项播——绝不传越界的 --playlist-start。
+            let startEpIdx = Number.isFinite(Number(opts.startIndex))
                 ? Math.max(0, Math.floor(Number(opts.startIndex))) : 0;
+            startEpIdx = m3uIndexOf[startEpIdx];
+            startIndex = (typeof startEpIdx === 'number' && startEpIdx < m3uCount) ? startEpIdx : 0;
             // --playlist-start 为 0 基下标；0 时不传，保持 argv 与旧单集路径完全一致
             if (startIndex > 0) args.push(`--playlist-start=${startIndex}`);
+            // 逐集集名表同步重映射：file-loaded 按 mpv playlist-pos 取标题时，
+            // 两者口径才一致（mpv 队列里只有带 url 的条目）。
+            if (Array.isArray(this._queueTitles)) {
+                this._queueTitles = this._queueTitles
+                    .filter((_, i) => episodes[i] && episodes[i].url);
+            }
             args.push('--', playlistPath);
         } else {
             args.push('--', episodes[0].url);
         }
         this._queueLen = episodes.length;
         this._lastFs = !!opts.fullscreen;
-        this._lastSp = (speed && speed > 0) ? speed : 1;
+        // 夹取后的起播倍速（与 --speed 注入同源）；无 speed 时回退 1
+        this._lastSp = speed;
         const sessionId = ++this._sessionId; // 闭包捕获：进程退出时附带，区分新旧会话
         let proc;
         try {
@@ -490,7 +521,8 @@ class MpvPlayer extends EventEmitter {
             nativeQueue,        // 原生多集队列：ended 逐集携带 nativeQueue/playlistPos 供渲染层逐集记账
             pendingSeekSec: deferredSeekSec, // 首集装载后一次性 seek（原生队列替代全局 --start）
             seekApplied: false,
-            queueIdx: Number(opts.startIndex) || 0, // 当前播放的列表下标（file-loaded 时经 IPC 刷新；end-file 记账用）
+            queueIdx: startIndex >= 0 ? startIndex
+                : Math.max(0, Number(opts.startIndex) || 0), // 当前播放的列表下标（file-loaded 时经 IPC 刷新；end-file 记账用）
             itemStartMs: Date.now(), // 当前集墙钟起点（每次 file-loaded 刷新；逐集统计用）
             // 观看时长统计（墙钟）：累计播放器运行时长（打开播放器后运行了多久，含暂停）。
             playStartMs: Date.now(),
@@ -560,7 +592,9 @@ class MpvPlayer extends EventEmitter {
             if (info.userStopped) this.controlGen++;
             // 只清理该会话；旧进程延迟退出时不能误清掉刚起播的新会话。
             this._teardown(sessionId);
-            this._removeAssFile(); // P3-24：会话退出即清弹幕临时文件（含观看文本）
+            // 弹幕临时文件只在确属本会话退出时才删（会话号守卫，见 _removeAssFile）：
+            // stop() 后旧 mpv 延迟退出时直接删会连带删掉新会话刚装载的弹幕文件。
+            this._removeAssFile(sessionId); // P3-24：会话退出即清弹幕临时文件（含观看文本）
             this.emit('exit', info);
         });
         this._connectIpc(0, sessionId);
@@ -709,8 +743,12 @@ class MpvPlayer extends EventEmitter {
     /** 删除 ASS 弹幕临时文件（%TEMP%/yuki-danmaku-<pid>.ass，P3-24）。
      *  文件内容含观看文本（片名/弹幕内容），原先从不清理、残留整个进程生命周期，
      *  且其他本机进程可读。会话 teardown 与进程退出路径各清一次（幂等；写入点
-     *  在下一次 play 前由 _writeAss 覆盖重建，删除不影响后续播放）。 */
-    _removeAssFile() {
+     *  在下一次 play 前由 _writeAss 覆盖重建，删除不影响后续播放）。
+     *  仅在会话号匹配时才删：assPath 是所有会话共享的同一路径，快速 stop→play
+     *  时旧会话的 exit 事件延迟到达，若无条件删除会把新会话刚 sub-add 的弹幕
+     *  文件删掉（sub-reload 静默失败，弹幕消失）。 */
+    _removeAssFile(sessionId = null) {
+        if (sessionId != null && this._activeSession && this._activeSession.id !== sessionId) return;
         try { fs.unlink(this.assPath, () => { /* 不存在/占用均忽略 */ }); } catch (e) { /* ignore */ }
     }
 
@@ -858,7 +896,9 @@ class MpvPlayer extends EventEmitter {
                         // 读到的标题全部变为我们指定的集名（流内嵌 title 标签被压制）
                         this.command('set', 'force-media-title', full).catch(() => { });
                         this.command('set', 'title', full).catch(() => { });
-                        this.command('show-text', full, 1200).catch(() => { });
+                        // show-text 的文本会做属性展开：$ 是 mpv 展开占位符（${property} /
+                        // $?{…} 等），集名里裸 $ 会被吞掉或展开出错，须按 osd-msg 语法转义。
+                        this.command('show-text', MpvPlayer.escapeOsdText(full), 1200).catch(() => { });
                     }
                 }).catch(() => { });
                 // 原生队列的首集续播位置：--start 会作用到每一集（全局选项），故只在
@@ -970,7 +1010,7 @@ class MpvPlayer extends EventEmitter {
     setPause(v) { return this.command('set_property', 'pause', !!v); }
     seek(sec) { return this.command('seek', sec, 'relative'); }
     setVolume(v) { return this.command('set_property', 'volume', Math.max(0, Math.min(200, v))); }
-    setSpeed(v) { return this.command('set_property', 'speed', Math.max(0.25, Math.min(4, v))); }
+    setSpeed(v) { return this.command('set_property', 'speed', MpvPlayer.clampSpeed(v)); }
     getProperty(name) { return this.command('get_property', name); }
 
     /**
@@ -1115,8 +1155,26 @@ class MpvPlayer extends EventEmitter {
             .join(', ');
     }
 
-    /** 解析 [time,mode,size,color]text；time 缺省 0。mode: 1滚动 4底部 5顶部 6反向滚动 */
-    static parseDanmaku(text) {
+    /** 倍速夹取：非有限值回退 1；范围 0.1~4（下限防 0/负值，上限对齐 mpv 常规可用区间）。
+     *  0.25 下限放宽为 0.1：起播 --speed 与 setSpeed 共用本函数，配置存储的历史
+     *  低倍速（如 0.1x）不应被悄悄抬高。 */
+    static clampSpeed(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) return 1;
+        return Math.max(0.1, Math.min(4, n));
+    }
+
+    /** OSD 文本转义：show-text/--osd-playing-msg 会做属性展开，$ 是占位符
+     *  （${property} 取属性、$?{prop} 条件展开、$$ 字面 $）。片名/集名里的
+     *  裸 $ 会被吞掉或展开成意外内容，写入 OSD 前统一把 $ 翻倍。
+     *  注意必须用函数形式替换：字符串替换串里的 '$$' 是 replace 自身的
+     *  「字面 $」转义、会被原样写回（'a$b' → 'a$b'，等于没转义），只有
+     *  '($$)' 语义的函数返回值才按字面插入。 */
+    static escapeOsdText(text) {
+        return String(text == null ? '' : text).replace(/\$/g, () => '$$');
+    }
+
+    /** 解析 [time,mode,size,color]text；time 缺省 0。mode: 1滚动 4底部 5顶部 6反向滚动 */    static parseDanmaku(text) {
         const m = String(text).match(/^\[([^\]]*)\]([\s\S]*)$/);
         if (!m) return null;
         const parts = m[1].split(',').map((s) => s.trim());

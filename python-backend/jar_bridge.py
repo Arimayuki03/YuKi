@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import base64
+import hashlib
 import socket
 import subprocess
 import threading
@@ -127,22 +128,87 @@ def _is_md5(s):
 _JVM_COOKIE_DIR = os.path.join(os.path.expanduser('~'), '.yuki', 'jar-cache', 'TVBox')
 _cookie_cleanup_lock = threading.Lock()
 
+# H-1：Java 侧 seedCookieFiles（jar-runner/SpiderRunner.java:526-550）写的是
+# **裸名**文件（固定文件名，位于所有 JVM 共享的 TVBox/ 目录），不是带 jar
+# 摘要的名字——此前按 jar 清理只构造 `{basename}_{sha1}_cookie.txt`，永远
+# 命中不了 Java 实际写出的文件，P1-4 的强杀清理实质落空。裸名文件全局共享，
+# 清理它必须满足前提：目标 JVM 已确认退出，且注册表中同 jar 再无其它存活桥。
+_BARE_JVM_COOKIE_NAMES = (
+    'quark_cookie.txt', 'uc_cookie.txt', 'bili_cookie.txt',
+    '189_cookie.txt', 'diy_cookie.txt',
+)
 
-def cleanup_jvm_cookie_files():
-    """强杀 JVM 后清理 TVBox/*_cookie.txt 明文登录态（幂等，可并发调用）。"""
+
+def cleanup_jvm_cookie_files(jar_path='', bare=False):
+    """清理 TVBox/*_cookie.txt 明文登录态（幂等，可并发调用）。
+
+    - 不传 jar_path：全局兜底（应用退出等场景，此时不应有存活 JVM）——清理
+      目录内所有 ``*_cookie.txt``；
+    - 传 jar_path 且 bare=False：只清理「该 jar 专属」的摘要名文件
+      （``{basename}_{sha1}_cookie.txt``，与 _download_jar_locked 的缓存命名
+      同构）。多 jar 并存时 TVBox/cookie 目录是所有 JVM 共享的，摘要名清理
+      不会误伤其他 jar 的登录态；
+    - 传 jar_path 且 bare=True：追加清理上面五个**裸名**文件——只有裸名清理
+      能命中 Java 实际写出的文件（H-1）。裸名文件全局共享，该模式仅允许在
+      强杀路径、确认目标 JVM 已死且同 jar 无其它存活桥时使用（见
+      :meth:`JarBridge._cleanup_cookie_files_after_kill`）。
+
+    TVBox 生态 jar 同名极多（spider.jar），文件名用「basename + 路径短摘要」
+    做标识。清理失败静默吞掉——宁少删，不误删存活 JVM 的登录态，绝不影响
+    主流程。
+    """
     with _cookie_cleanup_lock:
         try:
             if not os.path.isdir(_JVM_COOKIE_DIR):
                 return
-            for name in os.listdir(_JVM_COOKIE_DIR):
-                if not name.lower().endswith('_cookie.txt'):
-                    continue
+            names = set()
+            if jar_path:
+                base = os.path.basename(jar_path).lower()
+                digest = hashlib.sha1(jar_path.encode('utf-8', 'replace')).hexdigest()[:10]
+                names.add(f'{base}_{digest}_cookie.txt')
+                if bare:
+                    names.update(_BARE_JVM_COOKIE_NAMES)
+            else:
+                # 全局兜底：清理所有 jar 的 cookie 文件（应用退出等场景）
+                try:
+                    for name in os.listdir(_JVM_COOKIE_DIR):
+                        if name.lower().endswith('_cookie.txt'):
+                            names.add(name)
+                except OSError:
+                    return
+                if not names:
+                    return
+            for name in names:
                 try:
                     os.remove(os.path.join(_JVM_COOKIE_DIR, name))
                 except OSError:
                     pass
         except Exception:
             pass
+
+
+def _reap(proc):
+    """等强杀的子进程真正退出（H-1：裸名 cookie 清理的前置条件）。
+
+    TerminateProcess 是异步的——kill() 返回不代表进程已消失，Java 侧可能仍
+    持有 TVBox/cookie 文件句柄（Windows 上句柄未释放时删除会静默失败）。
+    上限 3s；超时放弃等待（后续裸名清理仍执行，幂等删除无害）。测试注入的
+    proc 替身没有 poll/wait 语义时按「已退出」处理，跳过等待。
+    """
+    try:
+        try:
+            proc.wait(timeout=3.0)
+        except Exception:
+            pass
+        for _ in range(100):
+            try:
+                if proc.poll() is not None:
+                    return
+            except Exception:
+                return
+            time.sleep(0.03)
+    except Exception:
+        pass
 
 
 # vendor 资产根：开发模式为仓库根 vendor/，打包模式为 resources/vendor/
@@ -380,6 +446,45 @@ def _jar_download_lock(url):
 _jar_integrity_warned = set()
 
 
+# jar 下载完整性策略（high#11）：jar 会被 JVM 当作代码执行（任意代码执行），
+# 仅魔数校验挡不住 MITM/篡改 → RCE。默认严格模式：jar 源必须 https 且必须
+# 携带 md5 校验值，二者缺一即拒绝下载执行。确需兼容明文 http/无 md5 的存量
+# 配置时，可显式 opt-in 宽松模式（环境变量，与 YUKI_CONFIG_BLOCK_PRIVATE_NETWORK
+# 同一注入通道——由 Electron 主进程经 python-bridge extraEnv 设置）：
+#   YUKI_JAR_INSECURE_SOURCES=1
+# 选择环境变量而非设置项：该开关由用户配置文件/命令行显式给出，是部署者
+# 的显式决定；且与本文件既有 YUKI_MAX_JVM 等读取通道一致，不引入新的配置面。
+_INSECURE_SOURCE_VALUES = ('1', 'true', 'yes')
+
+
+def _allow_insecure_jar_sources():
+    """宽松模式显式 opt-in 才返回 True（默认 False = 严格模式）。"""
+    return os.environ.get('YUKI_JAR_INSECURE_SOURCES', '').strip().lower() \
+        in _INSECURE_SOURCE_VALUES
+
+
+def _assert_jar_source_integrity(jar_url, md5):
+    """严格模式校验 jar 源的传输与完整性前提；不满足直接拒绝。
+
+    - 必须 https：明文 http 源可被 MITM 实时替换任意代码，md5 校验也会被
+      连同响应一起替换，毫无保护意义；
+    - 必须带 md5：无校验值时内容篡改无法察觉。
+    """
+    if _allow_insecure_jar_sources():
+        return
+    scheme = str(jar_url or '').split(':', 1)[0].lower()
+    if scheme != 'https':
+        raise ValueError(
+            '[L3:jar] insecure jar source rejected (strict mode): '
+            f'jar 在 JVM 内任意代码执行，jar 源必须为 https（当前 {scheme or "无协议"}: {jar_url}）。'
+            '如确认接受风险，可设置环境变量 YUKI_JAR_INSECURE_SOURCES=1 显式放宽')
+    if not md5:
+        raise ValueError(
+            '[L3:jar] unverified jar source rejected (strict mode): '
+            f'jar 源必须携带 md5 校验值（在配置 URL 后追加 ;md5，当前 {jar_url}）。'
+            '如确认接受风险，可设置环境变量 YUKI_JAR_INSECURE_SOURCES=1 显式放宽')
+
+
 def _warn_jar_integrity_once(jar_url):
     """无 md5 的 jar 源记一次完整性告警（每进程每 URL 一次）。"""
     if jar_url in _jar_integrity_warned:
@@ -519,11 +624,13 @@ class JarBridge:
         base = os.path.basename(jar_url.split('?')[0]) or f'{site_key or "spider"}.jar'
         fname = hashlib.sha1(jar_url.encode('utf-8')).hexdigest()[:10] + '_' + base
         dest = os.path.join(jar_dir, fname)
-        # 完整性告警：jar 会被 JVM 当作代码执行。无 md5 时仅魔数校验，内容被篡改
-        # 无法察觉；明文 http 源更存在链路 MITM 风险。不拒绝加载（兼容存量配置），
-        # 但醒目记日志供诊断页/用户感知（同一 URL 每进程只记一次）。
+        # 完整性校验（high#11）：默认严格模式必须 https + md5，缺一即拒绝下载
+        # 执行（见 _assert_jar_source_integrity）。宽松模式（YUKI_JAR_INSECURE_
+        # SOURCES=1）下退回旧行为：仅醒目告警不拒绝，供诊断页/用户感知（同一
+        # URL 每进程只记一次）。
         if not md5:
             _warn_jar_integrity_once(jar_url)
+        _assert_jar_source_integrity(jar_url, md5)
         if os.path.isfile(dest):
             if not md5 or _file_md5(dest) == md5:
                 JarBridge._require_available_runtime(dest, site_key, portable_only)
@@ -578,6 +685,7 @@ class JarBridge:
 
         该属性与上游站点的 HTTP 出站代理不同：前者是 JAR 生成播放 URL 时
         使用的本地数据面地址，必须始终存在，即使系统没有配置网络代理。
+        鉴权 token 不在命令行注入（进程列表可读），见 :meth:`runtime_java_env`。
         """
         # FongMi 的 Proxy.getUrl() 应该命中 FastAPI `/proxy` 调度器，才能
         # 执行最近 JAR 的静态 Proxy；只有后端尚未绑定控制端口时才退回
@@ -592,17 +700,33 @@ class JarBridge:
                 port = int(getattr(go_proxy, 'PORT', 9978))
             except Exception:
                 port = 9978
-        args = [
+        return [
             '-Dyuki.proxyHost=127.0.0.1',
             '-Dyuki.proxyPort=' + str(port),
         ]
+
+    @staticmethod
+    def runtime_java_env():
+        """JVM 子进程专用环境变量（low#7）：proxyToken 经 JAVA_TOOL_OPTIONS 注入。
+
+        此前 token 以 `-Dyuki.proxyToken=...` 命令行参数传 JVM，本机任意进程
+        可从进程列表读到命令行（token 可控 /proxy 数据面）。JAVA_TOOL_OPTIONS
+        是 JVM 官方文档支持的环境变量注入通道：HotSpot 启动时把其中的选项当作
+        命令行**前置**选项处理，-D 定义照常生效（jar-runner 的 Proxy stub 仍读
+        System.getProperty("yuki.proxyToken")，协议不变）——而环境变量只对
+        子进程自身可见，不再落进程列表。代价：JVM 会在 stderr 打一行
+        「Picked up JAVA_TOOL_OPTIONS: ...」（含 token），_ensure_alive 的
+        pump_err 线程按前缀过滤该行，避免 token 落日志。无 token 返回 {}。
+        """
         try:
             token = str(hoststate.get_token() or '')
         except Exception:
             token = ''
-        if token:
-            args.append('-Dyuki.proxyToken=' + token)
-        return args
+        if not token:
+            return {}
+        opts = '-Dyuki.proxyToken=' + token
+        existing = os.environ.get('JAVA_TOOL_OPTIONS', '').strip()
+        return {'JAVA_TOOL_OPTIONS': (existing + ' ' + opts).strip()}
 
     @staticmethod
     def apply_jar_patches(jar_path):
@@ -626,7 +750,18 @@ class JarBridge:
                 return jar_path
             patched_path = (jar_path[:-4] + '.patched.jar') if jar_path.lower().endswith('.jar') else (jar_path + '.patched.jar')
             if os.path.isfile(patched_path) and os.path.getmtime(patched_path) >= os.path.getmtime(jar_path):
-                return patched_path
+                # 原子写（M-4）兜底：patched.jar 理论上由 tmp+os.replace 产出，
+                # 不会留半截文件；但历史版本是直接 'w' 写目标，崩溃残留的坏 jar
+                # mtime 反而比源文件新——这里校验 zip 完整性，坏产物重打不复用。
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(patched_path) as z:
+                        if z.testzip() is None:
+                            return patched_path
+                except Exception:
+                    pass
+                logger.warning('patched jar %s corrupt (stale crash residue?), re-patching',
+                               os.path.basename(patched_path))
             changed = patch_jar(jar_path, patched_path, SELECTOR_PATCHES)
             if not changed:
                 return jar_path
@@ -785,6 +920,9 @@ class JarBridge:
         # M-27a：连续失败计数——需要重新拉起（崩溃/启动失败/被 kill）一律 +1，
         # 成功调用清零，>3 拒绝再拉起（取代原先会被 _kill_proc 重置的 _started/_restart_count）
         self._crash_count = 0
+        # destroy() 置位：置位后 _ensure_alive 拒绝再拉起 JVM（防止销毁后
+        # 残留引用的 call() 把"孤儿桥"重新孵化出来）
+        self._destroyed = False
 
     # ------------------------------------------------------------ 进程管理
 
@@ -796,6 +934,10 @@ class JarBridge:
         SpiderRunner 只接收 jar_path 作为 CLI 参数，className 在每次请求的 params 中传递。
         """
         with self._lock:
+            # destroy() 后拒绝再拉起：销毁是终态，残留引用 call() 不能孵化孤儿 JVM
+            if self._destroyed:
+                self._last_error = 'jar bridge destroyed'
+                return False
             if self.proc and self.proc.poll() is None:
                 return True
             # 需要重新拉起（进程已死 / 上次启动失败 / 被 kill）：一律计入崩溃
@@ -820,6 +962,9 @@ class JarBridge:
             # 判断是否为 DEX 转换后的 jar（需要 dexdeps；含补丁产物 -jvm.patched.jar）
             needs_deps = '-jvm' in self.jar_path.lower()
             proxy_args = JarBridge.proxy_java_args() + JarBridge.runtime_java_args()
+            # low#7：proxyToken 经 JAVA_TOOL_OPTIONS 注入（进程列表不可见），
+            # 而非 -D 命令行参数。
+            jvm_env = {**os.environ, **JarBridge.runtime_java_env()}
             if needs_deps and os.path.isdir(DEXDEPS_DIR):
                 deps = [os.path.join(DEXDEPS_DIR, f) for f in os.listdir(DEXDEPS_DIR) if f.endswith('.jar')]
                 if deps:
@@ -834,7 +979,7 @@ class JarBridge:
             try:
                 proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    cwd=get_jar_runtime_dir(),
+                    cwd=get_jar_runtime_dir(), env=jvm_env,
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                 )
             except Exception as e:
@@ -848,6 +993,11 @@ class JarBridge:
                         text = line.decode('utf-8', 'replace').rstrip()
                         if not text:
                             continue
+                        # JAVA_TOOL_OPTIONS 会被 JVM 以「Picked up ...」回显到
+                        # stderr（内容含 proxyToken），不得落日志（low#7）。
+                        if text.lstrip().startswith('Picked up JAVA_TOOL_OPTIONS'):
+                            logger.info('[jar:%s] <java-tool-options picked up>', self.class_name)
+                            continue
                         logger.info('[jar:%s] %s', self.class_name, text)
                 except Exception:
                     pass
@@ -860,6 +1010,10 @@ class JarBridge:
                         # 进程已退出（启动时崩溃），收集 stderr 日志
                         try:
                             err = proc.stderr.read(2000).decode('utf-8', 'replace')
+                            # 过滤 JAVA_TOOL_OPTIONS 回显行（含 proxyToken，不落日志）
+                            err = '\n'.join(
+                                ln for ln in err.splitlines()
+                                if not ln.lstrip().startswith('Picked up JAVA_TOOL_OPTIONS'))
                             if err:
                                 logger.warning('jar %s exited on startup: %s', self.class_name, err[:200])
                         except Exception:
@@ -990,6 +1144,20 @@ class JarBridge:
             # com.github.catvod.spider.Proxy 走 call_proxy()，避免把 Map
             # 当成字符串塞进实例方法。
             params['param'] = str(args[0]) if args else '{}'
+        elif method == 'liveContent':
+            # 审查 M-6：SpiderRunner 侧反射调用对任意方法名开放（handle/invoke），
+            # paramNames 对 liveContent 显式映射 {'url'}（jar-runner/SpiderRunner.java
+            # paramNames）。此前未分派一律 ValueError→None，直播源静默全灭。
+            params['url'] = str(args[0]) if args else ''
+        elif method == 'action':
+            # SpiderRunner paramNames 显式映射 action → {'action'}；TVBox 契约
+            # 传 JSON 字符串（JarSpider.action 已 json.dumps）。
+            params['action'] = str(args[0]) if args else ''
+        elif method == 'isVideoFormat':
+            # SpiderRunner 无显式签名表条目，按其兜底位置名 arg0 传参。
+            params['arg0'] = str(args[0]) if args else ''
+        elif method == 'manualVideoCheck':
+            pass  # 无参方法（stub Spider.manualVideoCheck()）
         elif method == 'destroy':
             pass
         else:
@@ -1235,6 +1403,7 @@ class JarBridge:
                 pass  # Windows 上已退出的进程 kill 会抛 Errno 22
             except Exception:
                 pass
+            _reap(proc)
             for pipe in (getattr(proc, 'stdout', None), getattr(proc, 'stderr', None)):
                 try:
                     if pipe:
@@ -1243,8 +1412,33 @@ class JarBridge:
                     pass
         # P1-4：TerminateProcess 不执行 Java shutdown hook，强杀后网盘
         # Cookie 文件（TVBox/*_cookie.txt）无人清理，这里补删（幂等、
-        # 优雅路径重复删除无害）。
-        cleanup_jvm_cookie_files()
+        # 优雅路径重复删除无害）。裸名清理（H-1）：只命中本桥已死且同 jar
+        # 无其它存活桥时的裸名文件；多 jar 并存绝不误删其他 JVM 的登录态。
+        self._cleanup_cookie_files_after_kill()
+
+    def _cleanup_cookie_files_after_kill(self):
+        """H-1：确认目标 JVM 已死且同 jar 无其它存活桥后清理裸名 cookie 文件。
+
+        Java 侧 seedCookieFiles 写的是**裸名**文件（quark_cookie.txt 等五个
+        固定名，SpiderRunner.java:531-537），此前按 jar 只清理摘要名，永远
+        命中不了 → 强杀后明文登录态残留。裸名文件被所有 JVM 共享，只有在这
+        两个前提下才允许清理（失败静默，不影响主流程）：
+        1. 本桥 proc 已确认终止（_kill_proc / destroy 强杀路径各自先
+           _reap/等待退出）；
+        2. 全局注册表 _jar_bridges 中同 jar 再无其它存活桥（注册表按 jar_path
+           建键，同 jar 至多一个条目；若是替代本桥的新桥且其 JVM 活着，说明
+           该 jar 的登录态仍被使用）。
+        """
+        try:
+            with _jar_bridges_lock:
+                other = _jar_bridges.get(self.jar_path)
+                if other is not None and other is not self \
+                        and getattr(other, 'proc', None) is not None:
+                    if other.proc.poll() is None:
+                        return
+            cleanup_jvm_cookie_files(self.jar_path, bare=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 生命周期
 
@@ -1253,12 +1447,24 @@ class JarBridge:
         （shutdown hook 会清理 cookie 缓存目录），1s 未退则强杀。
 
         显式关停清零崩溃计数（用户/热重载主动行为，非崩溃）。
+
+        并发安全（审查 M-17）：先取 `_call_lock`（阻塞等待在途调用完成，
+        destroy 语义允许等待），保证关停不会插在 `_call_inner` 写 stdin 与
+        读响应之间破坏 JSON-RPC 协议流；等待中的 call() 排队者用
+        `_call_lock.acquire(timeout=budget)` 排队，锁被 destroy 长期持有的
+        期间会按各自 budget 超时快速失败，不会无限挂起。
         """
-        with self._lock:
-            proc = self.proc
-            self.proc = None
-            self._pending.clear()
-            self._crash_count = 0
+        with self._call_lock:
+            # 逐个 reject 仍在 _pending 的等待者（_read_loop 只在进程退出时
+            # reject，这里的显式拒绝让超时等待者立即感知关停，而不是等 1s
+            # 强杀后 _read_loop 的兜底——期间也不再有新请求能写 stdin）。
+            self._reject_all(RuntimeError('[L3:jar] jar bridge destroyed'))
+            self._destroyed = True
+            with self._lock:
+                proc = self.proc
+                self.proc = None
+                self._pending.clear()
+                self._crash_count = 0
         # 先从全局缓存移除，避免关停中被 get_or_create 再次取走
         with _jar_bridges_lock:
             _jar_bridges.pop(self.jar_path, None)
@@ -1269,8 +1475,10 @@ class JarBridge:
                 proc.stdin.flush()
             except Exception:
                 pass
+            exited_gracefully = False
             try:
                 proc.wait(timeout=1.0)
+                exited_gracefully = True
             except Exception:
                 try:
                     proc.kill()
@@ -1278,7 +1486,9 @@ class JarBridge:
                     pass
                 # P1-4：优雅退出失败转强杀时，Java hook 大概率未执行，补删
                 # cookie 文件（优雅成功时 hook 已清理，此处重复删除无害）。
-                cleanup_jvm_cookie_files()
+                # 裸名清理（H-1）前提：先确认进程真正退出（_reap），且同 jar
+                # 无其它存活桥（_jar_bridges 中本桥已先行摘除）。
+                _reap(proc)
             finally:
                 for pipe in (getattr(proc, 'stdin', None), getattr(proc, 'stdout', None),
                              getattr(proc, 'stderr', None)):
@@ -1287,6 +1497,8 @@ class JarBridge:
                             pipe.close()
                     except Exception:
                         pass
+            if not exited_gracefully:
+                self._cleanup_cookie_files_after_kill()
 
 
 # ------------------------------------------------------------ 文件工具

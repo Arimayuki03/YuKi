@@ -196,24 +196,58 @@ def _image_tail_config(raw):
     return None
 
 
+def _strip_inline_comment(line):
+    """剥一行里的行内 `//` 注释（区分字符串内外），返回剥除后的行。
+
+    旧实现用 `re.sub(r'(?<!:)\\/\\/[^"\\n]*', ' ', line)`：字符串值内部含
+    `//`（如内嵌 JS 源码注释、URL 之外的富文本）时，会把 `//` 起直到本行
+    第一个引号（含收尾引号）的内容连同引号一起删掉，损坏 JSON。改为
+    状态机逐字符扫描：字符串内（引号包裹，含 `\\` 转义）的 `//` 原样保留，
+    字符串外的 `//` 视为注释起点截断——URL 场景中 `//` 前必是 `:`，但这里
+    无需该启发式：裸字符串外的 `//` 只可能是注释（合法 JSON 中 `//` 不能
+    出现在值区域）。
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for ch in line:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        if ch == '/' and ''.join(out).endswith('/'):
+            # 字符串外的 `//`：注释起点，截断并去掉先前误收的首个 `/`。
+            out.pop()
+            break
+        out.append(ch)
+    return ''.join(out)
+
+
 def _strip_json_comment_lines(text):
     """剥 TVBox 配置常见的注释与首尾空白。
 
     覆盖三类形态：
     - 整行注释：行首 `//...`（老刘备/小盒子/苹果CMS 等）与 `#...`（苹果CMS parses 区）；
     - 行内注释：`{//数据接口...`（分享等）。
-    为避免误伤 URL（https://...），行内 `//` 仅当前一字符不是 ':' 时视为注释
-    （URL 的 `//` 前必为 ':'，注释的 `//` 前为 {、,、空白等）。
+    行内 `//` 用状态机扫描区分引号内外（见 `_strip_inline_comment`）：
+    字符串值内部的 `//`（含 URL `https://...`）原样保留，字符串外的才截断。
     """
-    import re
     lines = []
     for l in (text or '').split('\n'):
         s = l.strip()
         if s.startswith('//') or s.startswith('#'):
             continue
-        # 行内注释：// 前不是 ':'（排除 https://）且不在字符串值内部
-        l = re.sub(r'(?<!:)\/\/[^"\n]*', ' ', l)
-        lines.append(l)
+        # 行内注释：仅剥字符串外的 `//` 及其后内容
+        lines.append(_strip_inline_comment(l))
     return '\n'.join(lines).strip()
 
 
@@ -237,8 +271,8 @@ def parse_config_json(text):
     """解析 CatVod 配置 JSON；非 JSON 时抛出可读的 ValueError（而非裸 JSONDecodeError）。
 
     先尝试严格解析；成功说明是干净 JSON，直接返回——注释剥除只作为兜底。
-    （不能无条件先剥：合法 JSON 字符串值内部也可能含 "//"（如内嵌 JS spider
-    源码的注释），行内剥除会把它们连同后续代码一起吃掉，损坏源码。）
+    （不能无条件先剥：行内剥除虽已用状态机区分引号内外，但严格解析成功就
+    没必要再跑一遍剥除；保留这条路径是为了干净 JSON 的快速通道。）
     最常见的误用是把直播源地址（.txt/.m3u）粘进「配置」框——这里显式识别并给出
     可操作的引导，避免用户只看到 'Expecting value: line 1 column 1'。
     """
@@ -440,17 +474,22 @@ class ConfigManager:
         """
         with self._ctx_lock:
             self._load_generation += 1
-            self._ctx = _LoadContext(url_or_json, allow_local_file=allow_local_file,
-                                     cancel_event=cancel_event, budget=budget,
-                                     generation=self._load_generation,
-                                     salvage_partial=salvage_partial)
+            # 锁内构造并立即以局部变量持有本次加载的 ctx：后续读 `self._ctx`
+            # 是读共享属性，若被并发加载接管（新 load 装上了自己的 ctx），
+            # 旧线程会拿着别人的上下文跑——取消/预算/代际守卫全部失锚。
+            # 代际取本线程锁内自增值，ctx 携带的 generation 与之恒一致。
+            generation = self._load_generation
+            ctx = _LoadContext(url_or_json, allow_local_file=allow_local_file,
+                               cancel_event=cancel_event, budget=budget,
+                               generation=generation,
+                               salvage_partial=salvage_partial)
+            self._ctx = ctx
         if not getattr(self, '_restoring_cache', False):
             self.cache_restored = False
             self.cache_age = 0
         self._cache_documents = {}
         self._cache_manifest_text = ''
         self._progress_cb = progress_cb   # 进度回调只在本次 load 生命周期内有效
-        ctx = self._ctx
         try:
             return self._load_inner(url_or_json, ctx, _text=_text, force=force)
         finally:
@@ -647,17 +686,24 @@ class ConfigManager:
         item, prepared, sub = chosen
         trail.selected_name = str(item.get('name') or '')
         trail.selected_url = sub
-        self._merge_repo_extras(prepared, sub_cfgs, entries, manifest_base=manifest_base)
-        trail.merged = [u for u in sub_cfgs if u != prepared['source_url']]
-        # 运行中快照记录「用户输入的多仓地址」为源，选中子仓为最终 URL。
-        prepared['snapshot'].fetch.source_url = str(url_or_json)
-        prepared['snapshot'].fetch.transport = 'depot'
-        # `_prepare` 里那份 depot 视图是**选中之前**拍的：那时 selected/merged 还是空的，
-        # snapshotId 也还没带子仓名。导入结果页读的是这个 summary，不刷新的话会显示
-        # 「多仓，但没选中任何条目、没合并任何仓」，和 `state()` 里的快照自相矛盾。
-        # 多仓兼容：不同子仓经常重复声明同一个 key；主仓/先出现者优先，
-        # 不应因为重复项让已经成功构建的整份多仓快照被校验丢弃。
-        self._dedupe_depot_sites(prepared)
+        try:
+            self._merge_repo_extras(prepared, sub_cfgs, entries, manifest_base=manifest_base)
+            trail.merged = [u for u in sub_cfgs if u != prepared['source_url']]
+            # 运行中快照记录「用户输入的多仓地址」为源，选中子仓为最终 URL。
+            prepared['snapshot'].fetch.source_url = str(url_or_json)
+            prepared['snapshot'].fetch.transport = 'depot'
+            # `_prepare` 里那份 depot 视图是**选中之前**拍的：那时 selected/merged 还是空的，
+            # snapshotId 也还没带子仓名。导入结果页读的是这个 summary，不刷新的话会显示
+            # 「多仓，但没选中任何条目、没合并任何仓」，和 `state()` 里的快照自相矛盾。
+            # 多仓兼容：不同子仓经常重复声明同一个 key；主仓/先出现者优先，
+            # 不应因为重复项让已经成功构建的整份多仓快照被校验丢弃。
+            self._dedupe_depot_sites(prepared)
+        except Exception:
+            # 合并/去重阶段抛异常（取消、预算或意外错误）时走不到 _validate_and_swap，
+            # 其自带的 discard 分支不会执行——主仓已建好的 Worker/JVM 必须在此释放，
+            # 否则表现为「多仓合并失败一次，进程/JVM 泄漏一批」。
+            self._discard(prepared, reason='multi-repo merge failed')
+            raise
         prepared['summary']['depot'] = trail.to_dict()
         prepared['summary']['snapshotId'] = prepared['snapshot'].snapshot_id
         summary = self._validate_and_swap(prepared, force=force, ctx=ctx)

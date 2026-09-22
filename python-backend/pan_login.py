@@ -152,7 +152,8 @@ def quark_qr_poll(token):
     status = d.get('status')
     if status == 2000000:
         st = ((d.get('data') or {}).get('members') or {}).get('service_ticket') or ''
-        logger.info('qr confirmed token=%s st=%s', token[:26], st[:16])
+        # service_ticket 等同登录凭据（可兑换 Cookie），只记长度不记内容。
+        logger.info('qr confirmed token=%s st_len=%d', token[:26], len(st))
         if not st:
             return {'status': 'error', 'message': '登录成功但未取得票据，请重试'}
         return _exchange_st(s, st)
@@ -168,6 +169,23 @@ def quark_qr_poll(token):
 def render_qr_png(text):
     """渲染任意文本为二维码 PNG data URI（主进程扫码登录用）。"""
     return _render_qr_png(text)
+
+
+# 兜底按名称收集时的白名单（旧形态 jar.items() 只有 name→value、无域信息）。
+# 旧实现按「名称包含 quark.cn」过滤——夸克 Cookie 的名称里根本不含域名，
+# 该分支永不生效；这里列出夸克/UC 会话的真实 Cookie 名（与主分支
+# pan-qr-window.js 浏览器导出注释一致：__puus/__pus/b-user-id/__sdid，
+# 另含同族的 __kp/__kps/__ktd/__uid、ctoken 与 UC 护照 _UP_* 前缀）。
+_QUARK_COOKIE_NAMES = frozenset({
+    '__pus', '__puus', '__kp', '__kps', '__ktd', '__uid',
+    'ctoken', 'b-user-id', '__sdid',
+})
+_QUARK_COOKIE_PREFIXES = ('_UP_',)
+
+
+def _name_in_whitelist(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _QUARK_COOKIE_NAMES or lowered.startswith(_QUARK_COOKIE_PREFIXES)
 
 
 def _exchange_st(s, st):
@@ -192,14 +210,15 @@ def _exchange_st(s, st):
                 parts.append('%s=%s' % (name, cookie.value))
     except Exception:
         parts = []
-    # 按名称收集的兜底（旧形态：jar.items() 只有 name→value，无域信息）
+    # 按名称收集的兜底（旧形态：jar.items() 只有 name→value，无域信息）：
+    # 按夸克/UC 真实 Cookie 名白名单过滤，避免把无关域会话写进网盘配置。
     if not parts:
         try:
             items = s.cookies.items() if hasattr(s.cookies, 'items') else []
         except Exception:
             items = []
         for name, value in items:
-            if 'quark.cn' in str(name).lower() or 'uc.cn' in str(name).lower():
+            if _name_in_whitelist(str(name)):
                 parts.append('%s=%s' % (name, value))
     if not parts:
         logger.warning('account/info 未取得 Cookie: %s %s', r.status_code, body[:120])

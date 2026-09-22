@@ -5,7 +5,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "postinstall": "node scripts/download-binaries.js anime4k || exit 0",
+    "postinstall": "node scripts/download-binaries.js anime4k || (echo [yuki] postinstall: anime4k 着色器下载失败（网络或 binaries.lock.json 完整性校验问题，详见上方 stderr 输出）&& exit 0)",
     "backend": "python-backend\\.venv\\Scripts\\python.exe python-backend\\server.py",
     "smoke": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\smoke.py",
     "test:py": "python-backend\\.venv\\Scripts\\python.exe python-backend\\tests\\run_all.py",

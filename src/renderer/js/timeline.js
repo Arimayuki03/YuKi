@@ -44,6 +44,8 @@ const Timeline = {
     // 无缓存命中时的加载遮罩状态（防闪现：延迟弹出，快响应直接上屏不闪）
     _maskTimer: null,
     _maskShown: false,
+    _loadToken: 0,      // 加载令牌：快速切季度后旧响应不得覆盖新数据（对齐 home.js）
+    _loadAbort: null,   // 与 _loadToken 同代的 AbortController：切季度中止在途请求
 
     async init() {
         if (this._inited) return;
@@ -396,19 +398,38 @@ const Timeline = {
     // ---------------------------------------------------------------- 数据加载
 
     /** 加载遮罩（对齐 Home 防闪现模式）：延迟 300ms 弹出，仅真正进入网络等待才可见；
-     *  数据上屏/失败后收起。缓存在手时不弹（即时上屏，后台静默刷新不打断已见内容）。 */
-    _showLoadMask() {
-        this._hideLoadMask();
-        this._maskTimer = setTimeout(() => { this._maskTimer = null; this._maskShown = true; showLoading(); }, 300);
+     *  数据上屏/失败后收起。缓存在手时不弹（即时上屏，后台静默刷新不打断已见内容）。
+     *  token 归属校验：快速切季度时旧请求的 finally 只撤自己那一轮的遮罩，
+     *  不会提前隐藏新请求的加载态。 */
+    _showLoadMask(token) {
+        this._hideLoadMask(token);
+        this._maskTimer = setTimeout(() => {
+            if (token !== this._loadToken) return; // 已换代：不再弹本轮遮罩
+            this._maskTimer = null; this._maskShown = true; showLoading();
+        }, 300);
     },
-    _hideLoadMask() {
+    _hideLoadMask(token) {
+        if (token != null && token !== this._loadToken) return; // 非本轮请求：不动共享遮罩状态
         if (this._maskTimer) { clearTimeout(this._maskTimer); this._maskTimer = null; }
         if (this._maskShown) { this._maskShown = false; hideLoading(); }
     },
 
+    /** 新一代加载令牌（对齐 home.js）：作废旧世代并中止在途请求，快速切季度后
+     *  旧响应/旧 toast 不再覆盖新数据、新遮罩。 */
+    _nextLoadToken() {
+        if (typeof AbortController === 'function') {
+            if (this._loadAbort) {
+                try { this._loadAbort.abort('superseded'); } catch (e) { /* ignore */ }
+            }
+            this._loadAbort = new AbortController();
+        }
+        return ++this._loadToken;
+    },
+
     async load() {
-        if (this._season === 'current') await this._loadCurrent();
-        else await this._loadSeason(this._season);
+        const token = this._nextLoadToken();
+        if (this._season === 'current') await this._loadCurrent(token);
+        else await this._loadSeason(this._season, token);
     },
 
     /** 缓存键：本周在播固定 'current'，历史季度按季度键区分。 */
@@ -435,13 +456,15 @@ const Timeline = {
         localCacheSet(this._cacheKey(), { calendar: this._calendar }, ttl);
     },
 
-    async _loadCurrent() {
+    async _loadCurrent(token) {
         this._mode = 'current';
         // 命中缓存即时上屏，后台静默刷新；无缓存才弹加载遮罩（延迟弹出防闪现）
         const hit = this._tryCache();
-        if (!hit) this._showLoadMask();
+        if (!hit) this._showLoadMask(token);
         try {
-            const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action');
+            const ac = this._loadAbort; // 与令牌同代：切季度时中止在途请求
+            const rsp = await doAction('kazumiBangumiCalendar', {}, '/kazumi/action', { signal: ac ? ac.signal : undefined });
+            if (token !== this._loadToken) return; // 快速切季度：旧响应作废，不得覆盖新数据
             const cal = (rsp && rsp.calendar) || [];
             if (cal.length) {
                 this._calendar = cal;
@@ -454,22 +477,25 @@ const Timeline = {
                 this._renderGrid();
             }
         } catch (e) {
+            if (token !== this._loadToken) return; // 已换代：旧请求的失败提示不弹
             if (!hit) warnToast('时间表载入失败');
             // 无缓存兜底且日历为空：渲染网络/镜像引导空态（多为无法直连 Bangumi）
             if (!hit && !this._calendar.length) this._renderGrid();
         } finally {
-            if (!hit) this._hideLoadMask();
+            if (!hit) this._hideLoadMask(token);
         }
     },
 
-    async _loadSeason(key) {
+    async _loadSeason(key, token) {
         const range = this._seasonRange(key);
-        if (!range) { this._loadCurrent(); return; }
+        if (!range) { this._loadCurrent(token); return; }
         this._mode = 'season';
         const hit = this._tryCache();
-        if (!hit) this._showLoadMask();
+        if (!hit) this._showLoadMask(token);
         try {
-            const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action');
+            const ac = this._loadAbort; // 与令牌同代：切季度时中止在途请求
+            const rsp = await doAction('kazumiBangumiSeason', { start: range.start, end: range.end }, '/kazumi/action', { signal: ac ? ac.signal : undefined });
+            if (token !== this._loadToken) return; // 快速切季度：旧响应作废，不得覆盖新数据
             const cal = (rsp && rsp.calendar) || [];
             if (cal.length) {
                 this._calendar = cal;
@@ -482,11 +508,12 @@ const Timeline = {
                 this._renderGrid();
             }
         } catch (e) {
+            if (token !== this._loadToken) return; // 已换代：旧请求的失败提示不弹
             if (!hit) warnToast('该季度数据载入失败');
             // 无缓存兜底且日历为空：渲染网络/镜像引导空态
             if (!hit && !this._calendar.length) this._renderGrid();
         } finally {
-            if (!hit) this._hideLoadMask();
+            if (!hit) this._hideLoadMask(token);
         }
     },
 

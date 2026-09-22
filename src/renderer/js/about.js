@@ -20,8 +20,14 @@ const About = {
 
     async render() {
         let version = null;
-        try { version = await window.yuki.appVersion(); } catch (e) { /* 使用内置版本兜底 */ }
-        $('#about-version').text(version || '0.2.2');
+        try { version = await window.yuki.appVersion(); } catch (e) { /* 走下方兜底 */ }
+        // 兜底不硬编码版本号：yuki:app-version 通道失败时用 UA 里的 Chrome 主版本
+        // 拼运行时占位串（如 Chrome/140.0 → 0.2.x-Chrome.140），避免随包过期失真
+        if (!version) {
+            const m = (navigator && navigator.userAgent || '').match(/Chrome\/(\d+)/);
+            version = `0.2.x-Chrome.${m ? m[1] : '?'}`;
+        }
+        $('#about-version').text(version);
     },
 };
 

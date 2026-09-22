@@ -85,22 +85,35 @@ def _drop_locked(bucket, key):
 
 
 def _evict_locked():
-    """条数或总字节超预算时，从最旧命名空间的最久未访问条目开始删。
+    """条数或总字节超预算时，从最久未访问的条目开始删。
 
-    总账判断 O(1)；仅真正超限时做一轮线性扫描找淘汰对象。"""
+    总账判断 O(1)；超限时按「每个命名空间桶首项 = 该桶 LRU 最旧」一轮收集
+    候选、按 last_access 排序后成批删除——不再每删 1 条就全命名空间重扫
+    （旧实现最坏 O(n²) 且全程持全局锁）。若一批删完仍超限（单条大 value），
+    再收集下一轮。"""
     while _total_entries > MAX_TOTAL_ENTRIES or _total_chars > MAX_TOTAL_CHARS:
-        victim_ns = None
-        victim_key = None
-        victim_at = None
+        # 单轮候选：每个非空桶的第一个条目（OrderedDict 首项，桶内最旧）。
+        candidates = []
         for n, b in _store.items():
             if not b:
                 continue
             k, meta = next(iter(b.items()))
-            if victim_at is None or meta[2] < victim_at:
-                victim_ns, victim_key, victim_at = n, k, meta[2]
-        if victim_ns is None:
+            candidates.append((meta[2], n, k))
+        if not candidates:
             break
-        _drop_locked(_store[victim_ns], victim_key)
+        candidates.sort()
+        evicted = False
+        for _at, ns, key in candidates:
+            if _total_entries <= MAX_TOTAL_ENTRIES and _total_chars <= MAX_TOTAL_CHARS:
+                break
+            bucket = _store.get(ns)
+            # 期间无并发写（持 _lock），桶与条目必然仍在；防御式判空兜底。
+            if not bucket or key not in bucket:
+                continue
+            _drop_locked(bucket, key)
+            evicted = True
+        if not evicted:
+            break
 
 
 def set_value(ns, key, value, ttl=None):

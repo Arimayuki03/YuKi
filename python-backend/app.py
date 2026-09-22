@@ -1,5 +1,7 @@
 import os
 import re
+import hashlib
+import threading
 import http_client
 from importlib.machinery import SourceFileLoader
 from urllib.parse import urlparse
@@ -7,15 +9,25 @@ import json
 
 
 def spider(cache, api):
-    # H-4：去 query/fragment 再取 basename，并清洗 Windows 非法字符——
-    # api 形如 '.../spider.py?ver=2' 时旧逻辑取到 'spider.py?ver=2'，
-    # Windows 上属非法文件名导致站点加载失败
+    """遗留入口：宿主已不调用（全仓 grep 仅 site_manager 注释提及；site_manager.load_api
+    只用 download 落盘，加载走 SupervisedRunner 子进程的独立模块装载）。
+
+    保留时注意两点（审查 J 组）：
+    - 模块名掺路径摘要：旧逻辑取 basename 作模块名，同名 spider.py 会让
+      importlib 在 sys.modules 命中另一站点已加载的同名模块——跨站串源；
+    - 该入口在宿主进程直接 exec 远程代码，仅兼容保留，勿在新链路使用。
+    """
     name = os.path.basename(urlparse(str(api)).path) or 'spider.py'
     name = re.sub(r'[\\/:*?"<>|#%]', '_', name)
-    path = os.path.join(cache, name)
+    # 摘要含完整 api（含 query）：同名不同址的插件不得复用同一落盘文件/模块名。
+    # 内联源码（非 http）没有文件名，直接以摘要命名 stem。
+    digest = hashlib.sha1(str(api).encode('utf-8', 'replace')).hexdigest()[:12]
+    stem = name.split('.')[0] if api.startswith('http') else f'inline_{digest}'
+    stem = f'{stem}_{digest}'
+    ext = os.path.splitext(name)[1] if api.startswith('http') else '.py'
+    path = os.path.join(cache, stem + ext)
     download(path, api)
-    name = name.split('.')[0]
-    return SourceFileLoader(name, path).load_module().Spider()
+    return SourceFileLoader(stem, path).load_module().Spider()
 
 
 def download(path, api):
@@ -26,8 +38,19 @@ def download(path, api):
 
 
 def writeFile(path, content):
-    with open(path, 'wb') as f:
-        f.write(content)
+    # 原子写：先写同目录临时文件再 os.replace——子进程 Worker 可能在写入
+    # 中途 import/读取该文件，直接覆盖写会让它拿到半成品（SyntaxError 假败）。
+    tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _fetch(url, timeout=15):

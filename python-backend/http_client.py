@@ -165,8 +165,19 @@ def system_proxy_addr():
     return None
 
 
-def _send(method, url, *, proxy=True, timeout=TIMEOUT_NORMAL, **kw):
-    """走共享 Session 发请求；代理失败回退直连（连接层异常才回退，HTTP 错误不回退）。"""
+def _send(method, url, *, proxy=True, timeout=TIMEOUT_NORMAL, _guard=True, **kw):
+    """走共享 Session 发请求；代理失败回退直连（连接层异常才回退，HTTP 错误不回退）。
+
+    高危#12：基础入口的守卫钩子挂在 _send 上（而非仅 get/post）——config_security
+    的 fetch_guarded、ext_resolver 等「先自行过 guard_url 再经 http_client 取回」
+    的合法链路都走 get/post，同一套钩子不得对它们二次加严（它们的信任根语义
+    与守卫方向是配置层自己的事）。因此钩子只拦**无条件红线**（云元数据地址、
+    高危端口），不做私网判定；后者留在各逐跳守卫路径（fetch_follow_redirects /
+    jar_bridge / go_proxy / spider._guard_spider_url / quickjs._native_http）。
+    `_guard=False` 供守卫模块自身的取回链路显式豁免（同一进程内的可信调用）。
+    """
+    if _guard:
+        guard_basic_url(url)
     if proxy:
         proxies = system_proxies(url)
         if proxies:
@@ -177,6 +188,156 @@ def _send(method, url, *, proxy=True, timeout=TIMEOUT_NORMAL, **kw):
     return get_session().request(method, url, timeout=timeout, **kw)
 
 
+# ---- 高危#12：基础入口守卫钩子 ----------------------------------------------
+# 两类无条件拒绝（默认即生效，不依赖严格开关）：
+# 1. 云元数据地址：169.254.169.254（AWS/GCP/Azure 凭据端点）与 fd00:ec2::254；
+#    其余链路一概放行，只有这里兜底拦——规则/配置把用户请求重定向到元数据
+#    端点是「基础入口」层最贵的 SSRF 收益。
+# 2. 高危端口：即使目标是本机/用户显式内网，这些端口承载 SMTP/数据库等
+#    协议，http 客户端打过去只有「投递攻击载荷 / 探测」一种解释。
+# 回环/私网的放行与否不在此判定：桌面默认策略放行（局域网 CMS/NAS 是生态
+# 常态，spider↔宿主的 KV/代理回环通道也依赖它），严格模式由各逐跳守卫路径
+# （fetch_follow_redirects / jar_bridge / go_proxy / spider / quickjs）经
+# config_security 政策链处理——语义单一来源，本钩子不越权重复判定。
+_CLOUD_METADATA_HOSTS = frozenset(('169.254.169.254', 'metadata.google.internal',
+                                   'metadata.goog'))
+# fd00:ec2::254（AWS IMDS IPv6）按元数据地址单独比对
+_CLOUD_METADATA_IP6 = 'fd00:ec2::254'
+# 端口表对齐常见 SSRF 防护实践（SMTP 25/465/587、数据库 1433/1521/3306/5432/6379/27017、
+# 其他 22/23/445/9200/11211）。不含 80/443/8080 等常规 Web 端口。
+_HIGH_RISK_PORTS = frozenset((
+    22, 23, 25, 110, 143, 445, 465, 587, 993, 995,   # ssh/telnet/mail
+    1433, 1521, 3306, 5432, 6379, 9200, 11211, 27017,  # 数据库/缓存
+))
+
+
+def _normalize_inet_aton_host(h):
+    """inet_aton 风格的非点分/混合进制 IPv4 归一（M-2）。
+
+    覆盖 socket.inet_aton 接受、URL host 上真实可用的绕过形态
+    （`http://0xA9FEA9FE/`、`http://2852039166/`、`http://169.16708094/`、
+    `http://0251.0376.0251.0376/`）：
+    - 1 段：0x 十六进制 / 前导 0 八进制 / 十进制整数，≤ 0xFFFFFFFF；
+    - 2-4 段：右侧段缺省补 0 后最后一段承载剩余字节（inet_aton 语义：
+      a.b 的 b 是 24 位、a.b.c 的 c 是 16 位、a.b.c.d 各 8 位），各段进制
+      独立判定（0x…/前导 0 八进制/十进制）。
+    任一段超界、非法或段数 > 4 返回 None（不是 IP，走域名逻辑，避免误伤）。
+    返回规范点分十进制字符串。
+    """
+    parts = h.split('.')
+    if not 1 <= len(parts) <= 4:
+        return None
+    values = []
+    for i, seg in enumerate(parts):
+        is_last = i == len(parts) - 1
+        max_bits = (32 - 8 * i) if is_last else 8
+        value = _parse_inet_seg(seg, max_bits)
+        if value is None:
+            return None
+        values.append(value)
+    if len(parts) == 1:
+        total = values[0]
+    else:
+        total = 0
+        for i, v in enumerate(values[:-1]):
+            total |= v << (24 - 8 * i)
+        total |= values[-1]
+    return f'{(total >> 24) & 0xFF}.{(total >> 16) & 0xFF}.{(total >> 8) & 0xFF}.{total & 0xFF}'
+
+
+_DIGITS_HEX = frozenset('0123456789abcdefABCDEF')
+_DIGITS_OCT = frozenset('01234567')
+_DIGITS_DEC = frozenset('0123456789')
+
+
+def _parse_inet_seg(seg, max_bits):
+    """解析单个 inet_aton 段：0x 十六进制 / 前导 0 八进制 / 十进制。
+
+    max_bits 为该段可承载的位宽（值上限 = 2^max_bits - 1）。返回 None 表示
+    本段不是数字（空段、符号、非 ASCII 数字、其它进制前缀）——调用方据此
+    判定「非 IP 走域名逻辑」。
+    """
+    if not seg:
+        return None
+    limit = (1 << max_bits) - 1
+    try:
+        if seg.startswith(('0x', '0X')):
+            body = seg[2:]
+            if not body or len(body) > 8 or not all(c in _DIGITS_HEX for c in body):
+                return None
+            value = int(body, 16)
+        elif len(seg) > 1 and seg[0] == '0':
+            body = seg[1:]
+            if len(body) > 11 or not all(c in _DIGITS_OCT for c in body):
+                return None
+            value = int(body, 8)
+        else:
+            if not all(c in _DIGITS_DEC for c in seg):
+                return None
+            value = int(seg, 10)
+    except (ValueError, OverflowError):
+        return None
+    return value if value <= limit else None
+
+
+def _is_cloud_metadata_host(host):
+    """host 是否为云元数据端点（v4 地址字面量 / IPv6 IMDS / 约定域名）。
+
+    覆盖常见绕过写法：IPv4-mapped IPv6（::ffff:169.254.169.254）、
+    非十进制 IPv4（八进制/十六进制/整数形态——`0xA9FEA9FE`、`2852039166`、
+    `0251.0176.0251.0376`，经 inet_aton 风格归一后比对；ipaddress 对这些
+    形态直接抛 ValueError，不能只靠它，M-2）。DNS 形式的变体（nip.io 等
+    通配域解析到元数据段）不在此拦——那是 host_scope/DNS 分级的职责，
+    逐跳守卫路径已覆盖。
+    """
+    h = str(host or '').strip('[]').lower()
+    if not h:
+        return False
+    if h in _CLOUD_METADATA_HOSTS:
+        return True
+    if h == _CLOUD_METADATA_IP6:
+        return True
+    # M-2：先做 inet_aton 风格归一（八进制/十六进制/整数形态）；归一失败
+    # 且 ipaddress 也拒绝的 host 按域名放行（避免误伤）。
+    normalized = _normalize_inet_aton_host(h)
+    if normalized is not None:
+        return normalized == '169.254.169.254'
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    if getattr(ip, 'ipv4_mapped', None) is not None:
+        ip = ip.ipv4_mapped
+    return str(ip) in ('169.254.169.254', _CLOUD_METADATA_IP6)
+
+
+def guard_basic_url(url):
+    """基础入口（get/post/_send）的无条件 SSRF 钩子。
+
+    只拦「无论信任根是谁都不该由 http 客户端去打」的地址：云元数据端点、
+    高危端口。loopback/私网的放行与否由 config_security 政策链（逐跳守卫路径）
+    决定，本钩子不越权判定——否则 config_security.fetch_guarded 等以 get 为
+    传输层、自带信任根语义的链路会被这里二次加严破坏。
+    守卫模块缺席（异常）时放行：钩子失败不改变存量行为（与 _guard_hop 的
+    fail-open 口径一致）。
+    """
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(str(url or ''))
+        if (parts.scheme or '').lower() not in ('http', 'https'):
+            return
+        if _is_cloud_metadata_host(parts.hostname):
+            raise ValueError(f'cloud metadata endpoint blocked: {url}')
+        port = parts.port
+        if port is not None and int(port) in _HIGH_RISK_PORTS:
+            raise ValueError(f'high-risk port {port} blocked: {url}')
+    except ValueError:
+        raise
+    except Exception:
+        return
+
+
 def _with_default_ua(kw):
     headers = dict(kw.pop('headers', None) or {})
     headers.setdefault('User-Agent', DEFAULT_UA)
@@ -185,12 +346,19 @@ def _with_default_ua(kw):
 
 
 def get(url, *, timeout=TIMEOUT_NORMAL, proxy=True, **kw):
-    """GET（参数透传 requests：params/headers/cookies/verify/stream/…）。"""
+    """GET（参数透传 requests：params/headers/cookies/verify/stream/…）。
+
+    高危#12：经 _send 的守卫钩子无条件拒绝云元数据地址与高危端口（
+    `_guard=False` 可显式豁免，仅供进程内可信链路使用）。
+    """
     return _send('GET', url, proxy=proxy, timeout=timeout, **_with_default_ua(kw))
 
 
 def post(url, *, timeout=TIMEOUT_NORMAL, proxy=True, **kw):
-    """POST（参数透传 requests：params/data/json/headers/cookies/verify/…）。"""
+    """POST（参数透传 requests：params/data/json/headers/cookies/verify/…）。
+
+    守卫语义与 get 相同（见 get 的 docstring）。
+    """
     return _send('POST', url, proxy=proxy, timeout=timeout, **_with_default_ua(kw))
 
 

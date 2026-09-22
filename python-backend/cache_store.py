@@ -33,6 +33,22 @@ class CacheStore:
         self._total = 0
         self.max_bytes = MAX_TOTAL_BYTES   # 实例级可覆盖（测试用）
         os.makedirs(dirpath, exist_ok=True)
+        # 启动清理（L-…崩溃残留）：set() 崩溃留下的 *.tmp*（半截 JSON）永不被
+        # get/set/扫描识别，只能靠这里回收。进程启动时清一次即可——运行中的
+        # set() 失败路径本就自带 remove 清理。
+        self._cleanup_tmp_files()
+
+    def _cleanup_tmp_files(self):
+        """删除目录内崩溃残留的临时文件（*.tmp<pid>-<tid> 形态）。"""
+        try:
+            for fn in os.listdir(self.dir):
+                if '.tmp' in fn:
+                    try:
+                        os.remove(os.path.join(self.dir, fn))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     def _path(self, key):
         name = hashlib.sha1(key.encode('utf-8')).hexdigest()
@@ -138,6 +154,16 @@ class CacheStore:
                 self.delete(key)  # 过期文件惰性删除
                 return ''
             with self.lock:
+                # 锁内复核：文件读在锁外，期间并发 set() 可能已把新值写进
+                # mem（set 先更 mem 后落盘）——直接回写会把 mem 里的新值
+                # 覆盖成文件里的陈旧值。复核命中即以 mem 为准。
+                fresh = self.mem.get(key)
+                if fresh is not None:
+                    f_value, f_exp = fresh
+                    if self._expired(f_exp):
+                        self.delete(key)
+                        return ''
+                    return f_value
                 self.mem[key] = (value, exp)
                 self._key_by_name[self._name_of(key)] = key
             return value

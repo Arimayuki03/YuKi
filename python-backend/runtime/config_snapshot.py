@@ -464,7 +464,11 @@ class ConfigSnapshot:
 def make_fetch_result(source_url, *, transport='inline', raw=b'', final_url='',
                       status=0, etag='', last_modified='', redirects=None,
                       disguise='', encoding='', started=None, from_cache=False):
-    now = time.time()
+    # 耗时只能用同一时钟相减：`started` 约定为 time.monotonic()（config.py 全部
+    # 调用点如此），此前用 time.time() - monotonic() 相减得到 ~1.8e12 ms 的垃圾
+    # 值。fetched_at 是墙钟（展示用），elapsed_ms 是单调钟（测量用），两者独立。
+    now_monotonic = time.monotonic()
+    now_wall = time.time()
     return ConfigFetchResult(
         source_url=str(source_url or ''),
         final_url=str(final_url or ''),
@@ -477,8 +481,8 @@ def make_fetch_result(source_url, *, transport='inline', raw=b'', final_url='',
         redirects=list(redirects or []),
         disguise=str(disguise or ''),
         encoding=str(encoding or ''),
-        elapsed_ms=int(max(0.0, now - started) * 1000) if started else 0,
-        fetched_at=now,
+        elapsed_ms=int(max(0.0, now_monotonic - started) * 1000) if started else 0,
+        fetched_at=now_wall,
         from_cache=bool(from_cache),
     )
 

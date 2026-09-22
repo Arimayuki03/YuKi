@@ -211,6 +211,7 @@ function createSearchPage(cfg) {
             const myToken = ++this._searchToken; // M-30a：搜索令牌——旧词在途回调不作数
             // T39：每页条数取「搜索页」单独设置（默认 20）
             this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
+            if (myToken !== this._searchToken) return; // await 期间已有新搜索发起：旧词作废，不得覆盖新词状态
             this.stop();
             $(cfg.resultsSel).empty();
             this._grpLists = {}; // 新搜索：重置分组数据

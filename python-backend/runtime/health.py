@@ -124,42 +124,45 @@ class SiteHealth:
             err.site_key = err.site_key or self.site_key
             err.runtime = err.runtime or self.runtime
             self.last_error = err
-            self.healthy = False
             if err.code.endswith('_CANCELLED'):
-                pass
-            elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN':
-                retry_ms = int((err.details or {}).get('retryAfterMs') or 0)
-                self.circuit_open_until = max(
-                    self.circuit_open_until, time.time() + retry_ms / 1000.0)
-            elif err.retryable:
-                # 读-改-写：无锁时 16 路并发失败互相覆盖，计数停在 1 → 熔断永不打开
-                if self.failure_stage == err.stage:
-                    self.consecutive_failures += 1
-                else:
-                    self.failure_stage = err.stage
-                    self.consecutive_failures = 1
-                # 与 CircuitBreaker.failure_threshold 同值；权威判定在 Supervisor 侧，
-                # 这里只是 apply_runtime_state 回填前的本地视图兜底
-                if self.consecutive_failures >= 3:
-                    self.circuit_open_until = time.time() + 60
-            else:
-                self.consecutive_failures = 0
-            if err.code == 'L2_SITE_REQUIRES_ANDROID':
-                self.runtime = 'android'
-                self.compatibility = 'C2'
-                self.state = 'requires_android'
-            elif self.runtime == 'unsupported' or err.code == 'L2_SITE_UNSUPPORTED':
-                self.state = 'unsupported'
-            elif err.code.endswith('_CANCELLED'):
+                # 用户取消（*_CANCELLED，见 errors.py 的 CancelledError/asyncio
+                # 映射）不是站点故障：健康站点不得被打成不健康，也不计连续
+                # 失败/熔断（熔断器同理，见 circuit.record_failure 的
+                # _CANCELLED 分支）。仅保留 last_error 供诊断页展示。
                 self.state = 'cancelled'
-            elif err.code == 'L3_RUNTIME_CREDENTIALS_REQUIRED':
-                self.state = 'degraded'
-            elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN' or self.circuit_open_until > time.time():
-                self.state = 'circuit-open'
-            elif err.code.endswith('_TIMEOUT'):
-                self.state = 'timeout'
             else:
-                self.state = 'unavailable'
+                self.healthy = False
+                if err.code == 'L3_RUNTIME_CIRCUIT_OPEN':
+                    retry_ms = int((err.details or {}).get('retryAfterMs') or 0)
+                    self.circuit_open_until = max(
+                        self.circuit_open_until, time.time() + retry_ms / 1000.0)
+                elif err.retryable:
+                    # 读-改-写：无锁时 16 路并发失败互相覆盖，计数停在 1 → 熔断永不打开
+                    if self.failure_stage == err.stage:
+                        self.consecutive_failures += 1
+                    else:
+                        self.failure_stage = err.stage
+                        self.consecutive_failures = 1
+                    # 与 CircuitBreaker.failure_threshold 同值；权威判定在 Supervisor 侧，
+                    # 这里只是 apply_runtime_state 回填前的本地视图兜底
+                    if self.consecutive_failures >= 3:
+                        self.circuit_open_until = time.time() + 60
+                else:
+                    self.consecutive_failures = 0
+                if err.code == 'L2_SITE_REQUIRES_ANDROID':
+                    self.runtime = 'android'
+                    self.compatibility = 'C2'
+                    self.state = 'requires_android'
+                elif self.runtime == 'unsupported' or err.code == 'L2_SITE_UNSUPPORTED':
+                    self.state = 'unsupported'
+                elif err.code == 'L3_RUNTIME_CREDENTIALS_REQUIRED':
+                    self.state = 'degraded'
+                elif err.code == 'L3_RUNTIME_CIRCUIT_OPEN' or self.circuit_open_until > time.time():
+                    self.state = 'circuit-open'
+                elif err.code.endswith('_TIMEOUT'):
+                    self.state = 'timeout'
+                else:
+                    self.state = 'unavailable'
         return self
 
     def apply_runtime_state(self, state):

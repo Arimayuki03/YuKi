@@ -66,6 +66,18 @@ test('_ts: 秒转 ASS 时间轴', () => {
     assert.equal(MpvPlayer._ts(-5), '00:00:00.00'); // 负值钳制 0
 });
 
+test('escapeOsdText: 裸 $ 翻倍（mpv 属性展开占位符转义）', () => {
+    // 回归：曾写成 replace(/\$/g, '$$')，'$$' 在 replace 字符串替换串里是
+    // 「字面 $」转义，等于空操作；必须 'a$b' → 'a$$b' 才能在 mpv OSD 里
+    // 呈现字面 $（$$ 是 mpv 的字面 $ 占位符）。
+    assert.equal(MpvPlayer.escapeOsdText('a$b'), 'a$$b');
+    assert.equal(MpvPlayer.escapeOsdText('$ ${title} $?{prop}x'), '$$ $${title} $$?{prop}x');
+    assert.equal(MpvPlayer.escapeOsdText('无美元符号'), '无美元符号');
+    assert.equal(MpvPlayer.escapeOsdText(''), '');
+    assert.equal(MpvPlayer.escapeOsdText(null), '');
+    assert.equal(MpvPlayer.escapeOsdText(undefined), '');
+});
+
 test('property-change 持续缓存播放进度与时长', () => {
     const p = Object.create(MpvPlayer.prototype);
     p._pending = new Map();

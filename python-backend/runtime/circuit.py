@@ -13,6 +13,10 @@ class CircuitBreaker:
 
     取消不计失败；不可重试错误保持阻断，直到配置/Cookie 更新或用户显式
     触发探测。这样不会把凭据缺失当成网络抖动反复重启 Worker。
+
+    「排队超时」也不计失败（见 record_failure）：请求根本没被 Worker 执行，
+    它反映的是自身队列拥挤/预算耗尽，而不是站点真的坏了——尤其慢源在半开
+    探测阶段前后台排队超时，会把刚放行的探测直接打回 open，站点被越冻越死。
     """
 
     def __init__(self, failure_threshold=3, open_seconds=60.0, half_open_backoff_seconds=None):
@@ -80,6 +84,16 @@ class CircuitBreaker:
                 self._state = 'blocked'
                 self._half_open_in_flight = False
                 self._open_until = 0.0
+                return
+            if error.code in ('L3_RUNTIME_TIMEOUT', 'L2_SITE_TIMEOUT') and getattr(
+                    error, 'details', None).get('queued'):
+                # 排队超时（supervisor 打了 queued 标记）：请求在 Supervisor 队列/
+                # 调用锁上等超了预算，从未被准入执行。不计失败也不结束半开探测位
+                # ——探测名额归还，让下一个请求继续探测；否则慢源「排队等超」会把
+                # half-open 直接打回 open，站点在无任何真实失败的情况下持续熔断。
+                # 注意只认显式标记：Worker 侧真实执行超时（无 queued 标记）照常计数。
+                if self._state == 'half-open':
+                    self._half_open_in_flight = False
                 return
             stage = str(error.stage or 'runtime')
             if stage == self._failure_stage:

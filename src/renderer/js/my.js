@@ -84,7 +84,11 @@ const My = {
     /** Bangumi 收藏（合并进收藏网格用）：拉取当前用户收藏，映射为收藏条目（site='bangumi'、tag 对应状态）。
      *  持久缓存（localStorage）：切页/重启即时上屏，不靠时间过期——只在收藏状态变动(FavHub)或
      *  点同步按钮时 force 重拉。force 之外命中缓存直接返回，避免每次进页面都等网络（加载慢/统计页收藏显示不出）。
-     *  无 Token/失败返回空数组（不影响本地收藏展示）。 */
+     *  无 Token/失败返回空数组（不影响本地收藏展示）。
+     *  在途合并：force 请求进行中时，后续 force/非 force 调用复用同一 Promise——
+     *  连续切换收藏（批量标记/连点）只发一次网络请求，且不会出现迟到旧响应覆盖新数据。
+     *  非 force 请求在途时随后的 force 调用不复用（直接再发）：旧请求拿的是变更前
+     *  数据，复用会把过期结果落盘渲染且不自愈。 */
     async _getBangumiItems(force) {
         // 内存缓存优先（同一会话内多次渲染复用，最快）
         if (!force && Array.isArray(this._bgmCache)) return this._bgmCache;
@@ -95,6 +99,22 @@ const My = {
                 if (Array.isArray(cached)) { this._bgmCache = cached; this._bgmCacheTs = Date.now(); return cached; }
             } catch (e) { /* ignore */ }
         }
+        // 在途请求复用（防抖合并）：force 拉取进行中时，后续 force/非 force 调用
+        // 挂到同一 Promise，避免 FavHub 连续广播时并发重复请求互相覆盖。
+        // 非 force 在途时随后的 force 调用不复用——见上方注释，直接再发一次强制拉取。
+        if (this._bgmInFlight && (!force || this._bgmInFlightForce)) return this._bgmInFlight;
+        const req = this._fetchBangumiItems().finally(() => {
+            // 仅当仍是当前在途请求时才清空：force 取代在途非 force 后，
+            // 迟到收尾的旧请求不得清掉新请求的在途标记
+            if (this._bgmInFlight === req) { this._bgmInFlight = null; this._bgmInFlightForce = false; }
+        });
+        this._bgmInFlightForce = !!force;
+        this._bgmInFlight = req;
+        return req;
+    },
+
+    /** _getBangumiItems 的实际网络拉取（缓存判断/在途合并之后才进入）。 */
+    async _fetchBangumiItems() {
         try {
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
             if (!token) {

@@ -234,7 +234,20 @@ class TestServerAttachesPanToken(unittest.TestCase):
 
 
 class TestJarCookieCleanup(unittest.TestCase):
-    """P1-4：强杀 JVM 后补删 TVBox/*_cookie.txt 明文登录态。"""
+    """P1-4 / H-1：强杀 JVM 后补删 TVBox/*_cookie.txt 明文登录态。
+
+    Java 侧 seedCookieFiles（SpiderRunner.java:531-537）写的是**裸名**文件
+    （quark/uc/bili/189/diy 固定名，共享 TVBox/ 目录）——H-1 修复后：
+
+    - ``cleanup_jvm_cookie_files()``（全局兜底，应用退出）：清所有 *_cookie.txt；
+    - ``cleanup_jvm_cookie_files(jar_path)``：只清该 jar 的摘要名文件
+      （不误伤共享裸名——其他存活 JVM 可能仍在用）；
+    - ``cleanup_jvm_cookie_files(jar_path, bare=True)``：追加清裸名文件，
+      仅限强杀路径在确认目标 JVM 已死且同 jar 无其它存活桥时调用。
+    """
+
+    BARE_NAMES = ('quark_cookie.txt', 'uc_cookie.txt', 'bili_cookie.txt',
+                  '189_cookie.txt', 'diy_cookie.txt')
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='yuki-sec-jar-')
@@ -249,12 +262,24 @@ class TestJarCookieCleanup(unittest.TestCase):
 
     @staticmethod
     def _seed(tvbox):
-        cookie_names = ('quark_cookie.txt', 'uc_cookie.txt', 'bili_cookie.txt')
+        cookie_names = TestJarCookieCleanup.BARE_NAMES
         keep_names = ('playlist.json', 'sub.ass', 'other_cookie.bak')
         for name in cookie_names + keep_names:
             with open(os.path.join(tvbox, name), 'wb') as f:
                 f.write(b'secret')
         return cookie_names, keep_names
+
+    @staticmethod
+    def _digest(jar_path):
+        import hashlib
+        base = os.path.basename(jar_path).lower()
+        digest = hashlib.sha1(jar_path.encode('utf-8', 'replace')).hexdigest()[:10]
+        return f'{base}_{digest}_cookie.txt'
+
+    def _make_bridge(self, jar_path, proc=None):
+        bridge = jar_bridge.JarBridge(jar_path)
+        bridge.proc = proc
+        return bridge
 
     def test_deletes_only_cookie_files(self):
         cookie_names, keep_names = self._seed(self.tvbox)
@@ -271,18 +296,185 @@ class TestJarCookieCleanup(unittest.TestCase):
         # cookie 文件已被首次清理删光；非 cookie 文件保留（不重复删 ≠ 全清空）
         for name in ('playlist.json', 'sub.ass', 'other_cookie.bak'):
             self.assertTrue(os.path.exists(os.path.join(self.tvbox, name)), name)
-        for name in ('quark_cookie.txt', 'uc_cookie.txt', 'bili_cookie.txt'):
+        for name in self.BARE_NAMES:
             self.assertFalse(os.path.exists(os.path.join(self.tvbox, name)), name)
 
     def test_missing_dir_is_safe(self):
         jar_bridge._JVM_COOKIE_DIR = os.path.join(self.tmp, 'no-such-dir')
         jar_bridge.cleanup_jvm_cookie_files()  # 目录缺失直接返回，不抛
+        jar_bridge.cleanup_jvm_cookie_files('x.jar', bare=True)  # 同样不抛
 
     def test_mixed_case_suffix_still_removed(self):
         with open(os.path.join(self.tvbox, 'Quark_Cookie.TXT'), 'wb') as f:
             f.write(b'x')
         jar_bridge.cleanup_jvm_cookie_files()
         self.assertEqual(os.listdir(self.tvbox), [])
+
+    # ------------------------------------------------- H-1：按 jar 裸名清理
+
+    def test_jar_path_without_bare_keeps_bare_files(self):
+        """按 jar 摘要清理不命中裸名（H-1 的旧缺陷形态，现在是有意为之：
+        裸名可能被其他存活 JVM 使用，摘要模式绝不触碰）。"""
+        self._seed(self.tvbox)
+        jar = os.path.join(self.tmp, 'spider.jar')
+        jar_bridge.cleanup_jvm_cookie_files(jar)
+        for name in self.BARE_NAMES:
+            self.assertTrue(os.path.exists(os.path.join(self.tvbox, name)), name)
+        # 但摘要名文件会被清理
+        digest_name = self._digest(jar)
+        with open(os.path.join(self.tvbox, digest_name), 'wb') as f:
+            f.write(b'x')
+        jar_bridge.cleanup_jvm_cookie_files(jar)
+        self.assertFalse(os.path.exists(os.path.join(self.tvbox, digest_name)))
+
+    def test_bare_mode_clears_java_seeded_files(self):
+        """bare=True 清理 Java 实际写出的裸名文件（H-1 修复本体）；
+        非 cookie 文件（含 *_cookie 后缀之外的任意文件）保留。"""
+        _, keep_names = self._seed(self.tvbox)
+        jar = os.path.join(self.tmp, 'spider.jar')
+        jar_bridge.cleanup_jvm_cookie_files(jar, bare=True)
+        for name in self.BARE_NAMES:
+            self.assertFalse(os.path.exists(os.path.join(self.tvbox, name)), name)
+        for name in keep_names:
+            self.assertTrue(os.path.exists(os.path.join(self.tvbox, name)), name)
+
+    def test_kill_proc_cleans_bare_when_no_live_bridge(self):
+        """_kill_proc 强杀后清理裸名文件（无其他存活桥）。"""
+        jar = os.path.join(self.tmp, 'spider.jar')
+        self._seed(self.tvbox)
+        bridge = self._make_bridge(jar)
+        try:
+            bridge._kill_proc()
+            for name in self.BARE_NAMES:
+                self.assertFalse(os.path.exists(os.path.join(self.tvbox, name)), name)
+        finally:
+            jar_bridge._jar_bridges.pop(jar, None)
+
+    def test_kill_proc_skips_bare_when_other_bridge_alive(self):
+        """同 jar 存在其他存活桥（如刚被替换的新桥）→ 不清裸名（登录态仍在用）。"""
+        jar = os.path.join(self.tmp, 'spider.jar')
+        self._seed(self.tvbox)
+
+        old_bridge = self._make_bridge(jar)
+        live_bridge = self._make_bridge(jar, proc=_FakeLiveProc())
+        jar_bridge._jar_bridges[jar] = live_bridge
+        try:
+            old_bridge._kill_proc()
+            for name in self.BARE_NAMES:
+                self.assertTrue(os.path.exists(os.path.join(self.tvbox, name)), name)
+        finally:
+            jar_bridge._jar_bridges.pop(jar, None)
+
+    def test_kill_proc_cleans_bare_when_other_bridge_dead(self):
+        """同 jar 的其他桥已死（proc 非 None 但已退出）→ 照常清裸名。"""
+        jar = os.path.join(self.tmp, 'spider.jar')
+        self._seed(self.tvbox)
+
+        old_bridge = self._make_bridge(jar)
+        dead_bridge = self._make_bridge(jar, proc=_FakeDeadProc())
+        jar_bridge._jar_bridges[jar] = dead_bridge
+        try:
+            old_bridge._kill_proc()
+            for name in self.BARE_NAMES:
+                self.assertFalse(os.path.exists(os.path.join(self.tvbox, name)), name)
+        finally:
+            jar_bridge._jar_bridges.pop(jar, None)
+
+    def test_destroy_force_kill_path_cleans_bare(self):
+        """destroy() 优雅退出失败转强杀 → 清裸名；优雅成功 → 不动裸名。"""
+        jar = os.path.join(self.tmp, 'spider.jar')
+        self._seed(self.tvbox)
+
+        # 强杀路径：wait 抛超时 → kill → 清理
+        bridge = self._make_bridge(jar, proc=_FakeKillProc())
+        try:
+            bridge.destroy()
+            for name in self.BARE_NAMES:
+                self.assertFalse(os.path.exists(os.path.join(self.tvbox, name)), name)
+            self.assertTrue(bridge._destroyed)
+        finally:
+            jar_bridge._jar_bridges.pop(jar, None)
+
+        # 优雅路径：wait 立即返回 → 不清理（Java shutdown hook 已处理）
+        self._seed(self.tvbox)
+        bridge = self._make_bridge(jar, proc=_FakeGracefulProc())
+        try:
+            bridge.destroy()
+            for name in self.BARE_NAMES:
+                self.assertTrue(os.path.exists(os.path.join(self.tvbox, name)), name)
+        finally:
+            jar_bridge._jar_bridges.pop(jar, None)
+
+    def test_kill_proc_swallow_errors(self):
+        """注册表异常/proc 异常都不得让 _kill_proc 抛出（清理绝不影响主流程）。"""
+        jar = os.path.join(self.tmp, 'spider.jar')
+        bridge = self._make_bridge(jar, proc=None)
+
+        class Boom:
+            def __enter__(self):
+                raise RuntimeError('boom')
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(jar_bridge, '_jar_bridges_lock', Boom()):
+            bridge._kill_proc()  # 不抛即通过
+
+
+class _FakeLiveProc:
+    """替代存活 JVM 的 proc 桩（poll() 永远返回 None）。"""
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        raise TimeoutError('still running')
+
+    def kill(self):
+        pass
+
+
+class _FakeDeadProc:
+    """已退出进程的 proc 桩。"""
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class _FakeKillProc:
+    """destroy() 强杀路径桩：wait 超时，kill 后立即退出。"""
+
+    def __init__(self):
+        self.killed = False
+
+    def poll(self):
+        return 1 if self.killed else None
+
+    def wait(self, timeout=None):
+        raise TimeoutError('no graceful exit')
+
+    def kill(self):
+        self.killed = True
+
+    stdin = stdout = stderr = None
+
+
+class _FakeGracefulProc:
+    """destroy() 优雅退出桩：wait 立即返回。"""
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    stdin = stdout = stderr = None
 
 
 class TestWorkerHoststateInjection(unittest.TestCase):

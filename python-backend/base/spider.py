@@ -24,8 +24,28 @@ def _guard_spider_url(url):
 
     Python spider 是不可信代码（与 JS 同级）：第一跳与重定向每一跳都复检，
     trust_root 留空 = 无受信 origin。守卫模块缺席时原样返回（行为同旧版）。
+    宿主回环豁免：`http://127.0.0.1:<port>/...` 是 spider 与宿主进程之间的
+    进程内通道（KV 缓存 /cache、本地代理 /proxy、js2Proxy），hoststate 注入的
+    端口只由宿主掌握——远端配置/远端代码派生不出这个 origin，不构成
+    「借 spider 探测内网」的跳板。严格 SSRF 模式下也必须放行，否则
+    getCache/setCache 全部被守卫拒绝（审查 J 组）。其余地址仍逐跳复检。
     """
+    if _is_host_loopback(url):
+        return url
     return http_client._guard_hop(url, kind='site')
+
+
+def _is_host_loopback(url):
+    """请求是否指向宿主自身的回环缓存/代理通道（127.0.0.1/localhost + 注入端口）。"""
+    try:
+        parts = urllib.parse.urlsplit(str(url or ''))
+        host = (parts.hostname or '').lower()
+        port = parts.port
+    except Exception:
+        return False
+    if port != hoststate.get_port() or port <= 0:
+        return False
+    return host in ('127.0.0.1', 'localhost', '::1')
 
 
 class Spider(metaclass=ABCMeta):
@@ -137,6 +157,8 @@ class Spider(metaclass=ABCMeta):
                     break
                 location = rsp.headers.get('Location') or ''
                 rsp.close()
+                # 跳转目标若是宿主回环通道（/proxy 重定向等）同样豁免，否则严格
+                # 模式下宿主自己的 30x Location 都跟不出去。
                 current = _guard_spider_url(urllib.parse.urljoin(current, location))
             else:
                 raise ValueError(f'too many redirects (>5): {url}')
@@ -172,6 +194,11 @@ class Spider(metaclass=ABCMeta):
         params = {'do': 'py'}
         if getattr(self, 'site_key', ''):
             params['siteKey'] = str(self.site_key)
+        # /proxy 已强制 token（R 组）：生成的播放地址必须自带有效 token，
+        # 否则 mpv 消费该地址时被 401 拒播。宿主未配置 token（仅测试）时不补。
+        token = str(hoststate.get_token() or '')
+        if token:
+            params['token'] = token
         return hoststate.get_proxy_url(local) + '?' + urllib.parse.urlencode(params)
 
     def log(self, msg):
