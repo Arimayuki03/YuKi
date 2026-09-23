@@ -48,6 +48,29 @@ class _FakeThread:
         return self._alive
 
 
+def _await_threads(w, timeout=10.0):
+    """等待 _SegStream 的全部下载线程真正收尾（join），不做存活断言。
+
+    ``stream()`` 收到段哨兵即返回，此刻生产者线程**仍在收尾**：它刚从
+    ``_put(q, None)`` 返回、正退出 ``_dl`` 栈帧并销毁线程对象，这段窗口内
+    ``is_alive()`` 仍为 True——这是完全正当的中间态，不是线程泄漏。
+
+    裸 ``assertFalse(t.is_alive())`` 会把这个窗口判成失败。窗口通常只有微秒
+    级，单机空跑几乎撞不上；机器负载高时（编排跑到本阶段时系统较忙）主线程
+    恰好在这个窗口里被调度，断言就偶发失败——本文件此前 flaky 的根因即此。
+    先 join 再断言是唯一可靠的终止判定：join 超时后仍存活才是真泄漏。
+    """
+    for t in w._threads:
+        t.join(timeout)
+
+
+def _assert_threads_stopped(case, w, timeout=10.0):
+    """断言全部下载线程已收尾（join 之后才判定，见 _await_threads）。"""
+    _await_threads(w, timeout)
+    for i, t in enumerate(w._threads):
+        case.assertFalse(t.is_alive(), '段 %d 下载线程未收尾（泄漏）' % i)
+
+
 class _FakeResponse:
     """最小 _fetch 响应：status 206 + 可迭代 chunk。"""
 
@@ -227,22 +250,28 @@ class TestQueueFullSegStream(unittest.TestCase):
         w = go_proxy._SegStream('https://cdn.test/a.mp4', {}, 0, 11, 3)
         w.get_timeout = 5.0
         segs = [[b'ab', b'cd'], [b'ef', b'gh'], [b'ij']]
-        # H-6 后上游契约：206 + 与请求区间一致的 Content-Range
-        responses = [
-            _FakeResponse(segs[i], status=206,
-                          headers={'Content-Range': 'bytes %d-%d/12'
-                                   % (i * 4, min((i + 1) * 4 - 1, 11))})
-            for i in range(3)
-        ]
+        # H-6 后上游契约：206 + 与请求区间一致的 Content-Range。
+        # 替身按请求的 (start, end) 区间取响应，而不是按调用到达序 pop(0)：
+        # 段线程并发启动，到达 _fetch 的先后顺序不保证是 0,1,2；pop(0) 会把
+        # 段 1 的响应发给先到的段 0，Content-Range 校验随即把它判为区间错位
+        # 进入重试阶梯，三次耗尽后列表已被取空 → 'pop from empty list' →
+        # 错误哨兵入队 → stream() 抛错、字节序断言失败。与线程收尾竞态同为
+        # 本文件在编排下偶发失败的根因（负载高时到达序更容易乱）。
+        by_range = {}
+        for i in range(3):
+            s = i * 4
+            e = min((i + 1) * 4 - 1, 11)
+            by_range[(s, e)] = _FakeResponse(
+                segs[i], status=206,
+                headers={'Content-Range': 'bytes %d-%d/12' % (s, e)})
         with patch.object(go_proxy, '_fetch',
                           side_effect=lambda url, headers, s, e, timeout=60:
-                              responses.pop(0)):
+                              by_range[(s, e)]):
             w.start()
             out = io.BytesIO()
             w.stream(out)
         self.assertEqual(out.getvalue(), b'abcdefghij')
-        for t in w._threads:
-            self.assertFalse(t.is_alive())
+        _assert_threads_stopped(self, w)
 
 
 class TestSegStreamRangeContract(unittest.TestCase):
@@ -291,9 +320,7 @@ class TestSegStreamRangeContract(unittest.TestCase):
         # 重试阶梯耗尽（3 次）
         self.assertGreaterEqual(len(fetches), 3)
         self.assertTrue(w._cancel.is_set())
-        for t in w._threads:
-            t.join(timeout=5)
-            self.assertFalse(t.is_alive())
+        _assert_threads_stopped(self, w)
 
     def test_mismatched_content_range_is_rejected(self):
         """206 但 Content-Range 与请求区间错位：按错误处理，不灌数据。"""
@@ -322,9 +349,7 @@ class TestSegStreamRangeContract(unittest.TestCase):
             w.start()
             out = self._drain(w)
         self.assertEqual(out, b'abcdefghijkl')
-        for t in w._threads:
-            t.join(timeout=5)
-            self.assertFalse(t.is_alive())
+        _assert_threads_stopped(self, w)
 
     def test_oversized_response_is_truncated_to_segment_length(self):
         """206 区间正确但响应体超出段长：必须截断，多余字节不进队列。"""
@@ -341,9 +366,7 @@ class TestSegStreamRangeContract(unittest.TestCase):
         self.assertEqual(out, b'x' * 30 + b'y' * 70,
                          'output must be truncated to the requested segment length')
         self.assertEqual(len(out), 100)
-        for t in w._threads:
-            t.join(timeout=5)
-            self.assertFalse(t.is_alive())
+        _assert_threads_stopped(self, w)
 
 
 class TestGoProxyUrlChannelAuth(unittest.TestCase):

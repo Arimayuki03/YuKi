@@ -122,58 +122,74 @@ async function openLoginWindow() {
         settled = false;
         startedAt = Date.now();
 
-        win = new BrowserWindow({
-            width: 460,
-            height: 700,
-            title: '夸克网盘扫码登录',
-            backgroundColor: '#f3f6fe',
-            autoHideMenuBar: true,
-            icon: require('./app-icon').windowIcon(), // 预缩多表示图标（exe 图标插值缩会糊/残缺）
-            webPreferences: {
-                partition: PARTITION,
-                // M-4：加载的是远程官方页面，无 preload/无 node 依赖（登录判定靠主进程轮询
-                // session Cookie），严格隔离 + 沙箱，页面脚本拿不到任何特权环境
-                contextIsolation: true,
-                nodeIntegration: false,
-                sandbox: true,
-                spellcheck: false, // 登录页输入框同样关闭拼写检查
-            },
-        });
-        win.setMenuBarVisibility(false);
-        win.loadURL(LOGIN_URL, { userAgent: UA });
+        // 建窗后初始化（setMenuBarVisibility/loadURL/on/setWindowOpenHandler/setInterval）
+        // 任何一步抛异常都会让 Promise reject，但 win 已经赋值——若不在此处
+        // 兜底 destroy + 复位，win 永久残留，后续所有 openLoginWindow 都报
+        // 「登录窗口已打开」，只能重启应用（A1 修复）。
+        try {
+            win = new BrowserWindow({
+                width: 460,
+                height: 700,
+                title: '夸克网盘扫码登录',
+                backgroundColor: '#f3f6fe',
+                autoHideMenuBar: true,
+                icon: require('./app-icon').windowIcon(), // 预缩多表示图标（exe 图标插值缩会糊/残缺）
+                webPreferences: {
+                    partition: PARTITION,
+                    // M-4：加载的是远程官方页面，无 preload/无 node 依赖（登录判定靠主进程轮询
+                    // session Cookie），严格隔离 + 沙箱，页面脚本拿不到任何特权环境
+                    contextIsolation: true,
+                    nodeIntegration: false,
+                    sandbox: true,
+                    spellcheck: false, // 登录页输入框同样关闭拼写检查
+                },
+            });
+            win.setMenuBarVisibility(false);
+            win.loadURL(LOGIN_URL, { userAgent: UA });
 
-        // 外链走系统浏览器
-        win.webContents.setWindowOpenHandler(({ url }) => {
-            const { shell } = require('electron');
-            if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
-            return { action: 'deny' };
-        });
-        // 用户手动关窗 = 取消
-        win.on('closed', () => {
-            win = null;
-            if (!settled) settle(false, { message: '登录窗口已关闭' });
-        });
-        // 页面加载失败/崩溃提示
-        win.webContents.on('did-fail-load', (_e, code, desc) => {
-            if (!settled && code !== -3) console.warn('[pan-qr-window] load fail:', code, desc);
-        });
+            // 外链走系统浏览器
+            win.webContents.setWindowOpenHandler(({ url }) => {
+                const { shell } = require('electron');
+                if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+                return { action: 'deny' };
+            });
+            // 用户手动关窗 = 取消
+            win.on('closed', () => {
+                win = null;
+                if (!settled) settle(false, { message: '登录窗口已关闭' });
+            });
+            // 页面加载失败/崩溃提示
+            win.webContents.on('did-fail-load', (_e, code, desc) => {
+                if (!settled && code !== -3) console.warn('[pan-qr-window] load fail:', code, desc);
+            });
 
-        // 轮询 cookie 判断登录成功
-        pollTimer = setInterval(async () => {
-            try {
-                if (await isLoggedIn()) {
-                    const cookies = await collectCookies();
-                    console.log('[pan-qr-window] login ok, cookie len:', cookies.split('; ').length);
-                    settle(true, { cookies });
+            // 轮询 cookie 判断登录成功
+            pollTimer = setInterval(async () => {
+                try {
+                    if (await isLoggedIn()) {
+                        const cookies = await collectCookies();
+                        console.log('[pan-qr-window] login ok, cookie len:', cookies.split('; ').length);
+                        settle(true, { cookies });
+                        closeLoginWindow();
+                        return;
+                    }
+                } catch (e) { /* 忽略单次轮询错误 */ }
+                if (Date.now() - startedAt > MAX_WAIT_MS) {
+                    settle(false, { message: '登录超时（5 分钟），请重试' });
                     closeLoginWindow();
-                    return;
                 }
-            } catch (e) { /* 忽略单次轮询错误 */ }
-            if (Date.now() - startedAt > MAX_WAIT_MS) {
-                settle(false, { message: '登录超时（5 分钟），请重试' });
-                closeLoginWindow();
+            }, POLL_MS);
+        } catch (err) {
+            // 初始化失败：清掉残留窗口与定时器、复位 win 引用，让下次调用能重试；
+            // 然后把错误继续抛给外层 Promise（reject）。
+            stopPoll();
+            if (win) {
+                const w = win;
+                win = null;
+                try { w.destroy(); } catch (e) { /* ignore */ }
             }
-        }, POLL_MS);
+            throw err;
+        }
         });
     } finally {
         // 建窗结束（成功/异常均算）：解除并发守卫

@@ -197,7 +197,11 @@ function createSearchPage(cfg) {
                         this._statusShown = false;
                     }, 1500);
                 } else {
-                    el.hide(); // 快速搜索未显示过：不闪现完成态
+                    // 快速搜索未显示过：完成态的「失败/不可用」类提示仍需让用户看到，
+                    // 否则功能失败但用户什么都收不到（之前这里只 el.hide()）。
+                    // 「无结果/完成」属正常终态不打扰；错误/不可用类文本走 warnToast。
+                    el.hide();
+                    if (o.warnText) warnToast(o.warnText);
                 }
                 return;
             }
@@ -311,8 +315,8 @@ function createSearchPage(cfg) {
             const total = rules.length;
             this._setStatus('正在检索 Kazumi 规则源…', { recv: 0, total, items: 0 });
             try {
-                if (typeof Kazumi === 'undefined' || !Kazumi.hasEnabledRules) { this._setStatus('Kazumi 引擎不可用', { done: true }); return; }
-                if (!Kazumi.hasEnabledRules()) { this._setStatus('尚未启用任何 Kazumi 规则', { done: true }); return; }
+                if (typeof Kazumi === 'undefined' || !Kazumi.hasEnabledRules) { this._setStatus('Kazumi 引擎不可用', { done: true, warnText: 'Kazumi 引擎不可用' }); return; }
+                if (!Kazumi.hasEnabledRules()) { this._setStatus('尚未启用任何 Kazumi 规则', { done: true, warnText: '尚未启用任何 Kazumi 规则' }); return; }
             } catch (e) { /* ignore */ }
             let recv = 0;
             let shown = 0;

@@ -110,6 +110,43 @@ STAGES = [
     # 批次 1 安全修复回归：P1-2/P2-10 落盘判定、P1-3 do=pan 门禁 + HLS token
     # 纪律、P1-4 JVM cookie 清理、P1-5 Worker hoststate 注入、P2-1 Host 白名单
     ('security-regressions', [PY, os.path.join(HERE, 'test_security_regressions.py')]),
+    # ── 以下 14 个是接口/内部实现层新增测试（2026-09 接入，此前未进编排）────────
+    # 顺序原则：纯单元、无副作用、跑得快的在前；会真实拉起服务/占端口的排到最后。
+    # HTTP 客户端底座：UA 注入、系统代理解析、bypass 判定、超时与错误分类
+    ('http-client', [PY, os.path.join(HERE, 'test_http_client.py')]),
+    # 站点管理器：配置解析/去重/优先级合并、kind 判定、启停持久化、能力字段派生
+    ('site-manager', [PY, os.path.join(HERE, 'test_site_manager.py')]),
+    # hoststate 全局状态面：目录/env 覆盖、java 探测缓存、proxy url 与 token 校验、
+    # legacy home 迁移、action 分发路由
+    ('hoststate', [PY, os.path.join(HERE, 'test_hoststate.py')]),
+    # 网盘登录（夸克 QR）：票据创建/轮询状态机、session TTL、二维码渲染降级
+    ('pan-login', [PY, os.path.join(HERE, 'test_pan_login.py')]),
+    # 网盘 provider 注册表：key 归一化、大小写无关查找、抽象子类契约、ShareInfo
+    ('pan-registry', [PY, os.path.join(HERE, 'test_pan_registry.py')]),
+    # 运行时底座内部：worker 帧协议编解码、进程树终止、Windows job、调用循环错误映射
+    ('runtime-internals', [PY, os.path.join(HERE, 'test_runtime_internals.py')]),
+    # Kazumi 工具层：模板渲染/选择器执行/配置校验/请求准备/OCR 降级
+    ('kazumi-utils', [PY, os.path.join(HERE, 'test_kazumi_utils.py')]),
+    # app/trigger 面向 spider 的调用面：方法委派、序列化边界、原子写文件、模块命名
+    ('app-trigger', [PY, os.path.join(HERE, 'test_app_trigger.py')]),
+    # runner 调用器：参数位置钉死、超时/取消语义、pg 默认值、TLS 上下文隔离
+    ('runner', [PY, os.path.join(HERE, 'test_runner.py')]),
+    # spider 内部：js/json 桥接分支表、播放串切分、runner 派发
+    ('spider-internals', [PY, os.path.join(HERE, 'test_spider_internals.py')]),
+    # jar 桥内部：帧解析、结果映射、运行时预算/超时重启、zip 条目名校验
+    ('jar-bridge-internals', [PY, os.path.join(HERE, 'test_jar_bridge_internals.py')]),
+    # Go 代理：监听者装配/端口冲突跳过/单飞、签名 URL 生成与门禁、缓存淘汰
+    ('go-proxy', [PY, os.path.join(HERE, 'test_go_proxy.py')]),
+    # 缓存内部：mem_cache 命名空间与惰性过期、play_cache 键哈希/容量/并发写
+    ('cache-internals', [PY, os.path.join(HERE, 'test_cache_internals.py')]),
+    # HTTP API 黑盒：真实拉起 uvicorn 后端（端口 0 自动分配 + 独立 temp root），
+    # 覆盖 token 门禁、代理通道、路径穿越、健康检查豁免等端到端契约。放最后：
+    # 它是唯一会真实起服务/占端口的阶段，避免影响前面阶段的干净环境。
+    ('http-api-blackbox', [PY, os.path.join(HERE, 'test_http_api_blackbox.py')]),
+    # 配置与内容 API 黑盒：本地 loopback 配置夹具 + 真实进程外 Worker 驱动
+    # homeContent/categoryContent/detailContent/searchContent/playerContent，
+    # 验证站点能力推导、多仓合并回退与结构化错误契约。同样会起真实服务，排最后。
+    ('config-content-blackbox', [PY, os.path.join(HERE, 'test_config_content_blackbox.py')]),
 ]
 
 # 有意不作为独立 stage 运行的 tests/test_*.py → 原因。

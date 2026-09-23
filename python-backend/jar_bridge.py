@@ -1049,6 +1049,13 @@ class JarBridge:
             msg = json.loads(text)
         except (ValueError, UnicodeDecodeError):
             return
+        # A2 修复：json.loads 可能返回非 dict（如 '123' / '"str"' / 'null' / '[1]'），
+        # 此时 msg.get('id') 会抛 AttributeError——若该异常冒泡出 _on_line，会跳出
+        # _read_loop 的 while 循环、读线程死亡，pending 调用被 finally 里的
+        # _reject_all('jar process exited') 误拒（实际进程未退出）。
+        # 校验 isinstance(dict) 让非法帧静默跳过（与 ValueError 兜底口径一致）。
+        if not isinstance(msg, dict):
+            return
         rid = msg.get('id')
         if rid is None:
             return

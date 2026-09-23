@@ -1100,7 +1100,10 @@ class HlsDownloader extends EventEmitter {
             task.speed = 0;
             this._cleanSegsDir(task);
             this._cleanAdTemp(task);
-            this.emit('completed', this._flatten(task));
+            // 监听器异常不得回流到本 try/catch（否则会把 complete 任务误判为失败重下），
+            // 也不得冒泡成未捕获异常导致主进程崩溃
+            try { this.emit('completed', this._flatten(task)); }
+            catch (err) { console.warn(`[hls] ${task.name}: completed 监听器抛异常：${err && err.message}`); }
         } catch (e) {
             if (dead()) { if (task.status === 'removed') this._cleanSegsDir(task); return; }
             // 合并落盘失败（rename EPERM 等）已在 _concatSegments 内按错误终态收敛：
@@ -1196,7 +1199,9 @@ class HlsDownloader extends EventEmitter {
                 task.status = 'complete';
                 task.percent = 100;
                 this._cleanAdTemp(task);
-                this.emit('completed', this._flatten(task));
+                // 监听器异常不得冒泡成未捕获异常导致主进程崩溃
+                try { this.emit('completed', this._flatten(task)); }
+                catch (err) { console.warn(`[hls] ${task.name}: completed 监听器抛异常：${err && err.message}`); }
                 return;
             }
             try { fs.rmSync(part, { force: true }); } catch (e) { /* ignore */ }
@@ -1271,7 +1276,9 @@ class HlsDownloader extends EventEmitter {
                 task.status = 'complete';
                 task.percent = 100;
                 this._cleanAdTemp(task);
-                this.emit('completed', this._flatten(task));
+                // 监听器异常不得冒泡成未捕获异常导致主进程崩溃
+                try { this.emit('completed', this._flatten(task)); }
+                catch (err) { console.warn(`[hls] ${task.name}: completed 监听器抛异常：${err && err.message}`); }
                 return;
             }
             try { fs.rmSync(part, { force: true }); } catch (e) { /* ignore */ }
