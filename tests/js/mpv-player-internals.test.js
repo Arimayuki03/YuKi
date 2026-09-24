@@ -95,7 +95,10 @@ const SRC = path.join(__dirname, '../../src/main/mpv-player.js');
 
 /**
  * 在 vm 沙箱里装载 mpv-player.js。
- * @param {{spawnSyncOut?: string, makeProc?: Function}} [opts]
+ * @param {{spawnSyncOut?: string, makeProc?: Function, findMpvTarget?: Function}} [opts]
+ * `findMpvTarget`：返回自动发现应命中的路径（null = 自动发现一无所获）。
+ * 用它把「vendor 里是否真实存在 mpv.exe」从测试前提里剥掉——vendor/ 不入库，
+ * CI 全新 checkout 上该目录为空，重探/恢复默认类用例不能依赖宿主机文件系统。
  */
 function loadMpv(opts = {}) {
     const source = fs.readFileSync(SRC, 'utf8');
@@ -107,6 +110,25 @@ function loadMpv(opts = {}) {
     const osStub = new Proxy(osReal, {
         get(t, p) { return p === 'tmpdir' ? () => TMP : t[p]; },
     });
+    const findMpvTarget = opts.findMpvTarget || null;
+    // findMpvTarget 生效时：fs.existsSync 只对「沙箱自身算出的 vendor mpv 路径」为真——
+    // vendor/ 不入库，CI 全新 checkout 上该目录为空，重探/恢复默认类用例不能依赖宿主机
+    // 文件系统。注入后 findMpv 把 vendor 路径当真实候选（版本校验走 spawnSync 替身恒
+    // 成功），自动发现的「命中」分支即可在 CI 上稳定复现。
+    const vendorFake = path.join(path.dirname(SRC), '..', '..', 'vendor', 'mpv', 'mpv.exe');
+    const fsForSandbox = (findMpvTarget !== null)
+        ? new Proxy(fs, {
+            get(t, p) {
+                if (p === 'existsSync') {
+                    return (fp) => {
+                        const s = String(fp);
+                        return s === vendorFake || s === path.resolve(vendorFake) || s === path.resolve(String(vendorFake));
+                    };
+                }
+                return t[p];
+            },
+        })
+        : fs;
     const context = {
         console: { log() { }, warn() { }, error() { } },
         process: { pid: 4242, platform: 'win32', resourcesPath: '' },
@@ -120,7 +142,7 @@ function loadMpv(opts = {}) {
         module: { exports: {} },
         require(name) {
             switch (name) {
-                case 'fs': return fs;
+                case 'fs': return fsForSandbox;
                 case 'os': return osStub;
                 case 'path': return path;
                 case 'events': return { EventEmitter };
@@ -164,7 +186,7 @@ function loadMpv(opts = {}) {
 function mkPlayer(opts = {}) {
     const ctx = loadMpv(opts);
     const p = new ctx.MpvPlayer();
-    p.binary = process.execPath;
+    if (opts.findMpvTarget !== true) p.binary = process.execPath;
     return { p, ctx };
 }
 
@@ -621,7 +643,12 @@ test('proc error(非 ENOENT/EACCES)：不清空 binary（不得把无关错误�
 });
 
 test('_scheduleBinaryReprobe(): 3s 后重探成功自愈并复位 externalStyle', () => {
-    const { p, ctx } = mkPlayer();
+    // 自动发现的「命中」分支依赖 vendor 里真实存在 mpv.exe，而 vendor/ 不入库——CI 全新
+    // checkout 上该目录为空（早前消息里写「找回 vendor 里的 mpv」，在 CI 上是碰运气）。
+    // 用 findMpvTarget 注入让 existsSync 只认 vendor 路径，重探命中在 CI 上稳定复现。
+    const { p, ctx } = mkPlayer({ findMpvTarget: true });
+    assert.ok(p.binary, '注入后构造期自动发现应命中 vendor 路径');
+    const discovered = p.binary;
     p.binary = null;
     p.externalStyle = true; // 模拟曾被用户指定外部 mpv
     p._scheduleBinaryReprobe();
@@ -635,7 +662,7 @@ test('_scheduleBinaryReprobe(): 3s 后重探成功自愈并复位 externalStyle'
     p.binary = null;
     p._scheduleBinaryReprobe();
     ctx.timers.fireTimeouts((h) => h.ms === 3000);
-    assert.ok(p.binary, '自动发现应找回 vendor 里的 mpv');
+    assert.equal(p.binary, discovered, '重探恢复自动发现结果');
     assert.equal(p.externalStyle, false, '回到自动发现语义，状态保持一致');
 });
 
