@@ -1,6 +1,6 @@
 # YuKi 使用指南
 
-> 从第一步，到得心应手。本指南仿照 [kazumi.app/docs](https://kazumi.app/docs) 的结构编写，内容基于 YuKi v0.2.5 的实际实现。
+> 从第一步，到得心应手。本指南仿照 [kazumi.app/docs](https://kazumi.app/docs) 的结构编写，内容基于 YuKi v0.2.6 的实际实现。
 >
 > 开发者文档请移步 [文档索引](README.md)：[系统架构](ARCHITECTURE.md) · [Kazumi 规则引擎](KAZUMI.md) · [文件结构](FILE_STRUCTURE.md)。
 

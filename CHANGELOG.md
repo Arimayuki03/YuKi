@@ -4,6 +4,37 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.6] - 2026-09-24
+
+本轮包含 2026-09-22 发布 v0.2.5 之后的四个批次：全项目代码审查修复、功能增强批次与大规模测试补齐，并修复 CI 慢机上的 flaky 测试。
+
+### Added
+
+- **智能跳过片头/片尾**：播放器内 `Shift+O` / `Shift+E` 登记当前时刻为片头/片尾结束点（同片名自动复用），起播按登记位置自动 `--start` 跳过；登记入口与提示接入播放页。
+- **Bangumi 评分/吐槽对话框**：详情页可直接为番组提交星级评分与吐槽（复用 `bangumiBangumiSyncApply` 端点透传，含提交状态与失败提示）。
+- **CatVod 详情页「开始播放」一键直达**：详情页在解析出选集后提供一键起播按钮，免二次点击。
+- **HLS 广告段过滤引擎**：`python-backend/ad_filter.py` 基于 `#EXT-X-DISCONTINUITY` + 跨 host + 路径特征词的组合启发式识别广告分片（宁漏勿错杀），供 HLS 下载链路调用；当前未挂载到在线播放。
+- **Kazumi 图片验证码识别模块骨架**：`python-backend/kazumi/captcha.py`（ddddocr 优先、可降级），预留接口暂未挂载。
+- **IPC 可信发送方判定加固**：`senderFrame` 判定加 `sender.getURL()` 兜底，拒绝日志携带双 URL 现场便于排查。
+
+### Fixed
+
+- **capability_router：省略 type 的 csp_/JAR 仓整仓判死**：TVBox 手写仓常见「不写 type 但 api 为 csp_ 前缀/指向 JAR」的条目此前被归入未知类型直接跳过，现按 JAR 路由修复菜妮丝等仓不可用的问题；`config.py` 同步支持 spider 列表/分号多值写法解析。
+- **jar_bridge 非字典 JSON 帧致读线程死亡**：`_on_line` 对非 dict 帧补 `isinstance` 校验，防止一个坏帧杀死读线程、后续 pending 调用全部被误拒。
+- **hls-downloader completed 监听器异常兜底**：监听器异常不再冒泡崩溃、不再误判失败触发重下。
+- **pan-qr-window 建窗失败残留**：初始化失败时清理残留窗口与定时器、复位可重试。
+- **mpv-player**：弹幕轨装载门控保持默认关、watch-later 续播位置守卫、在线源统一预缓冲。
+- **renderer/search**：快速搜索未展示时的失败/不可用提示改走 warnToast（不再静默）。
+
+### Security
+
+- 代码审查收口批次（d16d35f，17 条 High 与主要 Medium/Low）：go_proxy 分段流强制 206+Content-Range 校验与截断、kazumi 规则引擎逐跳 SSRF 守卫与重定向逐跳重派生 Cookie、cookie 仅同域附带、http_client 云元数据红线、JAR 默认强制 https+md5 校验（`YUKI_JAR_INSECURE_SOURCES` 可放宽）、`/proxy` 强制 token、supervisor 淘汰有界扫描（修复 while True 霸锁死锁）、弱引用 LRU、熔断区分排队超时、site_worker 方法白名单、DNS rebinding 二次解析缓解、WebDAV 恢复显式允许表、js-engine 多行 import 与循环依赖 fixup 等后端与 Electron 侧成批加固；明细见 `docs/CODE_REVIEW_2026-09-22.md`。
+
+### Tests
+
+- **大规模测试补齐**（93d9689）：新增 Python 后端 16 个测试文件（jar-bridge/runtime/spider/cache/http-client/go-proxy/pan-login/site-manager 等内部逻辑与黑盒用例）+ JS 侧 24 个测试文件（主进程下载器/播放器/IPC/推流/同步播放、渲染页面与 preload 契约等），并统一 run_all 阶段编排。全量回归：`run_all.py` 74 阶段 ALL PASS、编译 264 文件 0 error、JS 单元 1717/1717、check-js 50 文件 0 错、ESLint 0 error（74 条既有 warning 不变）、Ruff 全过。
+- **CI flaky 修复**：`test_runtime_supervisor.py` 五十源聚合搜索用例第二轮搜索前把被强杀的 10 个无限循环 Worker 重新 init 预热——CI 双核 runner 上第二轮冷 spawn 风暴会挤占 CPU，把健康源的管道往返拖出预算（观测 14/40，run 35647959954）；预热后第二轮与首轮对称，被测语义（第二轮不被上一批遗留协调线程/Worker 占满）不变。
+
 ## [0.2.5] - 2026-09-22
 
 本轮为三份独立安全审查（hy4 / ds / glm）交叉验证后的第二轮修复：合并去重确认 P1×5、P2×19、P3×24，按文件域并行修复并补齐回归测试。三份审查报告属临时文档，验证完成后已删除。

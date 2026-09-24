@@ -556,6 +556,13 @@ class RuntimeSupervisorTest(unittest.TestCase):
         )
         self.assertTrue(all(runner.supervisor.pid is None for runner in runners[:10]))
 
+        # 第一轮搜索已把 10 个无限循环 Worker 强杀（上面的 pid 断言）。若不预热，
+        # 第二轮搜索一开始会并发重 spawn 这 10 个 Worker——CI 双核 runner 上
+        # spawn 风暴挤占 CPU，健康源的管道往返被拖出预算（观测 14/40，run
+        # 35647959954）。先把它们重新 init 预热，与首轮前的 init 对称；被测语义
+        # 「第二轮不被上一批遗留协调线程/Worker 占满」考察的是协调面，不看冷启动。
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda runner: runner.init(''), runners[:10]))
         second_started = time.monotonic()
         second = server.aggregate_search('next-budget', timeout=2.0)
         self.assertLess(time.monotonic() - second_started, 2.0 + _BUDGET_ASSERT_SLACK)

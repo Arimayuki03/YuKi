@@ -73,6 +73,8 @@
 | cffi | 2.1.1 | MIT |
 | pycparser | 3.0 | BSD-3-Clause |
 
+> **可选依赖（不进锁文件）**：`python-backend/kazumi/captcha.py` 的图片验证码识别骨架优先使用 [ddddocr](https://github.com/sml2h3/ddddocr)（MIT，含自带 onnx 模型），用户自行 `pip install ddddocr` 即启用；未安装时走降级路径。因 ddddocr 依赖 onnxruntime、Python 3.14 无预编译轮子，本轮决策不进 requirements.txt 锁文件（2026-09-24 时点该模块接口预留、未挂载到产品流程）。
+
 ## 五、依赖审计豁免记录
 
 CI 中供应链审计（`npm audit --omit=dev || true`、`pip-audit --strict || true`）当前为观察模式。发现无法短期清零的高危项时，在此记录豁免理由与跟进计划；观察期结束（见 git 历史 docs/github.md G10）后移除 `|| true` 使审计失败阻断合并。

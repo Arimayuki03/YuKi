@@ -48,9 +48,9 @@ src/
 │   ├── dl-layout.js        下载番剧子目录布局（路径段清洗 + <dlDir>/<番剧名>/<集名> 合成）
 │   ├── dl-record.js        下载记录持久化（dl-records.json）
 │   ├── downloader.js       aria2c 引擎封装
-│   ├── hls-downloader.js   HLS 下载与广告过滤
+│   ├── hls-downloader.js   HLS 下载与广告过滤（两段式 CUE/DISCONTINUITY 启发式 + 分片完整性校验）
 │   ├── mpv-menu-conf.js    mpv 右键菜单中文定义（menu.conf 译制）
-│   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键）
+│   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键/跳片头片尾 --start）
 │   ├── parse-window.js     隐藏 BrowserWindow 真实流提取
 │   ├── playlist-proxy.js   在线整季原生播放列表本地按需解析代理
 │   ├── pan-source.js       网盘类源识别（PAN_SOURCE_RE：原生播放列表禁用/边下边播排除同源判定）
@@ -75,11 +75,12 @@ src/
     ├── index.html          单页应用壳
     ├── css/ui.css          全局样式
     ├── assets/             渲染层静态资源
-    └── js/ (19 文件)       渲染层模块（均导出为 YUKI.*）
+    └── js/ (21 文件)       渲染层模块（均导出为 YUKI.*）
         ├── app.js          路由与视图调度
         ├── home.js         首页/分类/聚合搜索
-        ├── detail.js       详情与播放入口
-        ├── player.js       播放与续播
+        ├── detail.js       详情与播放入口（含「开始播放」一键直达）
+        ├── player.js       播放与续播（含跳片头片尾登记，Shift+O/E）
+        ├── bgm-rate.js     Bangumi 评分/吐槽对话框
         ├── kazumi.js       Kazumi 规则管理与商店
         ├── bangumi-search.js  Bangumi 搜索页签
         ├── panels.js       设置面板
@@ -97,6 +98,7 @@ python-backend/
 ├── config.py               配置管理
 ├── cache_store.py          通用内存+文件两级缓存存储
 ├── mem_cache.py            会话级 TTL 内存缓存（0.2.5 提速）
+├── ad_filter.py            HLS 广告段过滤引擎（DISCONTINUITY+跨host+路径词启发式，宁漏勿错杀）
 ├── hoststate.py            宿主运行时状态（端口/缓存目录/代理地址，~/.video-pc 迁移兜底）
 ├── runner.py / app.py / trigger.py  CatVod 契约（恢复源码语义）
 ├── site_manager.py         站点管理
@@ -125,6 +127,7 @@ python-backend/
 ├── kazumi/                 Kazumi 规则引擎
 │   ├── plugin_manager.py   规则 CRUD 与持久化（含规则商店、Bangumi 对接、WebDAV 同步目录拼接）
 │   ├── rule_engine.py      搜索/剧集编排
+│   ├── captcha.py          图片验证码识别骨架（ddddocr 优先，接口预留未挂载）
 │   ├── xpath_strategy.py / api_strategy.py
 │   ├── models.py / plugin.py / utils.py / cookie_jar.py
 │   └── assets/             内置规则（7sefun/DM84/enlie）
@@ -140,11 +143,12 @@ python-backend/
 │   ├── build.py / gen_stubs.py  构建脚本
 │   └── runner.jar          构建产物（复制到 vendor/spider-runner.jar）
 ├── spike/                  探针与 Spike 报告
-└── tests/ (58 个 .py)
-    ├── run_all.py          全量回归入口（56 阶段，串行）
+└── tests/ (74 个 .py)
+    ├── run_all.py          全量回归入口（74 阶段，串行）
     ├── smoke.py            冒烟测试
-    ├── test_kazumi.py / test_phase3.py / test_config_snapshot.py 等（55 个 test_*.py）
+    ├── test_kazumi.py / test_phase3.py / test_config_snapshot.py 等（73 个 test_*.py）
     ├── test_play_cache.py  解析结果持久缓存单测（RM-4）
+    ├── test_http_api_blackbox.py / test_jar_bridge_internals.py / test_runtime_internals.py 等  2026-09 大规模补齐的接口/内部实现层测试
     ├── fixtures/           配置/媒体夹具（single.json 等确定性生成）
     └── offline_config_server.py  loopback 夹具服务器
 ```
@@ -165,7 +169,7 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`，55 文件 / 540 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）等。
+`tests/js/*.test.js`（`node --test`，84 文件 / 1717 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K/跳片头片尾）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）、主进程 IPC 黑盒与 preload 契约、主进程/渲染层内部实现单测等。
 
 ## 构建产物（不入库）
 

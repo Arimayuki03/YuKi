@@ -491,6 +491,8 @@ npx electron-builder --win --publish=never --config.directories.output="C:/temp/
 > - 2026-09-18：v0.2.5 特性批次——会话级 TTL 内存缓存提速（mem_cache.py）+ 落地 RM-1/2/4/5 特性合并、Bangumi 镜像切换。
 > - 2026-09-20：三报告交叉审查修复（P1×5/P2×19/P3×24 全项闭环）。
 > - 2026-09-22：v0.2.5 发布——ffmpeg 锁定源迁移 BtbN（发布阻断修复）、dex2jar CI 假绿修复、外部播放器实测定版与 README/GUIDE 使用文档批次。
+> - 2026-09-22：审查收口批次（17 条 High 与主要 Medium/Low，二轮复审）+ 功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）。
+> - 2026-09-24：大规模测试补齐（Python 16 文件 + JS 24 文件）与 CI flaky 修复后 **v0.2.6 定版发布**。
 
 ### 11.1 UI 视觉系统升级与壁纸自定义
 

@@ -1,26 +1,26 @@
 # 功能测试报告（YuKi）
 
-> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建；**2026-09-20 更新**：三报告交叉审查修复批次后全量回归 ALL PASS（`run_all.py` 56 阶段 / 编译 188 文件 0 error / JS 单元 540 tests / check-js 48 文件 0 错 / ESLint 0 error / Ruff 全过）。
+> 生成时间：2026-08-24（全量回归 ALL PASS：`run_all.py` 40 阶段 / 编译 98 文件 0 error / JS 单元 365 tests / ESLint 0 error / Ruff 全过，详见 [PROGRESS.md](../PROGRESS.md) §7）；快照于 2026-08-10 创建；**2026-09-20 更新**：三报告交叉审查修复批次后全量回归 ALL PASS（`run_all.py` 56 阶段 / 编译 188 文件 0 error / JS 单元 540 tests / check-js 48 文件 0 错 / ESLint 0 error / Ruff 全过）；**2026-09-24 更新**：v0.2.6 发布批次后全量回归 ALL PASS（`run_all.py` 74 阶段 / 编译 264 文件 0 error / JS 单元 1717 tests / check-js 50 文件 0 错 / ESLint 0 error / Ruff 全过）。
 > 测试范围：全部已实现功能的自动化测试 + 需用户实测项清单。
 > 本文是「功能测试」的唯一汇总入口；运行异常细节见 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)，开发批次见 [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md)。
 
 ## 1. 测试总览
 
-> 最近快照：2026-09-20 全量回归 **ALL PASS**（`npm run test:all`：`run_all.py` 56 阶段含 security-regressions / 编译 188 文件 0 error / Ruff 全过；JS 单元 **540/540**、check-js 48 文件 0 错、ESLint 0 error）。
+> 最近快照：2026-09-24 全量回归 **ALL PASS**（`npm run test:all`：`run_all.py` 74 阶段含 security-regressions / 编译 264 文件 0 error / Ruff 全过；JS 单元 **1717/1717**、check-js 50 文件 0 错、ESLint 0 error）。
 
 | 类别 | 数量 | 结果 |
 |---|---|---|
-| JS 单元测试（`tests/js/*.test.js`，55 文件） | 540 | ✅ 全部通过 |
-| Python 测试（`run_all.py` 56 阶段 + 编译） | 188 文件 | ✅ 全部通过 |
-| JS 语法检查（`scripts/check-js.js`） | 48 文件 | ✅ 0 错误 |
+| JS 单元测试（`tests/js/*.test.js`，84 文件） | 1717 | ✅ 全部通过 |
+| Python 测试（`run_all.py` 74 阶段 + 编译） | 264 文件 | ✅ 全部通过 |
+| JS 语法检查（`scripts/check-js.js`） | 50 文件 | ✅ 0 错误 |
 | 真实界面验收（CDP，`scripts/acceptance-*.js` × 11） | 103 检查项 | ✅ 103/103（2026-08 快照） |
-| **自动化合计** | **>640** | **全部通过** |
+| **自动化合计** | **>1800** | **全部通过** |
 
 真实界面验收均在**独立 userData 副本**（清空 `lastConfigUrl`、预置种子数据、清空 `bangumiToken` 避免真实收藏合并干扰计数）启动临时 Electron 实例，经 CDP 实测，结束自动清理，不污染真实用户数据。
 
 ## 2. 自动化测试明细
 
-### 2.1 JS 单元测试（55 文件 / 540 用例）
+### 2.1 JS 单元测试（84 文件 / 1717 用例）
 | 文件 | 覆盖 |
 |---|---|
 | `player-watch.test.js` | 观看统计 sessionId 元信息、未知/重复退出去重、断流重连观看链增量、ended 会话归属、isDone 判定、原生队列逐集记账（每集独立观看链、pos 记账去重） |
@@ -34,14 +34,28 @@
 | `kazumi-init.test.js` | init 单次绑定、不抢跑、`openBangumiInfoPage` 委托统一详情页 |
 | `cover-chain.test.js` | 封面多级兜底 `vodCoverChain`/`coverChainNext`：失败逐级切换、空链占位、加载策略 |
 | 其余（downloader / dl-record / hls-downloader / async-session 等） | 下载展平、记录持久化、HLS 广告过滤、单飞/串行队列 |
+| `ad-skip.test.js` / `bgm-rate.test.js` / `detail-start-button.test.js` | 跳片头片尾登记与复用、Bangumi 评分/吐槽提交、详情页一键起播 |
+| `file-ipc-sender.test.js` / `file-manager-ipc.test.js` / `main-integration.test.js` | IPC 可信发送方判定（getURL 兜底）、文件管理 IPC 契约、主进程集成 |
+| `ipc-handlers-blackbox.test.js` / `preload-contract.test.js` | 主进程 IPC 黑盒与 preload 契约面 |
+| `common-utils.test.js` / `main-small-utils.test.js` / `home-detail.test.js` 等内部单测 | 渲染层工具、主进程小工具、首页/详情内部逻辑 |
+| `mpv-player-internals.test.js` / `player-internals.test.js` / `downloader-internals.test.js` / `hls-downloader.test.js` | 播放器/下载器内部实现（会话守卫、续播、分片校验等） |
+| `push-server.test.js` / `syncplay-client.test.js` / `dlna-caster.test.js` | 局域网推送、SyncPlay 客户端、DLNA 投屏 |
+| `pan-qr-window.test.js` / `pan-source.test.js` / `system-proxy.test.js` | 扫码登录窗生命周期、网盘源判定、系统代理 |
+| `search-page.test.js` / `live.test.js` / `my-about-ui-state.test.js` / `panels-local.test.js` / `records.test.js` 等 | 渲染页面逻辑（搜索/直播/我的/设置面板/记录） |
+| `playlist-proxy-internals.test.js` / `parse-window-internals.test.js` / `renderer-cache.test.js` / `ffmpeg.test.js` | 播放列表代理内部、解析窗口、渲染缓存、ffmpeg 封装 |
 
-### 2.2 Python 测试（55 个 `test_*.py`，经 run_all.py 56 阶段编排）
+### 2.2 Python 测试（73 个 `test_*.py`，经 run_all.py 74 阶段编排）
 | 模块 | 覆盖 |
 |---|---|
 | plugin / rule_engine / xpath_strategy | 规则解析、校验、XPath 归一化（含 R2 `//`→`.//`） |
 | cookie_jar | Cookie 域名/父域匹配、持久化 |
 | bangumi search / calendar / season / trends / collections | R1 真实用户名、R6 官方搜索端点、季节日程分桶、趋势解包裹归一化、收藏 limit 钳制 100 |
 | hoststate / server / config | 二进制探测、端点路由、多仓配置合并 |
+| `test_http_client.py` / `test_http_api_blackbox.py` | HTTP 客户端底座（UA/代理/bypass/超时分类）、真实 uvicorn 黑盒（token 门禁/代理通道/穿越防护） |
+| `test_jar_bridge_internals.py` / `test_runtime_internals.py` / `test_runtime_supervisor.py` | JAR 桥帧协议与预算、运行时底座（帧编解码/进程树终止/Windows Job）、Supervisor 生命周期与五十源聚合预算 |
+| `test_spider_internals.py` / `test_runner.py` / `test_app_trigger.py` / `test_site_manager.py` | spider 内部分支表、runner 参数与超时语义、app/trigger 调用面、站点管理器 |
+| `test_go_proxy.py` / `test_cache_internals.py` / `test_pan_login.py` / `test_pan_registry.py` / `test_kazumi_utils.py` | Go 代理监听器/签名 URL、mem_cache/play_cache 内部、夸克 QR 状态机、Provider 注册表、Kazumi 工具层 |
+| `test_ad_filter.py` / `test_config_realworld_formats.py` / `test_kazumi_bgm_rating.py` | HLS 广告段过滤判定、真实公共仓格式兼容（离线）、Bangumi 评分/吐槽透传 |
 
 ### 2.3 真实界面验收脚本（11 个 / 103 项）
 | 脚本 | 覆盖功能 | 项数 |
@@ -130,7 +144,7 @@ npm run test:all
 
 # 单独运行
 npm run test:jsunit          # JS 单元（node --test）
-npm run test:py              # Python（run_all.py 全量 56 阶段）
+npm run test:py              # Python（run_all.py 全量 74 阶段）
 npm run test:js              # JS 语法检查
 
 # 真实界面验收（各自启动独立实例，自动清理）

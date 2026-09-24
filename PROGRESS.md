@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-09-22
+> 更新时间：2026-09-24
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -9,7 +9,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 应用版本 | `0.2.5` |
+| 应用版本 | `0.2.6` |
 | 桌面宿主 | Electron 31，JavaScript |
 | 后端 | FastAPI，Python 3.14 独立进程 |
 | 内容引擎 | CatVod + Kazumi 双引擎 |
@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；**v0.2.5 已发布**（2026-09-22），其后完成 ffmpeg 锁定源迁移 BtbN（发布阻断修复）、dex2jar CI 假绿修复、外部播放器实测定版与 README/GUIDE 使用文档批次；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -43,11 +43,13 @@
 - CatVod Python、JavaScript、CMS 和多仓配置加载。
 - 首页、分类、当前源搜索、SSE 聚合搜索、详情、收藏和历史。
 - Kazumi XPath/API 规则导入、编辑、测试、商店、有效性检测和批量更新。
+- Bangumi 评分/吐槽提交对话框（0.2.6，详情页直达）。
 - Bangumi 搜索、详情、日历、榜单、分集、角色、Staff、评论、关联、收藏同步和观看进度自动上报（RM-5，看完自动打点分集看过/联动在看看过，默认关）。
 
 ### 播放与解析
 
 - mpv 播放、硬件加速、倍速、续播、自动连播、断流重连和失败换线。
+- 智能跳过片头/片尾：`Shift+O`/`Shift+E` 登记当前时刻（同片名复用），起播自动跳过（0.2.6）。
 - 原生播放列表：在线整季经 `playlist-proxy` 本地按需解析代理（打开哪集解析哪集，302 交真实 CDN）交给 mpv 原生队列连播；静态直链批量直接入队，观看统计/历史逐集记账。
 - mpv 右键中文菜单（menu.conf 注入）与 Anime4K 快捷键（K 键循环档位 + 菜单勾选态同步）；PGUP/PGDWN 上/下一集。
 - 边下边播与手动下载同源同集去重（`dl-dedupe`，「站点 | 剧名 | 集名」稳定 key）。
@@ -122,12 +124,12 @@
 - [x] TVBox/FongMi S1.1-S1.4：可终止 Worker 进程隔离、绝对 deadline、聚合取消和熔断恢复。
 - [x] TVBox/FongMi C2.1-C2.5：ConfigSnapshot 三层与原子换入、`ext` 完整语义、站点字段矩阵、
   Capability Router、配置安全边界。
-- [x] 创建 GitHub 公开仓库（github.com/Arimayuki03/YuKi）并实测 tag→安装包流水线：v0.1.0–v0.2.5 已多轮发布，release.yml 实跑验证（期间修复 cp1252 编码崩溃 907451d、CI 无 vendor 工具假绿 52e2eca 等）；代码签名仍未实施。
+- [x] 创建 GitHub 公开仓库（github.com/Arimayuki03/YuKi）并实测 tag→安装包流水线：v0.1.0–v0.2.6 已多轮发布，release.yml 实跑验证（期间修复 cp1252 编码崩溃 907451d、CI 无 vendor 工具假绿 52e2eca 等）；代码签名仍未实施。
 - [ ] TVBox 兼容性 N3（PC 原生运行时新引擎）及真实公共仓/发布环境验收：按
   [主任务书](docs/TVBOX_FONGMI_PARITY_TASKS.md) 推进。drpy 引擎（Node Worker 方案）已实现并通过验收后从产品移除，能力路由现对 drpy 固定标记 unsupported（见 RUNTIME_ISSUES 与任务书 N3.1 现状回退注）。
 - [ ] macOS/Linux 实际打包与运行测试。
 - [ ] Windows 安装后首次冷启动验证，包括资源路径、Python 后端和二进制发现。
-- [x] 自动更新基础链路已接入 `electron-updater`，应用内更新闭环（RM-2）代码完成且随 v0.2.5 Release 流水线分发（latest.yml+blockmap 已上传）；v0.2.x→新版本应用内升级链路实测与代码签名仍待办。
+- [x] 自动更新基础链路已接入 `electron-updater`，应用内更新闭环（RM-2）代码完成且随 v0.2.5 Release 流水线分发（latest.yml+blockmap 已上传）；v0.2.5→v0.2.6 应用内升级链路以真实 Release 验证中，代码签名仍待办。
 
 ### 明确不作为当前待办
 
@@ -175,6 +177,14 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-09-24 v0.2.6 发布批次（审查收口 + 功能增强 + 测试补齐 + CI flaky 修复）：
+
+- **审查收口批次**（d16d35f）：按 `docs/CODE_REVIEW_2026-09-22.md` 修复 17 条 High 与主要 Medium/Low——go_proxy 分段流 206 校验、kazumi SSRF 逐跳守卫、JAR https+md5 强制、supervisor 有界扫描修复死锁、弱引用 LRU、js-engine ESM 补齐等（Python 后端 / Electron 主进程 / 渲染层三域）。
+- **功能增强批次**（2ea6086）：HLS 广告段过滤引擎（`ad_filter.py`，未挂载在线播放）、智能跳过片头/片尾（`ad-skip.js`，Shift+O/E 登记）、Bangumi 评分/吐槽对话框（`bgm-rate.js`）、CatVod 详情页一键起播、省略 type 的 csp_/JAR 仓兼容修复（菜妮丝等仓整仓判死问题）、Kazumi 验证码识别骨架（`captcha.py`，未挂载）、IPC 可信发送方 getURL 兜底。
+- **测试补齐批次**（93d9689）：新增 Python 测试 16 文件 + JS 测试 24 文件（35,000+ 行），配套源码边界修复（jar_bridge 非 dict 帧、hls-downloader completed 兜底、pan-qr-window 建窗失败残留、search warnToast）。
+- **CI flaky 修复**：`test_runtime_supervisor.py` 五十源用例第二轮搜索前预热被强杀的 10 个 Worker——CI 双核 runner 冷 spawn 风暴曾致 14/40（run 35647959954）；预热后与首轮对称，被测语义不变。
+- **验证**：`npm run test:all` 全绿——`run_all.py` 74 阶段 ALL PASS、编译 264 文件 0 error、JS 单元 1717/1717、check-js 50 文件 0 错、ESLint 0 error（74 条既有 warning 不变）、Ruff 全过。
 
 2026-09-22 v0.2.5 发布与发布阻断修复批次：
 

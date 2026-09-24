@@ -287,7 +287,7 @@ npm run build:py   # PyInstaller -> python-dist/
 npm run build:win  # NSIS x64 安装包 -> dist/
 ```
 
-`test:all` 最新全量 **ALL PASS**（2026-09-20：`run_all.py` 56 阶段全过、编译 188 文件 0 error、ESLint 0 error、Ruff 全过、JS 单元 540/540、check-js 48 文件 0 错；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
+`test:all` 最新全量 **ALL PASS**（2026-09-24：`run_all.py` 74 阶段全过、编译 264 文件 0 error、ESLint 0 error、Ruff 全过、JS 单元 1717/1717、check-js 50 文件 0 错；详见 [PROGRESS.md](../PROGRESS.md) §7 与 [RUNTIME_ISSUES.md](RUNTIME_ISSUES.md)）。Windows 已生成 NSIS 安装包；macOS/Linux 配置存在但尚未完成实机验证。发布流水线见 [.github/workflows/release.yml](../.github/workflows/release.yml)（tag `v*` → Windows 构建 → Draft Release）。
 
 `run_all.py` 按阶段串行（任一阶段失败即停），其中 `config-snapshot`/`ext-semantics`/`capability-router`/`config-security` 四个阶段通过 `tests/offline_config_server.py` 起在 `127.0.0.1:0` 的 loopback 夹具跑，不出网；其余阶段覆盖 smoke/phase3/kazumi/cache/代理/JAR/站点健康等。夹具进入时会隔离宿主代理环境变量与 Windows 系统代理，否则开发机代理会吞请求；gzip、JPEG/PNG 伪装三种载体由 `single.json` 确定性派生（`ensure_binary_fixtures()`，`mtime=0`），四种载体哈希必须相等。
 

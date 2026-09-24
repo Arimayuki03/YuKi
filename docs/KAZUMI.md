@@ -452,6 +452,7 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 番剧评论 | ✅ getBangumiCommentsByID | ✅ 已实现（统一详情页吐槽页签） | 无 |
 | 角色/Staff | ✅ getBangumiStaffByID / getCharatersByBangumiID | ✅ 已实现（统一详情页角色/制作页签） | 无 |
 | 用户收藏同步 | ✅ updateBangumiById | ✅ 已实现（设置页 Bangumi 同步卡：token 管理/测试连接/我的收藏/删除；统一详情页收藏按钮同步；T74 收藏写入走 POST/PUT × `-`/真实用户名 × 官方/镜像矩阵） | 无 |
+| 评分/吐槽提交 | ✅ collection 写入含 rate/comment | ✅ 已实现（0.2.6：详情页评分/吐槽对话框 `bgm-rate.js`，经 `bangumiBangumiSyncApply` 端点透传） | 无 |
 
 ---
 
