@@ -74,8 +74,14 @@ function supportsContextMenu(versionLine) {
  * 而非裸 CDN 地址。仅用于 URL 已知的静态列表（本地/下载/直链批量）；在线剧集的直链
  * 懒解析且带签名时效（整季预解析既慢又会被风控、放到后面集数时早已过期），仍走渲染层
  * 逐集驱动，不进原生队列。无可播放项返回空串，调用方回退单集路径。
+ *
+ * opts.keepRawTitle：本地文件批量播放（yuki:file-push-many）传 true——集名就是
+ * 用户可见的真实文件名，即使以 .mp4/.mkv 等媒体扩展名结尾也原样保留（默认净化
+ * 规则会把这类「媒体扩展名结尾」的集名回落成第N集，那是为在线抓流产物
+ * kazumi_stream_*.m3u8 等临时文件名设计的，不适用于本地文件场景）。
  */
-function buildM3u(episodes) {
+function buildM3u(episodes, opts = {}) {
+    const keepRawTitle = opts.keepRawTitle === true;
     const lines = ['#EXTM3U'];
     let n = 0;
     for (const ep of (Array.isArray(episodes) ? episodes : [])) {
@@ -84,8 +90,9 @@ function buildM3u(episodes) {
         // EXTINF 集名净化：换行/Tab 破坏行结构压成空格；抓流产物/清单的临时
         // 文件名（kazumi_stream_*.m3u8、yuki-playlist-*.m3u8 等）一旦混入集名，
         // 会原样出现在 mpv 标题与播放列表——统一回落「第N集」。
+        // keepRawTitle（本地文件批量）豁免媒体扩展名回落，仅做行结构净化。
         let name = String(ep.title || '').replace(/[\r\n\t]+/g, ' ').trim();
-        if (!name || /\.(m3u8?|mp4|mkv|ts|flv)$/i.test(name)) name = `第${n}集`;
+        if (!name || (!keepRawTitle && /\.(m3u8?|mp4|mkv|ts|flv)$/i.test(name))) name = `第${n}集`;
         // URL 净化：url 首尾空白剥掉、内嵌换行直接剔除——m3u 一行一个地址，
         // 换行会让恶意/畸形 url 的后半段变成独立行（可注入 #EXTINF/指令行，
         // 与真正的下一集混淆），导致播放列表错位。
@@ -478,7 +485,7 @@ class MpvPlayer extends EventEmitter {
                 if (ep && ep.url) m3uIndexOf[i] = m3uCount++;
             }
             playlistPath = path.join(os.tmpdir(), `yuki-playlist-${process.pid}-${Date.now()}.m3u8`);
-            fs.writeFileSync(playlistPath, buildM3u(episodes), 'utf8');
+            fs.writeFileSync(playlistPath, buildM3u(episodes, { keepRawTitle: opts.keepRawTitle === true }), 'utf8');
             // 起始集下标：非负夹取后映射到 m3u 实际条目；映射不到（该集无 url）
             // 或越界时回退 0，从清单第一项播——绝不传越界的 --playlist-start。
             let startEpIdx = Number.isFinite(Number(opts.startIndex))
@@ -827,6 +834,9 @@ class MpvPlayer extends EventEmitter {
             // Anime4K 右键菜单档位请求（hints.lua 写 user-data 信号，主进程消费后回写当前档位）
             this.command('observe_property', 0x106, 'user-data/yuki/a4k-request').catch(() => { });
             this.command('observe_property', 0x107, 'user-data/yuki/ep-skip').catch(() => { });
+            // 跳片头/片尾登记请求（T81，右键菜单「标记片头结束点/标记片尾起点」）：
+            // 信号通道同上，主进程转发渲染层 _recordOpEdFromPlayback 登记 AdSkip
+            this.command('observe_property', 0x108, 'user-data/yuki/oped-record').catch(() => { });
             this._probeContextMenuBinding();
             this._verifyA4kBindings();
             // 连接就绪通知：主进程据此用实时设置推送菜单初始档位等会话级状态
@@ -897,6 +907,12 @@ class MpvPlayer extends EventEmitter {
                 const dir = Number(msg.data);
                 this.command('set', 'user-data/yuki/ep-skip', '').catch(() => { });
                 if (dir === -1 || dir === 1) this.emit('ep-skip', { dir });
+            }
+            // 片头/片尾登记信号（hints/oped-*，右键菜单）：读后清零，同 kind 可连续触发
+            if (msg.name === 'user-data/yuki/oped-record' && typeof msg.data === 'string' && msg.data) {
+                const kind = (msg.data === 'op' || msg.data === 'ed') ? msg.data : '';
+                this.command('set', 'user-data/yuki/oped-record', '').catch(() => { });
+                if (kind) this.emit('oped-record', { kind });
             }
             return;
         }

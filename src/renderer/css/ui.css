@@ -405,6 +405,28 @@ body.has-wallpaper::after { display:none; }
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 
+/* ── 本地文件多选（多选模式：勾选框 + 条目选中态 + 状态条） ── */
+/* 勾选框：行内条目与网格卡片通用；未勾选描边圆角方块，勾选填充主色勾 */
+.sel-box {
+    flex-shrink:0; display:inline-flex; align-items:center; justify-content:center;
+    width:20px; height:20px; margin:2px; border-radius:6px;
+    border:2px solid var(--md-outline); background:transparent; cursor:pointer;
+    color:transparent; font-size:13px; line-height:1; user-select:none;
+    transition:background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.sel-box:hover { border-color:var(--md-primary); }
+.sel-box.checked { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
+.sel-box.checked::after { content:'✓'; font-weight:700; }
+/* 网格卡片的勾选框悬浮在封面左上角（半透明底保证任意封面下可辨） */
+.local-card.sel-mode .sel-box { position:absolute; top:8px; left:8px; z-index:2;
+    background:color-mix(in srgb, var(--md-surface) 72%, transparent);
+    backdrop-filter:blur(4px); }
+.local-card.sel-mode .sel-box.checked { background:var(--md-primary); }
+.local-card.sel-mode:has(.sel-box.checked) { border-color:var(--md-primary);
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--md-primary) 30%, transparent); }
+/* 多选状态条：工具栏下的轻量提示行 */
+.local-sel-bar { padding:2px 0 10px; font-size:13px; color:var(--md-primary); }
+
 .file-name {
     font-size: 16px;
     line-height: 24px;
@@ -1240,9 +1262,13 @@ body.frameless #view-detail { padding-top:0 !important; }
 #view-detail > .back-btn { margin-top:48px; }
 .back-btn { margin-bottom:18px; }
 .detail-head { display:grid; grid-template-columns:minmax(260px, 360px) minmax(0, 1fr); gap:28px; margin-bottom:20px; align-items:stretch; }
-.detail-cover { min-width:0; }
+/* .detail-cover 与 .detail-hero-cover 是同一元素（grid 左列）。aspect-ratio 锚定
+   容器高度与列宽的比例、不依赖 img 加载：此前容器高度可被加载完成的封面原图
+   （large ~600px+）撑高，行高跳变把右栏「开始观看」操作行（margin-top:auto）
+   随封面加载时机整体下移。容器高度确定后 img height:100% 只是填充，不再回流。 */
+.detail-cover { min-width:0; aspect-ratio:3 / 4; }
 .detail-hero-cover { position:relative; min-height:360px; border-radius:var(--radius-lg); overflow:hidden; background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); box-shadow:var(--shadow-md); }
-.detail-cover img { width:100%; height:100%; min-height:360px; object-fit:cover; border-radius:inherit; display:block; opacity:0; transition:opacity var(--dur-slow) var(--ease); }
+.detail-cover img { width:100%; height:100%; min-height:0; object-fit:cover; border-radius:inherit; display:block; opacity:0; transition:opacity var(--dur-slow) var(--ease); }
 .detail-cover img.landscape { object-fit:contain; background:var(--md-surface-container-high); }
 .detail-info { flex:1; min-width:0; }
 .detail-hero-info { display:flex; flex-direction:column; padding:26px 30px; gap:4px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg); background:var(--md-surface-container); box-shadow:var(--shadow-sm); }
@@ -1254,12 +1280,25 @@ body.frameless #view-detail { padding-top:0 !important; }
 .detail-catvod-facts { display:flex; align-items:center; gap:10px; margin-top:4px; margin-bottom:2px; padding:6px 14px; border-radius:var(--radius-md); background:color-mix(in srgb, var(--md-on-surface) 4%, transparent); border:1px solid var(--md-outline-variant); }
 .detail-fact-label, .detail-stat-label, .detail-source-label { font-size:12px; color:var(--md-on-surface-variant); }
 .detail-fact-value { font-size:14px; font-weight:600; color:var(--md-on-surface); }
-.detail-bgm-stats { display:grid; grid-template-columns:minmax(150px, .8fr) minmax(130px, .7fr) minmax(190px, 1.4fr); align-items:center; gap:18px; margin-top:18px; padding-top:18px; border-top:1px solid var(--md-outline-variant); }
+/* 直方图列用 minmax(0, 1.4fr) 而非固定 190px 下限：列总最小宽超过卡片内容宽时
+   grid 会整体溢出右缘（柱图被裁），minmax(0,..) 让列可收缩到分配宽度内 */
+.detail-bgm-stats { display:grid; grid-template-columns:minmax(120px, .8fr) minmax(100px, .7fr) minmax(0, 1.4fr); align-items:center; gap:18px; margin-top:18px; padding-top:18px; border-top:1px solid var(--md-outline-variant); }
 .detail-stat-score, .detail-stat-rank { min-width:0; }
+.detail-bgm-stats .bi-hist { min-width:0; max-width:100%; }
 .detail-stat-score-line { display:flex; align-items:center; gap:10px; margin-top:4px; }
 .detail-stat-score-line strong, .detail-stat-rank strong { color:var(--md-primary); font-size:25px; line-height:30px; font-variant-numeric:tabular-nums; }
 .detail-stat-rank strong { display:block; margin-top:4px; }
 .detail-stat-note { display:block; margin-top:3px; color:var(--md-on-surface-variant); font-size:11px; line-height:16px; }
+/* 标题右侧原名小字（中文标题右下角副标题，字号显著小于主标题） */
+.detail-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 10px; }
+.detail-title-orig { font-size:13px; font-weight:500; color:var(--md-on-surface-variant); letter-spacing:0; line-height:1.4; }
+/* 放送行内的完结标记：与「12话」同字体同色（普通正文样式，仅留间距） */
+.detail-eps-finished { color:inherit; font-weight:inherit; margin-left:6px; }
+/* 收藏人数行（想看/在看/看过）：hero 统计区底部整行 */
+.detail-stat-collections { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px 16px; font-size:12px; color:var(--md-on-surface-variant); }
+.detail-col-item { display:inline-flex; align-items:center; gap:4px; }
+/* 封面左下角进度徽章（综合排名徽章的对角）：看到 N/M 或 已完结 */
+.detail-progress-badge { position:absolute; left:6px; bottom:6px; z-index:2; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; color:#F2F1EB; background:rgba(0,0,0,.62); backdrop-filter:blur(2px); }
 .detail-score-empty { color:var(--md-on-surface-variant); font-size:12px; }
 .bi-stars { position:relative; display:inline-block; font-size:16px; line-height:1; letter-spacing:1px; white-space:nowrap; }
 .bi-stars-bg { color:var(--md-outline-variant); }
@@ -1268,7 +1307,36 @@ body.frameless #view-detail { padding-top:0 !important; }
 .bi-hist-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; min-width:0; }
 .bi-hist-bar { width:100%; min-height:3px; background:var(--md-primary); border-radius:3px 3px 0 0; opacity:.7; }
 .bi-hist-lb { font-size:9px; color:var(--md-on-surface-variant); margin-top:3px; }
+/* 操作行：允许换行，「开始观看/收藏/评分/Bangumi 页」四按钮在窄容器下自动折行，
+   不再溢出右缘把最后一个按钮裁掉 */
 .detail-hero-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:auto; padding-top:2px; }
+.detail-hero-actions .md-btn { flex:0 0 auto; }
+/* 收藏单按钮（内置于操作行）：状态文案 + ▾ 箭头同一按钮，六态菜单向上展开——
+   菜单落在 hero 卡片内部区域，不跨卡片边界，不会被下方吸顶页签栏遮挡 */
+.detail-col-wrap { position:relative; display:inline-flex; align-items:center; gap:8px; }
+/* 箭头与文案同字号（不再是 10px 小角标）；按钮加宽 padding 保证「未收藏 ▾」完整显示 */
+#detail-col-current { padding:0 16px; gap:7px; }
+#detail-col-current .detail-col-caret { font-size:16px; line-height:1; opacity:.9; transform:translateY(-1px); margin-left:2px; }
+#detail-col-current.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
+/* width:max-content：绝对定位菜单默认 shrink-to-fit 会被包含块（按钮自身宽度）
+   压窄，三列按钮挤到裁字——显式按内容取宽，按钮完整展示 */
+.detail-col-menu { position:absolute; left:0; bottom:calc(100% + 8px); z-index:80; width:max-content; padding:8px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); background:var(--md-surface-container-high); box-shadow:var(--shadow-lg); white-space:nowrap; }
+.detail-col-menu .kazumi-col-btns { display:grid; grid-template-columns:repeat(3, auto); gap:6px; }
+.detail-col-menu .kazumi-col-btn { white-space:nowrap; height:32px; font-size:12.5px; padding:0 12px; }
+/* 本地收藏单按钮（CatVod 源，Bangumi 同款交互）：复用上方 wrap/menu/菜单按钮全套样式，
+   仅扩宽 padding 让「未收藏 ▾」完整显示（同 #detail-col-current 口径） */
+#detail-local-col-current { padding:0 16px; gap:7px; }
+#detail-local-col-current .detail-col-caret { font-size:16px; line-height:1; opacity:.9; transform:translateY(-1px); margin-left:2px; }
+#detail-local-col-current.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
+.detail-col-progress { flex:none; }
+/* 时间表卡片封面左下角话数徽章：复用 .detail-progress-badge（absolute 定位），
+   .vod-cover 本身已 position:relative（2505 行既有规则），此处仅微调内边距观感 */
+.vod-cover .timeline-ep-badge { left:6px; bottom:6px; }
+/* 详情页签内的筛选条（角色/制作共用）：复用 class-tabs 视觉口径的轻量胶囊 */
+.detail-filter-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+.detail-filter-item { padding:4px 12px; border-radius:var(--radius-pill); font-size:12px; cursor:pointer; color:var(--md-on-surface-variant); border:1px solid var(--md-outline-variant); transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
+.detail-filter-item:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+.detail-filter-item.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
 .detail-actions { display:flex; flex-wrap:wrap; gap:8px; margin:0; }
 .detail-actions .tag-active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
 .detail-button-mark { margin-right:6px; font-size:11px; }
@@ -1405,6 +1473,10 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .ep-dl-bar-hidden { display:none !important; }
 /* CatVod 选集勾选框：默认隐藏，多选模式才显示 */
 .ep-grid:not(.selecting) .ep-check { display:none; }
+/* CatVod「开始播放」弹窗（T79）：复用 .play-src/.ep-btn 视觉，集数网格居中对齐排布 */
+.catvod-play-sheet .play-srcs { margin-bottom:12px; }
+.catvod-play-sheet .catvod-play-eps { grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); }
+.catvod-play-sheet .catvod-ep-btn { justify-content:center; text-align:center; }
 
 /* Bangumi 页签内容 */
 .detail-comment-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
@@ -1434,6 +1506,25 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-comment-inline-img { max-width:100%; max-height:120px; vertical-align:middle; border-radius:4px; }
 .detail-comment-text a { color:var(--md-primary); text-decoration:none; }
 .detail-comment-text a:hover { text-decoration:underline; }
+
+/* ===== 选集讨论（detail.js _renderEpComments；对齐 Kazumi EpisodeCommentsView） ===== */
+.ep-comments-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.ep-comments-title { font-size:15px; font-weight:600; color:var(--md-on-surface); display:flex; align-items:baseline; gap:8px; min-width:0; }
+.ep-comments-sub { font-size:12px; font-weight:400; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ep-comments-head #ep-comments-order { margin-left:auto; flex:none; }
+/* 集数选择器：横排滚动 chips（全集含 SP/OP/ED），当前集主色填充 */
+.ep-comments-chips { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:10px; scrollbar-width:thin; }
+.ep-comments-chip {
+    flex:none; min-width:34px; padding:4px 10px; border-radius:var(--radius-pill);
+    border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
+    font-size:12.5px; color:var(--md-on-surface-variant);
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.ep-comments-chip:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+.ep-comments-chip.active { background:var(--md-primary-container); color:var(--md-on-primary-container); border-color:var(--md-primary-container); font-weight:600; }
+.ep-comments-chip i { font-style:normal; font-size:10px; margin-left:3px; opacity:.75; }
+.ep-comments-count { display:inline-block; font-size:12px; font-weight:600; color:var(--md-on-secondary-container); background:var(--md-secondary-container); padding:3px 10px; border-radius:999px; margin-bottom:10px; }
+.ep-comments-empty { text-align:center; padding:24px 0; }
 
 /* 角色：卡片网格，展示角色头像（不再横排铺满一行） */
 .detail-char-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:12px; }
@@ -1515,7 +1606,13 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-col-btn.active { background:var(--md-primary); color:var(--md-on-primary); border-color:var(--md-primary); }
 
 /* 「开始观看」精简条：不显示底色与提示文案 */
-.kazumi-watch-row.detail-watch-row-plain { background:transparent; border:none; padding:0; margin:0; }
+.kazumi-watch-row.detail-watch-row-plain { background:transparent; border:none; padding:0; margin:0; flex-wrap:wrap; }
+/* T80：评分/吐槽按钮与「开始观看」同行右置，轮廓样式弱化以衬托主播放按钮 */
+.kazumi-watch-row #detail-bgm-rate { border:1px solid var(--md-outline); color:var(--md-primary); background:transparent; }
+.kazumi-watch-row #detail-bgm-rate:hover { background:var(--accent-hover-bg); }
+/* 「Bangumi 页」外链按钮：与「评分」同款描边弱按钮（次级操作） */
+.kazumi-watch-row #detail-bgm-open { border:1px solid var(--md-outline); color:var(--md-on-surface-variant); background:transparent; }
+.kazumi-watch-row #detail-bgm-open:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
 
 /* 人物详情浮层（仿 Kazumi CharacterPage：资料 / 吐槽） */
 #char-float { position:fixed; inset:0; z-index:1200; display:none; align-items:center; justify-content:center; background:color-mix(in srgb, #000 52%, transparent); padding:24px; }
@@ -1546,7 +1643,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 
 @media (max-width:1100px) {
     .detail-head { grid-template-columns:180px minmax(0, 1fr); gap:18px; }
-    .detail-hero-cover, .detail-cover img { min-height:300px; }
+    .detail-cover { min-height:300px; }
     .detail-hero-info { padding:22px 24px; }
     .detail-bgm-stats { grid-template-columns:1fr 1fr; }
     .detail-bgm-stats .bi-hist { grid-column:1 / -1; }
@@ -1557,7 +1654,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
     #view-detail { --view-pad-x:14px; padding:0 var(--view-pad-x) 32px; }
     body.frameless #view-detail { padding-top:0 !important; }
     .detail-head { grid-template-columns:104px minmax(0, 1fr); gap:14px; }
-    .detail-hero-cover, .detail-cover img { min-height:156px; }
+    .detail-cover { min-height:156px; }
     .detail-hero-info { padding:16px; border-radius:14px; }
     .detail-kicker { font-size:10px; }
     .detail-title { font-size:22px; line-height:1.25; margin-top:4px; }
@@ -1797,6 +1894,14 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .kazumi-tag { padding:3px 10px; border-radius:var(--radius-pill); font-size:12px; cursor:pointer;
     background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); color:var(--md-on-surface); }
 .kazumi-tag:hover { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
+/* 标签「展开全部（N）/收起」按钮：与 chips 同排同高，虚线胶囊区分实体标签 */
+.kazumi-tags-toggle {
+    border:1px dashed var(--md-outline-variant); background:transparent; cursor:pointer;
+    padding:3px 10px; border-radius:var(--radius-pill); font-size:12px;
+    color:var(--md-primary); align-self:center;
+    transition:background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.kazumi-tags-toggle:hover { background:var(--accent-hover-bg); border-color:var(--md-primary); }
 
 /* Bangumi 详情页签内容 */
 /* 注：.kazumi-detail-ep 等集数按钮样式统一定义在前文「Bangumi-only 分集」区块，
@@ -1868,51 +1973,98 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
     border-radius:var(--radius-pill); font-size:13px; background:var(--md-secondary-container);
     color:var(--md-on-secondary-container);
 }
-.bangumi-search-grid { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); }
+.bangumi-search-grid { grid-template-columns:repeat(auto-fill,minmax(172px,1fr)); }
 
 /* ===== Bangumi 评分/吐槽（bgm-rate.js；对齐 Kazumi 评分能力） ===== */
-/* 搜索结果卡「评分」操作条：卡片底部悬浮按钮（点击不进详情） */
-.bgm-card-rate {
-    position:absolute; left:6px; bottom:6px; z-index:2;
-    padding:3px 9px; border:none; border-radius:var(--radius-pill);
-    font-size:11px; font-weight:600; cursor:pointer; color:#F2F1EB;
-    background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
-    transition:background var(--dur-fast) var(--ease);
-}
+/* 搜索结果卡与收藏卡的「★ 评分」悬浮按钮均已移除：评分入口统一在详情页 hero
+ * 的「★ 评分 / 吐槽」按钮（T80 起挪入 hero；搜索卡按钮随入口收敛删除）。 */
 .bangumi-card { position:relative; }
-.bgm-card-rate:hover { background:var(--md-primary); }
-/* 收藏网格 Bangumi 卡「评分」操作（rec-badge 同位风格） */
-.rec-bgm-rate {
-    position:absolute; left:6px; bottom:6px; z-index:2;
-    padding:3px 9px; border:none; border-radius:var(--radius-pill);
-    font-size:11px; font-weight:600; cursor:pointer; color:#F2F1EB;
-    background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
-    transition:background var(--dur-fast) var(--ease);
-}
-.rec-bgm-rate:hover { background:var(--md-primary); }
-/* 多选删除模式下隐藏评分操作，避免与勾选点击区重叠 */
-.vod-grid.selecting .rec-bgm-rate, .vod-grid.selecting .bgm-card-rate { display:none; }
 /* 「我的评分」徽章（bangumiCard my_rate 字段渲染，封面左上角） */
 .bangumi-myrate-badge { position:absolute; top:6px; left:6px; z-index:2;
     padding:2px 7px; border-radius:var(--radius-sm); font-size:10.5px; font-weight:700;
     color:var(--md-on-primary-container); background:rgba(0,0,0,.6);
     border:1px solid var(--md-primary-container); }
-/* 评分对话框 */
+/* 评分对话框（比默认 md-dialog 宽，容纳 10 星一排 + 标签 chips） */
 #bgmRateDialog .md-dialog { width:460px; max-width:calc(100vw - 48px); }
-.bgm-rate-name { font-size:14px; font-weight:600; margin-bottom:10px;
+/* 条目名 + 当前评分徽标：一行两端的头部排版 */
+.bgm-rate-top { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.bgm-rate-name { flex:1; min-width:0; font-size:14px; font-weight:600; color:var(--md-on-surface);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.bgm-rate-stars-row { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
+/* 评分状态徽标（未评分/8 分 · 力荐）：随分值着色（联动规则见下方 :has()） */
+.bgm-rate-label {
+    flex:none; padding:3px 10px; border-radius:var(--radius-pill);
+    font-size:12px; font-weight:600; line-height:1.4;
+    color:var(--md-on-surface-variant); background:var(--md-surface-container);
+}
+/* 星级按钮行：10 颗等宽铺满一行（justify-content:space-between），不再折行拥挤 */
+.bgm-rate-stars-row { display:flex; justify-content:space-between; gap:2px; margin-bottom:12px; }
 .bgm-rate-star {
-    border:none; background:transparent; cursor:pointer; padding:2px 3px;
-    font-size:22px; line-height:1; color:var(--md-outline-variant);
+    flex:1; border:none; background:transparent; cursor:pointer; padding:4px 0;
+    font-size:26px; line-height:1; color:var(--md-outline-variant);
     transition:color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
-.bgm-rate-star:hover { transform:scale(1.15); }
+.bgm-rate-star:hover { transform:scale(1.18); }
 .bgm-rate-star.active { color:#F5B50A; }
-.bgm-rate-meta { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-.bgm-rate-label { font-size:13px; color:var(--md-on-surface-variant); }
-/* 吐槽输入框 */
-#bgm-rate-comment { width:100%; resize:vertical; min-height:84px; }
+/* 星级行下方操作条：右侧清除按钮（有高亮星时由 :has() 联动显现） */
+.bgm-rate-actions { display:flex; justify-content:flex-end; margin-bottom:12px; }
+.bgm-rate-actions .md-btn { flex:none; }
+/* 评分状态联动（纯 CSS :has，Chromium 105+）：无高亮星 = 未评分态——
+   徽标中性灰、「清除评分」隐藏；有任一高亮星 = 已评分态——徽标高亮、清除按钮显现 */
+#bgm-rate-clear { display:none; }
+#bgmRateDialog:has(.bgm-rate-star.active) #bgm-rate-clear { display:inline-flex; }
+#bgmRateDialog:has(.bgm-rate-star.active) .bgm-rate-label {
+    color:var(--md-on-primary-container); background:var(--md-primary-container);
+}
+/* 吐槽输入框（操作条已有下边距，抵消 .md-dialog-body .md-input 的通用 margin-top） */
+#bgm-rate-comment { width:100%; resize:vertical; min-height:84px; margin-top:0; }
+/* 标签编辑区（对齐 Kazumi rating_review_dialog：已选 chips + 热门建议 + 自定义输入）：
+   卡片化容器 + 内部分隔线，与吐槽正文视觉分区 */
+.bgm-rate-tags-block {
+    margin-top:12px; padding:12px 12px 12px;
+    background:var(--md-surface-container); border-radius:var(--radius-md);
+}
+.bgm-rate-tags-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.bgm-rate-tags-title { font-size:13px; font-weight:600; color:var(--md-on-surface); }
+.bgm-rate-tags-count { font-size:12px; color:var(--md-on-surface-variant); }
+.bgm-rate-tags-selected { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.bgm-rate-tags-empty { font-size:12px; color:var(--md-outline); }
+.bgm-rate-tag-chip {
+    display:inline-flex; align-items:center; gap:4px;
+    padding:3px 6px 3px 10px; border-radius:var(--radius-pill);
+    font-size:12px; color:var(--md-on-secondary-container);
+    background:var(--md-secondary-container);
+}
+.bgm-rate-tag-remove {
+    width:18px; height:18px; border:none; border-radius:50%;
+    background:transparent; color:inherit; font-size:12px; line-height:1;
+    cursor:pointer; display:inline-flex; align-items:center; justify-content:center;
+    transition:background var(--dur-fast) var(--ease);
+}
+.bgm-rate-tag-remove:hover { background:var(--md-error-container); color:var(--md-on-error-container); }
+.bgm-rate-tags-popular { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
+.bgm-rate-tags-pop-title { font-size:12px; color:var(--md-on-surface-variant); margin-right:2px; }
+.bgm-rate-tag-pop {
+    border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
+    padding:3px 10px; border-radius:var(--radius-pill); font-size:12px;
+    color:var(--md-on-surface-variant);
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.bgm-rate-tag-pop:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+.bgm-rate-tag-pop.active { background:var(--md-primary-container); color:var(--md-on-primary-container); border-color:var(--md-primary-container); }
+.bgm-rate-tag-more {
+    border:1px dashed var(--md-outline-variant); background:transparent; cursor:pointer;
+    padding:3px 10px; border-radius:var(--radius-pill); font-size:12px;
+    color:var(--md-primary);
+    transition:background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.bgm-rate-tag-more:hover { background:var(--accent-hover-bg); border-color:var(--md-primary); }
+.bgm-rate-tags-input-row { display:flex; gap:8px; align-items:center; }
+.bgm-rate-tags-input-row .md-input { flex:1; height:36px; border-radius:var(--radius-md); }
+.bgm-rate-tag-error { font-size:12px; color:var(--md-error); margin-top:6px; }
+/* 毛玻璃模式：标签卡片与弹窗面板同口径半透明，避免实色块浮在毛玻璃上 */
+html.glass-on .bgm-rate-tags-block {
+    background:color-mix(in srgb, var(--md-surface-container) var(--glass-veil, 80%), transparent);
+}
 
 /* 下载管理（卡片化：与直链/工具页同为 tool-card，限宽居中） */
 .downloads-wrap { max-width:980px; margin:0 auto; }
@@ -1981,8 +2133,9 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .live-name { flex:1; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--md-on-surface); }
 .live-group { flex:none; font-size:11px; padding:2px 8px; border-radius:10px;
     background:var(--md-surface-container-high); color:var(--md-on-surface-variant); }
-/* 直播频道卡片入场动画：仅用户切分组/翻页时由 JS 加 .anim-cards 启用（T30 同 vod-card 惯例），
-   后台探测分批重渲染不加该类，避免列表反复重播闪烁。
+/* 直播频道卡片入场动画：进页首渲/切源/刷新/切分组/翻页等全量重渲染时由 JS 加
+   .anim-cards 启用（T30 同 vod-card 惯例），后台探测分批重渲染不加该类，
+   避免列表反复重播闪烁。
    fill 用 backwards（非 both）：结束后释放 transform，保住 hover 上浮不被 fill 锁死。 */
 .live-list.anim-cards .live-item { animation:liveIn var(--dur-base) var(--ease) backwards; }
 /* 卡片错峰入场：前 10 张逐张出现，延迟封顶 */
@@ -2023,15 +2176,15 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .vod-grid.selecting .rec-check { display:block; }
 .vod-grid.selecting .vod-card.sel { outline:2px solid var(--md-primary); }
 .rec-check.checked { background:var(--md-primary); border-color:var(--md-primary); }
-/* 收藏卡封面左上角「想看/已看」标签：点击切换，多选模式下被勾选框遮盖不冲突 */
+/* 收藏卡状态标签（想看/在看/看过…）：用户要求移入封面左下角徽章组（源徽章右侧），
+   由封面左上角绝对定位改为徽章组内静态 flex 项；点击循环切换仍走 .rec-tag 委托 */
 .rec-tag {
-    position:absolute; top:6px; left:6px; z-index:1; max-width:calc(100% - 12px);
+    position:static; flex:0 1 auto; max-width:110px;
     padding:1px 8px; border-radius:var(--radius-sm); font-size:10.5px; color:#F2F1EB;
     background:rgba(0,0,0,.55); backdrop-filter:blur(2px); cursor:pointer;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .rec-tag.seen { background:var(--md-primary); color:var(--md-on-primary); }
-.vod-grid.selecting .rec-tag { z-index:0; }
 .rec-check.checked::after {
     content:''; position:absolute; left:5px; top:1.5px; width:4px; height:9px;
     border:solid var(--md-on-primary); border-width:0 2px 2px 0; transform:rotate(45deg);
@@ -2379,20 +2532,37 @@ html.dark[data-color="cyan"] {
     --md-primary-container:#155E75; --md-on-primary-container:#CFFAFE;
 }
 
-/* ===== 收藏/历史卡片源标识（封面左下角覆盖徽章：卡片尺寸与首页完全一致） ===== */
+/* ===== 收藏/历史卡片封面左下角徽章组（源标识 + 集数徽章，flex 并排） ===== */
 .vod-cover { position:relative; }
+.rec-cover-badges {
+    position:absolute; left:6px; bottom:6px; z-index:1; max-width:calc(100% - 12px);
+    display:flex; align-items:center; gap:4px; pointer-events:none;
+}
+/* 容器 none 让徽章间隙不拦截卡片点击；状态标签 .rec-tag 承担点击循环切换
+   （records.js 委托 .rec-tag），必须显式恢复 auto——pointer-events 可继承 */
+.rec-cover-badges .rec-tag { pointer-events:auto; }
 .rec-site {
-    position:absolute; left:6px; bottom:6px; max-width:calc(100% - 12px);
+    position:static; flex:0 1 auto; min-width:0;
     padding:1px 7px; border-radius:7px; font-size:10.5px; color:#F2F1EB;
     background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* 集数徽章（如 2/12，用户要求）：排在源徽章右侧，配色对齐时间表集数徽章
+   （.detail-progress-badge：半透明黑底 + 米白字 + 磨砂），同款观感 */
+.rec-eps {
+    flex:none; padding:1px 7px; border-radius:7px; font-size:10.5px; font-weight:700;
+    color:#F2F1EB; background:rgba(0,0,0,.62); backdrop-filter:blur(2px); white-space:nowrap;
 }
 
-/* 历史卡播放信息（T73：按次记录，显示 集名 · 时长 · 播放时间），位于片名下方，单行省略 */
+/* 历史卡播放信息（T73：按次记录），位于片名下方；播放时长与日期拆双行（用户要求），
+   各自单行省略。rec-playinfo-tight 用于「播放 X 分钟」行：去上距/底距，与集名行、
+   日期行紧凑相接，卡片底部留白由日期行的 padding-bottom 承担。 */
 .rec-playinfo {
     margin-top:2px; padding:0 10px 8px; font-size:13px; line-height:1.5; color:var(--md-on-surface-variant);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;
 }
+.rec-playinfo-tight { margin-top:0; padding-bottom:0; }
+.rec-playinfo-date { margin-top:0; }
 /* 历史卡集数信息行：与标题字号统一，单行省略 */
 .rec-epline {
     padding:0 10px 4px; font-size:13px; line-height:1.5; color:var(--md-on-surface);
@@ -2549,7 +2719,8 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
 @media (min-width:2000px) {
     /* 详情页 */
     .detail-head { grid-template-columns:340px minmax(0, 1fr); gap:32px; margin-bottom:24px; }
-    .detail-hero-cover, .detail-cover img { min-height:460px; border-radius:16px; }
+    .detail-cover { min-height:460px; }
+    .detail-hero-cover { border-radius:16px; }
     .detail-hero-info { padding:32px 36px; gap:6px; }
     .detail-catvod-facts { margin-top:6px; margin-bottom:4px; padding:10px 18px; font-size:16px; }
     .detail-fact-label { font-size:14px; }
@@ -2584,6 +2755,7 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .rec-epline { font-size:14.5px; line-height:20px; }
     .rec-playinfo { font-size:14.5px; line-height:20px; padding:0 10px 8px; }
     .rec-site { font-size:13px; }
+    .rec-eps { font-size:13px; }
     /* 通用控件 */
     .md-input { height:64px; font-size:19px; border-radius:var(--radius-md); }
     .search-bar .md-input { border-radius:var(--radius-md); }

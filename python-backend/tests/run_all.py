@@ -64,6 +64,8 @@ STAGES = [
     ('jar-supervisor', [PY, os.path.join(HERE, 'test_jar_supervisor.py')]),
     # dex2jar 生命周期：jar 反编译子进程的 spawn/收敛/超时契约
     ('dex2jar-lifecycle', [PY, os.path.join(HERE, 'test_dex2jar_lifecycle.py')]),
+    # dex-tools 按需下载链路（0.2.7 打包不随附后的主路径）：布局落位/哈希校验/负缓存
+    ('dextools-on-demand', [PY, os.path.join(HERE, 'test_dextools_on_demand.py')]),
     ('pan-cache', [PY, os.path.join(HERE, 'test_pan_cache.py')]),
     ('pan-cookies', [PY, os.path.join(HERE, 'test_pan_cookies.py')]),
     ('jar-compatibility', [PY, os.path.join(HERE, 'test_jar_compatibility.py')]),

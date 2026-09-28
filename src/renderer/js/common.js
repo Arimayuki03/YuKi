@@ -428,12 +428,13 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
         return a;
     };
     // 桥接可调用的全局函数名白名单：枚举当前全部消费点（panels.js 本地文件板块的
-    // 动态插值内联事件——goParent/enterDir/selectFile/pickRoot 与右键删除确认；
-    // 路径运行时拼接，进不了 CSP 静态哈希白名单，是桥接唯一实际执行的形态）。
+    // 动态插值内联事件——goParent/enterDir/selectFile/pickRoot/勾选 toggleSel 与
+    // 右键删除确认；路径运行时拼接，进不了 CSP 静态哈希白名单，是桥接唯一实际
+    // 执行的形态）。
     // 注意：新增消费点必须显式加入此表，否则桥接拒绝执行（fail-closed）并告警；
     // 静态哈希放行的表达式（closeDialog/pushFile 等）由浏览器原生执行，不经此处。
     const _cspFnWhitelist = new Set([
-        'goParent', 'enterDir', 'selectFile', 'pickRoot',
+        'goParent', 'enterDir', 'selectFile', 'pickRoot', 'toggleSel',
         'showDelFileDialog', 'showDelFolderDialog',
     ]);
     const _cspRun = (host, expr, event) => {
@@ -650,6 +651,9 @@ function bangumiCard(item) {
     const myBadge = (myRate >= 1 && myRate <= 10)
         ? `<span class="bangumi-myrate-badge" title="我的评分 ${myRate} 分">我的 ${myRate}★</span>` : '';
     const air = item.air_date || '';
+    // 条目公共标签（tagNames）：BgmRate 对话框热门标签建议实际取自详情接口
+    // （detail.js _bgmInfo.tags），搜索卡不消费 tags——不再输出序列化属性，
+    // 免得每张卡背一份冗余数据、注释误导维护者以为存在该链路
     return `<div class="vod-card bangumi-card" data-id="${escHtml(String(item.id))}" data-name="${escHtml(name)}" tabindex="0">
         <div class="vod-cover">${vodCoverImg(cover)}${rank}${myBadge}</div>
         <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
@@ -895,9 +899,25 @@ async function _coverFillOne(pool, item) {
         ? bangumiCoverImg(pic, true)
         : vodCoverImg(pic, true);
     el.find('.vod-cover').html(html);
-    // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）
+    // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）；
+    // 同批把 #N 排名角标（对齐 Bangumi 搜索卡）与评分/日期备注行一并按缓存刷新——
+    // 首渲为占位图时无匹配数据，这两处停在「Kazumi 规则源」兜底文案，补拉即补齐
     if (isKazumi) {
         el.find('.vod-cover').prepend(`<div class="kazumi-badge">${escHtml(String(site).slice(7))}</div>`);
+        const m = (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiMatch)
+            ? Kazumi.getCachedBangumiMatch(name) : null;
+        if (m && m.rank) {
+            el.find('.vod-cover').prepend(`<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(m.rank))}">#${escHtml(String(m.rank))}</span>`);
+        }
+        const score = (m && m.score) ? `⭐${escHtml(String(m.score))}` : '';
+        const air = (m && m.air_date) ? escHtml(String(m.air_date)) : '';
+        if (score || air) {
+            // 备注行仅在「空或渲染期占位文案」时补写：历史页 kazumi 卡的 remarks
+            // 可能带真实内容（如「完结」），不能被评分/日期覆盖
+            const $rem = el.find('.vod-remarks');
+            const cur = String($rem.text() || '').trim();
+            if (!cur || cur === 'Kazumi 规则源') $rem.html([score, air].filter(Boolean).join(' · '));
+        }
     }
     // 补拉完成回调：调用方（如历史页）可借此把封面回写记录并持久化
     if (pool.opts && typeof pool.opts.onOne === 'function') {

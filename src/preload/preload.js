@@ -69,6 +69,10 @@ contextBridge.exposeInMainWorld('yuki', {
     onEpisodeSkip: (cb) => {
         ipcRenderer.on('yuki:episode-skip', (_e, info) => cb(info));
     },
+    /** mpv 右键菜单「标记片头/片尾」（T81）：{kind:'op'|'ed'}，渲染层登记 AdSkip */
+    onOpEdRecord: (cb) => {
+        ipcRenderer.on('yuki:oped-record', (_e, info) => cb(info));
+    },
     /** 外部播放器进程退出 {sessionId, pid, kind, wallSec, titles}：wallSec 为进程存活
      *  墙钟秒数（口径同 mpv wallWatched），渲染层据此计入观看统计/最近观看/历史 */
     onExternalPlayerExit: (cb) => {
@@ -87,8 +91,12 @@ contextBridge.exposeInMainWorld('yuki', {
     fileNewFolder: (rel, name) => ipcRenderer.invoke('yuki:file-new-folder', rel || '', name),
     fileDelFile: (rel) => ipcRenderer.invoke('yuki:file-del-file', rel),
     fileDelFolder: (rel) => ipcRenderer.invoke('yuki:file-del-folder', rel),
+    /** 批量删除（多选模式）：rels 为相对路径数组；目录走 P2-7 三道防线，逐项结果回告 */
+    fileDelMany: (rels) => ipcRenderer.invoke('yuki:file-del-many', Array.isArray(rels) ? rels : []),
     /** 本地视频播放（mpv 接管；非视频/缺 mpv 返回 ok:false） */
     filePush: (rel) => ipcRenderer.invoke('yuki:file-push', rel),
+    /** 批量播放（多选/同类命名播放列表）：rel 数组组成 m3u 队列交给播放器连播 */
+    filePushMany: (rels) => ipcRenderer.invoke('yuki:file-push-many', Array.isArray(rels) ? rels : []),
     /** Phase 6 下载管理（aria2c）：action ∈ init/add/addFile/pickDir/pause/unpause/remove/clear */
     download: {
         control: (action, payload) => ipcRenderer.invoke('yuki:dl', action, payload || {}),

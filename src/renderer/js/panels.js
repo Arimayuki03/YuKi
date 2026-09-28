@@ -19,6 +19,9 @@ let currentFile = '';
 let currentParent = '';
 let dirNavStack = [];
 let pendingDelFolder = null;
+// 多选模式状态：_selMode 开启后条目点击变勾选；_selSet 收集勾选的相对路径
+let _selMode = false;
+let _selSet = new Set();
 let _assetStatus = null; // 最近一次资产就绪状态缓存（Anime4K 开关提示用）
 // initSettingsPanel 内部闭包 showSetCat 的模块级引用，供 openSettingsPanel 跨函数调用
 let _showSetCat = null;
@@ -581,10 +584,20 @@ function buildParentItem() {
     </a>`;
 }
 
+/** 多选勾选框（_selMode 时插在条目/卡片最前）：click 换勾选不冒泡触发条目动作；
+ *  data-sel-rel 存相对路径，供勾选态回填与收集。 */
+function buildSelBox(rel) {
+    const ep = escPath(rel);
+    return `<span class="sel-box${_selSet.has(rel) ? ' checked' : ''}" data-sel-rel="${ep}"
+        onclick="toggleSel('${ep}')" title="勾选/取消勾选"></span>`;
+}
+
 /** 文件夹项：点击进入；右键弹删除文件夹确认。 */
 function buildDirItem(name, time, path) {
     const ep = escPath(path);
-    return `<a class="file-item" oncontextmenu="showDelFolderDialog('${ep}',currentRoot);return false" onclick="enterDir('${ep}')">
+    const sel = _selMode ? buildSelBox(path) : '';
+    return `<a class="file-item${_selMode ? ' sel-mode' : ''}" oncontextmenu="showDelFolderDialog('${ep}',currentRoot);return false" onclick="enterDir('${ep}')">
+    ${sel}
     <img class="file-icon" src="${icDir}" alt="">
     <div class="file-info"><div class="file-name">${escHtml(name)}</div><div class="file-time">${escHtml(time)}</div></div>
     </a>`;
@@ -593,7 +606,9 @@ function buildDirItem(name, time, path) {
 /** 文件项：点击弹信息确认框（可提交播放）；右键弹删除文件确认。 */
 function buildFileItem(name, time, path) {
     const ep = escPath(path);
-    return `<a class="file-item" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')">
+    const sel = _selMode ? buildSelBox(path) : '';
+    return `<a class="file-item${_selMode ? ' sel-mode' : ''}" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')">
+    ${sel}
     <img class="file-icon" src="${icFile}" alt="">
     <div class="file-info"><div class="file-name">${escHtml(name)}</div><div class="file-time">${escHtml(time)}</div></div>
     </a>`;
@@ -615,7 +630,9 @@ function isLocalAudio(name) {
 /** 视频卡片（网格布局；预览图由 loadLocalThumbs 异步填充）。 */
 function buildVideoCard(name, time, path) {
     const ep = escPath(path);
-    return `<div class="local-card" data-thumb-rel="${ep}" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')" title="${escHtml(name)}">
+    const sel = _selMode ? buildSelBox(path) : '';
+    return `<div class="local-card${_selMode ? ' sel-mode' : ''}" data-thumb-rel="${ep}" oncontextmenu="showDelFileDialog('${ep}');return false" onclick="selectFile('${ep}')" title="${escHtml(name)}">
+    ${sel}
     <div class="local-thumb ph"><img src="${icFile}" alt=""></div>
     <div class="local-name">${escHtml(name)}</div>
     <div class="local-time">${escHtml(time)}</div>
@@ -644,8 +661,10 @@ function loadLocalThumbs() {
     });
 }
 
-/** 进入子目录（当前目录压栈供回退）。 */
+/** 进入子目录（当前目录压栈供回退）。多选模式下条目主体点击转勾选
+ *  （与 index.html 帮助文案「进入多选模式后点击条目勾选」一致）。 */
 function enterDir(path) {
+    if (_selMode) { toggleSel(path); return; }
     dirNavStack.push(currentRoot);
     listFile(path);
 }
@@ -658,53 +677,303 @@ function goParent() {
     }
 }
 
-/** 选中文件：展示路径信息确认框（确认后经 yuki:file-push 交 mpv 播放）。 */
+// ---------------------------------------------------------------- 多选模式
+
+/** 进入/退出多选模式：退出时清空勾选并还原工具栏按钮显隐。 */
+function toggleSelMode(force) {
+    const next = typeof force === 'boolean' ? force : !_selMode;
+    _selMode = next;
+    if (!next) _selSet.clear();
+    const bar = $('#local-sel-bar');
+    if (bar.length) bar.toggle(next);
+    $('#local-btn-select').toggle(!next);
+    $('#local-btn-selall').toggle(next);
+    $('#local-btn-play-sel').toggle(next);
+    $('#local-btn-del-sel').toggle(next);
+    $('#local-btn-exit-sel').toggle(next);
+    updateSelCount();
+    renderLocalPage();
+}
+
+/** 勾选/取消一个条目（sel-box 点击；复选模式下列表点击不再触发行动作）。 */
+function toggleSel(rel) {
+    if (!_selMode) return;
+    const key = String(rel || '');
+    if (!key) return;
+    if (_selSet.has(key)) _selSet.delete(key); else _selSet.add(key);
+    updateSelCount();
+    renderLocalPage();
+}
+
+/** 工具栏「已选 N 项」计数（sel-bar 隐藏时无元素可写，静默跳过）。 */
+function updateSelCount() {
+    const el = document.getElementById('local-sel-count');
+    if (el) el.textContent = `已选 ${_selSet.size} 项`;
+}
+
+/** 全选/反选当前页内全部条目（不含 .. 上级项）：只取当前页切片，
+ *  与可见勾选框回显范围一致（全目录全页会让「删除所选」越出用户所见）。 */
+function selectAllLocal() {
+    if (!_selMode || !_localPage) return;
+    const items = _localPage.dirs.concat(_localPage.videos, _localPage.audios);
+    const pages = Math.max(1, Math.ceil(items.length / LOCAL_PAGE_SIZE));
+    const page = Math.min(_localPageNo, pages);
+    const slice = items.slice((page - 1) * LOCAL_PAGE_SIZE, page * LOCAL_PAGE_SIZE);
+    // 已全选 → 反选清空；否则吸收当前页路径
+    const allIn = slice.length > 0 && slice.every((n) => _selSet.has(n.path));
+    if (allIn) slice.forEach((n) => _selSet.delete(n.path));
+    else slice.forEach((n) => _selSet.add(n.path));
+    updateSelCount();
+    renderLocalPage();
+}
+
+/** 收集勾选路径（保持列表顺序），空选集返回 null 由调用方提示。 */
+function collectSelPaths() {
+    if (!_localPage || !_selSet.size) return null;
+    const items = _localPage.dirs.concat(_localPage.videos, _localPage.audios);
+    const ordered = items.filter((n) => _selSet.has(n.path)).map((n) => n.path);
+    return ordered.length ? ordered : null;
+}
+
+/** 批量删除勾选项：confirmDialog 二次确认后交 yuki:file-del-many；
+ *  目录经主进程 delMany 保留 P2-7 三道防线（确认框整批一次）。 */
+async function delSelected() {
+    const paths = collectSelPaths();
+    if (!paths) { warnToast('未勾选任何项'); return; }
+    if (!await confirmDialog(`确定删除选中的 ${paths.length} 项吗？（删除的是根目录内的真实文件/文件夹，不可恢复）`, { okText: '删除' })) return;
+    showLoading();
+    try {
+        const r = await window.yuki.fileDelMany(paths);
+        hideLoading();
+        if (r && r.ok) {
+            const failed = r.failed || 0;
+            warnToast(failed ? `删除完成，${failed} 项失败` : `已删除 ${paths.length} 项`);
+            _selSet.clear();
+            updateSelCount();
+            listFile(currentRoot);
+        } else if (r && r.reason === 'folder has active downloads') {
+            warnToast('所选文件夹内有进行中的下载任务，已取消删除');
+        } else if (r && /cancel/.test(String(r.reason || ''))) {
+            warnToast('已取消删除');
+        } else warnToast('删除失败');
+    } catch (e) {
+        hideLoading();
+        warnToast('删除失败');
+    }
+}
+
+/** 批量播放勾选项：路径数组直接交 yuki:file-push-many 组成 m3u 队列连播。 */
+function playSelected() {
+    const paths = collectSelPaths();
+    if (!paths) { warnToast('未勾选任何项'); return; }
+    window.yuki.filePushMany(paths).then((r) => {
+        if (r && r.ok) {
+            localPlayToast(r);
+            return;
+        }
+        if (r && r.reason === 'empty selection') warnToast('未勾选任何项');
+        else if (r && r.reason === 'no-playable') warnToast('所选项目均无可播放的媒体文件');
+        else if (r && r.reason === 'path-denied') warnToast('路径不在白名单内');
+        else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
+        else warnToast('播放失败' + (r && r.reason ? `：${r.reason}` : ''));
+    }).catch(() => warnToast('播放失败'));
+}
+
+// ---------------------------------------------------------------- 同类命名播放列表
+
+/**
+ * 单文件集号锚点：从文件名定位「集号片段」，返回 { key, num } 或 null。
+ *  key = 剥掉集号片段后的骨架（前段 + '§' + 后段，小写、去集号位相邻分隔符）；
+ *  num = 集号整数。骨架相同（仅集号不同）的同级文件即同一影片的各集。
+ * 规则（对常见命名 S01E02 / 第02集 / EP2 / 02.mkv / [02] / - 02 等）：
+ *  1) 优先识别明确集号标记：第X集/话/回（含中文数字）、E02/EP2/S01E02；
+ *  2) 退化启发：最后一个「两位以上纯数字段」（含 [02] 方括号合集标记），
+ *     排除 1080p/4k/x264/年份等噪声数字；纯单位数段不参与（歧义太大）；
+ *  3) 全文件名无数字段、或剥完后骨架为空 → null（不分组）。
+ */
+function epAnchorOf(fileName) {
+    const name = String(fileName || '');
+    if (!name) return null;
+    let anchor = null; // { cutStart, cutEnd, num }
+    let m;
+    // 1) 明确集号标记（首个命中即用）
+    const markRe = /(第\s*([0-9０-９零一二两三四五六七八九十百]+)\s*[集话話回]|(?:S\d{1,2})?\s*E[Pp]?\s*[.-]?\s*(\d{1,4})(?=[^A-Za-z0-9]|$))/;
+    if ((m = markRe.exec(name)) !== null) {
+        anchor = { cutStart: m.index, cutEnd: m.index + m[0].length, num: parseEpNum(m[2] || m[3]) };
+    }
+    // 2) 序号段启发：取最后一个可接受的纯数字段
+    if (!anchor) {
+        const segRe = /(?:^|[^A-Za-z0-9])(\[?[0-9]{2,4}\]?)(?=[^A-Za-z0-9]|$)/g;
+        const segs = [];
+        while ((m = segRe.exec(name)) !== null) segs.push(m);
+        for (let i = segs.length - 1; i >= 0; i--) {
+            const seg = segs[i];
+            const tok = seg[1].replace(/^\[|\]$/g, '');
+            const noise = isNoiseNumber(name, seg.index, seg[0].length, tok);
+            if (/^0\d+$/.test(tok) || (/^\d{2,4}$/.test(tok) && !noise)) {
+                anchor = { cutStart: seg.index, cutEnd: seg.index + seg[0].length, num: parseInt(tok, 10) };
+                break;
+            }
+        }
+    }
+    if (!anchor || !Number.isFinite(anchor.num)) return null;
+    let key = (name.slice(0, anchor.cutStart) + '§' + name.slice(anchor.cutEnd)).toLowerCase();
+    key = key.replace(/[\s\-_.]+§/, '§').replace(/§[\s\-_.]+/, '§').trim();
+    if (!key || key === '§') return null;
+    return { key, num: anchor.num };
+}
+
+/**
+ * 同类命名分组（点击单个视频时自动扩充成播放列表）：以当前文件的骨架为键，
+ * 收集同级兄弟文件中同键条目按集号升序返回文件名数组；不足 2 项返回 null
+ * （调用方按单文件播放）。
+ */
+function groupSameSeries(fileName, siblings) {
+    const anchor = epAnchorOf(fileName);
+    if (!anchor) return null;
+    const list = [];
+    for (const s of (Array.isArray(siblings) ? siblings : [])) {
+        const a = epAnchorOf(String(s || ''));
+        if (a && a.key === anchor.key) list.push({ name: String(s), num: a.num });
+    }
+    if (list.length < 2) return null;
+    list.sort((a, b) => a.num - b.num);
+    return list.map((x) => x.name);
+}
+
+/** 中文数字/全角/阿拉伯数字集号统一转整数（一二三…/０２/01；无效返回 NaN）。 */
+function parseEpNum(raw) {
+    let s = String(raw || '').trim();
+    if (!s) return NaN;
+    s = s.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    if (/^\d+$/.test(s)) return parseInt(s, 10);
+    const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    if (!/^[零一二两三四五六七八九十百]+$/.test(s)) return NaN;
+    // 简易中文数字：十/百组合（覆盖 1~999 集足够）
+    const hunPos = s.indexOf('百');
+    if (hunPos >= 0) {
+        const h = hunPos > 0 ? (digits[s[hunPos - 1]] || 1) : 1;
+        const rest = s.slice(hunPos + 1);
+        return h * 100 + (rest ? parseEpNum(rest) : 0);
+    }
+    const tenPos = s.indexOf('十');
+    if (tenPos >= 0) {
+        const t = tenPos > 0 ? (digits[s[tenPos - 1]] || 1) : 1;
+        const rest = s.slice(tenPos + 1);
+        return t * 10 + (rest ? parseEpNum(rest) : 0);
+    }
+    let sum = 0;
+    for (const ch of s) sum = sum * 10 + (digits[ch] || 0);
+    return sum;
+}
+
+/** 分辨率/年份/码率等噪声数字：数字后紧跟 p/k/f（1080p/4k/60fps）、
+ *  前面紧贴 x（x264/x265），或 4 位且像年份/分辨率（>1900）。 */
+function isNoiseNumber(name, segStart, segLen, tok) {
+    const after = name.slice(segStart + segLen, segStart + segLen + 1);
+    const before = segStart > 0 ? name.slice(segStart - 1, segStart) : '';
+    if (/^[pkf]/i.test(after)) return true;
+    if (/^[xX]$/.test(before)) return true;
+    if (/^\d{4}$/.test(tok) && parseInt(tok, 10) > 1900) return true;
+    return false;
+}
+
+/** 选中文件：展示路径信息确认框（确认后经 yuki:file-push 交 mpv 播放）。
+ *  多选模式下条目主体点击转勾选（与 index.html 帮助文案一致）。 */
 function selectFile(path) {
+    if (_selMode) { toggleSel(path); return; }
     currentFile = path;
     $("#fileUrl").text("file:/" + path);
     openDialog('fileInfoDialog');
 }
 
-/** 信息确认框回调：yes===1 时提交播放（视频/音频；不支持的格式/缺 mpv 给对应提示）。 */
+/** 信息确认框回调：yes===1 时提交播放（视频/音频；不支持的格式/缺 mpv 给对应提示）。
+ *  多集扩充：当前目录内存在同类命名兄弟文件（仅集号不同）时自动组成 m3u 播放
+ *  列表连播（yuki:file-push-many）；无同类或仅一个媒体文件保持单文件路径。 */
 function pushFile(yes) {
     closeDialog('fileInfoDialog');
     if (yes !== 1) return;
     const target = String(currentFile || '').trim();
     if (!target) { warnToast('未选中文件'); return; }
+    // 同级同类命名扩充：从当前页缓存取兄弟视频名（相对路径的父目录过滤）。
+    // 组队列重建完整相对路径：兄弟名与 base 同父目录，按分隔符风格拼接。
+    const rel2 = String(currentFile || '');
+    const sepIdx = Math.max(rel2.lastIndexOf('\\'), rel2.lastIndexOf('/'));
+    const parent = sepIdx > 0 ? rel2.slice(0, sepIdx) : '';
+    const base = rel2.slice(parent.length ? parent.length + 1 : 0);
+    let queue = null;
+    try {
+        if (_localPage) {
+            const siblings = _localPage.videos
+                .filter((n) => {
+                    const p = String(n.path || '');
+                    const pi = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+                    return (pi > 0 ? p.slice(0, pi) : '') === parent;
+                })
+                .map((n) => n.name);
+            const group = groupSameSeries(base, siblings);
+            if (group && group.length > 1) {
+                queue = parent ? group.map((nm) => parent + rel2[sepIdx] + nm) : group;
+            }
+        }
+    } catch (e) { queue = null; /* 分组失败不阻断单文件播放 */ }
+    // 组列表成功（>1 项）：整组交主进程；含起始项的顺序由 groupSameSeries 集号排序保证
+    if (queue && queue.length > 1) {
+        window.yuki.filePushMany(queue).then((r) => {
+            if (r && r.ok) {
+                localPlayToast(r);
+                recordLocalPlay(rel2, base);
+                return;
+            }
+            warnPushReason(r);
+        }).catch(() => warnToast('播放失败'));
+        return;
+    }
     // 本地媒体直接交给主进程 mpv 播放（P2-18：失败不再静默重试——500ms 无提示
     // 重拉 mpv 会让用户误以为点击无效而反复点击；且「播放器启动超时」提示曾被
     // 重试分支提前 return 消费而不可达。失败即给出可见提示，由用户自行重试）
     window.yuki.filePush(target).then((r) => {
         if (r && r.ok) {
             localPlayToast(r);
-            // 记入历史记录（本地文件播放）：取文件名作为标题，来源标记「本地文件」
-            try {
-                const rel2 = String(currentFile || '');
-                const name = rel2.split(/[\\/]/).pop() || rel2 || '本地文件';
-                if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
-                    Records.recordPlay({
-                        site: 'local',
-                        siteName: '本地文件',
-                        vodId: rel2,
-                        name: name,
-                        pic: '',
-                        remarks: '本地文件',
-                        episode: '',
-                        seconds: 0,
-                        totalEps: 0,
-                    }).catch(() => { /* 历史记录失败不影响播放 */ });
-                }
-            } catch (e) { /* ignore */ }
+            recordLocalPlay(rel2, base);
             return;
         }
-        if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
-        else if (r && r.reason === 'file-not-found') warnToast('文件不存在或已被移动');
-        else if (r && r.reason === 'path-denied') warnToast('路径不在白名单内');
-        else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
-        else if (r && r.reason === 'mpv-start-timeout') warnToast('播放器启动超时，请重试');
-        else if (r && (r.reason === 'mpv-exited-before-playback' || r.reason === 'mpv-exited')) warnToast('播放器已退出，请重试');
-        else warnToast('播放失败' + (r && r.reason ? `：${r.reason}` : ''));
+        warnPushReason(r);
     }).catch(() => warnToast('播放失败'));
+}
+
+/** file-push / file-push-many 失败 reason → 可读提示（两个入口共用一套文案）。 */
+function warnPushReason(r) {
+    if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
+    else if (r && r.reason === 'file-not-found') warnToast('文件不存在或已被移动');
+    else if (r && r.reason === 'no-playable') warnToast('所选项目均无可播放的媒体文件');
+    else if (r && r.reason === 'empty selection') warnToast('未选中文件');
+    else if (r && r.reason === 'path-denied') warnToast('路径不在白名单内');
+    else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器，请在 设置 → 扩展 指定 mpv.exe 路径，或下载内置播放器');
+    else if (r && r.reason === 'mpv-start-timeout') warnToast('播放器启动超时，请重试');
+    else if (r && (r.reason === 'mpv-exited-before-playback' || r.reason === 'mpv-exited')) warnToast('播放器已退出，请重试');
+    else warnToast('播放失败' + (r && r.reason ? `：${r.reason}` : ''));
+}
+
+/** 本地播放历史记账（单文件与组列表共用；组列表只记当前点的那一集）。 */
+function recordLocalPlay(rel2, base) {
+    try {
+        const name = String(base || '').split(/[\\/]/).pop() || rel2 || '本地文件';
+        if (typeof Records !== 'undefined' && Records.recordPlay && !window._incognito) {
+            Records.recordPlay({
+                site: 'local',
+                siteName: '本地文件',
+                vodId: rel2,
+                name: name,
+                pic: '',
+                remarks: '本地文件',
+                episode: '',
+                seconds: 0,
+                totalEps: 0,
+            }).catch(() => { /* 历史记录失败不影响播放 */ });
+        }
+    } catch (e) { /* ignore */
+    }
 }
 
 /** 未选根目录时的引导态（白名单未设置）。 */
@@ -738,6 +1007,7 @@ function gotoLocalPage(n) {
 /** 渲染当前页：页内仍保持 目录行 → 视频卡片网格 → 音频行 的分段顺序。 */
 function renderLocalPage() {
     const st = _localPage;
+    if (!st) return; // 目录未加载（如先于 listFile 开多选模式）时无事可做
     const items = st.dirs.concat(st.videos, st.audios);
     const total = items.length;
     const pages = Math.max(1, Math.ceil(total / LOCAL_PAGE_SIZE));
@@ -756,6 +1026,9 @@ function renderLocalPage() {
     if (!total && st.parent === '.') parts.push('<div class="tip-line">（无视频/音频文件）</div>');
     $('#file_list').html(parts.join(''));
     if (videos.length) loadLocalThumbs();
+    // 多选模式下勾选态不写进 DOM 类名时也要让计数与工具栏同步（renderLocalPage
+    // 可能由 toggleSel 之外的路径触发）；sel-bar 显隐由 toggleSelMode 独立管理
+    updateSelCount();
     // 分页条：仅多于一页时展示
     if (pages > 1) {
         $('#local-page-info').text(`第 ${page} / ${pages} 页 · 共 ${total} 项`);
@@ -823,6 +1096,8 @@ function listFile(relPath, silent) {
         if (prevFp && prevFp === _localFp(next)) { warnToast('目录内容无变化'); return; }
         _localPage = next;
         _localPageNo = 1;
+        // 切目录即作废勾选（勾选集只对当前目录有意义，跨目录保留易误删）
+        if (_selSet.size) { _selSet.clear(); updateSelCount(); }
         renderLocalPage();
     }).catch(() => {
         clearTimeout(loadingTimer);

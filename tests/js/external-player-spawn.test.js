@@ -146,3 +146,40 @@ test('R24：单条目 http(s) 直链不经本地路径转换（toExternalLocalUr
     const m = indexJs.match(/const isSingle = resolved\.length === 1;\s*let target = isSingle \? resolved\[0\]\.url/);
     assert.ok(m, 'isSingle 分支应直接使用 resolved[0].url，不走 toExternalLocalUrl');
 });
+
+// ---- R25（2026-09-26）：外部 mpv 弹幕开关联动 ----
+// 根因：外部模式 spawn mpv（经 yuki:external-player）只传 URL/鉴权头/标题，不做
+// 任何 mpv 配置隔离——进程原样加载用户全局 %APPDATA%\mpv 下 scripts/ 的自装
+// danmaku 插件与 sub-auto 同名字幕，无视 YuKi「自动加载弹幕」开关默认启动。
+// 修复：danmakuEnable 关闭时在 mpv 分支追加 --load-scripts=no --sub-auto=no
+// （--load-scripts=no 只停 scripts/ 目录自动加载，不影响 OSC 内置脚本——
+// mpv scripting.c mp_load_scripts 只门控目录扫描，内置脚本走各自 --osc 等开关）。
+
+test('R25：buildExternalPlayerArgs 的 mpv 分支按 danmakuEnable 门控配置隔离参数', () => {
+    const m = indexJs.match(/if \(kind === 'mpv'\) \{([\s\S]*?)return \{ args/);
+    assert.ok(m, '应能定位 buildExternalPlayerArgs 的 mpv 分支');
+    const body = m[1];
+    // 门控必须读设置键（不允许无条件注入——开关开启时尊重用户自身 mpv 弹幕环境）
+    assert.ok(body.includes("settings.get('danmakuEnable')"),
+        'mpv 分支应以 danmakuEnable 设置键决定是否注入隔离参数');
+    assert.ok(/settings\.get\('danmakuEnable'\) !== true/.test(body),
+        '门控应为 !== true（缺省即关闭，与全库 danmakuEnable 严格判定口径一致）');
+    assert.ok(body.includes("'--load-scripts=no'"),
+        '应注入 --load-scripts=no 阻断 scripts/ 目录自装弹幕插件');
+    assert.ok(body.includes("'--sub-auto=no'"),
+        '应注入 --sub-auto=no 阻断同名字幕（含 .ass 弹幕）自动加载');
+    // 隔离参数必须在 URL 之前（选项在前、内容在后的既有约定）
+    const urlPos = body.indexOf('args.push(url)');
+    const isoPos = body.indexOf("'--load-scripts=no'");
+    assert.ok(isoPos >= 0 && urlPos >= 0 && isoPos < urlPos,
+        '隔离参数应位于 URL 之前');
+});
+
+test('R25：内置引擎路径不受影响（--load-scripts 门控仅在外部 mpv 分支）', () => {
+    // 内置 mpv（mpv-player.js）的弹幕有自己的三层门控（danmakuEnabled 字段 +
+    // 渲染层 _maybeLoadDanmaku + 数据面短路），不依赖 --load-scripts 参数；
+    // 该参数注入只应出现在 index.js 的外部 mpv 分支。
+    const mpvSrc = fs.readFileSync(path.join(__dirname, '../../src/main/mpv-player.js'), 'utf8');
+    assert.ok(!mpvSrc.includes('--load-scripts'),
+        '内置引擎不应使用 --load-scripts（弹幕由 danmakuEnabled 门控，注入会误伤功能资产注入链）');
+});

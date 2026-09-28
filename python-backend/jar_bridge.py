@@ -216,10 +216,184 @@ def _reap(proc):
 # 向上一级是 exe 目录，那里没有 vendor，直接拼路径会全部落空）
 DEFAULT_RUNNER_JAR = os.path.join(hoststate.vendor_dir(), 'spider-runner.jar')
 
-# dex2jar 工具（转换 Android DEX 为 JVM .class）
-DEX2JAR_JAR = os.path.join(
-    hoststate.vendor_dir(), 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar')
-DEXDEPS_DIR = os.path.join(hoststate.vendor_dir(), 'dexdeps')
+# dex2jar 工具（转换 Android DEX 为 JVM .class）。
+# 杀软误报治理（Q9，2026-09-26）：dex-tools 的 d2j-*.bat 命名是「HackTool」类
+# 静态启发式强特征，自 0.2.7 起不再随安装包分发（extraResources 已排除）。
+# 解析顺序：vendor/（开发模式或手工放置）→ 缓存目录运行时按需下载
+# （cache_dir/dextools/，hash 校验 + 镜像回退，与 scripts/download-binaries.js
+# 同源同 sha256；首次用到含 classes.dex 的 jar 蜘蛛源时才下载，语义为
+# 「插件获取」而非安装期释放）。
+DEX_TOOLS_SHA256 = ('ee7c45eb3c1d2474a6145d8d447e651a736a22d9664b6d3d3be5a5a817dda23a')
+DEX_TOOLS_URLS = [
+    'https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
+    'https://ghfast.top/https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
+]
+DEXDEPS_FILES = [
+    # (落盘名, Maven Central 相对路径, sha256)——与历史手工放置版逐字节一致（已实证）
+    ('gson.jar', 'com/google/code/gson/gson/2.10.1/gson-2.10.1.jar',
+     '4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593'),
+    ('kotlin-stdlib.jar', 'org/jetbrains/kotlin/kotlin-stdlib/1.8.21/kotlin-stdlib-1.8.21.jar',
+     '042a1cd1ac976cdcfe5eb63f1d8e0b0b892c9248e15a69c8cfba495d546ea52a'),
+    ('okhttp3.jar', 'com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar',
+     'b1050081b14bb7a3a7e55a4d3ef01b5dcfabc453b4573a4fc019767191d5f4e0'),
+    ('okio.jar', 'com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar',
+     '67543f0736fc422ae927ed0e504b98bc5e269fda0d3500579337cb713da28412'),
+    ('org-json.jar', 'org/json/json/20240303/json-20240303.jar',
+     '3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed'),
+]
+MAVEN_BASE = 'https://repo1.maven.org/maven2/'
+
+_dex_tools_lock = threading.Lock()
+_dex_tools_checked = set()  # 已确认缺失并打过日志的目录（仅做日志去重，不拦截重试）
+# 最近一次按需下载失败的墙钟时间：负缓存冷却期内的调用直接放弃，
+# 避免离线/弱网下每次转换请求都在锁内重跑完整下载链（拖死同桥全部站点）
+_dex_tools_failed_at = 0.0
+_DEX_TOOLS_RETRY_COOLDOWN_S = 600
+
+
+def _locate_dex2jar(root):
+    """在给定根目录下定位 dex-tools/dex-tools-v2.4/lib/dex-tools-v2.4.jar（v2.4 标准布局）。"""
+    jar = os.path.join(root, 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar')
+    if os.path.isfile(jar):
+        return jar
+    return None
+
+
+def _dexdeps_complete(deps_dir):
+    """dexdeps 五个依赖 jar 是否全部落盘（快路径与补全共用同一判定）。"""
+    return all(os.path.isfile(os.path.join(deps_dir, name)) for name, _rel, _sha in DEXDEPS_FILES)
+
+
+def _download_dextools_on_demand():
+    """运行时按需下载 dex-tools + dexdeps 到缓存目录（线程安全，失败返回 None）。
+
+    仅在真正需要转换 DEX jar 时调用：vendor 里没有（打包模式不随附）才走到这里。
+    下载源与 sha256 与 scripts/download-binaries.js 的 dextools 槽位同源——
+    上游为 pxb1988/dex2jar 官方 release v2.4 与 Maven Central，非第三方再打包。
+    上游 zip 顶层目录即 dex-tools-v2.4/（无外层 dex-tools/ 包装），解压后落位为
+    cache/dex-tools/dex-tools-v2.4/，与 vendor 布局一致。
+    """
+    global _dex_tools_failed_at
+    with _dex_tools_lock:
+        cache_root = os.path.join(hoststate.get_cache_dir(), 'dextools')
+        jar = _locate_dex2jar(cache_root)
+        deps_dir = os.path.join(cache_root, 'dexdeps')
+        if jar and _dexdeps_complete(deps_dir):
+            return jar
+        # 失败负缓存：冷却期内不重试下载链（_locate 已确认本进程内产物不完整）
+        if time.time() - _dex_tools_failed_at < _DEX_TOOLS_RETRY_COOLDOWN_S:
+            return jar
+        try:
+            os.makedirs(cache_root, exist_ok=True)
+        except OSError:
+            return None
+        zip_path = os.path.join(cache_root, 'dex-tools-v2.4.zip')
+        got = False
+        for url in DEX_TOOLS_URLS:
+            try:
+                r = http_client.get(url, timeout=http_client.TIMEOUT_SLOW, proxy=True)
+                r.raise_for_status()
+                blob = r.content
+                if hashlib.sha256(blob).hexdigest() != DEX_TOOLS_SHA256:
+                    logger.warning('dextools sha256 mismatch from %s, trying next source', url)
+                    continue
+                with open(zip_path, 'wb') as f:
+                    f.write(blob)
+                got = True
+                break
+            except Exception as e:
+                logger.info('dextools download failed from %s: %s', url, e)
+        if not got:
+            logger.warning('dex-tools on-demand download failed (all sources); '
+                           'DEX jar conversion unavailable')
+            _dex_tools_failed_at = time.time()
+            return None
+        try:
+            import zipfile
+            stage = os.path.join(cache_root, 'extract')
+            if os.path.isdir(stage):
+                shutil.rmtree(stage, ignore_errors=True)
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(stage)
+            # 上游 zip 顶层就是 dex-tools-v2.4/（实测无 dex-tools/ 包装层）
+            top = os.path.join(stage, 'dex-tools-v2.4')
+            if not os.path.isfile(os.path.join(top, 'lib', 'dex-tools-v2.4.jar')):
+                logger.warning('dex-tools archive missing expected entry: %s', zip_path)
+                _dex_tools_failed_at = time.time()
+                return None
+            dest_dir = os.path.join(cache_root, 'dex-tools')
+            if os.path.isdir(dest_dir):
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            os.makedirs(dest_dir, exist_ok=True)
+            os.rename(top, os.path.join(dest_dir, 'dex-tools-v2.4'))
+            shutil.rmtree(stage, ignore_errors=True)
+            # dexdeps：五个 Maven jar（转换产物运行时缺类的依赖补充，与 vendor 版同源）。
+            # 逐文件补全（已存在且哈希一致的跳过）；写盘走 tmp+replace 原子落位，
+            # 崩溃残留的半截文件不会被下次快路径误认为已就绪。
+            os.makedirs(deps_dir, exist_ok=True)
+            for name, rel, sha in DEXDEPS_FILES:
+                dep = os.path.join(deps_dir, name)
+                if os.path.isfile(dep):
+                    try:
+                        with open(dep, 'rb') as f:
+                            if hashlib.sha256(f.read()).hexdigest() == sha:
+                                continue
+                        logger.warning('dexdeps %s hash mismatch, re-downloading', name)
+                    except OSError:
+                        pass
+                try:
+                    rd = http_client.get(MAVEN_BASE + rel,
+                                         timeout=http_client.TIMEOUT_SLOW, proxy=True)
+                    rd.raise_for_status()
+                    if hashlib.sha256(rd.content).hexdigest() != sha:
+                        logger.warning('dexdeps %s sha256 mismatch, skip', name)
+                        continue
+                    tmp = dep + '.tmp'
+                    with open(tmp, 'wb') as f:
+                        f.write(rd.content)
+                    os.replace(tmp, dep)
+                except Exception as e:
+                    logger.info('dexdeps %s download failed: %s', name, e)
+                    try:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                    except OSError:
+                        pass
+            logger.info('dex-tools on-demand installed at %s', cache_root)
+            return _locate_dex2jar(cache_root)
+        except Exception:
+            logger.exception('dextools extract failed')
+            _dex_tools_failed_at = time.time()
+            return None
+
+
+def _dex2jar_jar():
+    """dex2jar 主 jar 解析：vendor 优先，缺失时缓存目录按需下载（一次）。"""
+    jar = _locate_dex2jar(hoststate.vendor_dir())
+    if jar:
+        return jar
+    jar = _locate_dex2jar(os.path.join(hoststate.get_cache_dir(), 'dextools'))
+    if jar:
+        return jar
+    if hoststate.vendor_dir() not in _dex_tools_checked:
+        _dex_tools_checked.add(hoststate.vendor_dir())
+        logger.info('dex-tools not in vendor (not bundled since 0.2.7); trying on-demand download')
+    return _download_dextools_on_demand()
+
+
+def _dexdeps_dir():
+    """dexdeps 依赖目录解析：vendor 优先，其次按需下载产物目录。"""
+    vendor = os.path.join(hoststate.vendor_dir(), 'dexdeps')
+    if os.path.isdir(vendor):
+        return vendor
+    cached = os.path.join(hoststate.get_cache_dir(), 'dextools', 'dexdeps')
+    if os.path.isdir(cached):
+        return cached
+    # 触发 dex-tools 下载（顺带拉全 dexdeps），再解析一次
+    _download_dextools_on_demand()
+    if os.path.isdir(cached):
+        return cached
+    return vendor
 
 # jar 蜘蛛（夸克/FongMi 系）以自身 cwd 为基准写运行时状态（DuoDuo/.quark 含登录
 # Cookie、FM/、VOX/、TVBox/ 等）。JVM 不设 cwd 会继承后端进程 cwd —— 历史上曾
@@ -799,32 +973,24 @@ class JarBridge:
         # 否则永远加载旧版类，表现为"更新配置不生效"
         if os.path.isfile(jvm_path) and os.path.getmtime(jvm_path) >= os.path.getmtime(jar_path):
             return JarBridge.apply_jar_patches(jvm_path)
-        # 用 dex2jar 转换
-        d2j_jar = DEX2JAR_JAR
-        if not os.path.isfile(d2j_jar):
-            # 尝试找 lib 目录下的所有 jar（老版本结构）
-            d2j_dir = os.path.dirname(os.path.dirname(DEX2JAR_JAR))
-            lib_dir = os.path.join(d2j_dir, 'lib')
-            if os.path.isdir(lib_dir):
-                cp = [os.path.join(lib_dir, f) for f in os.listdir(lib_dir) if f.endswith('.jar')]
-                main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
-            else:
-                logger.error('dex2jar not found at %s, cannot convert DEX jar %s', d2j_jar, jar_path)
-                raise RuntimeContractError(
-                    'L3_RUNTIME_INIT_FAILED',
-                    runtime='jar',
-                    raw_error=f'dex2jar tools not found for converting DEX jar: {os.path.basename(jar_path)}',
-                )
-        else:
-            cp = [d2j_jar]
-            # 加上 lib 下其他 jar（依赖）
-            d2j_dir = os.path.dirname(os.path.dirname(DEX2JAR_JAR))
-            lib_dir = os.path.join(d2j_dir, 'lib')
-            if os.path.isdir(lib_dir):
-                for f in os.listdir(lib_dir):
-                    if f.endswith('.jar') and f != 'dex-tools-v2.4.jar':
-                        cp.append(os.path.join(lib_dir, f))
-            main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
+        # 用 dex2jar 转换（0.2.7 起不随安装包分发：vendor 优先，缺失时按需下载到缓存目录）
+        d2j_jar = _dex2jar_jar()
+        if not d2j_jar or not os.path.isfile(d2j_jar):
+            logger.error('dex2jar unavailable (vendor 缺失且按需下载失败), cannot convert DEX jar %s', jar_path)
+            raise RuntimeContractError(
+                'L3_RUNTIME_INIT_FAILED',
+                runtime='jar',
+                raw_error=f'dex2jar tools not found for converting DEX jar: {os.path.basename(jar_path)}',
+            )
+        cp = [d2j_jar]
+        # 加上 lib 下其他 jar（依赖）
+        d2j_dir = os.path.dirname(os.path.dirname(d2j_jar))
+        lib_dir = os.path.join(d2j_dir, 'lib')
+        if os.path.isdir(lib_dir):
+            for f in os.listdir(lib_dir):
+                if f.endswith('.jar') and f != 'dex-tools-v2.4.jar':
+                    cp.append(os.path.join(lib_dir, f))
+        main_class = 'com.googlecode.dex2jar.tools.Dex2jarCmd'
         java_bin = java_probe.find_java()
         if not java_bin:
             logger.error('no java runtime for dex2jar, cannot convert DEX jar %s', jar_path)
@@ -965,8 +1131,9 @@ class JarBridge:
             # low#7：proxyToken 经 JAVA_TOOL_OPTIONS 注入（进程列表不可见），
             # 而非 -D 命令行参数。
             jvm_env = {**os.environ, **JarBridge.runtime_java_env()}
-            if needs_deps and os.path.isdir(DEXDEPS_DIR):
-                deps = [os.path.join(DEXDEPS_DIR, f) for f in os.listdir(DEXDEPS_DIR) if f.endswith('.jar')]
+            dexdeps_dir = _dexdeps_dir() if needs_deps else None
+            if needs_deps and dexdeps_dir and os.path.isdir(dexdeps_dir):
+                deps = [os.path.join(dexdeps_dir, f) for f in os.listdir(dexdeps_dir) if f.endswith('.jar')]
                 if deps:
                     cp = os.pathsep.join([self.runner_jar] + deps)
                     # SpiderRunner: <jar_path> <class_name> — className 作为占位符

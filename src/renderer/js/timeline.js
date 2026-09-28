@@ -549,6 +549,9 @@ const Timeline = {
             grid.html(slice.map((item) => this._renderCard(item)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
+            // 封面左下角进度徽章（排名徽章 #N 的对角）：补拉条目详情拿总话数（bangumiInfo
+            // 30 分钟缓存，同条目跨页/跨视图复用），放送完结→「已完结」；未完结→「N/总话数」。
+            this._attachEpBadges(grid, slice).catch(() => { /* 徽章补齐失败不外溢成全局未捕获 */ });
         }
         renderPagerBox($('#timeline-pager'), {
             page: this._page,
@@ -559,6 +562,40 @@ const Timeline = {
 
     _renderCard(item) {
         return bangumiCard(item);
+    },
+
+    /** 封面左下角话数徽章（bangumi-rank-badge 的对角）：放送日期 + 总话数推算完结态——
+     *  已完结显示「已完结」，未完结显示「N/总话数」（N=当前已播出话数，按每周一话
+     *  从放送日推算；无总话数的条目不显示）。bangumiInfo 有 30 分钟缓存，页内切换
+     *  重复开免网络。并发拉取后按条目 id 定位卡片追加，换页/切周时由 grid 重渲染自然作废。 */
+    async _attachEpBadges(grid, items) {
+        const ids = items.map((it) => String(it.id || '')).filter(Boolean);
+        await Promise.all(ids.map(async (id) => {
+            let info = null;
+            try { info = (typeof Kazumi !== 'undefined' && Kazumi.bangumiInfo) ? await Kazumi.bangumiInfo(id) : null; } catch (e) { /* 单条失败跳过 */ }
+            if (!info) return;
+            const eps = Number(info.eps || info.total_episodes) || 0;
+            if (!eps) return;
+            // 已播出话数：放送日 + 7 天/话推算（clamp 到 [1, eps]）；日期缺失按全量已播
+            const dateStr = String(info.date || info.air_date || '');
+            const m = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+            let aired = eps;
+            if (m) {
+                const start = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+                if (!Number.isNaN(start.getTime())) {
+                    aired = Math.min(eps, Math.max(0, Math.floor((Date.now() - start.getTime()) / (7 * 86400000)) + 1));
+                }
+            }
+            // 完结判定与详情页口径一致：放送日 + eps 周 + 3 天余量
+            const finished = m
+                ? Date.now() > (new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() + eps * 7 * 86400000 + 3 * 86400000)
+                : false;
+            const badge = finished
+                ? '<span class="detail-progress-badge timeline-ep-badge" title="放送已完结">已完结</span>'
+                : `<span class="detail-progress-badge timeline-ep-badge" title="已播出 ${Math.max(aired, 0)} 话 / 共 ${eps} 话">${Math.max(aired, 0)}/${eps}</span>`;
+            const $card = grid.find(`.bangumi-card[data-id="${id}"] .vod-cover`);
+            if ($card.length) { $card.find('.timeline-ep-badge').remove(); $card.append(badge); }
+        }));
     },
 };
 

@@ -1,18 +1,20 @@
 /**
- * bgm-rate.js — Bangumi 评分/吐槽对话框（对齐 Kazumi 的评分与吐槽能力）
+ * bgm-rate.js — Bangumi 评分/吐槽/打标签对话框（对齐 Kazumi 的评分与吐槽能力）
  *
  * 入口（本模块只提供 openRateDialog，不自带入口 UI）：
- *   - bangumi-search.js 搜索结果卡片操作条「评分/吐槽」；
- *   - my.js 收藏条目操作条「评分/吐槽」。
- * 数据通道：POST /v0/users/-/collections/{subject_id}（body 可选 type/rate/comment，
- * 对齐官方 OpenAPI UserSubjectCollectionModifyPayload：rate 0-10 整数、0=清除评分）。
+ *   - detail.js 详情页 hero 操作行「★ 评分 / 吐槽」按钮（T80）；
+ *   - bangumi-search.js 搜索结果卡片操作条「评分/吐槽」。
+ * 数据通道：POST /v0/users/-/collections/{subject_id}（body 可选 type/rate/comment/tags，
+ * 对齐官方 OpenAPI UserSubjectCollectionModifyPayload：rate 0-10 整数、0=清除评分；
+ * tags 为个人标签字符串数组——对齐 Kazumi rating_review_dialog：最多 10 个、单个 ≤10 字）。
  * server.py 不新增 do —— 复用 kazumiBangumiSyncApply 端点单条透传（type<1 表示不动收藏）。
- * 提交成功后 FavHub.changed 广播，my.js 自动作废 Bangumi 收藏缓存并重拉。
+ * 提交成功后 FavHub.changed 广播，my.js 自动作废 Bangumi 收藏缓存并重拉；
+ * 当前详情页匹配该条目时另触发吐槽乐观刷新（Detail.onBgmCommentSubmitted）。
  *
- * 纯逻辑函数（clampRate / starsFor / fmtRateLabel / buildRatingPayload）导出到
- * YUKI.bgmRate 供 tests/js/bgm-rate.test.js 在 VM 中直接单测。
+ * 纯逻辑函数（clampRate / starsFor / fmtRateLabel / normalizeTagInput /
+ * buildRatingPayload）导出到 YUKI.bgmRate 供 tests/js/bgm-rate.test.js 在 VM 中直接单测。
  */
-/* global $, doAction, warnToast, openDialog, closeDialog, FavHub, Kazumi */
+/* global $, doAction, warnToast, openDialog, closeDialog, FavHub, Kazumi, Detail, escHtml */
 
 // 模块加载时保存的原始 closeDialog（common.js 顶层函数声明）。_close 关闭对话框时
 // 直调它而非全局符号：全局符号已被底部 IIFE 包装，wrapped 检测到挂起的 _resolve 会
@@ -20,15 +22,23 @@
 // 提交成功的异常还会被 submit 的 catch 误报成「提交失败：网络错误」）。
 let origCloseDialog = null;
 
+// 标签客户端边界（对齐 Kazumi rating_review_dialog：_maxTags=10 / _maxTagLength=10）
+const BGM_RATE_MAX_TAGS = 10;
+const BGM_RATE_TAG_MAX_LEN = 10;
+// 热门标签默认展示数；超出折叠到「更多」按钮后面（对齐 Kazumi 默认 6 个 + 展开收起）
+const BGM_RATE_POPULAR_TAGS = 6;
+
 const BgmRate = {
     // 提交防抖：同一 subject 在途时不重复弹窗提交
     _inFlightId: '',
-    // 当前对话框上下文（subjectId/name/当前评分）
+    // 当前对话框上下文（subjectId/name/当前评分/当前吐槽/标签状态）
     _ctx: null,
+    // 热门标签展开态：每次打开对话框重置为收起
+    _showAllPopular: false,
 
     /**
-     * 补查某条目的当前评分/吐槽（GET /v0/users/{u}/collections/{subject_id}，
-     * UserSubjectCollection 含 rate/comment；收藏列表端点不回传这两字段）。
+     * 补查某条目的当前评分/吐槽/标签（GET /v0/users/{u}/collections/{subject_id}，
+     * UserSubjectCollection 含 rate/comment/tags；收藏列表端点不回传这三字段）。
      * cached 命中（myRate 非 null）直接返回不重查；未收藏/无 token/失败 → {rate:null, comment:''}。
      */
     async fetchCurrent(subjectId, cached) {
@@ -43,27 +53,17 @@ const BgmRate = {
             const rsp = await doAction('kazumiBangumiCollectionGet', { token, id: subjectId }, '/kazumi/action');
             const col = (rsp && rsp.collection) || null;
             if (!col) return none; // 未收藏（404）或失败：按无评分处理
-            return { rate: this.clampRate(col.rate), comment: String(col.comment || '') };
+            return { rate: this.clampRate(col.rate), comment: String(col.comment || ''), tags: this.normalizeTags(col.tags) };
         } catch (e) {
             return none;
         }
     },
 
     /**
-     * 给收藏网格容器里的 Bangumi 卡注入「评分」操作按钮（幂等：已有则跳过）。
-     * Bangumi 收藏卡由 records.js recCard 渲染（本文件不改动它），这里在渲染后
-     * 按 data-site="bangumi" 定位补挂操作徽标（对齐 rec-check/rec-tag 的定位方式）。
+     * 入口 UI：详情页 hero 操作行 #detail-bgm-rate（detail.js 渲染 + 委托）。
+     * （T80 前的收藏卡封面注入入口 injectCardActions 与 my.js 的 .rec-bgm-rate
+     * document 委托已随卡片按钮移除而删除。）
      */
-    injectCardActions($grid) {
-        if (!$grid || !$grid.find) return;
-        $grid.find('.vod-card[data-site="bangumi"]').each((_, el) => {
-            const $card = $(el);
-            if ($card.find('.rec-bgm-rate').length) return;
-            const sid = String($card.data('id') || '');
-            if (!sid) return;
-            $card.append('<button type="button" class="rec-bgm-rate" title="评分 / 吐槽（同步到 Bangumi）">★ 评分</button>');
-        });
-    },
 
     /** 评分钳制：非法输入转 null（无评分）；0-10 之外钳到边界。
      *  0 语义 = 清除评分（官方 API 约定），合法保留。 */
@@ -98,24 +98,55 @@ const BgmRate = {
         return `${n} 分 · ${labels[n] || ''}`;
     },
 
+    /** 标签数组归一化（展示/状态共用）：字符串数组 → 去空白、剔空、保序去重；
+     *  官方/next 返回的标签项可能是 {name} 对象（同 Kazumi BangumiInterest.fromJson 兼容）。 */
+    normalizeTags(list) {
+        if (!Array.isArray(list)) return [];
+        const seen = new Set();
+        const out = [];
+        for (const t of list) {
+            const name = (t && typeof t === 'object') ? String(t.name || '') : String(t || '');
+            const s = name.trim();
+            if (!s || seen.has(s)) continue;
+            seen.add(s);
+            out.push(s);
+        }
+        return out.slice(0, BGM_RATE_MAX_TAGS);
+    },
+
+    /** 自定义标签输入校验（对齐 Kazumi _addCustomTag 的错误口径）。
+     *  返回 {ok, tag, msg}：空串/超长/重复/超上限分别给出可操作提示。 */
+    normalizeTagInput(raw, selected) {
+        const t = String(raw || '').trim();
+        if (!t) return { ok: false, tag: '', msg: '请输入标签' };
+        if (t.length > BGM_RATE_TAG_MAX_LEN) return { ok: false, tag: '', msg: `标签最多 ${BGM_RATE_TAG_MAX_LEN} 字` };
+        if ((selected || []).includes(t)) return { ok: false, tag: '', msg: '标签已添加' };
+        if ((selected || []).length >= BGM_RATE_MAX_TAGS) return { ok: false, tag: '', msg: `最多 ${BGM_RATE_MAX_TAGS} 个标签` };
+        return { ok: true, tag: t, msg: '' };
+    },
+
     /** 构造 kazumiBangumiSyncApply 单条透传 payload（纯函数，单测覆盖）。
-     *  rate==null 且 comment 为空 → 返回 null（无改动不提交）。
+     *  rate==null 且 comment 为空且 tags 为空数组 → 返回 null（无改动不提交）。
+     *  tags 语义：undefined=不修改；数组（含空数组=清除全部标签）随 payload 提交。
      *  type=-1 语义：不动收藏类型（后端 body 不含有效 type 键）。 */
-    buildRatingPayload(subjectId, rate, comment) {
+    buildRatingPayload(subjectId, rate, comment, tags) {
         const sid = String(subjectId || '').trim();
         if (!sid) return null;
         const r = this.clampRate(rate);
         const c = String(comment || '').trim();
-        if (r === null && !c) return null;
+        const hasTags = Array.isArray(tags);
+        if (r === null && !c && !hasTags) return null;
         const item = { subjectId: sid, type: -1 };
         if (r !== null) item.rate = r;
         if (c) item.comment = c;
+        if (hasTags) item.tags = this.normalizeTags(tags);
         return item;
     },
 
     /**
-     * 打开评分/吐槽对话框。
-     * @param {object} opts { subjectId, name, rate(当前评分，可空), comment(当前吐槽，可空) }
+     * 打开评分/吐槽/标签对话框。
+     * @param {object} opts { subjectId, name, rate(当前评分，可空), comment(当前吐槽，可空),
+     *   tags(当前个人标签数组，可空), popularTags(条目标签数组做热门建议，可空) }
      * @returns {Promise<boolean>} 提交成功 true；取消/失败 false
      */
     openRateDialog(opts) {
@@ -126,11 +157,19 @@ const BgmRate = {
         // 对话框已打开时再次调用：先按取消复位旧会话（旧 Promise 立即 resolve(false)），
         // 避免旧 Promise 悬挂、其 _resolve 被新会话覆盖后永不 settle
         if (this._resolve) this._close(false);
+        this._showAllPopular = false;
+        const initTags = this.normalizeTags(opts.tags);
         this._ctx = {
             subjectId: sid,
             name: String(opts.name || ''),
             rate: this.clampRate(opts.rate),
             comment: String(opts.comment || ''),
+            // 当前个人标签（收藏接口回传）：对话框内可增删，提交时整体覆盖
+            tags: initTags.slice(),
+            // 初始标签快照：脏检查用（一致则 payload 不带 tags 键，不动远端标签）
+            tagsInit: initTags,
+            // 热门建议 = 条目公共标签（用户没选的不展示计数徽标，纯名展示）
+            popularTags: this.normalizeTags(opts.popularTags),
         };
         this._renderDialog();
         return new Promise((resolve) => {
@@ -142,8 +181,9 @@ const BgmRate = {
         });
     },
 
-    /** 渲染对话框内容（按 _ctx）：星级选择器 + 当前评分标签 + 吐槽文本框。 */
-    _renderDialog() {
+    /** 渲染对话框内容（按 _ctx）：星级选择器 + 当前评分标签 + 吐槽文本框 + 标签编辑区。
+     *  opts.preserveTagInput：重渲时保留自定义标签输入框草稿（星级交互触发的重渲）。 */
+    _renderDialog(opts = {}) {
         const c = this._ctx || {};
         const name = c.name || '未命名条目';
         $('#bgm-rate-name').text(name);
@@ -157,15 +197,71 @@ const BgmRate = {
         $('#bgm-rate-stars').html(stars.join(''));
         $('#bgm-rate-label').text(this.fmtRateLabel(c.rate));
         $('#bgm-rate-comment').val(c.comment || '');
+        this._renderTags({ preserveInput: !!opts.preserveTagInput });
         $('#bgm-rate-status').text('').hide();
     },
 
-    /** 星级点击：选中 ≤rate 的星（离散 10 档）；再点同一分值取消评分（置为 0=清除）。 */
+    /** 标签区渲染：已选 chips（可删）+ 热门建议（点击增删）+ 自定义输入。
+     *  opts.preserveInput：保留输入框草稿——星级点击/清除评分会触发整对话框
+     *  重渲，无此参数时用户正在输入的自定义标签会被静默清掉。 */
+    _renderTags(opts = {}) {
+        const c = this._ctx;
+        if (!c) return;
+        const selected = c.tags || [];
+        $('#bgm-rate-tags-count').text(`${selected.length} / ${BGM_RATE_MAX_TAGS}`);
+        // 已选标签 chips：点 × 整体移除
+        const sel = selected.map((t) =>
+            `<span class="bgm-rate-tag-chip" data-tag="${escHtmlAttr(t)}">${escHtml(t)}<button type="button"
+                class="bgm-rate-tag-remove" data-tag="${escHtmlAttr(t)}" title="移除标签 ${escHtml(t)}" aria-label="移除标签 ${escHtml(t)}">×</button></span>`).join('');
+        $('#bgm-rate-tags-selected').html(sel || '<span class="bgm-rate-tags-empty">未添加标签</span>');
+        // 热门标签：条目公共标签做建议；点击在已选里增删（toggle）；默认 6 个，更多展开
+        const popular = c.popularTags || [];
+        let pop = popular.slice(0, this._showAllPopular ? popular.length : BGM_RATE_POPULAR_TAGS)
+            .map((t) => {
+                const active = selected.includes(t);
+                return `<button type="button" class="bgm-rate-tag-pop${active ? ' active' : ''}" data-tag="${escHtmlAttr(t)}">${escHtml(t)}</button>`;
+            }).join('');
+        if (popular.length > BGM_RATE_POPULAR_TAGS) {
+            pop += `<button type="button" id="bgm-rate-tags-more" class="bgm-rate-tag-more">${this._showAllPopular ? '收起' : `更多（${popular.length - BGM_RATE_POPULAR_TAGS}）`}</button>`;
+        }
+        $('#bgm-rate-tags-popular').html(pop ? `<span class="bgm-rate-tags-pop-title">热门标签</span>${pop}` : '');
+        if (!opts.preserveInput) $('#bgm-rate-tag-input').val('');
+        this._hideTagError();
+    },
+
+    /** 展示标签操作错误提示（自动清除输入框尾随错误状态；不抛 toast，保持对话框内反馈）。 */
+    _showTagError(msg) {
+        $('#bgm-rate-tag-error').text(String(msg || '')).show();
+    },
+
+    _hideTagError() {
+        $('#bgm-rate-tag-error').text('').hide();
+    },
+
+    /** 热门/自定义标签 toggle：已选移除、未选追加（达上限报错）。 */
+    _toggleTag(tag) {
+        const c = this._ctx;
+        if (!c) return;
+        const t = String(tag || '').trim();
+        if (!t) return;
+        const idx = (c.tags || []).indexOf(t);
+        if (idx >= 0) {
+            c.tags.splice(idx, 1);
+        } else {
+            const v = this.normalizeTagInput(t, c.tags);
+            if (!v.ok) { this._showTagError(v.msg); return; }
+            c.tags.push(v.tag);
+        }
+        this._renderTags();
+    },
+
+    /** 星级点击：选中 ≤rate 的星（离散 10 档）；再点同一分值取消评分（置为 0=清除）。
+     *  重渲保留输入框草稿（用户先打标签后调星级是常见顺序）。 */
     _pickRate(val) {
         const c = this._ctx;
         if (!c) return;
         c.rate = (c.rate === val) ? 0 : val;
-        this._renderDialog();
+        this._renderDialog({ preserveTagInput: true });
     },
 
     /** 清除评分（0=删除评分，官方语义）：星级全部熄灭，标签显示「未评分」。 */
@@ -173,12 +269,14 @@ const BgmRate = {
         const c = this._ctx;
         if (!c) return;
         c.rate = 0;
-        this._renderDialog();
+        this._renderDialog({ preserveTagInput: true });
     },
 
     /** 收集对话框当前输入并提交（kazumiBangumiSyncApply 单条透传）。
      *  评分单一事实来源是 _ctx.rate（_pickRate/_clearRate 维护）：0=清除评分必须
      *  进入 payload，不能从「active 星级」反推——0 分时无 active 星会误判成不修改。
+     *  标签单一事实来源是 _ctx.tags：与打开时的初始标签有差异（或对话框内从未选过
+     *  但当前有值）才随 payload 提交，避免纯评分提交意外把远端标签清空。
      *  防重入：入口即占位 _inFlightId（先于任何 await），同一 subject 在途时
      *  忽略重复触发，杜绝连点并发多个 PATCH；提交按钮同步禁用、finally 复位。 */
     async submit() {
@@ -193,8 +291,23 @@ const BgmRate = {
         try {
             const rate = this.clampRate(c.rate);   // null=不修改；0=清除评分
             const comment = String($('#bgm-rate-comment').val() || '').trim();
-            const item = this.buildRatingPayload(c.subjectId, rate, comment);
-            if (!item) { warnToast('评分与吐槽均为空，无需提交'); return false; }
+            // 标签脏检查：初始 tags 快照在 _ctx.tagsInit；一致则不带 tags 键（不修改）。
+            // 输入框里的未确认草稿不参与提交（与 Kazumi 一致：提交时若有草稿先尝试入列）。
+            const draft = String($('#bgm-rate-tag-input').val() || '').trim();
+            if (draft) {
+                const v = this.normalizeTagInput(draft, c.tags);
+                if (!v.ok) {
+                    // 草稿有误（重复/超限/超长）只提示，不阻断主提交——删掉无关输入
+                    // 才能交评分是反直觉边界（对齐 Kazumi：草稿失败仅提示）
+                    this._showTagError(`标签草稿未入列：${v.msg}`);
+                } else {
+                    c.tags.push(v.tag);
+                    this._renderTags();
+                }
+            }
+            const tagsDirty = JSON.stringify(c.tags || []) !== JSON.stringify(c.tagsInit || []);
+            const item = this.buildRatingPayload(c.subjectId, rate, comment, tagsDirty ? (c.tags || []) : undefined);
+            if (!item) { warnToast('评分、吐槽与标签均为空，无需提交'); return false; }
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken)
                 ? await Kazumi._getBangumiToken() : '';
             if (!token) {
@@ -208,11 +321,20 @@ const BgmRate = {
             const r = rsp && rsp.result;
             const one = r && Array.isArray(r.results) ? r.results[0] : null;
             if (rsp && rsp.code === 200 && one && one.ok) {
-                // 成功文案：0=清除评分（官方语义），不能显示「已评分：未评分」
+                // 成功文案：0=清除评分（官方语义）；仅标签变更不得误报「吐槽已提交」
                 if (item.rate === 0) warnToast('已清除评分');
-                else warnToast(item.rate !== undefined ? `已评分：${this.fmtRateLabel(item.rate)}` : '吐槽已提交');
+                else if (item.rate !== undefined) warnToast(`已评分：${this.fmtRateLabel(item.rate)}`);
+                else if (item.tags !== undefined && !item.comment) warnToast('标签已更新');
+                else warnToast('吐槽已提交');
                 // 广播收藏变更：my.js 作废 Bangumi 收藏缓存重拉（评分/吐槽在收藏接口里回传）
                 if (typeof FavHub !== 'undefined' && FavHub.changed) FavHub.changed();
+                // T80：详情页提交后立即刷新吐槽数据——乐观插入 + 清缓存后台重拉合并
+                // （next.bgm 索引延迟由乐观行兜底，重拉到达后按正文匹配去重）。
+                // 仅当前详情页匹配该 subject 时生效（Detail 内部自判 _bgmId）。
+                if (typeof Detail !== 'undefined' && Detail.onBgmCommentSubmitted) {
+                    try { Detail.onBgmCommentSubmitted({ subjectId: c.subjectId, rate: item.rate, comment: item.comment }); }
+                    catch (e) { /* 刷新失败不影响提交流程 */ }
+                }
                 this._close(true);
                 return true;
             }
@@ -248,6 +370,15 @@ const BgmRate = {
     },
 };
 
+// 标签名进 data-* 属性与文本节点前的 HTML 转义。优先用 common.js 的 escHtml；
+// VM 单测环境无该全局时兜底内联实现（与 common.js 同口径：& < > " ' 全转）。
+function escHtmlAttr(s) {
+    if (typeof escHtml === 'function') return escHtml(s);
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[ch]));
+}
+
 /** 对话框静态控件事件绑定（委托一次；DOM 常驻 index.html，控件 id 固定）。 */
 (function bindBgmRateDialog() {
     if (typeof window === 'undefined' || !window.$) return;
@@ -259,6 +390,32 @@ const BgmRate = {
     // 清除评分：置 0（官方 0=删除评分语义）
     $('#bgm-rate-clear').on('click', () => {
         if (typeof BgmRate !== 'undefined') BgmRate._clearRate();
+    });
+    // 已选标签 chips：点 × 移除（委托）
+    $('#bgm-rate-tags-selected').on('click', '.bgm-rate-tag-remove', (e) => {
+        e.stopPropagation();
+        if (typeof BgmRate !== 'undefined') BgmRate._toggleTag($(e.currentTarget).data('tag') || '');
+    });
+    // 热门标签：点击 toggle 选择（委托）；「更多」展开收起
+    $('#bgm-rate-tags-popular').on('click', '.bgm-rate-tag-pop', (e) => {
+        if (typeof BgmRate !== 'undefined') BgmRate._toggleTag($(e.currentTarget).data('tag') || '');
+    });
+    $('#bgm-rate-tags-popular').on('click', '#bgm-rate-tags-more', (e) => {
+        e.stopPropagation();
+        if (typeof BgmRate !== 'undefined') {
+            BgmRate._showAllPopular = !BgmRate._showAllPopular;
+            BgmRate._renderTags();
+        }
+    });
+    // 自定义标签：添加按钮 + 回车快捷添加
+    $('#bgm-rate-tag-add').on('click', () => {
+        if (typeof BgmRate !== 'undefined') BgmRate._toggleTag($('#bgm-rate-tag-input').val() || '');
+    });
+    $('#bgm-rate-tag-input').on('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (typeof BgmRate !== 'undefined') BgmRate._toggleTag($('#bgm-rate-tag-input').val() || '');
+        }
     });
     // 提交
     $('#bgm-rate-submit').on('click', () => {
@@ -293,4 +450,7 @@ const BgmRate = {
     root.YUKI.bgmRate = BgmRate;
     // 渲染层无模块系统，暴露全局供 bangumi-search.js / my.js 调用
     root.BgmRate = BgmRate;
+    // 单测/复用导出（纯常量口径与实现一致）
+    BgmRate.MAX_TAGS = BGM_RATE_MAX_TAGS;
+    BgmRate.TAG_MAX_LEN = BGM_RATE_TAG_MAX_LEN;
 }(typeof window !== 'undefined' ? window : globalThis));

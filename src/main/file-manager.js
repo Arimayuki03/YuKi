@@ -161,6 +161,65 @@ class FileManager {
         fs.rmSync(p, { recursive: true, force: true });
     }
 
+    /** 批量删除（多选模式入口）：先分类并过完全部防线（根目录剔除 / 在写互斥 /
+     *  原生确认框），防线通过后才统一删除——取消/互斥拒绝时不得已删任何文件
+     *  （否则用户在主进程框点「取消」意图全不删，文件却已被删）。目录确认框只弹
+     *  一次（列出全部待删目录），整批共用一个决定；单项失败不中断整批，逐项结果
+     *  随返回值回告。 */
+    async delMany(rels) {
+        const list = (Array.isArray(rels) ? rels : []).map((r) => String(r || '')).filter(Boolean);
+        if (!list.length) throw new Error('empty selection');
+        const results = [];
+        // 先分类：目录统一收集（确认一次）；文件只解析校验，删除延后到防线之后
+        const dirs = [];
+        const files = [];
+        for (const rel of list) {
+            let p;
+            try { p = this.resolveSafe(rel); } catch (e) { results.push({ rel, ok: false, reason: e.message }); continue; }
+            let isDir = false;
+            try { isDir = fs.existsSync(p) && fs.statSync(p).isDirectory(); } catch (e) { /* stat 失败按文件处理 */ }
+            if (isDir) dirs.push({ rel, p });
+            else files.push(rel);
+        }
+        // 根目录项先剔除（对齐 delFolder：拒绝发生在确认框之前，不弹根目录确认）
+        for (const d of dirs) {
+            if (d.p === this.root) { results.push({ rel: d.rel, ok: false, reason: 'cannot delete root' }); }
+        }
+        const deletableDirs = dirs.filter((d) => d.p !== this.root);
+        if (deletableDirs.length) {
+            // 防线 (c)：任一目录在写互斥命中即整批拒绝（保守策略：宁可少删不误删）
+            for (const d of deletableDirs) {
+                if (this._hasActiveTaskUnder(d.p)) {
+                    throw new Error('folder has active downloads');
+                }
+            }
+            // 防线 (b)：原生确认框一次覆盖整批目录
+            if (this._confirm) {
+                const detail = deletableDirs.map((d) => d.p).join('\n');
+                const choice = await this._confirm({
+                    type: 'warning',
+                    title: '删除文件夹',
+                    message: deletableDirs.length > 1 ? `确定要删除这 ${deletableDirs.length} 个文件夹吗？` : '确定要删除文件夹吗？',
+                    detail: `将永久递归删除以下目录及其全部内容（不可恢复）：\n${detail}`,
+                    buttons: ['删除', '取消'],
+                });
+                if (choice !== 0) throw new Error('delete cancelled');
+            } else {
+                throw new Error('delete cancelled: no confirm dialog');
+            }
+        }
+        // 防线全部通过：统一删除（文件 + 目录）。到这里才允许真正动文件系统。
+        for (const rel of files) {
+            try { this.delFile(rel); results.push({ rel, ok: true }); }
+            catch (e) { results.push({ rel, ok: false, reason: e.message }); }
+        }
+        for (const d of deletableDirs) {
+            try { fs.rmSync(d.p, { recursive: true, force: true }); results.push({ rel: d.rel, ok: true }); }
+            catch (e) { results.push({ rel: d.rel, ok: false, reason: e.message }); }
+        }
+        return { results, failed: results.filter((r) => !r.ok).length };
+    }
+
     isVideo(name) {
         return VIDEO_EXTS.has(path.extname(String(name || '')).toLowerCase());
     }

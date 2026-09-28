@@ -62,9 +62,43 @@ WEBDAV_SYNC_ROOT = '/YuKiSync'
 # Bangumi 收藏写接口的评分/吐槽字段边界（官方 OpenAPI UserSubjectCollectionModifyPayload）：
 #   rate    — 0..10 整数，0 表示删除评分；1..10 为有效评分
 #   comment — 吐槽文本；官方端未见显式上限，客户端按 10000 字符截断防极端长文拖垮请求体
+#   tags    — 个人标签字符串数组；对齐 Kazumi rating_review_dialog 的客户端边界：
+#             最多 10 个、单个最长 10 字符，超限拒收（发到官方端会被 400 Validation Error）
 BGM_RATE_MIN = 0
 BGM_RATE_MAX = 10
 BGM_COMMENT_MAX = 10000
+BGM_TAGS_MAX = 10
+BGM_TAG_MAX_LEN = 10
+
+
+def normalize_bgm_tags(value):
+    """归一化个人标签入参：None/'' → None（不修改）；字符串数组 → 去空白、剔空项、
+    保序去重后返回。数组化输入（如 "a,b"）不拆分——标签允许含逗号，拆分会改写用户语义。
+
+    数量超 BGM_TAGS_MAX 或单项超 BGM_TAG_MAX_LEN 抛 BgmFieldError（field='tags'），
+    由调用方转单条失败结果，与 rate/comment 口径一致。"""
+    if value is None or value == '':
+        return None
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise BgmFieldError(f'无效的标签值: {value!r}', field='tags')
+    seen = set()
+    out = []
+    for it in items:
+        t = str(it or '').strip()
+        if not t:
+            continue
+        if len(t) > BGM_TAG_MAX_LEN:
+            raise BgmFieldError(f'标签最长 {BGM_TAG_MAX_LEN} 字: {t}', field='tags')
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    if len(out) > BGM_TAGS_MAX:
+        raise BgmFieldError(f'标签最多 {BGM_TAGS_MAX} 个（当前 {len(out)} 个）', field='tags')
+    return out
 
 
 def normalize_bgm_rate(value):
@@ -1137,7 +1171,13 @@ class PluginManager:
             logger.warning('[kazumi] bangumi staff failed: %s', e)
             return []
     def bangumi_comments(self, subject_id, limit=20, offset=0):
-        """Bangumi 番剧评论（next.bgm.tv）。"""
+        """Bangumi 番剧评论（next.bgm.tv）。
+
+        GET /p1/subjects/{id}/comments 正常响应为 {data: [...], total: N}（total 为
+        该条目吐槽总数，与 limit/offset 无关）；历史上也出现过裸数组形态。统一返回
+        {'list': [...], 'total': int}：裸数组形态 total 取数组长度（分页下仅已加载
+        部分可知），失败返回 {'list': [], 'total': 0}。
+        """
         try:
             rsp = http_client.get(
                 f'{self._base_next()}/p1/subjects/{subject_id}/comments',
@@ -1147,9 +1187,46 @@ class PluginManager:
                 verify=True,
             )
             rsp.raise_for_status()
-            return rsp.json()
+            data = rsp.json()
+            if isinstance(data, dict):
+                items = data.get('data') or data.get('list') or []
+                try:
+                    total = int(data.get('total') or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                if not total and isinstance(items, list):
+                    total = len(items)
+                return {'list': items if isinstance(items, list) else [], 'total': total}
+            if isinstance(data, list):
+                return {'list': data, 'total': len(data)}
+            return {'list': [], 'total': 0}
         except Exception as e:
             logger.warning('[kazumi] bangumi comments failed: %s', e)
+            return {'list': [], 'total': 0}
+
+    def bangumi_episode_comments(self, episode_id):
+        """Bangumi 分集评论（next.bgm.tv，对齐 Kazumi getBangumiCommentsByEpisodeID）。
+
+        GET /p1/episodes/{episode_id}/comments：返回主楼层数组，每项含 user/content/
+        createdAt/replies（嵌套楼中楼，与主楼层同构）。一次性返回全集（端点无分页参数），
+        失败返回 []（渲染层按空态展示）。"""
+        try:
+            rsp = http_client.get(
+                f'{self._base_next()}/p1/episodes/{episode_id}/comments',
+                headers={'User-Agent': BANGUMI_UA},
+                timeout=10,
+                verify=True,
+            )
+            rsp.raise_for_status()
+            data = rsp.json()
+            # next.bgm /p1 历史上出现过 {list: []} 包装与裸数组两种形态，统一兼容
+            if isinstance(data, dict):
+                items = data.get('list') or data.get('data') or []
+            else:
+                items = data
+            return items if isinstance(items, list) else []
+        except Exception as e:
+            logger.warning('[kazumi] bangumi episode comments failed: %s', e)
             return []
 
     def bangumi_relations(self, subject_id):
@@ -1303,8 +1380,8 @@ class PluginManager:
             logger.warning('[kazumi] bangumi collection get failed: %s', e)
             return None
 
-    def bangumi_update_collection(self, token, subject_id, collection_type, rate=None, comment=None):
-        """设置/更新收藏类型与评分/吐槽（对齐 Kazumi updateBangumiById：POST /v0/users/-/collections/{id}）。
+    def bangumi_update_collection(self, token, subject_id, collection_type, rate=None, comment=None, tags=None):
+        """设置/更新收藏类型与评分/吐槽/标签（对齐 Kazumi updateBangumiById：POST /v0/users/-/collections/{id}）。
 
         依次尝试 {POST, PUT} × {`-` 通配当前用户, 真实用户名} × {当前基址, 官方/镜像另一基址}，
         首个 2xx 即成功。Bangumi 官方与镜像均支持 `-` 通配（需有效 token）；POST 为 Kazumi 原版
@@ -1313,6 +1390,7 @@ class PluginManager:
         SubjectCollectionType 枚举仅 1-5，与 _bangumi_set_one 口径一致）。
         rate: 1-10 整数评分（None 不修改；对齐官方 API UserSubjectCollectionModifyPayload）。
         comment: 吐槽文本（None 不修改；与 rate 可独立提交，走 PATCH 语义不动收藏类型）。
+        tags: 个人标签字符串数组（None 不修改；对齐 Kazumi 最多 10 个、单个 ≤10 字）。
         返回 (ok, msg)。"""
         import requests
         token = self._normalize_bangumi_token(token)
@@ -1325,6 +1403,10 @@ class PluginManager:
             return False, str(e)
         try:
             comment_n = normalize_bgm_comment(comment)
+        except BgmFieldError as e:
+            return False, str(e)
+        try:
+            tags_n = normalize_bgm_tags(tags)
         except BgmFieldError as e:
             return False, str(e)
         # 先验证 token 有效性，刷新 username 缓存
@@ -1340,11 +1422,13 @@ class PluginManager:
         body = {}
         if collection_type is not None and int(collection_type) >= 1:
             body['type'] = int(collection_type)
-        # 评分/吐槽为可选字段：仅显式传入时加入 body（type<0 时不发 type，纯评分/吐槽场景）
+        # 评分/吐槽/标签为可选字段：仅显式传入时加入 body（type<0 时不发 type，纯评分/吐槽场景）
         if rate_n is not None:
             body['rate'] = rate_n
         if comment_n is not None:
             body['comment'] = comment_n
+        if tags_n is not None:
+            body['tags'] = tags_n
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
@@ -1690,14 +1774,15 @@ class PluginManager:
         return {'upload': upload, 'pull': pull, 'conflict': conflict, 'skipped': skipped,
                 'remoteTotal': len(remote_list), 'localTotal': len(local_favorites or [])}
 
-    def _bangumi_set_one(self, subject_id, ctype, headers, bases, usernames, rate=None, comment=None):
+    def _bangumi_set_one(self, subject_id, ctype, headers, bases, usernames, rate=None, comment=None, tags=None):
         """单条收藏写入（并发上传内部用）：沿用 bangumi_update_collection 的
         {POST,PUT} × usernames × bases 兜底逻辑，但用预解析好的 username/headers/bases，
         不重置用户名缓存（并发场景复用）。429/5xx 小退避后继续尝试其他组合。返回 (ok, msg)。
 
-        rate（0-10 整数）/ comment（吐槽文本）：本方法默认不含 type 之外的键（收藏同步
-        兼容路径不传即不受影响）；评分/吐槽路径由 bangumi_apply_sync_plan 归一化后传入，
-        与 type 一起进 body——官方 API 对 POST/PATCH 均接受可选的 rate/comment 字段。
+        rate（0-10 整数）/ comment（吐槽文本）/ tags（个人标签数组）：本方法默认不含 type
+        之外的键（收藏同步兼容路径不传即不受影响）；评分/吐槽/标签路径由
+        bangumi_apply_sync_plan 归一化后传入，与 type 一起进 body——官方 API 对
+        POST/PATCH 均接受可选的 rate/comment/tags 字段。
 
         type 契约与 bangumi_update_collection 一致（官方 OpenAPI 的
         SubjectCollectionType 枚举仅 1-5）：ctype<1 表示「不动收藏类型」，
@@ -1711,6 +1796,8 @@ class PluginManager:
             body['rate'] = int(rate)
         if comment is not None:
             body['comment'] = str(comment)
+        if tags is not None:
+            body['tags'] = list(tags)
         auth_err = None
         other_err = None
         for base in bases:
@@ -1740,9 +1827,9 @@ class PluginManager:
 
         对齐 Kazumi async_serial_queue 的限速上传，但用有界并发提速。username 只解析一次并复用
         （不像 bangumi_update_collection 每条重置缓存），避免每条上传都打一次 /v0/me。
-        uploads: list[{subjectId, type}]；条目另支持可选 rate（0-10，0=清除评分）与
-        comment（吐槽文本）——评分/吐槽 UI 走同一端点单条透传（server.py 不新增 do，
-        复用 kazumiBangumiSyncApply），type<0 表示不动收藏类型。
+        uploads: list[{subjectId, type}]；条目另支持可选 rate（0-10，0=清除评分）、
+        comment（吐槽文本）与 tags（个人标签数组）——评分/吐槽/标签 UI 走同一端点单条透传
+        （server.py 不新增 do，复用 kazumiBangumiSyncApply），type<0 表示不动收藏类型。
         返回 {uploaded, failed, results:[{subjectId,ok,msg}]}。"""
         token = self._normalize_bangumi_token(token)
         if not token:
@@ -1762,9 +1849,10 @@ class PluginManager:
 
         def _apply(item):
             sid = item.get('subjectId') or item.get('id')
-            # 评分/吐槽归一化先于网络：非法值直接判该条失败（400 语义），不发无效请求
+            # 评分/吐槽/标签归一化先于网络：非法值直接判该条失败（400 语义），不发无效请求
             rate_n = None
             comment_n = None
+            tags_n = None
             try:
                 rate_n = normalize_bgm_rate(item.get('rate'))
             except BgmFieldError as e:
@@ -1774,15 +1862,19 @@ class PluginManager:
             except BgmFieldError as e:
                 return {'subjectId': sid, 'ok': False, 'msg': str(e)}
             try:
+                tags_n = normalize_bgm_tags(item.get('tags'))
+            except BgmFieldError as e:
+                return {'subjectId': sid, 'ok': False, 'msg': str(e)}
+            try:
                 ctype = int(item.get('type') or 0)
             except (TypeError, ValueError):
                 ctype = 0
-            has_extra = rate_n is not None or comment_n is not None
+            has_extra = rate_n is not None or comment_n is not None or tags_n is not None
             if not sid or (ctype <= 0 and not has_extra):
                 return {'subjectId': sid, 'ok': False, 'msg': 'invalid item'}
             time.sleep(op_delay)  # 每 worker 请求前限速（3 worker 稳态 ≈ 每 250ms 一批，尊重 ~5 req/s）
             ok, msg = self._bangumi_set_one(sid, ctype, headers, bases, usernames,
-                                            rate=rate_n, comment=comment_n)
+                                            rate=rate_n, comment=comment_n, tags=tags_n)
             return {'subjectId': sid, 'ok': ok, 'msg': msg}
 
         results = []

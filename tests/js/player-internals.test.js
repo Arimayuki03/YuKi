@@ -984,14 +984,14 @@ describe('bgm-rate', () => {
     });
 
     test('fetchCurrent：无缓存时按 subjectId 查后端，未收藏/异常一律降级为无评分', async () => {
-        // 命中收藏
+        // 命中收藏（T82：回传 tags 一并归一化，无 tags 字段时为空数组）
         const a = loadBgmRate({
             doActionImpl: async (action, body) => {
                 a.lastArgs = [action, body];
                 return { collection: { rate: 7, comment: '还行' } };
             },
         });
-        assert.deepEqual(plain(await a.R.fetchCurrent('42', {})), { rate: 7, comment: '还行' });
+        assert.deepEqual(plain(await a.R.fetchCurrent('42', {})), { rate: 7, comment: '还行', tags: [] });
         assert.equal(a.lastArgs[0], 'kazumiBangumiCollectionGet');
         assert.equal(a.lastArgs[1].id, '42');
         // 未收藏（collection 为空）
@@ -1061,43 +1061,34 @@ describe('bgm-rate', () => {
         assert.equal(R._ctx, null);
     });
 
-    test('injectCardActions：Bangumi 卡注入评分按钮（幂等），且不插值任何用户数据', () => {
-        const { R, sink } = loadBgmRate();
-        sink.dataVals.id = '42';
-        sink.findItems['.vod-card[data-site="bangumi"]'] = [{ __n: 1 }, { __n: 2 }];
-        R.injectCardActions({ find: (s) => {
-            const api = { find: (s2) => ({ length: sink.findLength[s2] === undefined ? 0 : sink.findLength[s2],
-                each: (fn) => { (sink.findItems[s2] || []).forEach((it, i) => fn.call(it, i, it)); return api; } }) };
-            api.each = (fn) => { (sink.findItems[s] || []).forEach((it, i) => fn.call(it, i, it)); return api; };
-            return api;
-        } });
-        assert.equal(sink.appends.length, 2, '两张 Bangumi 卡各注入一次');
-        assert.ok(sink.appends.every((a) => a.v.includes('rec-bgm-rate')));
-        assert.ok(sink.appends.every((a) => !a.v.includes('42')), '注入的 HTML 不得插值卡片数据');
-        // 幂等：已有徽章（find length=1）则跳过
-        sink.appends.length = 0;
-        sink.findLength['.rec-bgm-rate'] = 1;
-        R.injectCardActions({ find: (s) => {
-            const api = { find: (s2) => ({ length: sink.findLength[s2] === undefined ? 0 : sink.findLength[s2],
-                each: (fn) => { (sink.findItems[s2] || []).forEach((it, i) => fn.call(it, i, it)); return api; } }) };
-            api.each = (fn) => { (sink.findItems[s] || []).forEach((it, i) => fn.call(it, i, it)); return api; };
-            return api;
-        } });
-        assert.equal(sink.appends.length, 0, '已有按钮的卡片不得重复注入');
-        // 无 id 的卡片跳过
-        sink.appends.length = 0;
-        sink.findLength['.rec-bgm-rate'] = 0;
-        sink.dataVals.id = '';
-        R.injectCardActions({ find: (s) => {
-            const api = { find: (s2) => ({ length: sink.findLength[s2] === undefined ? 0 : sink.findLength[s2],
-                each: (fn) => { (sink.findItems[s2] || []).forEach((it, i) => fn.call(it, i, it)); return api; } }) };
-            api.each = (fn) => { (sink.findItems[s] || []).forEach((it, i) => fn.call(it, i, it)); return api; };
-            return api;
-        } });
-        assert.equal(sink.appends.length, 0, '无 subjectId 的卡片跳过');
-        // 非 jQuery 容器（无 find）：静默返回
-        R.injectCardActions(null);
-        R.injectCardActions({});
-        assert.ok(true, '以上两条非 jQuery 容器调用均未抛错（提前 return）');
+    test('T80：injectCardActions 已删除（评分入口挪至详情页 hero，卡片注入路径不复存在）', () => {
+        const { R } = loadBgmRate();
+        assert.equal(R.injectCardActions, undefined,
+            'injectCardActions 应已随收藏卡评分按钮移除而删除');
+    });
+
+    test('T80：submit 成功后通知详情页乐观刷新吐槽（Detail.onBgmCommentSubmitted 行为测试）', async () => {
+        // 行为覆盖：VM 内真实执行 submit 成功路径，Detail 桩记录通知参数
+        // （doAction 缺省桩返回 code:200 + results[0].ok:true，直接命中成功分支）
+        const notified = [];
+        const sinkHolder = {};
+        const { R, calls, sink } = loadBgmRate({
+            globals: { Detail: { onBgmCommentSubmitted: (p) => notified.push(p) } },
+        });
+        sinkHolder.sink = sink;
+        R._ctx = { subjectId: '42', name: 'X', rate: 9, comment: '神作' };
+        R._inFlightId = '';
+        // comment 单一事实来源是 #bgm-rate-comment 输入框（submit 内 val() 读取），
+        // jq 桩缺省返回空串，先写入吐槽正文再提交
+        sink.vals['#bgm-rate-comment'] = '神作';
+        const ok = await R.submit();
+        assert.equal(ok, true, '成功桩下 submit 应返回 true');
+        assert.equal(calls.doAction.length, 1, '应发起一次 kazumiBangumiSyncApply');
+        assert.equal(notified.length, 1, '成功后应通知详情页一次');
+        // VM realm 对象原型与宿主不同，deepStrictEqual 会误报——逐字段断言
+        assert.equal(notified[0].subjectId, '42', '通知应携带 subjectId');
+        assert.equal(notified[0].rate, 9, '通知应携带 rate');
+        assert.equal(notified[0].comment, '神作', '通知应携带 comment');
     });
 });
+

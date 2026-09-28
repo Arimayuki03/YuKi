@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, _coverCache, setBangumiMirrorRoot */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, localCacheDel, _coverCache, setBangumiMirrorRoot */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -750,7 +750,11 @@ const Kazumi = {
         const token = await this._getBangumiToken();
         try {
             const rsp = await doAction('kazumiBangumiCollectionDel', { token, id: subjectId }, '/kazumi/action');
-            if (rsp && rsp.code === 200) { warnToast('已删除收藏'); return true; }
+            if (rsp && rsp.code === 200) {
+                warnToast('已删除收藏');
+                this._bgmColCacheDel(String(subjectId)); // 删除成功同步作废本地缓存
+                return true;
+            }
             warnToast('删除失败：' + ((rsp && rsp.msg) || '未知错误'));
             return false;
         } catch (e) { warnToast('删除失败'); return false; }
@@ -778,6 +782,13 @@ const Kazumi = {
                         if (st.bangumiImmediateSyncToastEnable !== false) warnToast('已同步到 Bangumi');
                     } catch (e) { warnToast('已同步到 Bangumi'); }
                 }
+                // 乐观更新本地收藏缓存：type 立即生效；ep_status 沿用旧值（打点接口另行更新），
+                // 下次打开详情页直接命中缓存显示最新状态。合并前校验旧条目 token：
+                // 换号后旧账号的 ep_status/rate/comment 不能借乐观写入带到新账号缓存里
+                const prev = this._bgmColCacheRead(String(subjectId));
+                const prevCol = (prev && typeof prev === 'object' && prev.col
+                    && prev.token === String(token)) ? prev.col : null;
+                this._bgmColCacheWrite(String(subjectId), { ...(prevCol || {}), type }, token);
                 return true;
             }
             if (!this._bgmBatchActive && !(opts && opts.quiet)) {
@@ -933,6 +944,17 @@ const Kazumi = {
             this._bgmProgressFailToast((rsp && rsp.msg) || '未知错误');
             return;
         }
+        // 打点成功：乐观更新本地收藏缓存的 ep_status（看到第 N 话），详情页进度行直接可用。
+        // 远端 ep_status 取 max(旧值, 本集号)；缓存不存在（未查过收藏）则跳过，等详情页回源。
+        try {
+            const cached = this._bgmColCacheRead(String(subjectId));
+            if (cached && typeof cached === 'object' && cached.col && cached.token === String(token)) {
+                const prevEp = Number(cached.col.ep_status) || 0;
+                cached.col.ep_status = Math.max(prevEp, resolvedNum);
+                cached.ts = Date.now();
+                this._bgmColCacheWrite(String(subjectId), cached.col, token);
+            }
+        } catch (e) { /* 缓存更新失败不影响打点 */ }
         // 收藏联动（全部静默）：未收藏/想看 → 在看；最后一集看完且远端本篇全部看过 → 看过
         try {
             const col = await this.getBangumiCollection(subjectId);
@@ -1127,20 +1149,67 @@ const Kazumi = {
         }
     },
 
-    /** 查询某 subject 的收藏状态（返回 {type} 或 null）。 */
-    async getBangumiCollection(subjectId) {
+    /** 单条收藏状态本地缓存（cache.js localStorage 持久）：key 不含 token
+     *  （token 存值内、读侧比对防换号串数据）；值 {col, ts, token}。
+     *  读：详情页 _applyBangumiColState 每次打开都查，命中直接上屏免网络等待；
+     *  写：get 回源后写入（null 走短负缓存），set/remove/ep watched 成功后同步
+     *  更新/作废对应条目。 */
+    _bgmColCacheTTL: 6 * 60 * 60 * 1000,
+    _bgmColCacheNegTTL: 60 * 1000,
+    _bgmColCacheKey(subjectId) {
+        return 'detail::bgmcol::v1::' + String(subjectId);
+    },
+    _bgmColCacheRead(subjectId) {
+        if (typeof localCacheGet !== 'function') return undefined; // undefined=缓存不可用
+        try {
+            const hit = localCacheGet(this._bgmColCacheKey(subjectId));
+            if (!hit || typeof hit !== 'object') return null; // null=未命中
+            return hit; // {col, ts, token}
+        } catch (e) { return null; }
+    },
+    _bgmColCacheWrite(subjectId, col, token, ttl) {
+        if (typeof localCacheSet !== 'function') return;
+        try { localCacheSet(this._bgmColCacheKey(subjectId), { col, ts: Date.now(), token: String(token || '') }, ttl || this._bgmColCacheTTL); } catch (e) { /* 缓存失败忽略 */ }
+    },
+    _bgmColCacheDel(subjectId) {
+        if (typeof localCacheDel !== 'function') return;
+        try { localCacheDel(this._bgmColCacheKey(subjectId)); } catch (e) { /* ignore */ }
+    },
+
+    /** 查询某 subject 的收藏状态（返回 {type} 或 null）。
+     *  先读本地缓存（未过期且 token 一致）：详情页打开即上屏，零网络等待；
+     *  未命中才回源 GET，回源成功后写缓存。仅 force 时跳过缓存（写操作后核对用）。 */
+    async getBangumiCollection(subjectId, opts = {}) {
         const token = await this._getBangumiToken();
         if (!token) return null;
+        const key = String(subjectId);
+        if (!opts.force) {
+            const hit = this._bgmColCacheRead(key);
+            if (hit && typeof hit === 'object' && hit.token === String(token)
+                && (Date.now() - Number(hit.ts || 0)) < this._bgmColCacheTTL) {
+                return (hit.col === undefined || hit.col === null) ? null : hit.col;
+            }
+        }
         try {
             const rsp = await doAction('kazumiBangumiCollectionGet', { token, id: subjectId }, '/kazumi/action');
-            return (rsp && rsp.collection) || null;
+            const col = (rsp && rsp.collection) || null;
+            if (col) {
+                this._bgmColCacheWrite(key, col, token);
+            } else {
+                // null 可能是「未收藏」也可能是上游 401/网络失败（服务端不可区分）：
+                // 只允许短负缓存，防止一次瞬时失败把「未收藏」冻结整段 TTL
+                this._bgmColCacheWrite(key, null, token, this._bgmColCacheNegTTL);
+            }
+            return col;
         } catch (e) { return null; }
     },
 
     /** 查询并回填详情页/弹窗里某 subject 的 Bangumi 收藏状态（高亮对应按钮）。
      *  P3-17：data-id 写入侧是 escHtml(原始值)（HTML 属性内安全），DOM 解码后的
      *  属性值即原始值；反查选择器必须用 CSS.escape(原始值) 才与之匹配——拼 escHtml
-     *  后的串会在 id 含 &/'/"/<> 时失配，且未转义 \ 与 ] 直接构成非法选择器。 */
+     *  后的串会在 id 含 &/'/"/<> 时失配，且未转义 \ 与 ] 直接构成非法选择器。
+     *  详情页单按钮模式（detail.js）：同步把当前状态文案写到 #detail-col-current，
+     *  并把收藏接口回传的 ep_status（看到第 N 话）显示到 .detail-col-progress 行。 */
     async _applyBangumiColState(subjectId) {
         const col = await this.getBangumiCollection(subjectId);
         const sel = CSS.escape(String(subjectId));
@@ -1152,6 +1221,27 @@ const Kazumi = {
         const t = col ? Number(col.type) : NaN;
         const cur = Number.isFinite(t) ? t : -1;
         wrap.find(`.kazumi-col-btn[data-type="${CSS.escape(String(cur))}"]`).addClass('active');
+        // 详情页收藏单按钮：同步当前态文案到按钮内 label（▾ 箭头常驻按钮内）
+        const labels = { '-1': '未收藏', 1: '想看', 2: '看过', 3: '在看', 4: '搁置', 5: '抛弃' };
+        const single = $('#detail-col-current');
+        if (single.length) {
+            single.find('.detail-col-label').text(labels[cur] || '未收藏');
+            single.attr('data-type', String(cur));
+            single.toggleClass('active', cur >= 1);
+        }
+        // 观看进度行：ep_status（看到第几话，0=未看）+ 总话数（_bgmInfo.eps）
+        const progress = $('.detail-col-progress');
+        if (progress.length) {
+            const epsTotal = Number((typeof Detail !== 'undefined' && Detail._bgmInfo && (Detail._bgmInfo.eps || Detail._bgmInfo.total_episodes)) || 0);
+            const watched = col ? (Number(col.ep_status) || 0) : 0;
+            if (watched > 0) {
+                progress.text(epsTotal > 0 ? `进度：看到第 ${watched} 话 / 共 ${epsTotal} 话` : `进度：看到第 ${watched} 话`).show();
+            } else {
+                progress.text('').hide();
+            }
+        }
+        // （Detail._bgmColCache 死写已移除：全仓库无读者，弹窗路径复用前不得
+        //   把弹窗条目状态写到当前详情页 DOM 上）
     },
 
     /** 检测规则有效性：后台并发搜索测试关键词，标记 valid/invalid。 */
@@ -1276,8 +1366,15 @@ const Kazumi = {
                     if (v) this._bgmMatchCache.set(kv[0], { id: 0, cover: this._migrateCover(v) });
                 } else if (v && v.id && v.cover) {
                     // 只接纳完整条目：id 无封面的残缺条目（搜索点击回填产生）不加载，
-                    // 让 getBangumiMatch 按 id 拉详情自愈，不再被旧缓存永久卡死
-                    this._bgmMatchCache.set(kv[0], { id: Number(v.id) || 0, cover: this._migrateCover(v.cover || '') });
+                    // 让 getBangumiMatch 按 id 拉详情自愈，不再被旧缓存永久卡死。
+                    // 卡片展示字段（评分/排名/日期）随条目透传；远端可控数值读侧重归一
+                    //（写侧 cacheBangumiMatch/_bgmMetaOf 已归一，此处兜旧版本脏数据）。
+                    const meta = this._bgmMetaOf(v);
+                    this._bgmMatchCache.set(kv[0], {
+                        id: Number(v.id) || 0,
+                        cover: this._migrateCover(v.cover || ''),
+                        ...meta,
+                    });
                 }
             });
         } catch (e) { /* 损坏则忽略 */ }
@@ -1287,6 +1384,21 @@ const Kazumi = {
      *  降采样锯齿。用共享 bangumiCover(string) 走路径段替换降级到 common；非该格式原样返回。 */
     _migrateCover(url) {
         return (typeof bangumiCover === 'function') ? bangumiCover(String(url || ''), 'card') : String(url || '');
+    },
+
+    /** 从 Bangumi 条目提取卡片展示字段（评分/排名/播出日期）：搜索页 Kazumi 卡
+     *  对齐 Bangumi 搜索卡样式（bangumiCard）所消费的最小字段集。远端可控数值
+     *  一律 Number 归一（对齐 #11 防御口径），无值落 0/空串不渲染。
+     *  写侧 cacheBangumiMatch 存扁平字段（score/rank/air_date 在条目顶层而非
+     *  rating 下），读侧归一须兼容两种形态，否则重启后评分/排名被清零回写。 */
+    _bgmMetaOf(item) {
+        const rating = (item && item.rating && typeof item.rating === 'object') ? item.rating : {};
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+        return {
+            score: num(rating.score) || num(item && item.score),
+            rank: num(rating.rank) || num(item && item.rank),
+            air_date: String((item && (item.air_date || item.date)) || ''),
+        };
     },
 
     /** 持久化匹配缓存（无 id 且无封面的空结果不落盘：下次会话可重试；只留最近 500 条防无限增长）。
@@ -1361,7 +1473,7 @@ const Kazumi = {
                         const info = await this.bangumiInfo(cached.id);
                         if (info && info.id) {
                             const cv = bangumiCover(info.images, 'card');
-                            if (cv) match = { id: Number(info.id) || 0, cover: cv };
+                            if (cv) match = { id: Number(info.id) || 0, cover: cv, ...this._bgmMetaOf(info) };
                         }
                     } catch (e) { /* 详情失败回退按名重搜 */ }
                 }
@@ -1375,6 +1487,9 @@ const Kazumi = {
                             // 避免 1080p 用 large 大幅降采样出现锯齿（T75）。
                             id: Number(first.id) || 0,
                             cover: bangumiCover(first.images, 'card'),
+                            // 卡片展示字段（评分/排名/播出日期）：搜索页 Kazumi 卡对齐
+                            // Bangumi 搜索卡样式（⭐评分 · 日期备注 + #N 排名角标）所必需
+                            ...this._bgmMetaOf(first),
                         };
                     }
                 }
@@ -1391,12 +1506,19 @@ const Kazumi = {
 
     /** 记录一次 Bangumi 匹配（点击搜索结果回填缓存，补 id 或封面后下次免搜；幂等）。
      *  cover 允许为空（首条结果无 images）：条目只在内存中，getBangumiMatch 会按
-     *  id 拉详情自愈补图，且不会被 _saveBgmMatchCache 持久化成毒缓存。 */
-    cacheBangumiMatch(name, id, cover) {
+     *  id 拉详情自愈补图，且不会被 _saveBgmMatchCache 持久化成毒缓存。
+     *  meta 可选携带评分/排名/播出日期展示字段（搜索页点击路径由 r0 直接展开传入），
+     *  缺省时保留既有值不回退（补 id 后按 id 拉详情自愈路径会一并补齐）。 */
+    cacheBangumiMatch(name, id, cover, meta) {
         const key = String(name || '').trim();
         if (!key || !id) return;
         const cur = this.getCachedBangumiMatch(key) || {};
         const m = { id: Number(id) || cur.id || 0, cover: cover || cur.cover || '' };
+        const metaNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+        const mt = (meta && typeof meta === 'object') ? meta : {};
+        m.score = metaNum(mt.score) || metaNum(cur.score) || 0;
+        m.rank = metaNum(mt.rank) || metaNum(cur.rank) || 0;
+        m.air_date = String(mt.air_date || cur.air_date || '');
         this._setBgmMatch(key, m);
         this._saveBgmMatchCache();
     },
@@ -1447,7 +1569,18 @@ const Kazumi = {
             images: {},
             rating: { score: num(rating.score), total: num(rating.total), rank: num(rating.rank), count: {} },
             tags: [],
+            // 头部增强字段：总话数（eps/total_episodes 同义，兼容两种口径）与
+            // 收藏人数统计 {wish,collect,doing,on_hold,dropped}（Kazumi InfoPage 同款）
+            eps: num(info.eps !== null && info.eps !== undefined ? info.eps : info.total_episodes),
+            total_episodes: num(info.total_episodes !== null && info.total_episodes !== undefined ? info.total_episodes : info.eps),
+            collection: {},
         };
+        if (info.collection && typeof info.collection === 'object') {
+            for (const k of ['wish', 'collect', 'doing', 'on_hold', 'dropped']) {
+                const v = num(info.collection[k]);
+                if (v > 0) out.collection[k] = v;
+            }
+        }
         for (const k of ['large', 'common', 'medium', 'small', 'grid']) {
             if (images[k]) out.images[k] = str(images[k]);
         }
@@ -1518,16 +1651,52 @@ const Kazumi = {
         }
     },
 
-    /** Bangumi 番剧评论（吐槽）。归一化为数组：next.bgm /p1 返回 {data:[...],total} 或直接数组，
-     *  统一取 data；字段 {user:{nickname}, comment, updatedAt} → 保留原样交前端渲染。 */
+    /** Bangumi 番剧评论（吐槽）。返回 {list, total}：list 为评论数组（字段
+     *  {user:{nickname}, comment, updatedAt} 保留原样交前端渲染），total 为该条目
+     *  吐槽总数（来自 next.bgm 响应，与 limit/offset 无关；后端兼容旧裸数组/失败
+     *  形态，缺省回退已加载数）。旧调用方直接消费数组时用 .list。 */
     async bangumiComments(subjectId, limit, offset) {
         try {
             const rsp = await doAction('kazumiBangumiComments', { id: subjectId, limit: limit || 20, offset: offset || 0 }, '/kazumi/action');
             const c = (rsp && rsp.comments);
-            if (Array.isArray(c)) return c;
-            if (c && Array.isArray(c.data)) return c.data;
-            if (c && Array.isArray(c.list)) return c.list;
-            return [];
+            if (c && typeof c === 'object' && !Array.isArray(c)) {
+                const list = Array.isArray(c.list) ? c.list : Array.isArray(c.data) ? c.data : [];
+                const total = Number(c.total) || 0;
+                return { list, total: Math.max(total, list.length) };
+            }
+            // 旧后端/直连形态：数组或 {data:[...]} 包装，无独立 total
+            const list = Array.isArray(c) ? c
+                : (c && Array.isArray(c.data)) ? c.data
+                    : (c && Array.isArray(c.list)) ? c.list : [];
+            return { list, total: list.length };
+        } catch (e) {
+            return { list: [], total: 0 };
+        }
+    },
+
+    /** Bangumi 分集评论（选集讨论）。归一化为数组（同 bangumiComments 口径）；
+     *  字段 {user:{nickname}, content, createdAt, replies[]}。
+     *  localStorage 持久缓存（cache.js）10 分钟：与后端 kazumiBangumiEpisodeComments
+     *  的 TTL 同级，切集往返免重复整段请求。 */
+    async bangumiEpisodeComments(episodeId) {
+        const key = String(episodeId);
+        if (key && typeof localCacheGet === 'function') {
+            try {
+                const hit = localCacheGet('detail::epcmt::v1::' + key);
+                if (Array.isArray(hit)) return hit;
+            } catch (e) { /* ignore */ }
+        }
+        try {
+            const rsp = await doAction('kazumiBangumiEpisodeComments', { episodeId: key }, '/kazumi/action');
+            const c = (rsp && rsp.comments);
+            let list = [];
+            if (Array.isArray(c)) list = c;
+            else if (c && Array.isArray(c.data)) list = c.data;
+            else if (c && Array.isArray(c.list)) list = c.list;
+            if (list.length && key && typeof localCacheSet === 'function') {
+                try { localCacheSet('detail::epcmt::v1::' + key, list, 10 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
+            }
+            return list;
         } catch (e) {
             return [];
         }
@@ -2078,6 +2247,12 @@ const Kazumi = {
             if (!tag) return;
             if (this.openBangumiTagResult) this.openBangumiTagResult(tag);
         });
+        // 标签「展开全部/收起」：只替换标签区块（info.tags 在闭包里），委托不受影响
+        box.on('click.kbd', '.kazumi-tags-toggle', (e) => {
+            if (token !== this._dlgToken) return;
+            const expanded = String($(e.currentTarget).data('tags-expanded')) === '1';
+            $(e.currentTarget).closest('.bangumi-info-tags').replaceWith(this._renderInfoTags(info.tags, !expanded));
+        });
         // 默认载入分集
         await this._loadBangumiTab(info.id, 'episodes', token, $content);
         // 页签切换
@@ -2090,15 +2265,22 @@ const Kazumi = {
         });
     },
 
-    /** 渲染简介区标签（info.tags: [{name,count}]），点击跳搜索。 */
-    _renderInfoTags(tags) {
+    /** 渲染简介区标签（info.tags: [{name,count}]），点击跳搜索。
+     *  默认展示前 13 个，超出折叠到「展开全部（N）」；展开/收起只重渲染标签区，
+     *  完整对齐 bgm.tv 条目页标签全集（截断的恰是标记人数最少的冷门标签）。 */
+    _renderInfoTags(tags, expanded) {
         if (!Array.isArray(tags) || !tags.length) return '';
-        const chips = tags.slice(0, 13).map((t) => {
+        const shown = expanded ? tags : tags.slice(0, 13);
+        const chips = shown.map((t) => {
             const tn = (t && typeof t === 'object') ? (t.name || '') : t;
             return tn ? `<span class="kazumi-tag" data-tag="${escHtml(tn)}">${escHtml(tn)}</span>` : '';
         }).filter(Boolean).join('');
         if (!chips) return '';
-        return `<div class="bangumi-info-tags"><span class="tip-line pad0">标签</span><div class="kazumi-tags-wrap">${chips}</div></div>`;
+        let toggle = '';
+        if (tags.length > 13) {
+            toggle = `<button type="button" class="kazumi-tags-toggle" data-tags-expanded="${expanded ? '1' : '0'}">${expanded ? '收起' : `展开全部（${tags.length - 13}）`}</button>`;
+        }
+        return `<div class="bangumi-info-tags"><span class="tip-line pad0">标签</span><div class="kazumi-tags-wrap">${chips}${toggle}</div></div>`;
     },
 
     async _loadBangumiTab(subjectId, tab, token, $content) {
@@ -2181,7 +2363,7 @@ const Kazumi = {
                     }).join('')
                     : '<div class="tip-line">暂无制作人员信息</div>');
             } else if (tab === 'comments') {
-                const list = await this.bangumiComments(subjectId, 20, 0);
+                const { list } = await this.bangumiComments(subjectId, 20, 0);
                 if (token !== this._dlgToken) return;
                 box.html(list.length
                     ? list.map((c) => `<div class="kazumi-detail-comment">

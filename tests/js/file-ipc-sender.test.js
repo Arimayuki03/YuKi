@@ -260,7 +260,8 @@ test('panels.js 本地文件三处模板不再产出 javascript:void href（CSP 
         const end = src.indexOf('\n}', start);
         const body = src.slice(start, end);
         assert.ok(!/href\s*=/.test(body), `${fn} 模板不得再带 href 属性（无 href 不产生导航）`);
-        assert.match(body, /class="file-item"/, `${fn} 须保留 file-item 类（手型光标由其 CSS 提供）`);
+        // 多选模式下类名含条件插值（file-item + 可选 sel-mode），锚定基础类前缀
+        assert.match(body, /class="file-item/, `${fn} 须保留 file-item 类（手型光标由其 CSS 提供）`);
         assert.match(body, /onclick=/, `${fn} 点击链路应保留`);
     }
 });

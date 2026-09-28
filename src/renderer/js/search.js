@@ -89,9 +89,14 @@ function createSearchPage(cfg) {
                             const r0 = (bgmResults || []).find((r) => r && r.id && r.images
                                 && (r.images.large || r.images.common || r.images.medium));
                             if (r0) {
-                                // 回填缓存（补 id 后下次免搜）
+                                // 回填缓存（补 id 后下次免搜）；评分/排名/日期随条目带入，
+                                // 搜索页 Kazumi 卡对齐 Bangumi 卡备注/角标展示（bangumiCard 同款）
                                 if (typeof Kazumi.cacheBangumiMatch === 'function') {
-                                    Kazumi.cacheBangumiMatch(name, r0.id, bangumiCover(r0.images, 'card'));
+                                    Kazumi.cacheBangumiMatch(name, r0.id, bangumiCover(r0.images, 'card'), {
+                                        score: (r0.rating && r0.rating.score) || 0,
+                                        rank: (r0.rating && r0.rating.rank) || 0,
+                                        air_date: r0.air_date || r0.date || '',
+                                    });
                                 }
                                 if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(r0.id);
                                 else fallback();
@@ -411,13 +416,20 @@ function createSearchPage(cfg) {
                 // data-cover-missing，由 fillMissingCovers 后台按片名从 Bangumi 拉取补上（T73）。
                 // 封面多级兜底：官方 lain.bgm.tv 优先，加载失败自动换镜像 lain.{镜像根域名}（T76）。
                 if (String(grp.src).startsWith('kazumi:')) {
-                    let cover = '';
-                    if (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiCover) cover = Kazumi.getCachedBangumiCover(v.name) || '';
+                    const meta = (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiMatch)
+                        ? Kazumi.getCachedBangumiMatch(v.name) : null;
+                    const cover = (meta && meta.cover) || '';
                     const coverHtml = cover ? bangumiCoverImg(cover, true) : vodCoverImg('', true);
+                    // 备注/角标对齐 Bangumi 搜索卡（bangumiCard）：⭐评分 · 播出日期备注行 +
+                    // #N 排名角标；缓存未命中（占位图阶段）时无数据，由补拉管线带上后重绘。
+                    const score = (meta && meta.score) ? `⭐${escHtml(String(meta.score))}` : '';
+                    const air = (meta && meta.air_date) ? escHtml(String(meta.air_date)) : '';
+                    const rank = (meta && meta.rank)
+                        ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(meta.rank))}">#${escHtml(String(meta.rank))}</span>` : '';
                     return `<div class="vod-card kazumi-card" data-id="${escHtml(v.src)}" data-name="${escHtml(v.name)}" data-source="${escHtml(grp.src)}" tabindex="0">
-                        <div class="vod-cover"><div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div>${coverHtml}</div>
+                        <div class="vod-cover">${rank}<div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div>${coverHtml}</div>
                         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
-                        <div class="vod-remarks">Kazumi 规则源</div>
+                        <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · ') || 'Kazumi 规则源')}</div>
                     </div>`;
                 }
                 // T59：搜索当前页封面立即加载（eager），不再等懒加载触发；已补拉过的封面直接复用缓存，避免重绘后占位+重复请求

@@ -45,7 +45,11 @@
         "filter": [
           "**/*",
           "!**/.tmp/**",
-          "!**/.tmp"
+          "!**/.tmp",
+          "!dex-tools/**",
+          "!dex-tools",
+          "!dexdeps/**",
+          "!dexdeps"
         ]
       }
     ],

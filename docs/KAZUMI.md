@@ -450,9 +450,12 @@ Kazumi 引擎关键步骤（规则导入、搜索、剧集解析、播放解析�
 | 番剧关联 | ✅ getBangumiRelationsByID | ✅ 已实现（统一详情页关联页签） | 无 |
 | 番剧分集信息 | ✅ getBangumiEpisodeByID | ✅ 已实现（统一详情页分集页签/Bangumi-only 概览分集） | 无 |
 | 番剧评论 | ✅ getBangumiCommentsByID | ✅ 已实现（统一详情页吐槽页签） | 无 |
+| 分集评论 | ✅ getBangumiCommentsByEpisodeID（next.bgm /p1/episodes/{id}/comments，播放器内选集讨论） | ✅ 已实现（统一详情页「选集讨论」页签：集数 chips 选择器 + 最早/最新排序 + 楼中楼评论；`kazumiBangumiEpisodeComments` 端点透传，后端/渲染层各 10 分钟缓存） | 无 |
 | 角色/Staff | ✅ getBangumiStaffByID / getCharatersByBangumiID | ✅ 已实现（统一详情页角色/制作页签） | 无 |
 | 用户收藏同步 | ✅ updateBangumiById | ✅ 已实现（设置页 Bangumi 同步卡：token 管理/测试连接/我的收藏/删除；统一详情页收藏按钮同步；T74 收藏写入走 POST/PUT × `-`/真实用户名 × 官方/镜像矩阵） | 无 |
 | 评分/吐槽提交 | ✅ collection 写入含 rate/comment | ✅ 已实现（0.2.6：详情页评分/吐槽对话框 `bgm-rate.js`，经 `bangumiBangumiSyncApply` 端点透传） | 无 |
+| 评分/吐槽打标签 | ✅ rating_review_dialog：个人标签编辑（≤10 个、单个 ≤10 字；当前标签 chips + 条目热门标签建议 + 自定义输入），PATCH body 携带 tags | ✅ 已实现（`bgm-rate.js` 对话框标签编辑区同口径；`normalize_bgm_tags` 边界校验，`bangumiSyncApply` 透传 tags；脏检查一致不带 tags 键，空数组=清除全部） | 无 |
+| 条目页跳转 | ✅ 条目页可跳转 bgm.tv 网页 | ✅ 已实现（详情页「↗ Bangumi 页」按钮，经系统浏览器打开 bgm.tv/subject/{id}） | 无 |
 
 ---
 

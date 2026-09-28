@@ -4,6 +4,33 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- **直播频道入场动画扩展到全部全量渲染场景**：此前仅切分组/翻页播卡片错峰入场，现进页首渲、切换直播源、手动刷新、每页数量变更重排同口径播放；后台探测分批刷新与异常回滚仍不播（防列表反复重播闪烁）。毛玻璃/`no-anim`/`prefers-reduced-motion` 等既有动画豁免不受影响。
+
+### Added
+
+- **BT/磁链公共 tracker 列表自动刷新**（downloader.js）：内置默认列表整体替换为 trackerslist.com `best_aria2.txt`（2026-09-28 拉取，71 条，按 http/https/udp/wss 分组）；引擎每次启动就绪后异步检查并每 24h 复查一次——缓存新鲜（<72h）直接复用不出网，过期则拉取最新列表，经逐条 scheme 校验（≥10 条有效才收编，防 CDN 错误页/截断）后热替换，aria2 运行中经 `changeGlobalOption('bt-tracker')` 即时生效、未运行则下次 spawn 随 CLI 生效；失败静默回退当前列表并记录 6h 退避期（持久化到 userData/tracker-cache.json，跨会话生效），拉取 15s 超时 + 3 次重定向跟随 + 1MB 响应上限，任何网络异常都不影响下载主链路。
+- **评分/吐槽弹窗布局优化**：10 颗星级按钮等宽铺满单行（不再折行拥挤）、条目名与当前评分徽标同行两端对齐（徽标随「已评分」状态高亮，`:has()` 纯 CSS 联动）、星级行下新增操作提示行、标签编辑区卡片化（容器底色 + 与吐槽正文视觉分区，毛玻璃模式同口径半透明）、提交按钮统一 40px 常规规格（与其他弹窗主操作一致）；未评分时「清除评分」按钮自动隐藏。
+- **Bangumi 评分/吐槽对话框支持打标签**（对齐 Kazumi rating_review_dialog）：对话框新增个人标签编辑区——当前标签 chips（可删）、条目公共标签做热门建议（默认 6 个可展开、点击增删）、自定义输入（回车/按钮添加，最多 10 个、单个 ≤10 字）。标签随评分/吐槽经 `kazumiBangumiSyncApply` 单条透传提交（PATCH body 新增 `tags` 字段）；脏检查通过才携带 tags 键（不误清远端标签；空数组 = 清除全部）。后端 `_bangumi_set_one` / `bangumi_update_collection` / `bangumi_apply_sync_plan` 全链路支持，`normalize_bgm_tags` 边界校验（超限转单条失败不发请求）。
+- **详情页「选集讨论」板块**（对齐 Kazumi EpisodeCommentsView）：详情页签新增「选集讨论」——横排集数选择器（全部分集含 SP/OP/ED 徽标）+ 最早/最新排序 + 评论列表（楼中楼缩进、BBCode 渲染，与吐槽页签同视觉口径）。数据走新后端端点 `kazumiBangumiEpisodeComments`（GET `next.bgm.tv/p1/episodes/{id}/comments`，只读免 token；后端 10 分钟 TTL 缓存 + 渲染层 localStorage 同级缓存）；分集列表与「分集」页签共用 `_bgmEps` 缓存，切番剧/切集均有世代守卫防串档。
+- **Bangumi 详情页一键跳转 bgm.tv**：hero 操作行新增「↗ Bangumi 页」按钮，经系统浏览器打开 `https://bgm.tv/subject/{id}` 条目页（主进程 `setWindowOpenHandler` 统一 `shell.openExternal`；subjectId 数字白名单校验防注入）。
+- **收藏来源分类切换**：「我的→收藏」与独立收藏页的筛选行新增「全部 / CatVod / Bangumi」来源页签——本地收藏（CatVod 源/本地文件/下载/直链/Kazumi 规则源）与 Bangumi 账号收藏分开查看。判定口径与卡片渲染的 Bangumi 托管判定统一（`isBangumiItem`：远端条目 + 详情页同步镜像），与既有标签筛选/搜索叠加生效，切换后回到第一页；无匹配时空态文案切换为「没有匹配的记录」。
+- **修复同步后 Bangumi 收藏被跳过**：`mergeExtraRecords` 的去重口径从「本地条目带 bangumiId 即拦远端同 ID」收窄为仅本地「Bangumi 镜像」（site='bangumi'）拦截——此前普通源收藏（CatVod/本地文件）在收藏/同步时也会回写 bangumiId（时间表关联用），导致点「同步 Bangumi」后账号收藏全部被去重跳过、网格只剩本地源影片。现在同名不同源的收藏（本地源 + Bangumi 账号）各自成卡正常展示，靠来源分类区分。
+- **收藏面板布局精简**：删除「我的→收藏」卡片顶部与内容重复的「我的收藏」标题行（搜索框上移补位）；来源分类页签与状态标签页签拆为两行显示，不再拥挤。
+- **收藏卡封面徽章组重排 + 已看集数徽章**：状态徽章（想看/在看/看过…）从封面左上角绝对定位移入封面左下角徽章组（源徽章右侧）；徽章组顺序统一为 源 → 状态 → 已看集数。集数徽章双数据源——CatVod 收藏用本地观看进度（`progress.currentEp/totalEps`，播放器逐集记账），Bangumi 收藏渲染后按 subject_id 补查收藏状态（`getBangumiCollection` 回传的 `ep_status`，看到第 N 话）+ 番剧信息总话数（`bangumiInfo.eps`，30 分钟缓存）回填 `N/总` 徽章；仅在看/看过状态的 Bangumi 卡发请求（想看/搁置/抛弃无进度语义免请求），无 Token/未收藏/失败静默保持无徽章。
+- **搜索页 Kazumi 源卡片样式对齐 Bangumi 搜索卡**：Kazumi 页签结果卡复用 `bangumiCard` 的视觉口径——备注行从固定「Kazumi 规则源」改为「⭐评分 · 播出日期」（无匹配数据时保留原文案兜底）、封面右上角补 `#N` 排名角标（与左上角源名徽章并存）。数据随 Bangumi 封面匹配缓存（`_bgmMetaOf` 提取 score/rank/air_date，远端可控数值 Number 归一）一并写入：封面补拉管线（common.js `_coverFillOne`）在补上封面时同步刷新角标与备注（历史页 Kazumi 卡备注带真实内容时不覆盖）；搜索点击回填 `cacheBangumiMatch` 支持第四参 meta 透传；localStorage 持久化读侧对旧版本脏数据重归一。
+
+### Tests
+
+- tracker 自动刷新：`tests/js/downloader-internals.test.js` 扩至 72 例（新增 tracker 刷新套件 9 例——parseTrackerList 混合格式解析/去重/坏行剔除与 10 条收编阈值、无缓存拉取成功热更新 + RPC changeGlobalOption 断言、缓存 72h TTL 内不出网、失败 6h 退避期不重试且过期恢复、非 2xx/坏列表/网络错三场景回退内置列表不写缓存、scheduleTrackerRefresh 立即触发 + stop 清定时器、start 就绪自动挂调度、addUri 磁链使用刷新后列表；loadDownloader 提升至文件顶层并支持 https/electron 桩注入）。
+- 新增 `tests/js/bgm-episode-comments.test.js`（14 例：选集讨论页签注册/派发/渲染/排序/世代守卫/跨番剧复位、bgm.tv 跳转按钮与守卫、kazumi.js 封装与缓存、后端 do 分支/端点/tags 链路契约、Python 纯逻辑跨语言断言）；`tests/js/bgm-rate.test.js` 扩至 17 例（normalizeTags/normalizeTagInput/标签 payload 语义/脏检查/收藏 GET tags 归一化/UI 集成形态）；`tests/js/player-internals.test.js` fetchCurrent 用例随返回值扩展同步。Python 侧 `test_kazumi_bgm_rating.py` 扩至 57 例（normalize_bgm_tags 边界、update_collection/apply_sync_plan 的 tags 通道、空数组清除语义、分集评论多形态兼容与错误降级）。
+- 收藏来源分类：`tests/js/my-about-ui-state.test.js` 扩至 108 例（catvod/bangumi 分类过滤与同步镜像归属、同步后同名不同源各自成卡、_src 清空恢复全部、与标签/搜索叠加、页签点击写态与未知值钳制、无匹配空态文案、无 Kazumi 环境补齐静默跳过）；`tests/js/records.test.js` 扩至 26 例（合并去重收窄为仅 Bangumi 镜像拦截远端、历史视图不参与来源筛选、收藏视图默认全部、状态徽章入徽章组次序断言、CatVod 本地 progress 集数徽章 3/12 与 5/? 形态、历史卡同名去重计数口径不变）。
+- 直播入场动画扩展：`tests/js/live.test.js` 扩至 30 例——renderList 挂/摘 `.anim-cards` 语义、进页首渲/切源/手动刷新/缓存命中路径播动画、探测分批刷新与异常回滚不播、enter 每页数量变更重排播动画（jQuery 桩 `toggleClass` 补记录、新增 `probeUrls` 桩与 `$.lastAnim` 断言口）。
+- 全量回归：JS 单元 1755/1755、check-js 50 文件 0 错、ESLint 0 error（既有 warning 不变）。
+
 ## [0.2.6] - 2026-09-24
 
 本轮包含 2026-09-22 发布 v0.2.5 之后的四个批次：全项目代码审查修复、功能增强批次与大规模测试补齐，并修复 CI 慢机上的 flaky 测试。
@@ -19,6 +46,22 @@
 
 ### Fixed
 
+- **2026-09-28 未暂存区全量代码审查修复**（OCR delegate 文件选择 + 13 个审查子代理交叉审查，47 文件 +4328/-623 全覆盖）：验证确认并修复 4 项 critical/high、12 项 medium 与一批 low 问题，明细见 `docs/CODE_REVIEW_2026-09-28.md`。要点：
+  - **jar_bridge 按需下载布局错误（打包模式主路径必然失败）**：上游 dex-tools-v2.4.zip 顶层即 `dex-tools-v2.4/`（实测无外层 `dex-tools/` 包装），原实现按错误布局解压定位恒失败；现按真实布局落位 `cache/dex-tools/dex-tools-v2.4/` 与 vendor 一致。同时修复「主 jar 已在即跳过 dexdeps 补全」的快路径（依赖缺失曾永不重试）、补全循环可达性、依赖写盘 tmp+replace 原子化 + 已存在文件哈希复核、下载失败负缓存（10 分钟冷却，防弱网下每次转换请求重跑完整下载链拖死调用方）。
+  - **detail.js CatVod meta 行 XSS 回归**：hero 重构时 `metaLine` 各段（type_name/vod_year/vod_area/vod_remarks，第三方 CMS 源回传）漏转义直接进 `.html()`，恢复整体 `escHtml`。
+  - **file-manager delMany 先删后确认**：文件在目录确认框弹出前已被删除，用户在主进程框点「取消」意图全不删、文件却已删且 toast 显示「已取消删除」；现改为防线（根目录剔除/在写互斥/原生确认框）全部通过后才统一删除，根目录拒绝提前到确认框之前（与 delFolder 口径一致）。
+  - **本地多选单条目外部播放器 VLC 不播**：`yuki:file-push-many` 单有效条目直传正斜杠盘符路径绕过 `toExternalLocalUrl`（VLC 静默拒载只拉窗口），现单条目先过 `toExternalLocalUrl` 再直启（与 file-push/dl-play 同口径）。
+  - **download-binaries downloadDextools 首次安装必然 ENOENT**：`rmSync(dest)` 后 `renameSync` 前缺 `ensureDir(dest)`（父目录被删），实测复现并修复。
+  - **server.py 分集评论缓存形同虚设**：`kazumiBangumiEpisodeComments` 的上游请求写在 `_cached_bangumi` builder 之外，缓存命中也先回源一次；网络调用移入 builder 与其余 7 个端点同构。
+  - **downloader fetchText 畸形 Location 卡死刷新锁**：3xx 重定向的 `new URL(...)` 在事件回调内同步 throw 会让 Promise 永不 settle、`_trackerRefreshing` 永久为 true；改 try/catch reject + `rsp.resume()` 排空响应归还连接池。
+  - **收藏状态标签不可点（CSS 回归）**：`.rec-cover-badges` 的 `pointer-events:none` 可继承到 `.rec-tag`，状态循环切换交互死亡；补 `.rec-cover-badges .rec-tag { pointer-events:auto; }`。
+  - **收藏卡徽章渲染口径**：「我的 N★」与「#N 排名」右上角重叠补互斥（排名优先）；bgmScore 公共评分首渲路径补齐（无播放行时拼到日期行行首，v3 缓存新增字段不再落空）。
+  - **kazumi.js 匹配缓存读写不对称**：读侧 `_bgmMetaOf` 不认写侧扁平 `score/rank` 字段，重启后评分/排名清零被回写永久丢失；读侧兼容两种形态。收藏状态 null 负缓存 6h 改 60s（上游 401/网络失败不再冻结「未收藏」展示）、乐观合并补 token 校验（换号不串数据）、`Detail._bgmColCache` 死写移除。
+  - **bgm-rate.js 交互细节**：调星级不再清空正在输入的标签草稿（`_renderTags(preserveInput)`）；草稿非法（重复/超限）降级为提示不阻断评分提交；仅改标签提交成功文案改「标签已更新」不再误报「吐槽已提交」。
+  - **panels.js 多选模式**：`selectFile`/`enterDir` 补 `_selMode` 守卫（多选时点条目主体转勾选，与帮助文案一致）；「全选/反选」范围收窄为当前页切片（与可见勾选框一致，防整库误删感知偏差）；中文集号锚点字符类补「零」。
+  - **测试侧修复与新增**：live.test.js「缓存命中不探测」恒真断言改真实 probeUrls 计数桩；detail-start-button 死断言补有效内容断言；file-manager-ipc 5 处临时目录补 try/finally 清理 + 新增「取消/互斥时不删文件」回归断言；player-internals T80 源码正则死代码用例重写为真实 submit 行为测试；bgm-episode-comments 硬编码 venv python 改 existsSync 回退 + skip 显形（CI js job 不再 ENOENT）并补跳转守卫源码锚点；my-about-ui-state 用例名与断言对齐；新增 `python-backend/tests/test_dextools_on_demand.py` 10 例（此前 150 行按需下载逻辑零覆盖——vendor/缓存解析顺序、真实布局落位、dexdeps 补全/哈希/原子写、失败负缓存冷却与恢复）并接入 run_all。
+  - **.opencodereview/ 加入 .gitignore**：目录内 config.json 含 LLM 网关 api_key 明文，防止随 `git add .` 入库泄露。
+  - **文档同步**：ad-skip.js 登记入口注释对齐 mpv 右键菜单迁移、download-binaries.js 注释对齐实际触发路径、index.html CSP 注释哈希计数 41→42、ui.css 死规则 `.detail-stat-eps` 清理、detail.js `_epCommentsEpisode` 死字段移除、director 正则重复分支清理、my.js globals 注释残留清理、mpv-player 嵌套三元与 kazumi/bgm-rate 宽松等号规范化。
 - **capability_router：省略 type 的 csp_/JAR 仓整仓判死**：TVBox 手写仓常见「不写 type 但 api 为 csp_ 前缀/指向 JAR」的条目此前被归入未知类型直接跳过，现按 JAR 路由修复菜妮丝等仓不可用的问题；`config.py` 同步支持 spider 列表/分号多值写法解析。
 - **jar_bridge 非字典 JSON 帧致读线程死亡**：`_on_line` 对非 dict 帧补 `isinstance` 校验，防止一个坏帧杀死读线程、后续 pending 调用全部被误拒。
 - **hls-downloader completed 监听器异常兜底**：监听器异常不再冒泡崩溃、不再误判失败触发重下。

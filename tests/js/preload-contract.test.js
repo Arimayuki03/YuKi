@@ -187,9 +187,10 @@ test('API 全集快照：暴露的方法名清单与契约清单完全一致（�
     const EXPECTED = [
         'getBackendInfo', 'configState', 'onBackendReady', 'onBackendState',
         'playUrl', 'playerControl', 'playerState', 'onPlayerEnded', 'onPlayerExit',
-        'onA4kChanged', 'onEpisodeSkip', 'onExternalPlayerExit', 'buildPlaylist',
+        'onA4kChanged', 'onEpisodeSkip', 'onOpEdRecord', 'onExternalPlayerExit', 'buildPlaylist',
         'fileRoot', 'filePickRoot', 'fileList', 'fileOpenDir', 'fileThumb',
-        'fileNewFolder', 'fileDelFile', 'fileDelFolder', 'filePush',
+        'fileNewFolder', 'fileDelFile', 'fileDelFolder', 'fileDelMany',
+        'filePush', 'filePushMany',
         'download.control', 'download.pickDir', 'download.openDir', 'download.onList',
         'download.onEvent', 'download.onGoto', 'download.play',
         'pushUrl', 'pushInfo', 'onPushReceived',
@@ -353,6 +354,19 @@ test('文件类：fileList / fileOpenDir / fileNewFolder / fileDelFile / fileDel
     assert.deepEqual(invokes(state, 'yuki:file-del-folder')[0].args, ['剧名/季2']);
     assert.deepEqual(invokes(state, 'yuki:file-thumb')[0].args, ['剧名/a.mp4']);
     assert.deepEqual(invokes(state, 'yuki:file-push')[0].args, ['剧名/a.mp4']);
+});
+
+test('文件类批量：fileDelMany / filePushMany 数组透传；非数组实参兜底为空数组', async () => {
+    const state = loadPreload();
+    const rels = ['剧名/第01集.mp4', '剧名/第02集.mp4'];
+    await state.api.fileDelMany(rels);
+    await state.api.filePushMany(rels);
+    await state.api.fileDelMany(undefined);
+    await state.api.filePushMany('剧名/a.mp4');
+    assert.deepEqual(invokes(state, 'yuki:file-del-many')[0].args, [rels]);
+    assert.deepEqual(invokes(state, 'yuki:file-push-many')[0].args, [rels]);
+    assert.deepEqual(invokes(state, 'yuki:file-del-many')[1].args, [[]], '非数组兜底空数组');
+    assert.deepEqual(invokes(state, 'yuki:file-push-many')[1].args, [[]], '字符串非数组同样兜底');
 });
 
 test('文件类：rel 传 undefined/null 时兜底为空字符串（根目录语义）', async () => {
@@ -756,6 +770,7 @@ test('订阅回调收到主进程 payload：event 第一参被剥掉', () => {
     state.api.onPlayerEnded((info) => got.push(info));
     state.api.onExternalPlayerExit((info) => got.push(info));
     state.api.onEpisodeSkip((info) => got.push(info));
+    state.api.onOpEdRecord((info) => got.push(info));
     state.api.onA4kChanged((info) => got.push(info));
     state.api.onMouseNav((info) => got.push(info));
     state.api.onPlayerSpawnError((info) => got.push(info));
@@ -770,6 +785,7 @@ test('订阅回调收到主进程 payload：event 第一参被剥掉', () => {
         ['yuki:player-ended', { sessionId: 3 }],
         ['yuki:ext-player-exit', { sessionId: 3, wallSec: 55 }],
         ['yuki:episode-skip', { dir: 1 }],
+        ['yuki:oped-record', { kind: 'op' }],
         ['yuki:a4k-changed', { enabled: true, mode: 'A' }],
         ['yuki:mouse-nav', { dir: 'back' }],
         ['yuki:player-spawn-error', { code: 'ENOENT' }],

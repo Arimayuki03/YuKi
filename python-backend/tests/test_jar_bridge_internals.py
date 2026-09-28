@@ -1596,7 +1596,9 @@ def test_ensure_alive_builds_expected_command_lines():
         plain_jar = _touch(os.path.join(tmp, 'plain.jar'))
         dex_jar = _touch(os.path.join(tmp, 'a-jvm.jar'))
         common = [
-            mock.patch.object(jar_bridge, 'DEXDEPS_DIR', os.path.join(tmp, 'deps')),
+            # _dexdeps_dir()（0.2.7 起按需解析：vendor → 缓存目录下载产物）
+            mock.patch.object(jar_bridge, '_dexdeps_dir',
+                              return_value=os.path.join(tmp, 'deps')),
             mock.patch.object(java_probe, 'find_java', return_value='java'),
             mock.patch.object(jar_bridge.time, 'sleep', return_value=None),
             mock.patch.object(jar_bridge, 'get_jar_runtime_dir',

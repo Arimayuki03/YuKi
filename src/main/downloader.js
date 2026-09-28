@@ -15,6 +15,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const https = require('https');
 const { spawn, execSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { getProxyUrl } = require('./system-proxy');
@@ -30,24 +31,157 @@ const WIN = process.platform === 'win32';
 
 // 磁链/BT 公共 tracker 列表：磁链只有 info-hash，须先从 DHT/tracker/PEX 找到 peer 拿 metadata
 // 才能开始下载。仅靠 DHT 在很多网络环境（UDP 被限）下连不通，导致进度长期卡 0%。
-// 补一批稳定的公共 tracker（含 udp/http/wss）作为 DHT 之外的 peer 发现途径，显著提高磁链成功率。
+// 默认列表取自 trackerslist.com 的 best_aria2.txt（2026-09-28 拉取，共 71 条），
+// 需刷新时从 https://cf.trackerslist.com/best_aria2.txt 重新拉取整段替换即可。
 const BT_TRACKERS = [
-    'udp://tracker.opentrackr.org:1337/announce',
-    'udp://open.tracker.cl:1337/announce',
-    'udp://open.demonii.com:1337/announce',
-    'udp://tracker.torrent.eu.org:451/announce',
+    // http
+    'http://1337.abcvg.info:80/announce',
+    'http://bt1.archive.org:6969/announce',
+    'http://bt2.archive.org:6969/announce',
+    'http://ipv4announce.sktorrent.eu:6969/announce',
+    'http://nyaa.tracker.wf:7777/announce',
+    'http://torrentsmd.com:8080/announce',
+    'http://tracker.dhitechnical.com:6969/announce',
+    'http://tracker.dler.com:6969/announce',
+    'http://tracker.dler.org:6969/announce',
+    'http://tracker.mywaifu.best:6969/announce',
+    'http://tracker.renfei.net:8080/announce',
+    'http://tracker.waaa.moe:6969/announce',
+    'http://tracker2.dler.org:80/announce',
+    'http://www.wareztorrent.com:80/announce',
+    // https
+    'https://004430.xyz:443/announce',
+    'https://1.tracker.eu.org:443/announce',
+    'https://1337.abcvg.info:443/announce',
+    'https://t.213891.xyz:443/announce',
+    'https://tr.abiir.top:443/announce',
+    'https://tr.burnabyhighstar.com:443/announce',
+    'https://tracker.7471.top:443/announce',
+    'https://tracker.foreverpirates.co:443/announce',
+    'https://tracker.kuroy.me:443/announce',
+    'https://tracker.nekomi.cn:443/announce',
+    'https://tracker.pmman.tech:443/announce',
+    'https://tracker.qingwapt.org:443/announce',
+    'https://tracker1.520.jp:443/announce',
+    // udp
+    'udp://anime-tracker.aruku.kro.kr:8081/announce',
+    'udp://bittorrent-tracker.e-n-c-r-y-p-t.net:1337/announce',
+    'udp://evan.im:6969/announce',
     'udp://exodus.desync.com:6969/announce',
-    'udp://tracker.openbittorrent.com:6969/announce',
     'udp://explodie.org:6969/announce',
-    'udp://tracker.dler.org:6969/announce',
-    'udp://opentracker.i2p.rocks:6969/announce',
-    'http://tracker.openbittorrent.com:80/announce',
-    'https://tracker.tamersunion.org:443/announce',
-    'udp://tracker.tiny-vps.com:6969/announce',
-    'udp://tracker.moeking.me:6969/announce',
-    'udp://tracker1.bt.moack.co.kr:80/announce',
+    'udp://ipv6.govt.hu:6969/announce',
+    'udp://mail.segso.net:6969/announce',
+    'udp://martin-gebhardt.eu:25/announce',
+    'udp://open.demonii.com:1337/announce',
+    'udp://open.ftorrent.com:443/announce',
+    'udp://open.stealth.si:80/announce',
+    'udp://open.tracker.ink:6969/announce',
+    'udp://opentor.org:2710/announce',
+    'udp://opentracker.lain.moscow:6969/announce',
+    'udp://p4p.arenabg.com:1337/announce',
+    'udp://retracker.hotplug.ru:2710/announce',
+    'udp://retracker01-msk-virt.corbina.net:80/announce',
+    'udp://t.overflow.biz:6969/announce',
+    'udp://torrent.tracker.durukanbal.com:6969/announce',
+    'udp://tr4ck3r.duckdns.org:6969/announce',
+    'udp://tracker-udp.gbitt.info:80/announce',
+    'udp://tracker.aruku.ovh:8081/announce',
     'udp://tracker.bittor.pw:1337/announce',
+    'udp://tracker.cn.nyaa.net:6969/announce',
+    'udp://tracker.corpscorp.online:80/announce',
+    'udp://tracker.dler.com:6969/announce',
+    'udp://tracker.ducks.party:1984/announce',
+    'udp://tracker.farted.net:6969/announce',
+    'udp://tracker.gmi.gd:6969/announce',
+    'udp://tracker.ilibr.org:6969/announce',
+    'udp://tracker.k.vu:6969/announce',
+    'udp://tracker.nyaa.net:6969/announce',
+    'udp://tracker.nyaa.vc:6969/announce',
+    'udp://tracker.opentrackr.com:6969/announce',
+    'udp://tracker.opentrackr.org:1337/announce',
+    'udp://tracker.peerfect.org:6969/announce',
+    'udp://tracker.qu.ax:6969/announce',
+    'udp://tracker.skynetcloud.site:6969/announce',
+    'udp://tracker.skyts.net:6969/announce',
+    'udp://tracker.teambelgium.net:6969/announce',
+    'udp://tracker.torrent.eu.org:451/announce',
+    'udp://tracker.torrents.observer:80/announce',
+    'udp://v6.vito-tracker.space:6969/announce',
+    // wss（aria2 不支持 WebSocket tracker，保留以与源列表一致，announce 失败会被静默忽略）
+    'wss://tracker.openwebtorrent.com:443/announce',
 ];
+
+// -------------------------------------------------------------- tracker 自动刷新
+// 内置列表会随时间失效（公共 tracker 存活率波动大），定期从 trackerslist.com
+// 拉取最新 best 列表热更新；失败静默回退当前列表（内置 → 上次缓存），永不影响下载。
+
+const TRACKER_SOURCE = 'https://cf.trackerslist.com/best_aria2.txt';
+// 成功后 72h 内不再拉取；失败后 6h 退避重试（网络差/被墙时避免每次启动都空打一发）
+const TRACKER_REFRESH_OK_MS = 72 * 60 * 60 * 1000;
+const TRACKER_REFRESH_FAIL_MS = 6 * 60 * 60 * 1000;
+// 拉取超时与重定向跟随上限（cf.trackerslist.com 可能经 CDN 30x 跳转）
+const TRACKER_FETCH_TIMEOUT_MS = 15000;
+const TRACKER_FETCH_MAX_REDIRECTS = 3;
+// 缓存文件名（userData 下）：记录列表内容 + 上次成功/失败时间，跨会话持久
+const TRACKER_CACHE_FILE = 'tracker-cache.json';
+
+/** 校验拉取文本并解析为 tracker 数组；不合法返回 null（调用方回退当前列表）。
+ *  Aria2 格式为逗号分隔（兼容换行分隔），逐条 scheme/host 校验剔除坏行；
+ *  有效条数 <10 视为异常响应（防 CDN 错误页/截断），>300 截断（aria2 无压力上限，
+ *  但保留合理规模）。 */
+function parseTrackerList(text) {
+    if (typeof text !== 'string') return null;
+    const items = text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const seen = new Set();
+    const out = [];
+    for (const item of items) {
+        // 仅放行 aria2 认识的 announce 协议；udp6 需 --enable-dht6 之外参数，先不收
+        if (!/^(https?|udp|wss):\/\/[^\s/:]+(:\d+)?\/announce$/i.test(item)) continue;
+        if (seen.has(item)) continue;
+        seen.add(item);
+        if (out.length >= 300) break;
+        out.push(item);
+    }
+    if (out.length < 10) return null;
+    return out;
+}
+
+/** HTTPS GET 拉取文本，跟随最多 maxRedirects 次 3xx；超时/网络错/非 2xx 抛异常。 */
+function fetchText(url, redirects = TRACKER_FETCH_MAX_REDIRECTS) {
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, { timeout: TRACKER_FETCH_TIMEOUT_MS }, (rsp) => {
+            const status = rsp.statusCode || 0;
+            // 3xx：取 Location 重发（跨 host 允许，纯只读公开文本，无凭据泄漏面）。
+            // 本回调是事件回调而非 Promise executor：同步 throw 不会变成 rejection，
+            // 会让 fetchText 永不 settle 并卡死 refreshTrackers 防并发锁——
+            // URL 解析必须 try/catch 兜底（CDN 错误页可能回畸形 Location）。
+            if (status >= 300 && status < 400 && rsp.headers.location) {
+                if (redirects <= 0) return reject(new Error('too many redirects'));
+                let next;
+                try {
+                    next = new URL(rsp.headers.location, url).toString();
+                } catch (e) {
+                    return reject(new Error(`bad redirect location: ${rsp.headers.location}`));
+                }
+                rsp.resume(); // 排空当前响应，socket 及时归还连接池
+                resolve(fetchText(next, redirects - 1));
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                return reject(new Error(`HTTP ${status}`));
+            }
+            let text = '';
+            // 上限 1MB：正常列表 <10KB，超限视为异常响应不再累积
+            rsp.on('data', (c) => {
+                text += c;
+                if (text.length > 1024 * 1024) req.destroy(new Error('response too large'));
+            });
+            rsp.on('end', () => resolve(text));
+        });
+        req.on('timeout', () => req.destroy(new Error('fetch timeout')));
+        req.on('error', reject);
+    });
+}
 
 function findAria2() {
     const exe = WIN ? 'aria2c.exe' : 'aria2c';
@@ -83,6 +217,12 @@ class Downloader extends EventEmitter {
         this._exitCode = null;
         this._spawnError = '';
         this._stderrBuf = '';
+        // tracker 自动刷新状态：当前生效列表（默认内置）、缓存路径（start 时定位）、
+        // 定时器与防并发锁。失败静默，仅打 console.warn 便于诊断。
+        this._trackers = BT_TRACKERS.slice();
+        this._trackerCacheFile = '';
+        this._trackerTimer = null;
+        this._trackerRefreshing = false;
         // EventEmitter 约定：'error' 无监听器会抛异常，兜底 noop
         this.on('error', () => { });
     }
@@ -128,7 +268,7 @@ class Downloader extends EventEmitter {
             '--follow-torrent=true', '--follow-metalink=true',
             // 磁链提速：DHT 之外补公共 tracker + 开启 PEX（peer 交换），
             // 多路发现 peer 才能拉到 metadata 并开始实际下载，避免仅靠 DHT 卡 0%。
-            `--bt-tracker=${BT_TRACKERS.join(',')}`,
+            `--bt-tracker=${this._trackers.join(',')}`,
             '--enable-peer-exchange=true',
             '--bt-max-peers=0',                 // 0 = 不限 peer 数，尽量多连
             '--bt-request-peer-speed-limit=0',  // 不因单 peer 慢而限速整体
@@ -180,7 +320,11 @@ class Downloader extends EventEmitter {
 
         // 立即探测 + 200 次 × 200ms = ~40s：慢机/首次启动（AV 扫描、DHT 初始化）
         // RPC 起得晚，需宽松窗口。proc 若中途死掉，_waitReady 会提前跳出而非空等满时长。
-        this._ready = this._waitReady(200).catch((e) => {
+        this._ready = this._waitReady(200).then((ok) => {
+            // 引擎就绪后异步刷新公共 tracker 列表（缓存新鲜则不出网，失败静默回退）
+            this.scheduleTrackerRefresh();
+            return ok;
+        }).catch((e) => {
             this._ready = null;
             this.stop();
             throw e;
@@ -222,6 +366,11 @@ class Downloader extends EventEmitter {
             this.proc = null;
         }
         this._ready = null;
+        // tracker 刷新定时器随引擎生命周期停止（下次 start 重新调度）
+        if (this._trackerTimer) {
+            clearInterval(this._trackerTimer);
+            this._trackerTimer = null;
+        }
         // P3-20：通知集合与引擎生命周期对齐——aria2 gid 仅单会话唯一，引擎重启后
         // 同名 gid 不会复现，但集合只增不减会随长期运行缓慢增长；引擎停止即整体清空。
         this._notified.clear();
@@ -294,12 +443,125 @@ class Downloader extends EventEmitter {
         }
         return this.split;
     }
+    // ------------------------------------------------------------ tracker 自动刷新
+
+    /** 读取缓存文件（不存在/损坏返回 null）。结构：{ url, trackers, updatedAt, failedAt } */
+    _readTrackerCache() {
+        if (!this._trackerCacheFile) return null;
+        try {
+            const raw = JSON.parse(fs.readFileSync(this._trackerCacheFile, 'utf8'));
+            if (!raw || !Array.isArray(raw.trackers)) return null;
+            return raw;
+        } catch (e) { return null; }
+    }
+
+    /** 写缓存（失败静默：缓存只是加速手段，写不进去不影响功能） */
+    _writeTrackerCache(data) {
+        if (!this._trackerCacheFile) return;
+        try {
+            fs.writeFileSync(this._trackerCacheFile, JSON.stringify(data), 'utf8');
+        } catch (e) { /* 只读盘/磁盘满等，忽略 */ }
+    }
+
+    /**
+     * 拉取远端列表并热更新。永不抛出——失败返回 null 并记录退避时间，
+     * 成功返回新 tracker 数组。决策顺序：
+     *   1. 命中缓存且 updatedAt 距今 < 72h → 直接用缓存列表（不出网）
+     *   2. 缓存 updatedAt 过期但 failedAt 距今 < 6h → 不重试（退避期）
+     *   3. 拉取 → 校验 → 成功则热更新（aria2 运行中经 changeGlobalOption）并写缓存
+     *   4. 拉取/校验失败 → 上报失败时间（写缓存 failedAt），保持现有列表
+     * @param {number} now 当前时刻（测试注入用，缺省 Date.now()）
+     * @returns {Promise<string[]|null>} 新列表（无更新或失败为 null）
+     */
+    async refreshTrackers(now = Date.now()) {
+        if (this._trackerRefreshing) return null;
+        this._trackerRefreshing = true;
+        try {
+            const cached = this._readTrackerCache();
+            if (cached && this._trackerCacheFile) {
+                const fresh = now - (cached.updatedAt || 0) < TRACKER_REFRESH_OK_MS;
+                const cooling = now - (cached.failedAt || 0) < TRACKER_REFRESH_FAIL_MS;
+                if (fresh) {
+                    // 缓存新鲜：过校验后换成缓存列表（可能与当前一致），不出网
+                    const list = parseTrackerList(cached.trackers.join(','));
+                    if (list) {
+                        this._applyTrackers(list);
+                        return list;
+                    }
+                    // 缓存内容已不合法：当无缓存处理，继续走拉取
+                } else if (cooling) {
+                    return null; // 上次失败后退避期内：不重试
+                }
+            }
+            let list = null;
+            try {
+                const text = await fetchText(TRACKER_SOURCE);
+                list = parseTrackerList(text);
+            } catch (e) { /* 网络错：走下方失败记录 */ }
+            if (list) {
+                const data = { url: TRACKER_SOURCE, trackers: list, updatedAt: now, failedAt: 0 };
+                this._writeTrackerCache(data);
+                await this._applyTrackers(list);
+                return list;
+            }
+            // 失败：记录退避时间。缓存可能不存在（首次启动即失败）→ 只记内存态，
+            // 下次 start 再试（无缓存文件可写失败时间，代价是冷启动多一次尝试，可接受）
+            if (cached && this._trackerCacheFile) {
+                this._writeTrackerCache({ ...cached, failedAt: now });
+            }
+            return null;
+        } finally {
+            this._trackerRefreshing = false;
+        }
+    }
+
+    /** 应用列表到实例并热更新运行中的 aria2（全局选项对新增任务生效）。 */
+    async _applyTrackers(list) {
+        if (!Array.isArray(list) || !list.length) return;
+        const joined = list.join(',');
+        if (this._trackers.join(',') === joined) return; // 无变化不触发 RPC
+        this._trackers = list.slice();
+        if (this.proc) {
+            // 热更新失败（RPC 断开等）不影响内存中的新列表：下次 spawn 随 CLI 生效
+            await this.changeGlobalOption({ 'bt-tracker': joined }).catch(() => { });
+        }
+    }
+
+    /**
+     * 引擎启动后调用：定位缓存文件 → 立即按需刷新 → 调度 24h 周期复查。
+     * 全程异步不 await：绝不能拖慢 start() 的就绪路径。缓存文件放 userData
+     * （start 时才 require electron，测试环境 app.getPath 为桩）。
+     */
+    scheduleTrackerRefresh() {
+        if (this._trackerTimer) clearInterval(this._trackerTimer);
+        if (!this._trackerCacheFile) {
+            try {
+                const { app } = require('electron');
+                const ud = app.getPath('userData');
+                if (!fs.existsSync(ud)) fs.mkdirSync(ud, { recursive: true });
+                this._trackerCacheFile = path.join(ud, TRACKER_CACHE_FILE);
+            } catch (e) { /* userData 不可用：仅损失缓存与退避持久化，刷新照常 */ }
+        }
+        // 失败仅告警：定时器回调吞掉所有异常，防止 unhandledRejection
+        this.refreshTrackers().catch((e) => {
+            try { console.warn('[aria2] tracker 刷新失败:', e && e.message); } catch (e2) { /* ignore */ }
+        });
+        // 24h 复查一次（refreshTrackers 内部有 72h/6h 闸门，这里只提供节拍）
+        this._trackerTimer = setInterval(() => {
+            this.refreshTrackers().catch((e) => {
+                try { console.warn('[aria2] tracker 刷新失败:', e && e.message); } catch (e2) { /* ignore */ }
+            });
+        }, 24 * 60 * 60 * 1000);
+        // 定时器不阻止进程退出（Electron 主进程常驻，unref 只是防御）
+        if (this._trackerTimer.unref) this._trackerTimer.unref();
+    }
+
     addUri(urls, opts = {}) {
         const list = [].concat(urls);
         // 磁链任务级补 tracker：全局 --bt-tracker 对经 RPC 新增的磁链不总是生效，
         // 显式在任务 options 里带上 bt-tracker，确保每个磁链都有 DHT 之外的 peer 来源。
         const isMagnet = list.some((u) => /^magnet:/i.test(String(u)));
-        const finalOpts = isMagnet ? { 'bt-tracker': BT_TRACKERS.join(','), ...opts } : opts;
+        const finalOpts = isMagnet ? { 'bt-tracker': this._trackers.join(','), ...opts } : opts;
         return this._rpc('addUri', [list, this._proxyOpts(finalOpts)]);
     }
     addTorrent(b64, opts = {}) { return this._rpc('addTorrent', [b64, [], this._proxyOpts(opts)]); }
@@ -423,3 +685,5 @@ class Downloader extends EventEmitter {
 }
 
 module.exports = Downloader;
+// 测试与潜在调用方可复用校验解析：挂静态而非导出第二份模块
+Downloader.parseTrackerList = parseTrackerList;

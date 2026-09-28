@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-09-24
+> 更新时间：2026-09-28
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；2026-09-26 Kazumi 对齐批次（评分对话框打标签 / 详情页选集讨论板块 / bgm.tv 跳转按钮，未定版）完成；2026-09-28 未暂存区全量代码审查修复批次完成（OCR delegate + 13 审查子代理，47 文件全覆盖：4 critical/high + 12 medium + 一批 low 修复，新增 test_dextools_on_demand 10 例，明细见 docs/CODE_REVIEW_2026-09-28.md）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -43,7 +43,9 @@
 - CatVod Python、JavaScript、CMS 和多仓配置加载。
 - 首页、分类、当前源搜索、SSE 聚合搜索、详情、收藏和历史。
 - Kazumi XPath/API 规则导入、编辑、测试、商店、有效性检测和批量更新。
-- Bangumi 评分/吐槽提交对话框（0.2.6，详情页直达）。
+- Bangumi 评分/吐槽/打标签对话框（0.2.6 详情页直达；待发布：对齐 Kazumi 补个人标签编辑——当前标签 chips + 条目热门标签建议 + 自定义输入，收藏 PATCH body 新增 tags 字段）。
+- 详情页「选集讨论」板块（待发布，对齐 Kazumi EpisodeCommentsView）：集数选择器 + 最早/最新排序 + 楼中楼评论，走 `kazumiBangumiEpisodeComments`（GET next.bgm /p1/episodes/{id}/comments，只读免 token）。
+- 详情页一键跳转 bgm.tv 条目页（待发布，「↗ Bangumi 页」按钮经系统浏览器打开）。
 - Bangumi 搜索、详情、日历、榜单、分集、角色、Staff、评论、关联、收藏同步和观看进度自动上报（RM-5，看完自动打点分集看过/联动在看看过，默认关）。
 
 ### 播放与解析
@@ -177,6 +179,20 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-09-28 未暂存区全量代码审查修复批次（OCR delegate 文件选择 + 13 个审查子代理并发审查，宿主逐条验证后修复）：
+
+- **范围**：OCR `delegate preview` 识别 27 个审查文件（+9685/-623）+ 20 个默认排除但项目规则要求审查的测试文件；第一波 10 子代理审源码、第二波 3 子代理审测试；全部 critical/high/medium 发现经宿主对照源码逐条验证后修复。
+- **修复要点**（明细见 `docs/CODE_REVIEW_2026-09-28.md`）：jar_bridge 按需下载 zip 布局错误（打包模式主路径必然失败）+ dexdeps 快路径/原子写/负缓存；detail.js CatVod meta 行 XSS 回归；file-manager delMany 先删后确认顺序；file-push-many 单条目 VLC 路径缺 `toExternalLocalUrl`；download-binaries renameSync ENOENT；server.py 分集评论缓存写在 builder 外形同虚设；downloader fetchText 畸形 Location 卡死刷新锁；`.rec-cover-badges` pointer-events:none 继承致状态标签不可点；收藏卡徽章互斥与 bgmScore 首渲缺面；kazumi.js 匹配缓存读写不对称/收藏 null 负缓存 6h→60s/乐观合并 token 校验；bgm-rate 调星级清空标签草稿/草稿阻断提交/仅改标签误报文案；panels 多选主体点击守卫与全选范围收窄；`.opencodereview/`（含 LLM 网关 key 明文）加入 .gitignore。
+- **测试**：live.test.js 恒真断言改真实探测计数桩、file-manager-ipc 临时目录清理 + 取消语义回归断言、player-internals T80 重写为行为测试、bgm-episode-comments venv 硬编码 skip 化 + 守卫源码锚点；新增 `tests/../python-backend/tests/test_dextools_on_demand.py` 10 例补齐按需下载链路零覆盖并接入 run_all。
+- **全量回归**：JS 87 个测试文件 0 fail（含新增用例），Python `run_all.py` 75 阶段 ALL PASS（含 coverage-self-check 过新增测试注册检查）、编译门禁全过。
+
+2026-09-26 Kazumi 对齐批次（标签 / 选集讨论 / bgm.tv 跳转，未定版）：
+
+- **评分/吐槽对话框打标签**（对齐 Kazumi rating_review_dialog）：`bgm-rate.js` 对话框新增标签编辑区（当前标签 chips 可删 + 条目公共标签做热门建议（默认 6 个可展开）+ 自定义输入回车添加；最多 10 个、单个 ≤10 字）。payload 契约：tags 与 tagsInit 脏检查一致则不带 tags 键（不误清远端），空数组=清除全部。后端 `normalize_bgm_tags`（`plugin_manager.py`）边界校验，`_bangumi_set_one` / `bangumi_update_collection` / `bangumi_apply_sync_plan` 三条写入路径透传；复用 `kazumiBangumiSyncApply` 端点（server.py 未新增评分 do）。入口：详情页 hero（预填 `_bgmInfo.tags` 热门建议）与 Bangumi 搜索卡（`bangumiCard` 渲染 `data-tags`）。
+- **详情页「选集讨论」页签**（对齐 Kazumi EpisodeCommentsView）：`DETAIL_TABS` 新增页签；集数 chips 选择器（全分集含 SP/OP/ED 徽标，与「分集」页签共用 `_bgmEps` 缓存）+ 最早/最新排序 + 楼中楼评论列表（复用吐槽页签的 BBCode/头像渲染）。数据链：`Kazumi.bangumiEpisodeComments`（渲染层 localStorage 10 分钟缓存）→ 新 do `kazumiBangumiEpisodeComments`（server.py，10 分钟 TTL 只读缓存）→ `bangumi_episode_comments`（GET next.bgm /p1/episodes/{id}/comments，裸数组/{list}/{data} 三形态兼容）。切集/切番剧 `_epCommentsGen` 世代守卫；跨番剧 `_resetEpComments` 连带清 `_bgmEps` 防串档。
+- **「↗ Bangumi 页」按钮**：详情页 hero 操作行，`window.open('https://bgm.tv/subject/{id}')` → 主进程 `setWindowOpenHandler` 转系统浏览器；subjectId `/^\d+$/` 白名单防注入。
+- **测试**：新增 `tests/js/bgm-episode-comments.test.js`（14 例），`tests/js/bgm-rate.test.js` 扩至 17 例，`test_kazumi_bgm_rating.py` 扩至 57 例（normalize_bgm_tags 边界 / tags 三通道 / 空数组清除 / 分集评论形态兼容）。全量回归：`run_all.py` 74 阶段 ALL PASS、JS 单元 1747/1747、check-js 50 文件 0 错、ESLint 0 error（既有 warning 不变）、Ruff 全过。
 
 2026-09-24 v0.2.6 发布批次（审查收口 + 功能增强 + 测试补齐 + CI flaky 修复）：
 

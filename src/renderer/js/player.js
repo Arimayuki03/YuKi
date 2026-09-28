@@ -118,16 +118,17 @@ const Player = {
                 window.yuki.onEpisodeSkip((info) => this._onEpisodeSkip(info));
             }
         }
+        // 片头/片尾登记（T81）：入口从主窗口 Shift+O/E 热键迁移到 mpv 右键菜单
+        // 「标记片头结束点/标记片尾起点」——原热键挂在主窗口 renderer 的 keydown 上，
+        // mpv 播放时焦点在 mpv 窗口，主窗口根本收不到按键（不可用的根因）。菜单经
+        // hints.lua → user-data 信号 → 主进程 → 此通道回到渲染层，焦点在 mpv 内即可触发。
+        if (window.yuki && window.yuki.onOpEdRecord) {
+            window.yuki.onOpEdRecord((info) => this._onOpEdRecord(info));
+        }
         // 外部播放器（PotPlayer/VLC 等）进程退出：墙钟时长记账（独立于 mpv 事件通道）
         if (window.yuki && window.yuki.onExternalPlayerExit) {
             window.yuki.onExternalPlayerExit((info) => this._onExtPlayerExit(info));
         }
-        // 智能跳过片头/片尾快捷键（mpv 模式的唯一入口）：
-        //   Shift+O：把当前播放位置登记为该片名+线路的片头结束点；
-        //   Shift+E：登记为片尾起点（<video> 预览接近时自动跳过 + toast 提示）。
-        // mpv 模式当前位置经 yuki:player 'get-pos'（主进程契约）读回真实
-        // time-pos；主进程未放行该命令时调用失败/返回空——登记路径整体降级并提示。
-        document.addEventListener('keydown', (e) => this._onOpEdHotkey(e));
         // <video> 预览兜底模式：有真实进度流，接入片尾自动跳过
         const pv = document.getElementById('player-video');
         if (pv) {
@@ -135,17 +136,13 @@ const Player = {
         }
     },
 
-    /** Shift+O / Shift+E 快捷键：登记片头/片尾位置到 AdSkip 存储（按片名+线路）。
-     *  输入框/可编辑元素内按键与 Ctrl/Alt/Meta 组合不拦截，避免劫持正常输入与系统快捷键。 */
-    _onOpEdHotkey(e) {
-        if (e.ctrlKey || e.altKey || e.metaKey) return; // 修饰键组合交给系统/编辑器
-        const t = e.target;
-        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-        if (!e.shiftKey) return;
-        if (!/^[OoEe]$/.test(e.key)) return; // 只拦截 O/E，避免 Shift 组合键误伤
-        const kind = (e.key === 'O' || e.key === 'o') ? 'op' : 'ed';
-        // 返回 promise 仅供测试/调用方等待完成；keydown 监听器不消费返回值
-        return this._recordOpEdFromPlayback(kind);
+    /** mpv 右键菜单「标记片头结束点/标记片尾起点」（T81）：转发共用登记逻辑。
+     *  原主窗口 Shift+O/E keydown 热键已移除——mpv 播放时焦点在 mpv 窗口，
+     *  主窗口收不到按键，该入口从未真正可用。 */
+    _onOpEdRecord({ kind } = {}) {
+        const k = (kind === 'op' || kind === 'ed') ? kind : '';
+        if (!k) return;
+        return this._recordOpEdFromPlayback(k);
     },
 
     /** 快捷键/悬浮按钮共用的登记逻辑：读当前位置 → 存 AdSkip → toast 反馈。
@@ -854,7 +851,7 @@ const Player = {
                     // 片头长度可能不同，错跳会毁正片），只提示用户可手动登记
                     const hint = adskip.findSiblingHint ? adskip.findSiblingHint(title, flag || '', null) : null;
                     if (hint) {
-                        warnToast(`线路「${hint.flag}」有片头记录（${hint.sec}s），如与本线路不同请 Shift+O 重新登记`);
+                        warnToast(`线路「${hint.flag}」有片头记录（${hint.sec}s），如与本线路不同请在播放器右键菜单「标记片头结束点」重新登记`);
                     }
                 }
             }

@@ -799,6 +799,31 @@ test('buildM3u(): #EXTINF 集名与 URL 成对；换行/Tab 压空格；空列�
     assert.equal(MpvPlayer.buildM3u(null), '');
 });
 
+test('buildM3u(): keepRawTitle——本地文件批量入口的媒体扩展名文件名原样保留；缺省行为不变', () => {
+    const eps = [
+        { url: 'file:///d/剧名 01.mp4', title: '剧名 01.mp4' },
+        { url: 'file:///d/剧名 02.mkv', title: '剧名 02.mkv' },
+        { url: 'http://x/kazumi_stream_1.m3u8', title: 'kazumi_stream_1.m3u8' },
+    ];
+    // 本地文件批量（keepRawTitle）：文件名进 EXTINF，仍保留行结构净化
+    const kept = MpvPlayer.buildM3u(eps, { keepRawTitle: true }).split('\n');
+    assert.ok(kept.includes('#EXTINF:-1,剧名 01.mp4'));
+    assert.ok(kept.includes('#EXTINF:-1,剧名 02.mkv'));
+    assert.ok(kept.includes('#EXTINF:-1,kazumi_stream_1.m3u8'));
+    // 缺省（在线链路）：媒体扩展名/抓流产物集名仍回落第N集
+    const fallback = MpvPlayer.buildM3u(eps).split('\n');
+    assert.ok(fallback.includes('#EXTINF:-1,第1集'));
+    assert.ok(fallback.includes('#EXTINF:-1,第2集'));
+    assert.ok(fallback.includes('#EXTINF:-1,第3集'));
+    // keepRawTitle 下空标题/换行净化仍然生效
+    const odd = MpvPlayer.buildM3u(
+        [{ url: 'file:///d/a.mp4', title: '坏\n名.mp4' }, { url: 'file:///d/b.mp4' }],
+        { keepRawTitle: true },
+    ).split('\n');
+    assert.ok(odd.includes('#EXTINF:-1,坏 名.mp4'), '换行压空格保留扩展名');
+    assert.ok(odd.includes('#EXTINF:-1,第2集'), '空标题仍回落第N集');
+});
+
 test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用一次，ready 照常逐次发出', async () => {
     const p = Object.create(MpvPlayer.prototype);
     p._pending = new Map();

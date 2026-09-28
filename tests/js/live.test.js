@@ -47,7 +47,7 @@ function makeJQueryStub() {
         off() { return this; }
         addClass() { return this; }
         removeClass() { return this; }
-        toggleClass() { return this; }
+        toggleClass(c, f) { rec(this.sel).ops.push(['toggleClass', String(c), !!f]); return this; }
         toggle(f) { rec(this.sel).ops.push(['toggle', !!f]); return this; }
         show() { return this.toggle(true); }
         hide() { return this.toggle(false); }
@@ -78,6 +78,12 @@ function makeJQueryStub() {
         r.handlers[ev].forEach((h) => h.fn.call({}, evt));
     };
     $.opsOf = (sel) => rec(sel).ops;
+    /** #live-list 最近一次 toggleClass('anim-cards', f) 的 f（无记录返回 null）：
+     *  renderList(animate) 唯一动画入口的断言口。 */
+    $.lastAnim = () => {
+        const ts = rec('#live-list').ops.filter((o) => o[0] === 'toggleClass' && o[1] === 'anim-cards');
+        return ts.length ? ts[ts.length - 1][2] : null;
+    };
     $.lastHtml = (sel) => {
         const hs = rec(sel).ops.filter((o) => o[0] === 'html');
         return hs.length ? hs[hs.length - 1][1] : null;
@@ -100,7 +106,7 @@ function loadLive(opts) {
     const $ = makeJQueryStub();
     const state = {
         $, plays: [], toasts: [], pager: [], pageSizeKeys: [],
-        settingsSets: [], doActions: [], nextPlay: null, setNextPlay: (r) => { state.nextPlay = r; },
+        settingsSets: [], doActions: [], probes: [], nextPlay: null, setNextPlay: (r) => { state.nextPlay = r; },
         win: o.win || { innerWidth: 1280, innerHeight: 800 },
     };
     // 容器尺寸桩：缺省视为无 #live-list 元素（走 window.innerWidth 回退）
@@ -129,6 +135,7 @@ function loadLive(opts) {
                     if (state.nextPlay !== null) { const r = state.nextPlay; state.nextPlay = null; return r; }
                     return { ok: true };
                 },
+                probeUrls: o.probeUrls || (async (urls) => { state.probes.push(urls); return urls.map(() => true); }),
             },
         },
         $,
@@ -471,6 +478,100 @@ test('页码越界：_page 大于总页数时被钳回末页（不会出现空�
     assert.equal(L._page, 3, '7 条 / 每页 3 条 = 3 页，越界回末页');
     const html = h.$.lastHtml('#live-list');
     assert.ok(html.includes('台6'), '末页应有数据');
+});
+
+// ---------------------------------------------------------------- 入场动画覆盖
+
+test('renderList：切分组/翻页传 animate 时挂 .anim-cards，不传则摘掉（探测刷新不播）', () => {
+    const h = loadLive();
+    const L = h.Live;
+    L.channels = [{ group: 'G', name: 'A', url: 'http://a/1' }];
+    L._pageSize = 10;
+    L.renderList(true);
+    assert.equal(h.$.lastAnim(), true, '切分组/翻页：挂 .anim-cards 播入场动画');
+    L.renderList();
+    assert.equal(h.$.lastAnim(), false, '后台探测分批刷新：摘掉 .anim-cards 防反复重播闪烁');
+    L.renderList(true);
+    assert.equal(h.$.lastAnim(), true, '再次全量重渲染重新挂回');
+});
+
+test('loadChannels：进页首渲/切源/手动刷新也播入场动画（缓存命中路径同口径）', async () => {
+    const h = loadLive({
+        sites: { lives: [{ name: 'TXT源', url: 'https://x/live.txt' }] },
+        doAction: async () => ({ text: TXT }),
+        pageSize: 5,
+        // 永不 resolve 的探测桩：真实场景探测是秒级网络往返，入场动画早已播完；
+        // 这里挂起探测避免其即时回写重渲染（renderList 不传参摘 anim-cards）干扰断言
+        probeUrls: () => new Promise(() => {}),
+    });
+    const L = h.Live;
+    L.init();
+    await L.load({});
+    assert.equal(h.$.lastAnim(), true, '首次进页首渲播入场动画');
+
+    // 切源（change 事件）→ loadChannels(false)：同样新列表入场
+    h.$.setVal('#live-select', 0);
+    h.$.fire('#live-select', 'change', {});
+    await flush();
+    assert.equal(h.$.lastAnim(), true, '切换直播源重渲播入场动画');
+
+    // 手动刷新 → loadChannels(true)：同口径
+    h.$.fire('#live-refresh', 'click', {});
+    await flush();
+    assert.equal(h.$.lastAnim(), true, '手动刷新重渲播入场动画');
+
+    L._clearProbeBar(); // 收尾：清掉挂起探测的进度条 timer
+});
+
+test('loadChannels：命中本地探测缓存时首渲仍播动画；后台探测分批刷新不播', async () => {
+    const h = loadLive({
+        sites: { lives: [{ name: 'TXT源', url: 'https://x/live.txt' }] },
+        doAction: async () => ({ text: TXT }),
+        pageSize: 5,
+        settings: { liveProbeCache: { 'https://x/live.txt': { ts: Date.now(), dead: ['http://a.example/2.m3u8'] } } },
+    });
+    await h.Live.load({});
+    assert.equal(h.Live.channels.length, 2, '按缓存过滤掉 dead 频道');
+    assert.equal(h.$.lastAnim(), true, '缓存命中路径的首渲同口径播入场动画');
+    // 探测走 yuki.probeUrls（不走 doAction），必须看 probes 计数——doActions 过滤恒为空是假通过
+    assert.deepEqual(h.probes, [], '缓存命中不再探测');
+});
+
+test('_probeChannels：探测分批回写原地重渲染不播动画，异常回滚也不播', async () => {
+    const h = loadLive({
+        sites: { lives: [{ name: 'TXT源', url: 'https://x/live.txt' }] },
+        doAction: async () => ({ text: TXT }),
+        pageSize: 5,
+        probeUrls: async () => [false, true, true], // 首地址 dead 被过滤
+    });
+    await h.Live.load({}); // 首渲播动画
+    await flush();
+    assert.equal(h.Live.channels.length, 2, '探测后过滤 dead 频道');
+    assert.equal(h.$.lastAnim(), false, '探测分批刷新不播动画（防闪烁）');
+
+    // 探测异常回滚：恢复全部频道重渲染，同样不播
+    const h2 = loadLive({
+        sites: { lives: [{ name: 'TXT源', url: 'https://x/live.txt' }] },
+        doAction: async () => ({ text: TXT }),
+        pageSize: 5,
+        probeUrls: async () => { throw new Error('probe down'); },
+    });
+    await h2.Live.load({});
+    await flush();
+    assert.equal(h2.Live.channels.length, 3, '异常回滚恢复全部频道');
+    assert.equal(h2.$.lastAnim(), false, '异常回滚重渲染同样不播动画');
+});
+
+test('enter：每页数量设置变更后的重排播入场动画（同全量重渲染惯例）', async () => {
+    const h = loadLive({ pageSize: 6 });
+    const L = h.Live;
+    L.lives = [{ name: 'S', url: 'https://x/live.txt' }]; // 有源且不脏 → enter 走重排分支
+    L.channels = Array.from({ length: 10 }, (_, i) => ({ group: 'G', name: `台${i}`, url: `http://a/${i}` }));
+    L._pageSize = 5; // 与 pageSizeOf 返回值不同 → enter 触发重排
+    await L.enter();
+    assert.equal(L._pageSize, 6);
+    assert.equal(L._page, 1, '重排回第 1 页');
+    assert.equal(h.$.lastAnim(), true, 'enter 重排播入场动画');
 });
 
 // ---------------------------------------------------------------- 播放

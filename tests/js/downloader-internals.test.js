@@ -28,6 +28,79 @@ function tmpRoot(tag) {
     };
 }
 
+/**
+ * 用注入桩加载真实 downloader.js：不 spawn 真进程、不出网、不依赖 Electron。
+ * @param {object} o existsSync/onRequest/stubHttps/onSpawn/onExecSync/proxyUrl/appPath/electron
+ */
+function loadDownloader(o = {}) {
+    const mkdirs = [];
+    const deps = {
+        './system-proxy': { getProxyUrl: () => (o.proxyUrl || '') },
+        electron: o.electron || { app: { isPackaged: false, getPath: () => (o.appPath || 'D:\\Downloads') } },
+        fs: {
+            existsSync: o.existsSync || (() => true),
+            mkdirSync: (p) => { mkdirs.push(String(p)); },
+            // tracker 缓存读写委托真实 fs（仅 tracker 用例使用真实临时路径）
+            readFileSync: (...a) => fs.readFileSync(...a),
+            writeFileSync: (...a) => fs.writeFileSync(...a),
+        },
+        child_process: {
+            spawn: o.onSpawn || (() => { throw new Error('spawn 未桩化'); }),
+            execSync: o.onExecSync || (() => { throw new Error('execSync 未桩化'); }),
+        },
+    };
+    if (o.onRequest) deps.http = { request: o.onRequest };
+    if (o.stubHttps) deps.https = o.stubHttps;
+    const mod = { exports: {} };
+    const req = (id) => (Object.prototype.hasOwnProperty.call(deps, id) ? deps[id] : require(id));
+    const src = fs.readFileSync(DOWNLOADER_SRC, 'utf8');
+    // 用 Function 包装真实源码（同 realm，Buffer/JSON 等全局可用），仅替换 require 解析
+    new Function('require', 'module', '__dirname', '__filename', src)(
+        req, mod, path.dirname(DOWNLOADER_SRC), DOWNLOADER_SRC,
+    );
+    return { Downloader: mod.exports, mkdirs };
+}
+
+/**
+ * HTTP 桩：handler(opts, body) 返回 { json } | { raw } | { socketError } | { timeout }。
+ */
+function makeHttpStub(handler) {
+    const calls = [];
+    const request = (opts, cb) => {
+        const req = new EventEmitter();
+        let body = '';
+        req.write = (c) => { body += c; };
+        req.end = () => {
+            calls.push({ opts, body });
+            setImmediate(() => {
+                const out = handler(opts, body) || {};
+                if (out.socketError) return req.emit('error', out.socketError);
+                if (out.timeout) return req.emit('timeout');
+                const res = new EventEmitter();
+                cb(res);
+                setImmediate(() => {
+                    res.emit('data', out.raw !== undefined ? out.raw : JSON.stringify(out.json));
+                    res.emit('end');
+                });
+            });
+        };
+        req.destroy = (err) => setImmediate(() => req.emit('error', err));
+        return req;
+    };
+    return { httpStub: { request }, calls };
+}
+
+/** 造一个「已在运行」的引擎实例（proc/port/secret 手工置位，_rpc 走桩）。 */
+function runningEngine(handler) {
+    const { httpStub, calls } = makeHttpStub(handler);
+    const { Downloader: D } = loadDownloader({ onRequest: httpStub.request });
+    const d = new D();
+    d.proc = { fake: true };
+    d.port = 12345;
+    d.secret = 'sec-xyz';
+    return { d, calls };
+}
+
 // ============================================================================
 describe('dl-layout：路径段清洗与布局计算（补既有测试的非法入参/边界分支）', () => {
 
@@ -407,74 +480,8 @@ describe('dl-record：持久化兜底、上限淘汰与写盘时机（补既有�
 // ============================================================================
 describe('downloader：RPC/启动/状态机内部分支（HTTP 与子进程全部注入桩）', () => {
 
-    /**
-     * 用注入桩加载真实 downloader.js：不 spawn 真进程、不出网、不依赖 Electron。
-     * @param {object} o existsSync/onRequest/onSpawn/onExecSync/proxyUrl/appPath
-     */
-    function loadDownloader(o = {}) {
-        const mkdirs = [];
-        const deps = {
-            './system-proxy': { getProxyUrl: () => (o.proxyUrl || '') },
-            electron: { app: { isPackaged: false, getPath: () => (o.appPath || 'D:\\Downloads') } },
-            fs: {
-                existsSync: o.existsSync || (() => true),
-                mkdirSync: (p) => { mkdirs.push(String(p)); },
-            },
-            child_process: {
-                spawn: o.onSpawn || (() => { throw new Error('spawn 未桩化'); }),
-                execSync: o.onExecSync || (() => { throw new Error('execSync 未桩化'); }),
-            },
-        };
-        if (o.onRequest) deps.http = { request: o.onRequest };
-        const mod = { exports: {} };
-        const req = (id) => (Object.prototype.hasOwnProperty.call(deps, id) ? deps[id] : require(id));
-        const src = fs.readFileSync(DOWNLOADER_SRC, 'utf8');
-        // 用 Function 包装真实源码（同 realm，Buffer/JSON 等全局可用），仅替换 require 解析
-        new Function('require', 'module', '__dirname', '__filename', src)(
-            req, mod, path.dirname(DOWNLOADER_SRC), DOWNLOADER_SRC,
-        );
-        return { Downloader: mod.exports, mkdirs };
-    }
-
-    /**
-     * HTTP 桩：handler(opts, body) 返回 { json } | { raw } | { socketError } | { timeout }。
-     */
-    function makeHttpStub(handler) {
-        const calls = [];
-        const request = (opts, cb) => {
-            const req = new EventEmitter();
-            let body = '';
-            req.write = (c) => { body += c; };
-            req.end = () => {
-                calls.push({ opts, body });
-                setImmediate(() => {
-                    const out = handler(opts, body) || {};
-                    if (out.socketError) return req.emit('error', out.socketError);
-                    if (out.timeout) return req.emit('timeout');
-                    const res = new EventEmitter();
-                    cb(res);
-                    setImmediate(() => {
-                        res.emit('data', out.raw !== undefined ? out.raw : JSON.stringify(out.json));
-                        res.emit('end');
-                    });
-                });
-            };
-            req.destroy = (err) => setImmediate(() => req.emit('error', err));
-            return req;
-        };
-        return { httpStub: { request }, calls };
-    }
-
-    /** 造一个「已在运行」的引擎实例（proc/port/secret 手工置位，_rpc 走桩）。 */
-    function runningEngine(handler) {
-        const { httpStub, calls } = makeHttpStub(handler);
-        const { Downloader: D } = loadDownloader({ onRequest: httpStub.request });
-        const d = new D();
-        d.proc = { fake: true };
-        d.port = 12345;
-        d.secret = 'sec-xyz';
-        return { d, calls };
-    }
+    // loadDownloader / makeHttpStub / runningEngine 定义于文件顶层，
+    // 供本套件与「tracker 列表自动刷新」套件共用（stubHttps/electron 注入亦在此处）。
 
     test('_rpc：请求体带 token:secret 与 aria2.<method> 前缀，成功解析 result', async () => {
         const { d, calls } = runningEngine(() => ({ json: { result: { gid: 'g1' } } }));
@@ -1089,5 +1096,233 @@ describe('dl-dedupe：与 dl-record 联动的边界（中间态/孤儿/并发/�
                 assert.equal(await d.check('s|v|e1'), null);
             } finally { setFs(stubFs); }
         } finally { t.cleanup(); }
+    });
+});
+
+// ============================================================================
+describe('downloader：tracker 列表自动刷新（拉取/校验/缓存/热更新全桩）', () => {
+
+    const OK_LIST = [
+        'udp://tracker.a.test:1337/announce', 'udp://tracker.b.test:1337/announce',
+        'udp://tracker.c.test:1337/announce', 'udp://tracker.d.test:1337/announce',
+        'udp://tracker.e.test:1337/announce', 'udp://tracker.f.test:1337/announce',
+        'udp://tracker.g.test:1337/announce', 'udp://tracker.h.test:1337/announce',
+        'udp://tracker.i.test:1337/announce', 'udp://tracker.j.test:1337/announce',
+        'http://tracker.k.test:80/announce',
+    ];
+    const OK_TEXT = OK_LIST.join(',\n');          // 混合逗号与换行的 Aria2 源格式
+    const HOUR = 3600 * 1000;
+
+    /**
+     * HTTPS GET 桩：scenario 提供 { status?, raw?, error? }。
+     * 2xx 发 raw（缺省 OK_TEXT）；status 非 2xx 只发状态码；error 模拟网络错。
+     * 记录每次调用的 { url, opts } 到 calls。
+     */
+    function makeHttpsStub(scenario = {}) {
+        const calls = [];
+        const get = (url, opts, cb) => {
+            calls.push({ url, opts });
+            const req = new EventEmitter();
+            req.destroy = () => {};
+            if (scenario.error) setImmediate(() => req.emit('error', scenario.error));
+            else setImmediate(() => {
+                const res = new EventEmitter();
+                res.statusCode = scenario.status || 200;   // 缺省 2xx，headers 与真实 https 响应同形
+                res.headers = {};
+                cb(res);
+                setImmediate(() => {
+                    if (scenario.status && (scenario.status < 200 || scenario.status >= 300)) return;
+                    res.emit('data', scenario.raw !== undefined ? scenario.raw : OK_TEXT);
+                    res.emit('end');
+                });
+            });
+            return req;
+        };
+        return { stub: { get }, calls };
+    }
+
+    test('parseTrackerList：Aria2 逗号/换行混合格式解析、去重与坏行剔除', () => {
+        const { Downloader: D } = loadDownloader({});
+        // 坏行混入但有效条目仍 ≥10：坏行剔除、重复剔除，其余保留
+        const text = [...OK_LIST, ...[
+            'udp://a.test:1337/announce',                                  // 与前 10 条重复? 否——同条目第二次出现
+            'udp://a.test:1337/announce',                                  // 重复
+            'ftp://c.test/announce',                                       // 非 announce 协议
+            'udp://d.test:1337/other',                                     // 路径非 /announce
+            'not-a-url', '',
+            'udp://e.test:70000/announce',                                 // 端口非法仍放行（aria2 自行容错）
+        ]].join(',\n');
+        const list = D.parseTrackerList(text);
+        assert.deepEqual(list, [...OK_LIST, 'udp://a.test:1337/announce', 'udp://e.test:70000/announce']);
+        assert.equal(D.parseTrackerList(null), null);
+        // 有效条目不足 10 拒绝（防 CDN 错误页/截断响应整体收编）
+        assert.equal(D.parseTrackerList(OK_LIST.slice(0, 9).join(',')), null);
+        assert.deepEqual(D.parseTrackerList(OK_LIST.join(',')), OK_LIST);
+    });
+
+    test('refreshTrackers：无缓存 → 拉取成功 → 热更新 _trackers 并写缓存', async () => {
+        const t = tmpRoot('tracker-ok');
+        try {
+            const httpsStub = makeHttpsStub();
+            const { Downloader: D } = loadDownloader({
+                onRequest: makeHttpStub(() => ({ json: { result: 'OK' } })).httpStub.request,
+                stubHttps: httpsStub.stub,
+            });
+            const d = new D();
+            d._trackerCacheFile = path.join(t.root, 'tracker-cache.json');
+            d.proc = { fake: true };                          // 模拟运行中：应触发 RPC 热更新
+            d.port = 12345; d.secret = 's';
+            const list = await d.refreshTrackers();
+            assert.deepEqual(list, OK_LIST);
+            assert.equal(d._trackers.join(','), OK_LIST.join(','), '实例列表已热替换');
+            assert.equal(httpsStub.calls.length, 1);
+            assert.match(httpsStub.calls[0].url, /best_aria2\.txt$/, '拉取 trackerslist best 源');
+            assert.equal(httpsStub.calls[0].opts.timeout, 15000);
+            const saved = JSON.parse(fs.readFileSync(d._trackerCacheFile, 'utf8'));
+            assert.deepEqual(saved.trackers, OK_LIST);
+            assert.ok(saved.updatedAt > 0 && saved.url.includes('best_aria2'));
+        } finally { t.cleanup(); }
+    });
+
+    test('refreshTrackers：缓存新鲜（<72h）→ 直接采用缓存列表且不出网', async () => {
+        const t = tmpRoot('tracker-fresh');
+        try {
+            const httpsStub = makeHttpsStub();
+            const { Downloader: D } = loadDownloader({ stubHttps: httpsStub.stub });
+            const d = new D();
+            d._trackerCacheFile = path.join(t.root, 'tracker-cache.json');
+            fs.writeFileSync(d._trackerCacheFile, JSON.stringify({
+                url: 'https://cf.trackerslist.com/best_aria2.txt',
+                trackers: OK_LIST, updatedAt: Date.now() - 10 * HOUR, failedAt: 0,
+            }));
+            const list = await d.refreshTrackers();
+            assert.deepEqual(list, OK_LIST);
+            assert.equal(d._trackers.join(','), OK_LIST.join(','));
+            assert.equal(httpsStub.calls.length, 0, '缓存新鲜绝不发网络请求');
+        } finally { t.cleanup(); }
+    });
+
+    test('refreshTrackers：上次失败后 6h 退避期内不重试；过期后恢复拉取', async () => {
+        const t = tmpRoot('tracker-backoff');
+        try {
+            const httpsStub = makeHttpsStub({ error: new Error('ENETDOWN') });
+            const { Downloader: D } = loadDownloader({ stubHttps: httpsStub.stub });
+            const d = new D();
+            d._trackerCacheFile = path.join(t.root, 'tracker-cache.json');
+            const base = Date.now();
+            fs.writeFileSync(d._trackerCacheFile, JSON.stringify({
+                url: 'u', trackers: OK_LIST, updatedAt: base - 100 * HOUR, failedAt: base - 1 * HOUR,
+            }));
+            const before = d._trackers.slice();           // 退避期内实例保持启动时的列表
+            assert.equal(await d.refreshTrackers(base), null, '退避期内直接放弃');
+            assert.equal(httpsStub.calls.length, 0);
+            assert.deepEqual(d._trackers, before, '退避期列表不变（内置列表原样保留）');
+            // 退避期（6h）过后恢复重试
+            const r = await d.refreshTrackers(base + 7 * HOUR);
+            assert.equal(r, null, '网络仍失败 → 返回 null');
+            assert.equal(httpsStub.calls.length, 1);
+            const saved = JSON.parse(fs.readFileSync(d._trackerCacheFile, 'utf8'));
+            assert.ok(saved.failedAt === base + 7 * HOUR, '失败时间持久化（退避窗口随之后移）');
+            assert.deepEqual(saved.trackers, OK_LIST, '旧列表保留');
+        } finally { t.cleanup(); }
+    });
+
+    test('refreshTrackers：成功热更新后 72h TTL 内第二次调用不再出网', async () => {
+        const t = tmpRoot('tracker-ttl');
+        try {
+            const httpsStub = makeHttpsStub();
+            const { Downloader: D } = loadDownloader({ stubHttps: httpsStub.stub });
+            const d = new D();
+            d._trackerCacheFile = path.join(t.root, 'tracker-cache.json');
+            const now = Date.now();
+            assert.deepEqual(await d.refreshTrackers(now), OK_LIST, '首次：拉取成功');
+            assert.equal(httpsStub.calls.length, 1);
+            // 立即再刷：缓存 72h 新鲜 → 不出网，返回缓存列表
+            assert.deepEqual(await d.refreshTrackers(now + 1 * HOUR), OK_LIST);
+            assert.equal(httpsStub.calls.length, 1, 'TTL 内无网络请求');
+            // 72h 过期 → 重新拉取（stub 恒成功）
+            assert.deepEqual(await d.refreshTrackers(now + 73 * HOUR), OK_LIST);
+            assert.equal(httpsStub.calls.length, 2, 'TTL 过期恢复出网');
+        } finally { t.cleanup(); }
+    });
+
+    test('refreshTrackers：非 2xx/坏列表/网络错均回退当前列表且不写缓存', async () => {
+        const t = tmpRoot('tracker-bad');
+        try {
+            const scenarios = [
+                { tag: '503', scenario: { status: 503 } },
+                { tag: 'garbage', scenario: { raw: 'CDN error page, no urls here' } },
+                { tag: 'offline', scenario: { error: new Error('EAI_AGAIN') } },
+            ];
+            for (const { tag, scenario } of scenarios) {
+                const httpsStub = makeHttpsStub(scenario);
+                const { Downloader: D } = loadDownloader({ stubHttps: httpsStub.stub });
+                const d = new D();
+                d._trackerCacheFile = path.join(t.root, `tracker-cache-${tag}.json`);
+                const before = d._trackers.slice();
+                const r = await d.refreshTrackers();
+                assert.equal(r, null, `${tag} 应失败`);
+                assert.deepEqual(d._trackers, before, `${tag} 列表保持内置默认`);
+                assert.equal(fs.existsSync(d._trackerCacheFile), false, `${tag} 失败不写 updatedAt 缓存`);
+            }
+        } finally { t.cleanup(); }
+    });
+
+    test('scheduleTrackerRefresh：立即触发一次刷新；stop() 清理定时器', async () => {
+        const t = tmpRoot('tracker-sched');
+        try {
+            const httpsStub = makeHttpsStub();
+            const { Downloader: D } = loadDownloader({
+                electron: {
+                    app: { isPackaged: false, getPath: (name) => (name === 'userData' ? t.root : `D:\\${name}`) },
+                },
+                stubHttps: httpsStub.stub,
+            });
+            const d = new D();
+            d.scheduleTrackerRefresh();
+            assert.ok(d._trackerTimer, '周期定时器已建立');
+            assert.equal(d._trackerCacheFile, path.join(t.root, 'tracker-cache.json'), '缓存文件定位到 userData');
+            await new Promise((r) => setTimeout(r, 20));
+            assert.equal(httpsStub.calls.length, 1, '调度后立即刷新一次');
+            assert.deepEqual(JSON.parse(fs.readFileSync(d._trackerCacheFile, 'utf8')).trackers, OK_LIST);
+            d.stop();
+            assert.equal(d._trackerTimer, null, 'stop 清理定时器（引擎生命周期对齐）');
+        } finally { t.cleanup(); }
+    });
+
+    test('start：就绪后自动挂调度（RPC 就绪即触发 scheduleTrackerRefresh）', async () => {
+        const t = tmpRoot('tracker-start');
+        try {
+            const httpsStub = makeHttpsStub({ error: new Error('offline') });
+            const { Downloader: D } = loadDownloader({
+                electron: {
+                    app: { isPackaged: false, getPath: (name) => (name === 'userData' ? t.root : `D:\\${name}`) },
+                },
+                onSpawn: () => {
+                    const p = new EventEmitter();
+                    p.stderr = new EventEmitter();
+                    p.kill = () => {};
+                    return p;
+                },
+                onRequest: makeHttpStub(() => ({ json: { result: { version: '1.37.0' } } })).httpStub.request,
+                stubHttps: httpsStub.stub,
+            });
+            const d = new D();
+            await d.start('D:\\dl');
+            assert.ok(d._trackerTimer, 'start 成功即建立刷新定时器');
+            await new Promise((r) => setTimeout(r, 20));   // 让异步刷新走完（此环境网络失败，静默）
+            assert.ok(d._trackers.length >= 10, '失败后仍保有内置列表');
+            assert.equal(httpsStub.calls.length, 1, '失败仅一次尝试，不阻塞 start');
+            d.stop();
+            assert.equal(d._trackerTimer, null);
+        } finally { t.cleanup(); }
+    });
+
+    test('addUri：磁链使用刷新后的 _trackers（非内置 BT_TRACKERS）', async () => {
+        const { d, calls } = runningEngine(() => ({ json: { result: 'g1' } }));
+        d._trackers = OK_LIST.slice();                    // 模拟刷新已替换列表
+        await d.addUri('magnet:?xt=urn:btih:abc');
+        const body = JSON.parse(calls[0].body);
+        assert.equal(body.params[2]['bt-tracker'], OK_LIST.join(','));
     });
 });

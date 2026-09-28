@@ -171,20 +171,27 @@ async function loadMainIndexReady(tmpRoot, opts) {
 /** 白名单根工作区：userData/downloads 与系统下载替身都必须真实存在（setRoot 契约）。 */
 function makeWorkspace() {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-fmipc-'));
-    const rootDir = path.join(tmpRoot, 'userData', 'downloads');
-    fs.mkdirSync(rootDir, { recursive: true });
-    fs.mkdirSync(path.join(tmpRoot, 'downloads'), { recursive: true });
-    fs.writeFileSync(path.join(rootDir, 'video.mp4'), 'v');
-    fs.writeFileSync(path.join(rootDir, '中文 影片.mp4'), 'v');
-    fs.mkdirSync(path.join(rootDir, '子目录'), { recursive: true });
-    return { tmpRoot, rootDir };
+    try {
+        const rootDir = path.join(tmpRoot, 'userData', 'downloads');
+        fs.mkdirSync(rootDir, { recursive: true });
+        fs.mkdirSync(path.join(tmpRoot, 'downloads'), { recursive: true });
+        fs.writeFileSync(path.join(rootDir, 'video.mp4'), 'v');
+        fs.writeFileSync(path.join(rootDir, '中文 影片.mp4'), 'v');
+        fs.mkdirSync(path.join(rootDir, '子目录'), { recursive: true });
+        return { tmpRoot, rootDir, cleanup: () => fs.rmSync(tmpRoot, { recursive: true, force: true }) };
+    } catch (e) {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        throw e;
+    }
 }
 
 // ------------------------------------------------------------------
 // 1. fileIpc 收敛契约：handler 抛错 → ok:false（不得 reject 穿透到渲染层）
 // ------------------------------------------------------------------
 test('fileIpc 收敛：file-pick-root 对无效根目录/取消返回 ok:false 而非 reject', async () => {
-    const { tmpRoot } = makeWorkspace();
+    const ws = makeWorkspace();
+    try {
+    const { tmpRoot } = ws;
     const { handlers, setDirPick } = await loadMainIndexReady(tmpRoot);
     const pickRoot = handlers.get('yuki:file-pick-root');
     assert.equal(typeof pickRoot, 'function', 'yuki:file-pick-root 应已注册');
@@ -198,10 +205,13 @@ test('fileIpc 收敛：file-pick-root 对无效根目录/取消返回 ok:false �
     const r2 = await pickRoot(null);
     assert.equal(r2.ok, false);
     assert.equal(r2.reason, 'canceled');
+    } finally { ws.cleanup(); }
 });
 
 test('fileIpc 收敛：穿越/非法输入经 file-list / file-del-file 返回 ok:false', async () => {
-    const { tmpRoot } = makeWorkspace();
+    const ws = makeWorkspace();
+    try {
+    const { tmpRoot } = ws;
     const { handlers } = await loadMainIndexReady(tmpRoot);
     const list = handlers.get('yuki:file-list');
     const delFile = handlers.get('yuki:file-del-file');
@@ -212,13 +222,16 @@ test('fileIpc 收敛：穿越/非法输入经 file-list / file-del-file 返回 o
     }
     const rd = await delFile(null, '../outside.txt');
     assert.equal(rd.ok, false, '删除入口同样拒绝穿越');
+    } finally { ws.cleanup(); }
 });
 
 // ------------------------------------------------------------------
 // 2. fileMgr 未初始化窗口：判空降级，不抛 TypeError
 // ------------------------------------------------------------------
 test('fileMgr 未初始化：file-list 走 needRoot、file-thumb/file-push 收敛 ok:false（不抛 TypeError）', async () => {
-    const { tmpRoot } = makeWorkspace();
+    const ws = makeWorkspace();
+    try {
+    const { tmpRoot } = ws;
     // 强制改动：装配完成后把 fileMgr 置回 null，模拟「窗口已建、whenReady 后半段未跑完」
     // 的极早期调用窗口（真实场景：渲染层在初始化完成前抢跑）。
     const { handlers } = await loadMainIndexReady(tmpRoot, {
@@ -240,6 +253,7 @@ test('fileMgr 未初始化：file-list 走 needRoot、file-thumb/file-push 收�
     assert.equal(typeof push.reason, 'string', 'file-push 降级必须带语义化 reason 字符串');
     const root = await handlers.get('yuki:file-root')(null);
     assert.equal(root.ok, true, 'file-root 对 null fileMgr 也必须返回可序列化结果');
+    } finally { ws.cleanup(); }
 });
 
 // ------------------------------------------------------------------
@@ -248,6 +262,7 @@ test('fileMgr 未初始化：file-list 走 needRoot、file-thumb/file-push 收�
 test('file-manager 边界输入：中文/特殊字符/空目录/不存在路径只抛可收敛 Error', async () => {
     const FileManager = require('../../src/main/file-manager');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-fmboundary-'));
+    try {
     const root = path.join(tmp, 'root');
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(path.join(root, '中文视频.mp4'), 'v');
@@ -275,6 +290,88 @@ test('file-manager 边界输入：中文/特殊字符/空目录/不存在路径�
     const fmNoConfirm = new FileManager(path.join(tmp, 'cfg2'));
     fmNoConfirm.root = root;
     await assert.rejects(() => fmNoConfirm.delFolder('待删除'), /no confirm/);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+// ------------------------------------------------------------------
+// 3.5 delMany 批量删除：文件逐个删、目录三道防线、整批确认一次
+// ------------------------------------------------------------------
+test('delMany：混合文件/目录批量删除——文件即删，目录整批一次确认后递归删', async () => {
+    const FileManager = require('../../src/main/file-manager');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-fmdelmany-'));
+    try {
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(path.join(root, '剧名', 'S01'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'a.mp4'), 'v');
+    fs.writeFileSync(path.join(root, 'b.mp4'), 'v');
+    fs.writeFileSync(path.join(root, '剧名', '第01集.mp4'), 'v');
+    const confirms = [];
+    const fm = new FileManager(tmp, {
+        confirm: async (opts) => { confirms.push(opts); return 0; },
+        getRecords: () => [],
+    });
+    fm.setRoot(root);
+    const r = await fm.delMany(['a.mp4', 'b.mp4', path.join('剧名', 'S01')]);
+    assert.equal(r.failed, 0, `全部成功，实际 ${JSON.stringify(r.results)}`);
+    assert.ok(!fs.existsSync(path.join(root, 'a.mp4')));
+    assert.ok(!fs.existsSync(path.join(root, 'b.mp4')));
+    assert.ok(!fs.existsSync(path.join(root, '剧名', 'S01')));
+    assert.ok(fs.existsSync(path.join(root, '剧名', '第01集.mp4')), '目录外的兄弟内容不受影响');
+    assert.equal(confirms.length, 1, '整批目录只弹一次原生确认框');
+    assert.match(confirms[0].detail, /S01/);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('delMany：确认框取消时不删任何目录；单项失败不中断整批', async () => {
+    const FileManager = require('../../src/main/file-manager');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-fmdelmany2-'));
+    try {
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(path.join(root, 'd1'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep.mp4'), 'v');
+    const fmCancel = new FileManager(tmp, { confirm: async () => 1, getRecords: () => [] });
+    fmCancel.setRoot(root);
+    await assert.rejects(() => fmCancel.delMany(['d1']), /delete cancelled/);
+    assert.ok(fs.existsSync(path.join(root, 'd1')), '取消后目录仍在');
+
+    // ghost 不存在：单项目失败回告，其余照删
+    fs.writeFileSync(path.join(root, 'del.mp4'), 'v');
+    const r = await fmCancel.delMany(['del.mp4', 'ghost.mp4']);
+    assert.equal(r.failed, 1);
+    assert.equal(r.results.find((x) => x.rel === 'ghost.mp4').ok, false);
+    assert.ok(!fs.existsSync(path.join(root, 'del.mp4')));
+    assert.ok(fs.existsSync(path.join(root, 'keep.mp4')));
+
+    // 混合批次中取消：文件与目录一律不删（旧实现文件在确认框之前已删，属回归点）
+    fs.writeFileSync(path.join(root, 'cancel.mp4'), 'v');
+    fs.mkdirSync(path.join(root, 'cancel-dir'), { recursive: true });
+    await assert.rejects(() => fmCancel.delMany(['cancel.mp4', 'cancel-dir']), /delete cancelled/);
+    assert.ok(fs.existsSync(path.join(root, 'cancel.mp4')), '取消后文件不得被删（防线先于删除）');
+    assert.ok(fs.existsSync(path.join(root, 'cancel-dir')), '取消后目录不得被删');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('delMany：目录在写互斥命中整批拒绝（防线先于删除，无文件被删）；空选集抛错', async () => {
+    const FileManager = require('../../src/main/file-manager');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-fmdelmany3-'));
+    try {
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(path.join(root, 'd'), { recursive: true });
+    const fm = new FileManager(tmp, { confirm: async () => 0, getRecords: () => [{ status: 'active', dir: path.join(root, 'd') }] });
+    fm.setRoot(root);
+    fs.writeFileSync(path.join(root, 'guard.mp4'), 'v');
+    await assert.rejects(() => fm.delMany(['guard.mp4', 'd']), /folder has active downloads/);
+    assert.ok(fs.existsSync(path.join(root, 'guard.mp4')), '互斥拒绝时文件不得先被删（防线先于删除）');
+
+    const fm2 = new FileManager(tmp, { confirm: async () => 0, getRecords: () => [] });
+    fm2.setRoot(root);
+    await assert.rejects(() => fm2.delMany([]), /empty selection/);
+    // 空串在入口被过滤（等价空选集）；穿越项 resolveSafe 抛错进 results（不炸整批）
+    await assert.rejects(() => fm2.delMany(['']), /empty selection/);
+    const r = await fm2.delMany(['../outside']);
+    assert.equal(r.failed, 1, `穿越项失败回告，实际 ${JSON.stringify(r.results)}`);
+    assert.equal(r.results[0].reason, 'path outside whitelist');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
 // ------------------------------------------------------------------

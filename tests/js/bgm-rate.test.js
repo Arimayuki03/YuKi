@@ -91,6 +91,70 @@ test('starsFor / fmtRateLabel：展示映射', () => {
     assert.match(R.fmtRateLabel(0), /未评分/);
 });
 
+// ---------------------------------------------------------------- 标签（对齐 Kazumi rating_review_dialog）
+
+test('normalizeTags：去空白/去重/对象 name 兼容/上限截断', () => {
+    const R = loadBgmRate();
+    // VM 数组与主 realm Array.prototype 非同源：JSON 往返归一后再 deepEqual
+    const norm = (v) => JSON.parse(JSON.stringify(R.normalizeTags(v)));
+    assert.deepEqual(norm(null), []);
+    assert.deepEqual(norm('not-array'), []);
+    assert.deepEqual(norm(['神作', ' 神作 ', '', '原创']), ['神作', '原创']);
+    // next.bgm 回传 {name,count} 对象形态（同 Kazumi BangumiInterest.fromJson 兼容）
+    assert.deepEqual(norm([{ name: 'TV' }, { name: ' TV ' }, { count: 5 }]), ['TV']);
+    // 超 10 个截断到前 10（保序）
+    const many = Array.from({ length: 15 }, (_, i) => `t${i}`);
+    assert.equal(norm(many).length, 10);
+    assert.deepEqual(norm(many).slice(0, 3), ['t0', 't1', 't2']);
+});
+
+test('normalizeTagInput：空串/超长/重复/超上限的错误口径（对齐 Kazumi）', () => {
+    const R = loadBgmRate();
+    assert.equal(R.normalizeTagInput('', []).ok, false);
+    assert.equal(R.normalizeTagInput('   ', []).ok, false);
+    // 单标签 ≤10 字
+    const long = R.normalizeTagInput('一二三四五六七八九十X', []);
+    assert.equal(long.ok, false);
+    assert.match(long.msg, /10 字/);
+    assert.equal(R.normalizeTagInput('一二三四五六七八九十', []).ok, true);
+    // 重复
+    assert.equal(R.normalizeTagInput('神作', ['神作']).ok, false);
+    assert.match(R.normalizeTagInput('神作', ['神作']).msg, /已添加/);
+    // 满额 10 个后拒绝新增
+    const ten = Array.from({ length: 10 }, (_, i) => `tag${i}`);
+    const full = R.normalizeTagInput('new', ten);
+    assert.equal(full.ok, false);
+    assert.match(full.msg, /最多 10 个/);
+});
+
+test('buildRatingPayload：tags 语义（undefined=不修改；数组=整体覆盖，空数组=清除）', () => {
+    const R = loadBgmRate();
+    // 评分 + 标签
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(R.buildRatingPayload('42', 8, '好看', ['神作', 'TV']))),
+        { subjectId: '42', type: -1, rate: 8, comment: '好看', tags: ['神作', 'TV'] });
+    // 仅标签（无评分无吐槽）也可提交
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(R.buildRatingPayload('42', null, '', ['原创']))),
+        { subjectId: '42', type: -1, tags: ['原创'] });
+    // 空数组 = 清除全部标签（必须能提交，不能被误判为「无改动」）
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(R.buildRatingPayload('42', null, '', []))),
+        { subjectId: '42', type: -1, tags: [] });
+    // tags undefined = 不修改（不带 tags 键）
+    const noTags = R.buildRatingPayload('42', 8, '', undefined);
+    assert.ok(!('tags' in noTags), 'undefined tags 不进 payload');
+    // 全空（无评分无吐槽且无 tags 数组）→ null
+    assert.equal(R.buildRatingPayload('42', null, '', undefined), null);
+    // tags 数组归一化进 payload（去空白/去重）
+    const p = R.buildRatingPayload('42', null, '', [' 神作 ', '神作', '']);
+    assert.deepEqual(JSON.parse(JSON.stringify(p.tags)), ['神作']);
+    // 兼容回归：旧三参调用（无 tags）仍工作
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(R.buildRatingPayload('42', 8, '好看'))),
+        { subjectId: '42', type: -1, rate: 8, comment: '好看' });
+});
+
 test('submit：401 失败提示重新获取 Token，成功后 FavHub.changed 广播', async () => {
     const source = read('src/renderer/js/bgm-rate.js');
     const toasts = [];
@@ -101,7 +165,9 @@ test('submit：401 失败提示重新获取 Token，成功后 FavHub.changed 广
         $: (sel) => {
             // 自反 jQuery 桩：所有方法返回自身，支撑 text('…').show() / .text().show() 链式
             const api = {
-                on: () => api, off: () => api, text: () => api, val: () => '吐槽内容',
+                on: () => api, off: () => api, text: () => api,
+                // #bgm-rate-comment 返回吐槽正文；#bgm-rate-tag-input 返回空（无草稿）
+                val: () => (sel === '#bgm-rate-tag-input' ? '' : '吐槽内容'),
                 show: () => api, hide: () => api, html: () => api, trigger: () => api,
                 prop: () => api, // submit 禁用/复位提交按钮（prop('disabled', …)）
                 find: () => ({ on: () => api, length: 0 }),
@@ -126,7 +192,7 @@ test('submit：401 失败提示重新获取 Token，成功后 FavHub.changed 广
         vm.createContext(context);
         vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
         const R = context.__R;
-        R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '' };
+        R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '', tags: [], tagsInit: [], popularTags: [] };
         return R.submit();
     };
     // 成功路径：FavHub.changed 广播 + true
@@ -198,15 +264,22 @@ test('bangumiCard：原字段（rank/score/air_date）输出不受新增徽章�
 
 // ---------------------------------------------------------------- 集成形态（my.js / records.js 协作）
 
-test('my.js/records.js：评分按钮委托层级与内嵌渲染（防回归）', () => {
+test('my.js/records.js：评分按钮入口已迁至详情页（T80 防回归）', () => {
     const mySrc = read('src/renderer/js/my.js');
-    // 评分按钮点击委托在 document 级（对话框开合入口；#view-my 收不下独立收藏页 #view-favorites）
-    assert.match(mySrc, /\$\(document\)\.on\('click', '\.rec-bgm-rate'/);
-    // recCard 已内嵌渲染按钮：my.js 不再有任何 injectCardActions 调用（注入路径已删）
-    assert.ok(!mySrc.includes('injectCardActions'), 'injectCardActions 应已由 recCard 内嵌渲染取代，my.js 无残留调用');
-    // 卡片委托入口按事件源过滤评分按钮（点评分只开对话框，不进详情页）
+    // T80：收藏卡按钮与 document 级委托已移除（评分是详情级操作）
+    assert.ok(!mySrc.includes("$('.rec-bgm-rate'"), 'my.js 不应再有 .rec-bgm-rate 委托（入口挪至详情页）');
+    assert.ok(!mySrc.includes('injectCardActions'), 'injectCardActions 注入路径应已删除');
     const recSrc = read('src/renderer/js/records.js');
-    assert.match(recSrc, /closest\('\.rec-bgm-rate'\)/, '.vod-card 点击处理应跳过 .rec-bgm-rate');
+    assert.ok(!recSrc.includes('rec-bgm-rate'), 'recCard 不应再渲染收藏卡评分按钮');
+    // 新入口：详情页 hero 操作行按钮 + 委托（detail.js）
+    const detailSrc = read('src/renderer/js/detail.js');
+    assert.match(detailSrc, /id="detail-bgm-rate"/, '详情页 hero 应渲染 #detail-bgm-rate 按钮');
+    assert.match(detailSrc, /on\('click', '#detail-bgm-rate'/, '应绑定 #detail-bgm-rate 点击委托');
+    // bgm-rate.js 死代码清理（注释里的历史说明不算，只匹配函数定义）
+    const bgmSrc = read('src/renderer/js/bgm-rate.js');
+    assert.ok(!/injectCardActions\s*\(/.test(bgmSrc), 'injectCardActions 函数应已删除');
+    // 提交成功后通知详情页乐观刷新吐槽
+    assert.match(bgmSrc, /Detail\.onBgmCommentSubmitted/, '提交成功应通知详情页刷新吐槽（T80）');
 });
 
 // ---------------------------------------------------------------- 对话框生命周期（closeDialog 递归 / 防重入 / 重开复位）
@@ -218,13 +291,15 @@ test('my.js/records.js：评分按钮委托层级与内嵌渲染（防回归）'
  */
 function loadBgmRateInteractive(overrides) {
     const source = read('src/renderer/js/bgm-rate.js');
+    // hide 按选择器记录：#bgm-rate-status / #bgm-rate-tag-error 的 hide 是状态行
+    // 反馈（text('').hide()），与对话框可见性无关；对话框只经 closeDialog 关闭。
     const calls = { closeDialog: [], hide: [], disabled: [] };
-    const mk$ = () => {
+    const mk$ = (sel) => {
         // 自反 jQuery 桩：记录 hide() 与 prop('disabled', …) 调用，其余链式返回自身
         const api = {
             on: () => api, off: () => api, text: () => api, val: () => '',
             show: () => api, html: () => api, trigger: () => api,
-            hide: () => { calls.hide.push(1); return api; },
+            hide: () => { calls.hide.push(String(sel)); return api; },
             prop: (k, v) => {
                 if (k === 'disabled') calls.disabled.push(v);
                 return api;
@@ -268,7 +343,8 @@ test('closeDialog 递归：Esc/取消/提交成功三条路径 _close 均一次�
     assert.equal(await p1, false, 'Esc 路径按取消 resolve(false)');
     assert.equal(R._resolve, null, '关闭后 _resolve 已置空（wrapped 不再可捕获 → 递归根除）');
     assert.equal(calls.closeDialog.filter((id) => id === 'bgmRateDialog').length, 1, 'Esc 路径 closeDialog 只执行一次');
-    assert.ok(calls.hide.length <= 1, '对话框隐藏至多一次');
+    // 对话框根节点不经 $.hide() 隐藏（closeDialog 是唯一关闭路径）；hide 只允许打在状态行上
+    assert.ok(!calls.hide.some((s) => /bgmRateDialog/.test(s)), '对话框根不走 $.hide()（closeDialog 专责）');
 
     // —— 路径二：取消按钮（直接 _close(false) → 原始 closeDialog 直调，不走 wrapped）——
     const p2 = R.openRateDialog({ subjectId: '42', name: 'X' });
@@ -285,7 +361,7 @@ test('closeDialog 递归：Esc/取消/提交成功三条路径 _close 均一次�
     assert.equal(R._resolve, null, '提交成功后 _resolve 已置空');
     assert.equal(R._ctx, null, '提交成功后 _ctx 已复位');
     assert.equal(calls.closeDialog.filter((id) => id === 'bgmRateDialog').length, 3, '三次会话各关闭一次（无递归连锁）');
-    assert.ok(calls.hide.length <= 3, '每次会话隐藏至多一次');
+    assert.ok(!calls.hide.some((s) => /bgmRateDialog/.test(s)), '对话框根从不走 $.hide()');
 
     // —— 路径四：wrapped 不再触发二次关闭（_resolve 已空，wrapped 透传原始 closeDialog）——
     // 再次全局派发（模拟 Esc 重复按键）：BgmRate._resolve 为空 → wrapped 透传，_close 不再执行
@@ -308,7 +384,7 @@ test('submit 防重入：同一 subject 在途时重复触发被拒绝，不并�
             return { code: 200, result: { uploaded: 1, failed: 0, results: [{ subjectId: '42', ok: true, msg: 'ok' }] } };
         },
     });
-    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '' };
+    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '', tags: [], tagsInit: [], popularTags: [] };
     const first = R.submit();
     // 等首个请求真正进入 doAction（submit 同步段只到 token 查询的 await）
     await new Promise((r) => setImmediate(r));
@@ -322,7 +398,7 @@ test('submit 防重入：同一 subject 在途时重复触发被拒绝，不并�
     assert.equal(await first, true, '首个提交正常完成');
     assert.equal(R._inFlightId, '', 'finally 复位 _inFlightId');
     // 复位后可再次提交（不误锁）。首次成功已 _close(true) 复位 _ctx，需重新挂上下文
-    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '' };
+    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '', tags: [], tagsInit: [], popularTags: [] };
     assert.equal(await R.submit(), true, '复位后可再次提交');
     assert.equal(doActionCalls, 2);
     // 提交按钮禁用/复位按序发生：true(发送前禁用) → false(finally 复位) → true → false
@@ -343,15 +419,96 @@ test('重开复位：对话框已打开时再次 openRateDialog，旧 Promise �
 test('清除评分文案：rate=0 成功 toast 为「已清除评分」，不再是「已评分：未评分」', async () => {
     const toasts = [];
     const { R } = loadBgmRateInteractive({ warnToast: (m) => toasts.push(m) });
-    R._ctx = { subjectId: '42', name: 'X', rate: 0, comment: '' };   // 0 = 清除评分
+    R._ctx = { subjectId: '42', name: 'X', rate: 0, comment: '', tags: [], tagsInit: [], popularTags: [] };   // 0 = 清除评分
     const ok = await R.submit();
     assert.equal(ok, true);
     assert.ok(toasts.includes('已清除评分'), '应提示「已清除评分」');
     assert.ok(!toasts.some((t) => t.includes('已评分：未评分')), '不得出现「已评分：未评分」');
     // 对照：正常评分仍走「已评分：N 分」文案
     toasts.length = 0;
-    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '' };
+    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '', tags: [], tagsInit: [], popularTags: [] };
     await R.submit();
     assert.ok(toasts.some((t) => t.startsWith('已评分：') && t.includes('8 分')));
+});
+
+test('submit 标签脏检查：初始一致不带 tags 键；有改动整体覆盖（含清除）', async () => {
+    // 捕获 doAction 实际提交的 uploads payload
+    let sent = null;
+    const { R } = loadBgmRateInteractive({
+        doAction: async (_do, form) => {
+            sent = JSON.parse(form.uploads);
+            return { code: 200, result: { uploaded: 1, failed: 0, results: [{ subjectId: '42', ok: true, msg: 'ok' }] } };
+        },
+    });
+    // 1) 初始标签与当前一致（tags === tagsInit）：payload 不带 tags（不动远端标签）
+    R._ctx = { subjectId: '42', name: 'X', rate: 8, comment: '', tags: ['神作'], tagsInit: ['神作'], popularTags: [] };
+    await R.submit();
+    assert.equal(sent.length, 1);
+    assert.ok(!('tags' in sent[0]), '标签未改动时 payload 不带 tags 键');
+    // 2) 新增标签：整体覆盖提交
+    R._ctx = { subjectId: '42', name: 'X', rate: null, comment: '', tags: ['神作', 'TV'], tagsInit: ['神作'], popularTags: [] };
+    await R.submit();
+    assert.deepEqual(sent[0].tags, ['神作', 'TV']);
+    // 3) 清空标签：空数组照常提交（清除远端标签）
+    R._ctx = { subjectId: '42', name: 'X', rate: null, comment: '', tags: [], tagsInit: ['神作'], popularTags: [] };
+    await R.submit();
+    assert.deepEqual(sent[0].tags, []);
+});
+
+// ---------------------------------------------------------------- 标签 UI 集成形态
+
+test('标签编辑 UI：index.html 对话框结构 + detail/bangumi-search 入口透传 tags', () => {
+    const html = read('src/renderer/index.html');
+    // 对话框静态结构（常驻 DOM，控件 id 固定）
+    for (const id of ['bgm-rate-tags-selected', 'bgm-rate-tags-popular', 'bgm-rate-tag-input', 'bgm-rate-tag-add', 'bgm-rate-tags-count', 'bgm-rate-tag-error']) {
+        assert.ok(html.includes(`id="${id}"`), `index.html 应包含 #${id}`);
+    }
+    // detail.js：入口透传 tags + popularTags（条目公共标签做热门建议）
+    const detailSrc = read('src/renderer/js/detail.js');
+    assert.match(detailSrc, /tags: cur\.tags/, 'detail.js 评分入口应透传当前个人标签');
+    assert.match(detailSrc, /popularTags:/, 'detail.js 评分入口应透传热门标签建议');
+    // bangumi-search.js：搜索卡评分入口已移除（评分统一在详情页 hero），不应再有 .bgm-card-rate 逻辑
+    const bsSrc = read('src/renderer/js/bangumi-search.js');
+    assert.ok(!bsSrc.includes('bgm-card-rate'), 'bangumi-search.js 不应保留搜索卡评分按钮逻辑');
+    // common.js bangumiCard：不再输出 data-tags（BgmRate 热门标签实际取自详情接口，
+    // 搜索卡从无消费方，死属性已移除）
+    const commonSrc = read('src/renderer/js/common.js');
+    assert.ok(!commonSrc.includes('data-tags'), 'bangumiCard 不应再渲染 data-tags 死属性');
+    // 事件绑定：chips 移除 / 热门 toggle / 自定义输入（回车 + 按钮）
+    const bgmSrc = read('src/renderer/js/bgm-rate.js');
+    assert.match(bgmSrc, /'#bgm-rate-tags-selected'\)\.on\('click', '\.bgm-rate-tag-remove'/, '已选 chips 移除委托');
+    assert.match(bgmSrc, /'#bgm-rate-tags-popular'\)\.on\('click', '\.bgm-rate-tag-pop'/, '热门标签 toggle 委托');
+    assert.match(bgmSrc, /'#bgm-rate-tag-input'\)\.on\('keydown'/, '自定义标签回车添加');
+});
+
+test('fetchCurrent：收藏 GET 回传 tags 归一化进上下文', async () => {
+    const source = read('src/renderer/js/bgm-rate.js');
+    const context = {
+        console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+        setTimeout, clearTimeout,
+        $: () => ({ on: () => this, find: () => ({ on: () => this, length: 0 }) }),
+        doAction: async (doName) => {
+            assert.equal(doName, 'kazumiBangumiCollectionGet');
+            return {
+                code: 200,
+                collection: { rate: 8, comment: '好看', tags: [{ name: '神作' }, 'TV'] },
+            };
+        },
+        warnToast: () => {},
+        escHtml: (s) => String(s),
+        openDialog: () => {}, closeDialog: () => {},
+        FavHub: { changed: () => {} },
+        Kazumi: { _getBangumiToken: async () => 'tok' },
+    };
+    context.globalThis = context;
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+    const R = context.__R;
+    const cur = await R.fetchCurrent('42', null);
+    assert.equal(cur.rate, 8);
+    assert.equal(cur.comment, '好看');
+    // VM 数组跨 realm：JSON 往返归一后比较；{name} 对象与字符串混合应归一化为字符串数组
+    assert.deepEqual(JSON.parse(JSON.stringify(cur.tags)), ['神作', 'TV']);
 });
 

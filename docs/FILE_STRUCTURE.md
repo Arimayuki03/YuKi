@@ -19,7 +19,7 @@ YuKi/
 ├── scripts/                构建、下载、验收与诊断脚本
 ├── src/                    Electron 主进程与渲染进程
 ├── tests/                  JS 单元测试（node --test）
-├── vendor/                 第三方二进制（mpv/aria2c/ffmpeg/Anime4K/MiSans/dex-tools/dexdeps/spider-runner.jar，不入库）
+├── vendor/                 第三方二进制（mpv/aria2c/ffmpeg/Anime4K/MiSans/spider-runner.jar + 可选 dex-tools/dexdeps，不入库）
 ├── python-dist/            PyInstaller 产物（不入库）
 ├── dist/                   electron-builder 产物（不入库）
 ├── package.json            依赖与构建配置（appId com.yuki.app，productName YuKi）
@@ -47,7 +47,7 @@ src/
 │   ├── dl-dedupe.js        同源同集下载去重登记（站点|剧名|集名 稳定 key）
 │   ├── dl-layout.js        下载番剧子目录布局（路径段清洗 + <dlDir>/<番剧名>/<集名> 合成）
 │   ├── dl-record.js        下载记录持久化（dl-records.json）
-│   ├── downloader.js       aria2c 引擎封装
+│   ├── downloader.js       aria2c 引擎封装（BT/磁链公共 tracker 内置列表 + trackerslist.com 72h 自动刷新热更新）
 │   ├── hls-downloader.js   HLS 下载与广告过滤（两段式 CUE/DISCONTINUITY 启发式 + 分片完整性校验）
 │   ├── mpv-menu-conf.js    mpv 右键菜单中文定义（menu.conf 译制）
 │   ├── mpv-player.js       mpv 进程管理与播放会话（原生队列/右键菜单/Anime4K 快捷键/跳片头片尾 --start）
@@ -78,9 +78,9 @@ src/
     └── js/ (21 文件)       渲染层模块（均导出为 YUKI.*）
         ├── app.js          路由与视图调度
         ├── home.js         首页/分类/聚合搜索
-        ├── detail.js       详情与播放入口（含「开始播放」一键直达）
+        ├── detail.js       详情与播放入口（含「开始播放」一键直达、选集讨论页签、bgm.tv 跳转）
         ├── player.js       播放与续播（含跳片头片尾登记，Shift+O/E）
-        ├── bgm-rate.js     Bangumi 评分/吐槽对话框
+        ├── bgm-rate.js     Bangumi 评分/吐槽/打标签对话框
         ├── kazumi.js       Kazumi 规则管理与商店
         ├── bangumi-search.js  Bangumi 搜索页签
         ├── panels.js       设置面板
@@ -169,13 +169,13 @@ python-backend/
 
 ## `tests/` — JS 单元测试
 
-`tests/js/*.test.js`（`node --test`，84 文件 / 1717 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K/跳片头片尾）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）、主进程 IPC 黑盒与 preload 契约、主进程/渲染层内部实现单测等。
+`tests/js/*.test.js`（`node --test`，85 文件 / 1747 用例），覆盖观看统计、时间表、播放器（含原生队列记账/Anime4K/跳片头片尾）、播放列表代理、网盘源播放策略（pan-source-playlist）、下载去重与番剧目录、右键菜单定义、设置、记录、封面链、下载、打包钩子（after-pack）、更新控制器（updater-controller）、主进程 IPC 黑盒与 preload 契约、主进程/渲染层内部实现单测、Bangumi 评分/标签与选集讨论（bgm-rate、bgm-episode-comments）等。
 
 ## 构建产物（不入库）
 
 | 目录 | 内容 | 来源 |
 |---|---|---|
-| `vendor/` | mpv/aria2c/ffmpeg/Anime4K/MiSans（download-binaries.js）+ dex-tools/dexdeps（不入库，需自行从上游 Release/AOSP 获取放置）+ spider-runner.jar（自建产物） | 混合来源，见 [THIRD_PARTY.md](THIRD_PARTY.md) |
+| `vendor/` | mpv/aria2c/ffmpeg/Anime4K/MiSans（download-binaries.js）+ spider-runner.jar（自建产物）+ dex-tools/dexdeps（**可选**：`download-binaries.js dextools` 或运行时按需下载，0.2.7 起不随安装包分发） | 混合来源，见 [THIRD_PARTY.md](THIRD_PARTY.md) |
 | `python-dist/` | 后端 PyInstaller 产物 | `npm run build:py` |
 | `dist/` | 安装包（NSIS exe 等） | `electron-builder` |
 | `node_modules/` / `.venv/` | 依赖 | `npm install` / `pip install` |

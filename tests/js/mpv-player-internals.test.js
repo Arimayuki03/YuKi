@@ -532,7 +532,8 @@ test('_connectIpc(): 连接就绪后按固定 id 观察 7 条属性（含两个 
     assert.deepEqual(obs.map((c) => [c[1], c[2]]), [
         [0x101, 'fullscreen'], [0x102, 'speed'], [0x103, 'time-pos'], [0x104, 'duration'],
         [0x105, 'pause'], [0x106, 'user-data/yuki/a4k-request'], [0x107, 'user-data/yuki/ep-skip'],
-    ], '全屏/倍速/进度/时长/暂停与 Anime4K、上下集信号都必须观察（退出时直接用缓存）');
+        [0x108, 'user-data/yuki/oped-record'],
+    ], '全屏/倍速/进度/时长/暂停与 Anime4K、上下集、片头片尾登记信号都必须观察（退出时直接用缓存）');
 });
 
 test('_connectIpc(): 连接失败按 100ms 重试；attempt>100 放弃；无进程/会话不匹配不连', () => {
@@ -560,22 +561,30 @@ test('_connectIpc(): 连接失败按 100ms 重试；attempt>100 放弃；无进�
     assert.equal(ctx.netSockets.length, before, 'attempt>100 直接放弃，不再建连接');
 });
 
-test('property-change: ep-skip/a4k-request 读后清零并 emit（仅 ±1 方向生效）', () => {
+test('property-change: ep-skip/a4k-request/oped-record 读后清零并 emit（仅合法值生效）', () => {
     const { p } = mkPlayer();
     const sets = [];
     const skips = [];
     const a4k = [];
+    const oped = [];
     p.command = (...args) => { if (args[0] === 'set') sets.push(args); return Promise.resolve(); };
     p.on('ep-skip', (i) => skips.push(i.dir));
     p.on('a4k-request', (i) => a4k.push(i.mode));
+    p.on('oped-record', (i) => oped.push(i.kind));
     p._activeSession = { id: 5 };
     p._onEvent({ event: 'property-change', name: 'user-data/yuki/ep-skip', data: '-1' });
     p._onEvent({ event: 'property-change', name: 'user-data/yuki/ep-skip', data: '1' });
     p._onEvent({ event: 'property-change', name: 'user-data/yuki/ep-skip', data: '7' }); // 非法方向
     p._onEvent({ event: 'property-change', name: 'user-data/yuki/ep-skip', data: '' });  // 空串
     p._onEvent({ event: 'property-change', name: 'user-data/yuki/a4k-request', data: 'A4K_Restore' });
+    // T81：片头/片尾登记信号（右键菜单「标记片头结束点/标记片尾起点」）
+    p._onEvent({ event: 'property-change', name: 'user-data/yuki/oped-record', data: 'op' });
+    p._onEvent({ event: 'property-change', name: 'user-data/yuki/oped-record', data: 'ed' });
+    p._onEvent({ event: 'property-change', name: 'user-data/yuki/oped-record', data: 'x' }); // 非法 kind
+    p._onEvent({ event: 'property-change', name: 'user-data/yuki/oped-record', data: '' });
     assert.deepEqual(skips, [-1, 1], '仅 ±1 方向触发；其它值不得误跳转集数');
     assert.deepEqual(a4k, ['A4K_Restore']);
+    assert.deepEqual(oped, ['op', 'ed'], '仅 op/ed 触发登记；其它值不得误登记');
     assert.deepEqual(sets, [
         ['set', 'user-data/yuki/ep-skip', ''],
         ['set', 'user-data/yuki/ep-skip', ''],
@@ -583,6 +592,9 @@ test('property-change: ep-skip/a4k-request 读后清零并 emit（仅 ±1 方向
         // data='' 为 falsy，整段跳过（不清零也不 emit）
         ['set', 'user-data/yuki/ep-skip', ''],
         ['set', 'user-data/yuki/a4k-request', ''],
+        ['set', 'user-data/yuki/oped-record', ''],
+        ['set', 'user-data/yuki/oped-record', ''],
+        ['set', 'user-data/yuki/oped-record', ''],
     ], '信号读后立即清空，重复请求同一档位才能再次触发 observe');
 });
 

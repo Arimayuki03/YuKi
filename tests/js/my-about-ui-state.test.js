@@ -898,7 +898,7 @@ describe('my', () => {
         h.My._saveBgmCol([{ vodId: '1' }]);
         assert.equal(h.bgm.set, 1, '数组应写入');
         assert.equal(h.bgm.setArgs[0].ttl, 0, '账号收藏缓存无 TTL');
-        assert.equal(h.bgm.setArgs[0].k, 'my::bgmcol::v1', '持久键名带版本后缀');
+        assert.equal(h.bgm.setArgs[0].k, 'my::bgmcol::v3', '持久键名带版本后缀');
     });
 
     test('my：refreshBangumi 作废内存+持久缓存后强制重拉最新数据', async () => {
@@ -1173,7 +1173,7 @@ describe('my', () => {
         }
 
         const render = async () => { await view.render(); syncCards(); };
-        return { view, render, cards, jq, toasts, confirms, sets, settings, ui, handlers: jq.handlers };
+        return { view, render, cards, jq, toasts, confirms, sets, settings, ui, handlers: jq.handlers, ctx: context };
     }
 
     /** 从 grid HTML 中解析每张卡的关键 data-* 属性。 */
@@ -1539,6 +1539,146 @@ describe('my', () => {
         h.cards[1].checked = true;
         await h.view.removeChecked();
         assert.deepEqual(h.settings.favorites.map((f) => f.uid), ['u3'], '两条本地/下载记录被删除，在线片保留');
+    });
+
+    // —— 来源筛选（全部/CatVod/Bangumi）：_src 与卡片渲染的 Bangumi 托管口径一致
+
+    test('my：同步后普通源收藏带 bangumiId 不再跳过远端条目——同名不同源两张卡都显示（来源分类可区分）', async () => {
+        // 用户场景：点「同步 Bangumi」→ 上传本地收藏时为每条回写 bangumiId；
+        // 此前 mergeExtraRecords 把远端同 subject 条目全部拦掉，同步后网格只剩 CatVod 源影片。
+        const favorites = [
+            { uid: 'u1', site: 'cspby', siteName: '源甲', vodId: '1', name: '碧蓝之海', bangumiId: '10860' },
+            { uid: 'u2', site: 'local', vodId: 'C:\\a.mp4', name: '本地文件片', bangumiId: '7777' },
+        ];
+        const h = loadFavView({ favorites });
+        h.view._extra = async () => [
+            { site: 'bangumi', vodId: '10860', name: '碧蓝之海', tag: 'watching', bangumi: true },
+            { site: 'bangumi', vodId: '7777', name: '本地文件片', tag: 'want', bangumi: true },
+        ];
+        h.view._src = '';
+        await h.render();
+        const cards = parseCards(h.jq.html('#my-favorites-grid'));
+        assert.equal(cards.length, 4, '全部：2 张本地源卡 + 2 张 Bangumi 卡（同名不同源各自成卡）');
+        // 来源分类仍能区分开：catvod 只剩本地两张，bangumi 只剩远端两张
+        h.view._src = 'catvod';
+        await h.render();
+        assert.deepEqual(parseCards(h.jq.html('#my-favorites-grid')).map((c) => c.uid), ['u1', 'u2']);
+        h.view._src = 'bangumi';
+        await h.render();
+        assert.deepEqual(parseCards(h.jq.html('#my-favorites-grid')).map((c) => c.id), ['10860', '7777']);
+    });
+
+    test('my：来源筛选 catvod——只显示本地收藏（含本地文件/下载），远端 Bangumi 条目被滤除', async () => {
+        const favorites = [
+            { uid: 'u1', site: 'cspby', siteName: '源甲', vodId: '1', name: '在线片' },
+            { uid: 'u2', site: 'local', vodId: 'C:\\a.mp4', name: '本地视频' },
+            { uid: 'u3', site: 'download', vodId: 'D:\\b.mkv', name: '下载视频' },
+            { uid: 'u4', site: 'bangumi', vodId: '55', name: '同步镜像番', bangumiId: '55' },
+        ];
+        const h = loadFavView({ favorites });
+        h.view._extra = async () => [{ site: 'bangumi', vodId: '77', name: '远端番', tag: 'want', bangumi: true }];
+        h.view._src = 'catvod';
+        await h.render();
+        const uids = parseCards(h.jq.html('#my-favorites-grid')).map((c) => c.uid);
+        assert.deepEqual(uids, ['u1', 'u2', 'u3'], '本地三类（在线/本地文件/下载）保留，site=bangumi 与远端条目滤除');
+    });
+
+    test('my：Bangumi 已看话数补齐——无 Kazumi 环境时静默跳过（不抛错不发请求）', async () => {
+        const h = loadFavView({ favorites: [] });
+        h.view.init();
+        h.view._extra = async () => [
+            { site: 'bangumi', vodId: '100', name: '在看番', tag: 'watching', bangumi: true },
+            { site: 'bangumi', vodId: '300', name: '想看番', tag: 'want', bangumi: true },
+        ];
+        // loadFavView 的 context 未注入 Kazumi → render 内 typeof Kazumi 守卫应跳过
+        // 评分/排名与已看话数两条补齐流程，且不影响网格正常渲染
+        await assert.doesNotReject(h.render());
+        assert.equal(parseCards(h.jq.html('#my-favorites-grid')).length, 2, '补齐跳过不影响卡片渲染');
+    });
+
+    test('my：来源筛选 bangumi——远端条目与 site=bangumi 同步镜像都进分类，本地条目被滤除', async () => {
+        const favorites = [
+            { uid: 'u1', site: 'cspby', siteName: '源甲', vodId: '1', name: '在线片' },
+            { uid: 'u4', site: 'bangumi', vodId: '55', name: '同步镜像番', bangumiId: '55' },
+        ];
+        const h = loadFavView({ favorites });
+        h.view._extra = async () => [{ site: 'bangumi', vodId: '77', name: '远端番', tag: 'want', bangumi: true }];
+        h.view._src = 'bangumi';
+        await h.render();
+        const cards = parseCards(h.jq.html('#my-favorites-grid'));
+        assert.deepEqual(cards.map((c) => c.id), ['55', '77'], '镜像（55）与远端（77）都进 Bangumi 分类，本地条目滤除');
+    });
+
+    test('my：来源筛选空串恢复全部条目', async () => {
+        const favorites = [{ uid: 'u1', site: 'a', vodId: '1', name: '本地片' }];
+        const h = loadFavView({ favorites });
+        h.view._extra = async () => [{ site: 'bangumi', vodId: '77', name: '远端番', tag: 'want', bangumi: true }];
+        h.view._src = 'bangumi';
+        await h.render();
+        assert.equal(parseCards(h.jq.html('#my-favorites-grid')).length, 1, 'bangumi 分类只剩远端条目');
+        h.view._src = '';
+        await h.render();
+        assert.equal(parseCards(h.jq.html('#my-favorites-grid')).length, 2, '切回全部恢复 2 条');
+    });
+
+    test('my：来源筛选与标签筛选叠加（bangumi + 看过），与搜索叠加（catvod + 关键字）', async () => {
+        const favorites = [
+            { uid: 'u1', site: 'a', vodId: '1', name: '本地想看', tag: 'want' },
+            { uid: 'u2', site: 'a', vodId: '2', name: '本地看过', tag: 'seen' },
+        ];
+        const h = loadFavView({ favorites });
+        h.view._extra = async () => [
+            { site: 'bangumi', vodId: '77', name: '远端看过番', tag: 'seen', bangumi: true },
+            { site: 'bangumi', vodId: '78', name: '远端想看番', tag: 'want', bangumi: true },
+        ];
+        h.view._src = 'bangumi';
+        h.view._tag = 'seen';
+        await h.render();
+        assert.deepEqual(parseCards(h.jq.html('#my-favorites-grid')).map((c) => c.id), ['77'], 'bangumi+seen 只剩远端看过番');
+        h.view._src = 'catvod';
+        h.view._tag = '';
+        h.view._q = '看过';
+        await h.render();
+        assert.deepEqual(parseCards(h.jq.html('#my-favorites-grid')).map((c) => c.uid), ['u2'], 'catvod+关键字只剩本地看过');
+    });
+
+    test('my：来源筛选点击——data-src 写入 _src、页码回 1、未知值钳回全部', async () => {
+        const favorites = [{ uid: 'u1', site: 'a', vodId: '1', name: '片1' }];
+        const h = loadFavView({ favorites });
+        h.view.init();
+        await h.render();
+        h.view._page = 2;
+        const srcHandler = h.handlers.find((x) => x.sel === '#my-favorites-srcs' && x.event === 'click');
+        assert.ok(srcHandler, '应绑定来源筛选点击事件');
+        // currentTarget 桩：data() 返回页签 data-src 值；其余链式方法空转（handlers 之外的写入可忽略）
+        const stub = () => { const o = { data: () => '', addClass: () => o, removeClass: () => o }; return o; };
+        srcHandler.fn({ currentTarget: Object.assign(stub(), { data: () => 'bangumi' }) });
+        assert.equal(h.view._src, 'bangumi', '点击 Bangumi 页签应写入 _src');
+        assert.equal(h.view._page, 1, '切换来源应回到第 1 页');
+        srcHandler.fn({ currentTarget: Object.assign(stub(), { data: () => 'weird' }) });
+        assert.equal(h.view._src, '', '未知来源值应钳回全部（空串）');
+    });
+
+    test('my：来源筛选无匹配时显示「没有匹配的记录」空态', async () => {
+        const favorites = [{ uid: 'u1', site: 'a', vodId: '1', name: '本地片' }];
+        const h = loadFavView({ favorites });
+        h.view._src = 'bangumi';
+        await h.render();
+        const html = h.jq.html('#my-favorites-grid');
+        assert.match(html, /没有匹配的记录/, '只有本地收藏时 Bangumi 分类空态应切换文案');
+        assert.doesNotMatch(html, /暂无收藏/);
+    });
+
+    test('my：收藏视图默认绑定来源筛选且 _src 初始为全部；历史视图不绑筛选（_src 恒空）', async () => {
+        const favorites = [{ uid: 'u1', site: 'a', vodId: '1', name: '片1' }];
+        const h = loadFavView({ favorites });
+        h.view.init();
+        const srcHandler = h.handlers.find((x) => x.sel === '#my-favorites-srcs' && x.event === 'click');
+        assert.ok(srcHandler, '收藏视图应绑定来源筛选');
+        assert.equal(h.view._src, '', '收藏视图默认全部');
+        // 历史视图（withTags=false）：makeRecordView 直接构造，不绑定来源筛选页签
+        const historyView = h.ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+        assert.equal(String(historyView._src), '', '历史视图 _src 恒为空串（不参与来源筛选）');
     });
 
 

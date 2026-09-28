@@ -58,3 +58,6 @@ python-backend/tests/compat_report.json
 python-backend/tests/fixtures/config/single.json.gz
 python-backend/tests/fixtures/config/disguise.jpg
 python-backend/tests/fixtures/config/disguise.png
+
+# open-code-review 本地配置与审查产物（含 LLM 网关 key，禁止入库）
+.opencodereview/

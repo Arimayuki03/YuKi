@@ -2172,12 +2172,15 @@ _BANGUMI_CACHE_TTL = {
     'kazumiBangumiListByTag': 600,
     # 角色列表现会并发补全每个角色的中文名（多次详情请求），开销大且变动罕见 → 缓存 30min
     'kazumiBangumiCharacters': 1800,
+    # 分集评论（next.bgm /p1/episodes/{id}/comments）：讨论时效性接近吐槽，
+    # 但无分页参数一次拉全量，10min 折中减少重复整段请求
+    'kazumiBangumiEpisodeComments': 600,
 }
 
 
 def _bangumi_cache_key(do, form):
     """按 endpoint + 相关参数 hash 生成缓存键（忽略 token/refresh 等无关项）。"""
-    keys = ('id', 'keyword', 'limit', 'offset', 'tag',
+    keys = ('id', 'episodeId', 'keyword', 'limit', 'offset', 'tag',
             'tags', 'sort', 'dateStart', 'dateEnd',
             'rankMin', 'rankMax', 'scoreMin', 'scoreMax', 'weekdays')
     parts = [do] + ['%s=%s' % (k, form.get(k, '')) for k in keys]
@@ -2225,6 +2228,8 @@ def _bangumi_body_ok(do, body):
         return bool(d.get('items'))
     if do == 'kazumiBangumiCharacters':
         return bool(d.get('characters'))
+    if do == 'kazumiBangumiEpisodeComments':
+        return bool(d.get('comments'))
     return True
 
 
@@ -2851,7 +2856,18 @@ def dispatch_kazumi_action(form):
             limit = _form_int(form, 'limit', 20)
             offset = _form_int(form, 'offset', 0)
             data = kazumi_mgr.bangumi_comments(subject_id, limit, offset)
+            # data: {'list': [...], 'total': 吐槽总数}（total 与分页无关，来自 next.bgm）
             return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
+
+        # 分集评论（只读；episode_id 为 Bangumi 分集 ID，非集号——前端从
+        # kazumiBangumiEpisodes 的分集列表按 sort 取第 N 集的 id）
+        if do == 'kazumiBangumiEpisodeComments':
+            episode_id = form.get('episodeId', '') or form.get('id', '')
+            def _build_ep_comments():
+                data = kazumi_mgr.bangumi_episode_comments(episode_id)
+                return 200, json.dumps({'code': 200, 'comments': data}, ensure_ascii=False)
+            # 网络调用必须进 builder：放外面时缓存命中也会先回源一次，TTL 形同虚设
+            return _cached_bangumi(do, form, _build_ep_comments)
 
         if do == 'kazumiBangumiRelations':
             subject_id = form.get('id', '')

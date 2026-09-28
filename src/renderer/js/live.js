@@ -232,7 +232,7 @@ const Live = {
                 if (this.channels.some((c) => c.group === String(st.group))) this.group = String(st.group);
             }
             this.renderGroups();
-            this.renderList();
+            this.renderList(true); // 进页首渲/切源/刷新同切分组一样播入场动画（仅探测分批刷新不播，防闪烁）
             if (!this.channels.length) {
                 // 网页/非直播源内容解析不出频道：给出可操作的提示
                 const isHtml = /<html|<!doctype/i.test(text);
@@ -446,8 +446,8 @@ const Live = {
         box.html(tabs.join(''));
     },
 
-    /** animate=true：本次渲染的频道卡片播放入场动画（分类切换/翻页）。
-     *  后台探测分批刷新/静默重载不传参，避免列表反复重播动画闪烁。 */
+    /** animate=true：本次渲染的频道卡片播放入场动画（进页首渲/切源/刷新/切分组/翻页
+     *  等全量重渲染）。后台探测分批刷新不传参：列表原地反复重写，播动画会闪烁。 */
     renderList(animate) {
         const box = $('#live-list').empty().toggleClass('anim-cards', !!animate);
         // T34 分页：先按分组过滤再切片，索引保留在完整 channels 中的位置（点击播放用）
@@ -484,13 +484,13 @@ const Live = {
             return;
         }
         // 每页数量设置变更（invalidatePageSizeCache 已作废 pageSizeOf 缓存）：
-        // 与当前列表不一致时只重排分页，不重新探测频道
+        // 与当前列表不一致时重排分页并播入场动画（同全量重渲染惯例），不重新探测频道
         if (this.channels && this.channels.length) {
             const size = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
             if (size !== this._pageSize) {
                 this._pageSize = size;
                 this._page = 1;
-                this.renderList();
+                this.renderList(true);
             }
         }
     },

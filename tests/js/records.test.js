@@ -137,7 +137,7 @@ test('recCard：Bangumi 条目带来源徽标/状态标签，可勾选批量标�
     assert.match(html, /rec-check/);       // Bangumi 条目现支持勾选（多选标记状态，同步账号）
     assert.match(html, /data-bgm="1"/);    // 带 Bangumi 标识供批量标记识别
     assert.doesNotMatch(html, /rec-edit/);
-    assert.match(html, /rec-bgm-rate/);    // 内嵌「★ 评分」操作按钮（recCard 直接渲染，重建路径不丢）
+    assert.doesNotMatch(html, /rec-bgm-rate/); // T80：评分按钮挪到详情页 hero，卡片不再渲染
 });
 
 test('recCard：本地与下载文件卡片带 data-local-path 供抓帧渲染', () => {
@@ -248,9 +248,9 @@ test('迁移：旧记录缺 uid 时 recGet 按 ts 回填并持久化', async () 
     assert.equal(new Set(uids).size, uids.length, 'uid 互不相同');
 });
 
-// ---------------------------------------------------------------- T79：Bangumi 合并去重
+// ---------------------------------------------------------------- T79：Bangumi 合并去重（仅本地「Bangumi 镜像」拦远端同 ID）
 
-test('mergeExtraRecords：本地收藏带 bangumiId 时，远端同 ID 条目被去掉（同步后不再双卡）', () => {
+test('mergeExtraRecords：本地「Bangumi 镜像」条目拦下远端同 ID 条目（同步后不再双 Bangumi 卡）', () => {
     const { __mergeExtraRecords: merge } = loadRecords({});
     const local = [{ site: 'bangumi', vodId: '999', name: '本地条目', bangumiId: '999' }];
     const extra = [
@@ -261,6 +261,22 @@ test('mergeExtraRecords：本地收藏带 bangumiId 时，远端同 ID 条目被
     assert.equal(merged.length, 2);
     assert.ok(merged.some((v) => v.name === '本地条目'));
     assert.ok(merged.some((v) => v.name === '仅远端条目'));
+});
+
+test('mergeExtraRecords：普通源收藏带 bangumiId 不再拦截远端条目（同名不同源各自成卡，靠来源分类区分）', () => {
+    const { __mergeExtraRecords: merge } = loadRecords({});
+    const local = [
+        { site: 'cspby', vodId: 'v1', name: '碧蓝之海', bangumiId: '10860' },
+        { site: 'local', vodId: 'C:\\a.mp4', name: '本地文件片', bangumiId: '7777' },
+    ];
+    const extra = [
+        { site: 'bangumi', vodId: '10860', name: '碧蓝之海', bangumi: true },
+        { site: 'bangumi', vodId: '7777', name: '本地文件片', bangumi: true },
+    ];
+    const merged = merge(local, extra);
+    assert.equal(merged.length, 4, '普通源收藏（CatVod/本地文件）不拦远端：2 本地 + 2 远端各自成卡');
+    assert.equal(String(merged[2].vodId), '10860');
+    assert.equal(String(merged[3].vodId), '7777');
 });
 
 test('mergeExtraRecords：普通本地收藏（无 bangumiId）不受影响，extra 内部按 vodId 自去重', () => {
@@ -306,18 +322,18 @@ test('recCard：详情页同步写入的本地镜像（site=bangumi 无 bangumi 
     assert.ok(plain.includes('rec-edit'));
 });
 
-// ---------------------------------------------------------------- Bangumi 卡评分操作与「我的评分」徽章（recCard 内嵌）
+// ---------------------------------------------------------------- Bangumi 卡「我的评分」徽章（recCard 内嵌；评分按钮已挪详情页 T80）
 
-test('recCard：isBgm 分支内嵌 rec-bgm-rate 评分按钮，本地/历史卡不带', () => {
+test('recCard：T80 后各卡型均不带 rec-bgm-rate 评分按钮（入口挪至详情页 hero）', () => {
     const { __recCard } = loadRecords({});
-    // Bangumi 条目（远端标志）：带评分按钮
+    // Bangumi 条目（远端标志）：无评分按钮（挪到详情页）
     const bgm = __recCard({ site: 'bangumi', vodId: '77', name: '番剧', tag: 'want', bangumi: true }, true, true, {});
-    assert.ok(bgm.includes('rec-bgm-rate'), 'Bangumi 卡应自带「★ 评分」按钮');
-    assert.ok(bgm.includes('★ 评分'), '按钮文案可见');
-    // 本地镜像（site=bangumi 无 bangumi 标志）同样按 isBgm 渲染按钮
+    assert.ok(!bgm.includes('rec-bgm-rate'), 'T80：Bangumi 卡不再渲染「★ 评分」按钮');
+    assert.ok(!bgm.includes('★ 评分'), '按钮文案不应出现在卡片上');
+    // 本地镜像（site=bangumi 无 bangumi 标志）同样无按钮
     const mirror = __recCard({ site: 'bangumi', vodId: '77', name: '番剧', tag: 'want', bangumiId: '77', uid: 'u1' }, true, true, {});
-    assert.ok(mirror.includes('rec-bgm-rate'), '同步镜像卡也应带评分按钮');
-    // 对照组：普通收藏/播放历史不带评分按钮
+    assert.ok(!mirror.includes('rec-bgm-rate'), '同步镜像卡也无评分按钮');
+    // 对照组：普通收藏/播放历史无评分按钮
     const plain = __recCard({ site: 'cspby', vodId: 'v1', name: '普通收藏', tag: 'want', uid: 'u2' }, true, true, {});
     assert.ok(!plain.includes('rec-bgm-rate'), '本地收藏卡不应有评分按钮');
     const play = __recCard({ site: 's', vodId: 'v', name: '播放卡', kind: 'play' }, true, false, {});
@@ -350,4 +366,62 @@ test('recCard：带评分按钮时仍无 rec-del/rec-edit，按钮 title 转义�
     assert.ok(!bgm.includes('rec-edit'), '仍无编辑按钮');
     // 片名进 data-name/title 时经 escHtml，注入串不产出可执行标签
     assert.ok(!/<img src=x/.test(bgm), '片名应被转义');
+});
+
+// ---------------------------------------------------------------- 封面徽章组布局与已看集数徽章
+
+test('recCard：状态徽章移入封面徽章组（源徽章右侧），不再绝对定位在封面左上角', () => {
+    const { __recCard } = loadRecords({});
+    // 本地收藏：源徽章 → 状态徽章 → 依次进 rec-cover-badges
+    const local = __recCard({ site: 'cspby', siteName: '源甲', vodId: '1', name: '片名', tag: 'watching', uid: 'u1' }, true, true, {});
+    const m = local.match(/<div class="rec-cover-badges">([\s\S]*?)<\/div><span class="bangumi/) || local.match(/<div class="rec-cover-badges">([\s\S]*?)<\/div>/);
+    assert.ok(m, '应渲染徽章组容器');
+    assert.ok(m[1].includes('rec-site'), '徽章组首项为源徽章');
+    assert.ok(m[1].indexOf('rec-site') < m[1].indexOf('rec-tag'), '状态徽章在源徽章右侧');
+    // 卡片顶层不再有独立的状态徽章（旧的封面左上角绝对定位已移除）
+    const topTag = local.replace(/<div class="rec-cover-badges">[\s\S]*?<\/div>/, '');
+    assert.ok(!topTag.includes('class="rec-tag'), '徽章组外不应再有 rec-tag');
+    // Bangumi 收藏：无源徽章时状态徽章单独进徽章组（只读样式）
+    const bgm = __recCard({ site: 'bangumi', vodId: '9', name: '番剧', tag: 'seen', bangumi: true }, true, true, {});
+    const bm = bgm.match(/<div class="rec-cover-badges">([\s\S]*?)<\/div>/);
+    assert.ok(bm && bm[1].includes('rec-tag-static'), 'Bangumi 卡状态徽章也在徽章组内（只读）');
+    // 历史卡（withTags=false）：不出状态徽章
+    const hist = __recCard({ site: 's', vodId: 'v', name: '播放卡', kind: 'play' }, true, false, {});
+    assert.ok(!hist.includes('rec-tag'), '历史卡无状态徽章');
+});
+
+test('recCard：CatVod 收藏已看集数徽章用本地 progress（currentEp/totalEps），无进度不出徽章', () => {
+    const { __recCard } = loadRecords({});
+    // 有本地观看进度：显示 已看/总集数
+    const watched = __recCard(
+        { site: 'cspby', vodId: '1', name: '片名', tag: 'watching', uid: 'u1', progress: { currentEp: 3, totalEps: 12, percent: 25 } },
+        true, true, {});
+    const badge = watched.match(/<span class="rec-eps"[^>]*>([^<]*)<\/span>/);
+    assert.ok(badge, '有 progress 的收藏卡应渲染集数徽章');
+    assert.equal(badge[1], '3/12', '显示已看 3 / 共 12');
+    // 无进度：无徽章
+    const fresh = __recCard({ site: 'cspby', vodId: '2', name: '片名2', tag: 'want', uid: 'u2' }, true, true, {});
+    assert.ok(!fresh.includes('rec-eps'), '无 progress 的收藏卡不出集数徽章');
+    // 有 currentEp 无 totalEps：N/? 形态
+    const partial = __recCard(
+        { site: 'cspby', vodId: '3', name: '片名3', tag: 'watching', uid: 'u3', progress: { currentEp: 5, totalEps: 0, percent: 0 } },
+        true, true, {});
+    const pb = partial.match(/<span class="rec-eps"[^>]*>([^<]*)<\/span>/);
+    assert.ok(pb && pb[1] === '5/?', '无总数显示 5/?');
+    // 历史播放卡：仍按同名去重计数（watchedCount），数据源不变
+    const play = __recCard({ site: 's', vodId: 'v', name: '播放卡', kind: 'play', totalEps: 12 }, true, false, { '播放卡': 2 });
+    const pl = play.match(/<span class="rec-eps"[^>]*>([^<]*)<\/span>/);
+    assert.ok(pl && pl[1] === '2/12', '历史卡仍用同名去重集数 2/12');
+});
+
+// ---------------------------------------------------------------- 来源筛选（全部/CatVod/Bangumi）
+
+test('makeRecordView：来源筛选 _src 仅在收藏视图生效，历史视图 _extra/_src 过滤不参与（catvod 口径=非 Bangumi 托管）', () => {
+    const ctx = loadRecords({});
+    // 历史视图（withTags=false）：不绑定来源筛选页签，_src 保持空串（全量）
+    const historyView = ctx.__makeRecordView('view-history', 'history', 'x', true, false, 'pageSizeHistory');
+    assert.equal(String(historyView._src), '', '历史视图 _src 默认空（不过滤）');
+    // 收藏视图：_src 挂在视图上，catvod=非 Bangumi、bangumi=Bangumi 托管（与 recCard isBgm 同口径）
+    const favView = ctx.__makeRecordView('view-favorites', 'favorites', 'x', true, true, 'pageSizeFavorites');
+    assert.equal(String(favView._src), '', '收藏视图 _src 默认全部');
 });

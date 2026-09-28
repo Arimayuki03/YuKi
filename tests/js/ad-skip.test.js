@@ -391,41 +391,62 @@ test('_recordOpEdFromPlayback：opEdSkip=false 时登记入口关闭并提示', 
     assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
 });
 
-test('_onOpEdHotkey：Shift+O / Shift+E 触发登记，输入框与修饰键组合不触发', async () => {
+test('_onOpEdRecord（T81 菜单入口）：op/ed 触发登记，非法 kind 不触发', async () => {
     const settings = {};
     const backing = new Map();
     const { player, context } = loadPlayer(settings, backing);
     player._curMeta = { title: '影片H', flag: '线路C', site: 'siteA' };
     context.yuki.playerControl = async () => ({ ok: true, pos: 80 });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O' });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'e' });
+    // mpv 右键菜单信号：{kind:'op'|'ed'}
+    await player._onOpEdRecord({ kind: 'op' });
+    await player._onOpEdRecord({ kind: 'ed' });
     const rec = JSON.parse(backing.get('yuki_oped_skip_v1')).byKey['影片H|线路C'];
     assert.equal(rec.op, 80);
     assert.equal(rec.ed, 80);
-    // 无 Shift / 其他键：不触发
-    await player._onOpEdHotkey({ shiftKey: false, key: 'O' });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'A' });
-    // 输入框/可编辑元素聚焦：不劫持
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O', target: { tagName: 'INPUT' } });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O', target: { tagName: 'TEXTAREA' } });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O', target: { tagName: 'DIV', isContentEditable: true } });
-    // Ctrl/Alt/Meta 组合：不拦截
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O', ctrlKey: true });
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O', metaKey: true });
+    // 非法 kind / 空载荷：不触发
+    await player._onOpEdRecord({ kind: 'x' });
+    await player._onOpEdRecord({});
+    await player._onOpEdRecord();
     const data = JSON.parse(backing.get('yuki_oped_skip_v1'));
     assert.equal(Object.keys(data.byKey).length, 1);
     assert.equal(rec.op, 80); // 仍是最初登记值
 });
 
-test('_onOpEdHotkey：opEdSkip=false 时快捷键提示功能已关闭', async () => {
+test('_onOpEdRecord：opEdSkip=false 时菜单入口提示功能已关闭', async () => {
     const settings = { opEdSkip: false };
     const backing = new Map();
     const { player, context } = loadPlayer(settings, backing);
     player._curMeta = { title: '影片H2', flag: '线路C', site: 'siteA' };
     player._opEdSkipEnabled = false;
-    await player._onOpEdHotkey({ shiftKey: true, key: 'O' });
+    await player._onOpEdRecord({ kind: 'op' });
     assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
     assert.equal(backing.get('yuki_oped_skip_v1'), undefined);
+});
+
+test('T81：主窗口 Shift+O/E 热键已移除（入口迁至 mpv 右键菜单信号通道）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const playerSrc = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/player.js'), 'utf8');
+    assert.ok(!playerSrc.includes('_onOpEdHotkey'),
+        'Shift+O/E keydown 热键应已删除（mpv 播放时主窗口无焦点，入口不可用）');
+    assert.ok(!playerSrc.includes("addEventListener('keydown'"),
+        'player.js 不应再挂 document keydown 热键监听');
+    assert.ok(playerSrc.includes('onOpEdRecord'),
+        '应订阅 yuki:oped-record 通道（mpv 右键菜单信号）');
+    // 信号通道全链路：hints.lua 绑定 → mpv observe → 主进程转发 → preload 桥
+    const idxSrc = fs.readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+    assert.ok(idxSrc.includes('oped-op') && idxSrc.includes('oped-ed'),
+        'hints.lua 应注册 oped-op/oped-ed 菜单绑定（user-data 信号）');
+    assert.ok(idxSrc.includes("send('yuki:oped-record'"),
+        '主进程应转发 oped-record 信号到渲染层');
+    const mpvSrc = fs.readFileSync(path.join(__dirname, '../../src/main/mpv-player.js'), 'utf8');
+    assert.ok(mpvSrc.includes("observe_property', 0x108, 'user-data/yuki/oped-record'"),
+        'mpv 应 observe oped-record 信号属性');
+    const menuSrc = fs.readFileSync(path.join(__dirname, '../../src/main/mpv-menu-conf.js'), 'utf8');
+    assert.ok(menuSrc.includes('标记片头结束点') && menuSrc.includes('标记片尾起点'),
+        '右键菜单应含「标记片头结束点/标记片尾起点」菜单项');
+    const preloadSrc = fs.readFileSync(path.join(__dirname, '../../src/preload/preload.js'), 'utf8');
+    assert.ok(preloadSrc.includes('onOpEdRecord'), 'preload 应桥接 onOpEdRecord');
 });
 
 test('_estimateCurrentSec：<video> 预览（含暂停态）返回 currentTime，mpv 分支读 get-pos', async () => {

@@ -8,7 +8,7 @@
       #11 渲染层 CSP：核心目标 = 禁止内联脚本块与 eval（XSS 注入脚本无法执行）。
       - script-src 'self' file:：页面脚本全部为本地 <script src>（jQuery 3.7.1 本地文件），
         file:// 加载下 'self' 不覆盖本地脚本，需显式 file:；无 unsafe-inline / eval。
-      - script-src-attr 'unsafe-hashes' + 36 个 sha256：存量静态内联事件处理器属性
+      - script-src-attr 'unsafe-hashes' + 42 个 sha256：存量静态内联事件处理器属性
         （onclick/onload/onerror，表达式原文哈希见面板按钮与封面 img 模板）白名单放行；
         任何改动/新增内联处理器都会被 CSP 拦截（新增需同步哈希）。动态路径处理器
         （panels.js 本地文件 enterDir/选删等，路径运行时拼接无法静态哈希）由
@@ -24,7 +24,7 @@
       - object-src 'none' / base-uri 限制 / form-action / frame-src 放宽到 http(s)
         （解析器会话展示）。
     -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file:; script-src-attr 'unsafe-hashes' 'sha256-+wWYd0cvisjUfqJ7T2/a8vZzrF8As2lWv4Cs0NkXY+s=' 'sha256-0TQOpPlsHFrGkJFuUL4xx0Ao5AOHvCn9lSzL26hy4iQ=' 'sha256-1SQzuX8/o4JYODs3OMrp3JUfMBXkEay17ANxAIBjsOE=' 'sha256-22vvfTZidcXbm1JoJ6n9K7yLEV06fTNF+eIjkgFjTsA=' 'sha256-45/BhBSTGSUO3rxoQab92meVadR+K+beF5yHtYQltps=' 'sha256-4qFKt2gnTAmIsLSosgtioDuREzMzQcJ03ztZDdZkoss=' 'sha256-7bR3MAZOLJIjmDpTFJoYDR8F5LecHt7Lap6Pi4em/Lg=' 'sha256-7wJ21uhw/cXZL/SqWYu65n7+7hFXlbzm89TPdq9MmjQ=' 'sha256-FwrKKyPTFFM54jD3EDT4nF8wKFOfPJfEWBu/V01Mpao=' 'sha256-Gm+MqIS9oEXnhMo9JbswuICONul0MYWPZGL4Kn9Bxaw=' 'sha256-GnZkYWQS3I3b7eapjHdJHVrelo9gSq+ukvClZ9nSmcI=' 'sha256-IAOA0hucIGT+ZOQfUL5wu1NYfA6JYSABkpxv9hZl+K0=' 'sha256-L09VGdyMRnyTYUULQguQyKIydkyTtBb6e44aCniwEfM=' 'sha256-MwMRjswhMODX8lDyKTT1fLWySJnZ1EHtP05oO58DeoE=' 'sha256-OQD15E6AyW0GPlXFVWPNiX53zgwYBE2kve2yHyW3S6o=' 'sha256-OWkFIHOg1uiILp+yV2RY8709AGqoLhsA8Rld2wkx2YY=' 'sha256-PdOcaXLBUYVUVArkuCJpgtl/ALSS/HQOqk1xR3ncAng=' 'sha256-Q3a0jZ/WjnXum0AWybcR24r1PY6qZg48wAgI6yOSgjA=' 'sha256-RQypk4ndoyxoslvJYAf4jwUCNStKAPjwTHqfbU5oY1U=' 'sha256-W3IWwAr66BM8rqd9xNV4nqb57rGloVBR9YoPHiWiz2k=' 'sha256-WDz0QsZOhlR4u1CnegFLLUrF2t52Frebw+El9FBxxVI=' 'sha256-Wy+KWgmwY766eOtQUjeKMv89LD5Sryiv51qT66+jp9M=' 'sha256-XStbg4wfKn2u8GUjWjYcFnFO2KnvWfcCnB/XELBkLIM=' 'sha256-gUZ5QccDiosXitsQUsk2EAaj4yHyT8WWgjL1d/w/N7M=' 'sha256-hz3w3ksoH0Cp3tIP6giw3IAOPEoFRmXBEtU21zAQgkQ=' 'sha256-j2NeESjAytU8RUFAvXqEg7JPrwzlXvvE5qWdJ52000s=' 'sha256-jHd/zN21JyJh/Oc9ocev4pBVRd8rXRmQP6KtlHwmM0M=' 'sha256-lfnvGAb3x0BgjPCRN4KMMihFxOPb5e+sij2vThbdOng=' 'sha256-nExd8aVH7WFvo4MD2n2peN4o3wywGZ0cIOz06B5PFJw=' 'sha256-nax0D9/+3RYOGDkHizUDehG0HaUsMO9tSkvqryDPitU=' 'sha256-oD8C4Tf8jDyAjuRDY0OMIPtMrSdG7zEUVSeRn1eI4Z0=' 'sha256-pH9vasf723dW0cxFKn1nXbeTMoxQqpc0S0ICeFUkXVM=' 'sha256-pwQduWxX3Cm7lLbQmAos7n73RLP4QrsCDFejmsBdZ78=' 'sha256-rJYjNP2NX9izv0ZB5kEEbLCvDja+RtWQ6ii3KaEEnto=' 'sha256-yC+HUJqdrBNMTFNAiidWg2N54jc2ibNHVD0AdgfT5FI=' 'sha256-yiE3rRnSy3gx/5yvJObfQ/XEBmmoWi+oRKN3w52djzs='; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: http: https: blob:; media-src 'self' file: http: https: blob:; connect-src 'self' file: http: https: ws: wss: blob: data:; font-src 'self' file: data:; object-src 'none'; base-uri 'self' file:; form-action 'self' file: http: https:; frame-src http: https:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file:; script-src-attr 'unsafe-hashes' 'sha256-+wWYd0cvisjUfqJ7T2/a8vZzrF8As2lWv4Cs0NkXY+s=' 'sha256-0TQOpPlsHFrGkJFuUL4xx0Ao5AOHvCn9lSzL26hy4iQ=' 'sha256-1SQzuX8/o4JYODs3OMrp3JUfMBXkEay17ANxAIBjsOE=' 'sha256-22vvfTZidcXbm1JoJ6n9K7yLEV06fTNF+eIjkgFjTsA=' 'sha256-45/BhBSTGSUO3rxoQab92meVadR+K+beF5yHtYQltps=' 'sha256-4qFKt2gnTAmIsLSosgtioDuREzMzQcJ03ztZDdZkoss=' 'sha256-7bR3MAZOLJIjmDpTFJoYDR8F5LecHt7Lap6Pi4em/Lg=' 'sha256-7wJ21uhw/cXZL/SqWYu65n7+7hFXlbzm89TPdq9MmjQ=' 'sha256-FwrKKyPTFFM54jD3EDT4nF8wKFOfPJfEWBu/V01Mpao=' 'sha256-Gm+MqIS9oEXnhMo9JbswuICONul0MYWPZGL4Kn9Bxaw=' 'sha256-GnZkYWQS3I3b7eapjHdJHVrelo9gSq+ukvClZ9nSmcI=' 'sha256-IAOA0hucIGT+ZOQfUL5wu1NYfA6JYSABkpxv9hZl+K0=' 'sha256-L09VGdyMRnyTYUULQguQyKIydkyTtBb6e44aCniwEfM=' 'sha256-MwMRjswhMODX8lDyKTT1fLWySJnZ1EHtP05oO58DeoE=' 'sha256-OQD15E6AyW0GPlXFVWPNiX53zgwYBE2kve2yHyW3S6o=' 'sha256-OWkFIHOg1uiILp+yV2RY8709AGqoLhsA8Rld2wkx2YY=' 'sha256-PdOcaXLBUYVUVArkuCJpgtl/ALSS/HQOqk1xR3ncAng=' 'sha256-Q3a0jZ/WjnXum0AWybcR24r1PY6qZg48wAgI6yOSgjA=' 'sha256-RQypk4ndoyxoslvJYAf4jwUCNStKAPjwTHqfbU5oY1U=' 'sha256-W3IWwAr66BM8rqd9xNV4nqb57rGloVBR9YoPHiWiz2k=' 'sha256-WDz0QsZOhlR4u1CnegFLLUrF2t52Frebw+El9FBxxVI=' 'sha256-Wy+KWgmwY766eOtQUjeKMv89LD5Sryiv51qT66+jp9M=' 'sha256-XStbg4wfKn2u8GUjWjYcFnFO2KnvWfcCnB/XELBkLIM=' 'sha256-gUZ5QccDiosXitsQUsk2EAaj4yHyT8WWgjL1d/w/N7M=' 'sha256-hz3w3ksoH0Cp3tIP6giw3IAOPEoFRmXBEtU21zAQgkQ=' 'sha256-j2NeESjAytU8RUFAvXqEg7JPrwzlXvvE5qWdJ52000s=' 'sha256-jHd/zN21JyJh/Oc9ocev4pBVRd8rXRmQP6KtlHwmM0M=' 'sha256-lfnvGAb3x0BgjPCRN4KMMihFxOPb5e+sij2vThbdOng=' 'sha256-nExd8aVH7WFvo4MD2n2peN4o3wywGZ0cIOz06B5PFJw=' 'sha256-nax0D9/+3RYOGDkHizUDehG0HaUsMO9tSkvqryDPitU=' 'sha256-oD8C4Tf8jDyAjuRDY0OMIPtMrSdG7zEUVSeRn1eI4Z0=' 'sha256-pH9vasf723dW0cxFKn1nXbeTMoxQqpc0S0ICeFUkXVM=' 'sha256-pwQduWxX3Cm7lLbQmAos7n73RLP4QrsCDFejmsBdZ78=' 'sha256-rJYjNP2NX9izv0ZB5kEEbLCvDja+RtWQ6ii3KaEEnto=' 'sha256-yC+HUJqdrBNMTFNAiidWg2N54jc2ibNHVD0AdgfT5FI=' 'sha256-BBX7WxuDeO7kR9G2mcG9RCVPOgU71IFmNd/nL5CFn88=' 'sha256-yiE3rRnSy3gx/5yvJObfQ/XEBmmoWi+oRKN3w52djzs=' 'sha256-yxg3KaF3r1xP4JeshCvyW4NXRBf7Km3A8mbD1crkRrs=' 'sha256-iCEMkbic+IAXdg8YpdUn8HuyXr/aUfu+lkObrOPNx3Y=' 'sha256-LlNKVn8Gl0IQVKEDgLGzS1oG8n9GM4GHnef+ep5GASg=' 'sha256-biKyhFIYapsgJUGPOBfqExrj2Ikjds8bo8ozWUCubPk=' 'sha256-lyzuEnIiEg3nN9OMmsk79/dWRoBKlrGSfSQUrWreEXU='; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data: http: https: blob:; media-src 'self' file: http: https: blob:; connect-src 'self' file: http: https: ws: wss: blob: data:; font-src 'self' file: data:; object-src 'none'; base-uri 'self' file:; form-action 'self' file: http: https:; frame-src http: https:;">
     <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=0,viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
     <link rel="stylesheet" href="css/ui.css">
@@ -238,6 +238,13 @@
                     <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                 </div>
                 <div class="rec-bar">
+                    <div id="view-favorites-srcs" class="rec-tags" title="按收藏来源分类">
+                        <span class="class-tab active" data-src="">全部</span>
+                        <span class="class-tab" data-src="catvod">CatVod</span>
+                        <span class="class-tab" data-src="bangumi">Bangumi</span>
+                    </div>
+                </div>
+                <div class="rec-bar">
                     <div id="view-favorites-tags" class="rec-tags">
                         <span class="class-tab active" data-tag="">全部</span>
                         <span class="class-tab" data-tag="want">想看</span>
@@ -322,7 +329,6 @@
                 </div>
                 <div id="my-panel-favorites" class="my-panel" style="display:none">
                     <div class="tool-card">
-                        <div class="tool-card-title">我的收藏</div>
                         <div class="view-toolbar">
                             <input id="my-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
                             <button id="my-favorites-bgm-sync" class="md-btn md-btn-sm md-btn-tonal" title="拉取/合并 Bangumi 账号收藏">同步 Bangumi</button>
@@ -334,6 +340,13 @@
                             <button id="my-favorites-taghold" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记搁置</button>
                             <button id="my-favorites-tagdropped" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记抛弃</button>
                             <button id="my-favorites-multidel" class="md-btn md-btn-sm">多选</button>
+                        </div>
+                        <div class="rec-bar">
+                            <div id="my-favorites-srcs" class="rec-tags" title="按收藏来源分类">
+                                <span class="class-tab active" data-src="">全部</span>
+                                <span class="class-tab" data-src="catvod">CatVod</span>
+                                <span class="class-tab" data-src="bangumi">Bangumi</span>
+                            </div>
                         </div>
                         <div class="rec-bar">
                             <div id="my-favorites-tags" class="rec-tags">
@@ -420,9 +433,11 @@
                                         <div class="info-detail local-desc">
                                             <p>· 管理并播放本机视频：默认本机下载文件夹</p>
                                             <p>· 仅展示文件夹与视频/音频文件；单击视频/音频弹出确认框后交给播放器播放，单击文件夹进入，按 Esc 返回上层；视频卡片自动截帧生成预览图（缺 ffmpeg 时显示占位图）；文件较多时底部有分页条（每页 100 项）。</p>
+                                            <p>· 播放列表：点击的影片与同目录内同名不同集号的文件（如「剧名 01.mp4 / 剧名 02.mp4」「剧名 S01E02」）会自动组成播放列表连播，可在播放器内切集。</p>
+                                            <p>· 「多选」：进入多选模式后点击条目勾选（再次点击取消），可「全选/反选」后「播放所选」组成播放列表，或「删除所选」批量删除；切换目录会清空勾选。</p>
                                             <p>· 「新建文件夹」：在当前目录创建子文件夹，方便分类整理。</p>
                                             <p>· 「更换根目录」：重新指定可访问的本地文件夹（历史记录保留）。</p>
-                                            <p>· 右键点击文件/文件夹可删除（删除的是根目录内的真实文件，请谨慎操作）。</p>
+                                            <p>· 右键点击文件/文件夹可删除；多选删除与右键删除均删除根目录内的真实文件，请谨慎操作。</p>
                                         </div>
                                     </div>
                                 </div>
@@ -431,6 +446,15 @@
                                     <button class="md-btn md-btn-tonal" onclick="pickRoot()">更换根目录</button>
                                     <button class="md-btn md-btn-tonal" onclick="openLocalDir()" title="在系统资源管理器中打开当前浏览的目录">打开目录</button>
                                     <button class="md-btn md-btn-tonal" onclick="refreshLocal()">刷新</button>
+                                    <button id="local-btn-select" class="md-btn md-btn-tonal" onclick="toggleSelMode(true)">多选</button>
+                                    <button id="local-btn-selall" class="md-btn md-btn-tonal" style="display:none" onclick="selectAllLocal()">全选/反选</button>
+                                    <button id="local-btn-play-sel" class="md-btn md-btn-filled" style="display:none" onclick="playSelected()">播放所选</button>
+                                    <button id="local-btn-del-sel" class="md-btn md-btn-tonal" style="display:none" onclick="delSelected()">删除所选</button>
+                                    <button id="local-btn-exit-sel" class="md-btn md-btn-tonal" style="display:none" onclick="toggleSelMode(false)">退出多选</button>
+                                </div>
+                                <!-- 多选模式状态条：勾选计数（toggleSelMode 控制显隐） -->
+                                <div id="local-sel-bar" class="local-sel-bar" style="display:none">
+                                    <span id="local-sel-count">已选 0 项</span>
                                 </div>
                                 <div id="file_list"></div>
                                 <!-- 本地文件分页条：仅多于一页时由 renderLocalPage 显示 -->
@@ -1364,6 +1388,21 @@
         </div>
     </div>
 
+    <!-- Dialog: CatVod 选源选集（T79「开始播放」引导弹窗：线路+集数同屏）。
+         关闭按钮 onclick 表达式随弹窗 id；其 sha256 已追加进 CSP script-src-attr
+         白名单（xss-renderer 测试同步校验）。 -->
+    <div id="catvodPlayDialog" class="md-dialog-overlay">
+        <div class="md-dialog md-dialog-wide">
+            <div class="md-dialog-title" id="catvod-play-dialog-title">选择线路与集数</div>
+            <div class="md-dialog-body" id="catvod-play-dialog-body" style="max-height:60vh;overflow-y:auto;">
+                <div class="tip-line">载入中…</div>
+            </div>
+            <div class="md-dialog-actions">
+                <button onclick="closeDialog('catvodPlayDialog')" class="md-dialog-btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Dialog: Bangumi 搜索筛选工作台（复刻 Kazumi _SearchWorkbenchSheet） -->
     <div id="bangumiFilterDialog" class="md-dialog-overlay">
         <div class="md-dialog md-dialog-wide">
@@ -1476,24 +1515,38 @@
 
     <!-- Dialog: Bangumi 评分/吐槽（bgm-rate.js；对齐 Kazumi 的评分与吐槽能力） -->
     <div id="bgmRateDialog" class="md-dialog-overlay">
-        <div class="md-dialog" style="max-width:460px;">
+        <div class="md-dialog">
             <div class="md-dialog-title">评分 / 吐槽</div>
             <div class="md-dialog-body">
-                <div id="bgm-rate-name" class="bgm-rate-name" title=""></div>
-                <div class="bgm-rate-stars-row" id="bgm-rate-stars" role="radiogroup" aria-label="评分 1 到 10 分"></div>
-                <div class="bgm-rate-meta">
+                <div class="bgm-rate-top">
+                    <div id="bgm-rate-name" class="bgm-rate-name" title=""></div>
                     <span id="bgm-rate-label" class="bgm-rate-label">未评分</span>
+                </div>
+                <div class="bgm-rate-stars-row" id="bgm-rate-stars" role="radiogroup" aria-label="评分 1 到 10 分"></div>
+                <div class="bgm-rate-actions">
                     <button type="button" id="bgm-rate-clear" class="md-btn md-btn-tonal md-btn-sm" title="清除评分（同步为未评分）">清除评分</button>
                 </div>
-                <div class="md-field">
-                    <textarea id="bgm-rate-comment" class="md-input" rows="4" maxlength="10000"
-                        placeholder="吐槽（可选）：短评同步到 Bangumi 收藏备注…"></textarea>
+                <textarea id="bgm-rate-comment" class="md-input" rows="4" maxlength="10000"
+                    placeholder="吐槽（可选）：同步到 Bangumi 收藏备注…"></textarea>
+                <div class="bgm-rate-tags-block">
+                    <div class="bgm-rate-tags-head">
+                        <span class="bgm-rate-tags-title">标签</span>
+                        <span id="bgm-rate-tags-count" class="bgm-rate-tags-count">0 / 10</span>
+                    </div>
+                    <div id="bgm-rate-tags-selected" class="bgm-rate-tags-selected"></div>
+                    <div id="bgm-rate-tags-popular" class="bgm-rate-tags-popular"></div>
+                    <div class="bgm-rate-tags-input-row">
+                        <input type="text" id="bgm-rate-tag-input" class="md-input" maxlength="10"
+                            placeholder="自定义标签（回车添加，最多 10 个）">
+                        <button type="button" id="bgm-rate-tag-add" class="md-btn md-btn-tonal md-btn-sm">添加</button>
+                    </div>
+                    <div id="bgm-rate-tag-error" class="bgm-rate-tag-error" style="display:none;"></div>
                 </div>
                 <div id="bgm-rate-status" class="tip-line pad0" style="display:none;color:var(--md-error);"></div>
             </div>
             <div class="md-dialog-actions">
                 <button id="bgm-rate-cancel" class="md-dialog-btn">取消</button>
-                <button id="bgm-rate-submit" class="md-btn md-btn-filled md-btn-sm">提交</button>
+                <button id="bgm-rate-submit" class="md-btn md-btn-filled">提交</button>
             </div>
         </div>
     </div>

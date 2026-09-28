@@ -26,7 +26,10 @@ from kazumi.plugin_manager import (  # noqa: E402
     PluginManager,
     normalize_bgm_rate,
     normalize_bgm_comment,
+    normalize_bgm_tags,
     BGM_RATE_MAX,
+    BGM_TAGS_MAX,
+    BGM_TAG_MAX_LEN,
 )
 from kazumi.utils import (  # noqa: E402
     BgmFieldError,
@@ -98,6 +101,44 @@ class TestNormalizeComment(unittest.TestCase):
         self.assertEqual(len(normalize_bgm_comment(long)), 10000)
 
 
+class TestNormalizeTags(unittest.TestCase):
+    """个人标签归一化（对齐 Kazumi rating_review_dialog：≤10 个、单个 ≤10 字）。"""
+
+    def test_none_and_empty_untouched(self):
+        self.assertIsNone(normalize_bgm_tags(None))
+        self.assertIsNone(normalize_bgm_tags(''))
+
+    def test_strip_dedupe_keep_order(self):
+        self.assertEqual(normalize_bgm_tags(['神作', ' 神作 ', '', 'TV', 'tv']), ['神作', 'TV', 'tv'])
+
+    def test_string_becomes_single_item(self):
+        # 整串标签（含逗号）不拆分：标签允许含逗号，拆分会改写用户语义
+        self.assertEqual(normalize_bgm_tags('科幻,太空'), ['科幻,太空'])
+
+    def test_empty_items_dropped(self):
+        self.assertEqual(normalize_bgm_tags(['', '  ', None]), [])
+        # 全空项 → 空列表（不是 None：调用方以 None 判「不修改」）
+        self.assertEqual(normalize_bgm_tags(['', '  ']), [])
+
+    def test_oversize_tag_rejected(self):
+        with self.assertRaises(BgmFieldError) as cm:
+            normalize_bgm_tags(['x' * (BGM_TAG_MAX_LEN + 1)])
+        self.assertEqual(cm.exception.field, 'tags')
+        self.assertEqual(BGM_TAG_MAX_LEN, 10)
+
+    def test_too_many_rejected(self):
+        with self.assertRaises(BgmFieldError) as cm:
+            normalize_bgm_tags([f't{i}' for i in range(BGM_TAGS_MAX + 1)])
+        self.assertEqual(cm.exception.field, 'tags')
+        self.assertEqual(BGM_TAGS_MAX, 10)
+        # 恰 10 个合法
+        self.assertEqual(len(normalize_bgm_tags([f't{i}' for i in range(10)])), 10)
+
+    def test_non_iterable_rejected(self):
+        with self.assertRaises(BgmFieldError):
+            normalize_bgm_tags(42)
+
+
 class TestUpdateCollectionRateComment(unittest.TestCase):
     """bangumi_update_collection 的 rate/comment 扩展。"""
 
@@ -163,6 +204,31 @@ class TestUpdateCollectionRateComment(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(m.call_args[1]['json'], {'rate': 0})
 
+    def test_body_with_tags(self):
+        # tags（T82 个人标签）随 body 提交；归一化后保序去重
+        p1, p2 = _patched(self.mgr, _Rsp(200))
+        with p1, p2 as m:
+            ok, _ = self.mgr.bangumi_update_collection('tok', '42', -1,
+                                                       tags=['神作', ' 神作 ', 'TV'])
+        self.assertTrue(ok)
+        self.assertEqual(m.call_args[1]['json'], {'tags': ['神作', 'TV']})
+
+    def test_empty_tags_list_submitted(self):
+        # 空标签数组 = 清除全部个人标签（语义区别于 None=不修改），必须能进 body
+        p1, p2 = _patched(self.mgr, _Rsp(200))
+        with p1, p2 as m:
+            ok, _ = self.mgr.bangumi_update_collection('tok', '42', -1, tags=[])
+        self.assertTrue(ok)
+        self.assertEqual(m.call_args[1]['json'], {'tags': []})
+
+    def test_invalid_tag_fails_fast_no_request(self):
+        p1, p2 = _patched(self.mgr, _Rsp(200))
+        with p1, p2 as m:
+            ok, msg = self.mgr.bangumi_update_collection('tok', '42', -1, tags=['x' * 11])
+        self.assertFalse(ok)
+        self.assertIn('10 字', msg)
+        m.assert_not_called()  # 非法入参不发任何网络请求
+
 
 class TestApplySyncPlanRating(unittest.TestCase):
     """kazumiBangumiSyncApply 单条透传（评分/吐槽 UI 的后端通道）。"""
@@ -216,6 +282,32 @@ class TestApplySyncPlanRating(unittest.TestCase):
         result, m = self._run([{'subjectId': '42', 'type': 2}])
         self.assertEqual(result['uploaded'], 1)
         self.assertEqual(m.call_args[1]['json'], {'type': 2})
+
+    def test_single_tags_entry(self):
+        # 标签 UI 路径：type=-1 + tags 单条透传（评分/吐槽 UI 走同一通道）
+        result, m = self._run([{'subjectId': '42', 'type': -1, 'tags': ['神作', 'TV']}])
+        self.assertEqual(result['uploaded'], 1)
+        self.assertEqual(m.call_args[1]['json'], {'tags': ['神作', 'TV']})
+        self.assertNotIn('type', m.call_args[1]['json'])
+
+    def test_empty_tags_clears(self):
+        # 空数组 = 清除全部标签：has_extra 判定必须把 tags=[] 视为有效改动
+        result, m = self._run([{'subjectId': '42', 'type': -1, 'tags': []}])
+        self.assertEqual(result['uploaded'], 1)
+        self.assertEqual(m.call_args[1]['json'], {'tags': []})
+
+    def test_invalid_tag_counts_failed(self):
+        result, m = self._run([{'subjectId': '42', 'type': -1, 'tags': [f't{i}' for i in range(11)]}])
+        self.assertEqual(result['failed'], 1)
+        self.assertIn('最多 10 个', result['results'][0]['msg'])
+        m.assert_not_called()
+
+    def test_rate_comment_tags_combined(self):
+        # 三字段合并：评分 + 吐槽 + 标签一次提交
+        result, m = self._run([{'subjectId': '42', 'type': -1, 'rate': 9,
+                                'comment': '神作', 'tags': ['神作']}])
+        self.assertEqual(result['uploaded'], 1)
+        self.assertEqual(m.call_args[1]['json'], {'rate': 9, 'comment': '神作', 'tags': ['神作']})
 
     def test_missing_token(self):
         # 缺 token：uploads 非空时带 error 说明且无成功上传（对齐既有契约）
@@ -469,6 +561,115 @@ class TestCaptchaImageUrlGuarded(unittest.TestCase):
         with mock.patch.object(RuleEngine, '_send_guarded') as m:
             self.assertEqual(self.engine._captcha_image_url(cfg), '')
         m.assert_not_called()
+
+
+class TestBangumiEpisodeComments(unittest.TestCase):
+    """分集评论（T82 选集讨论板块）：GET next.bgm /p1/episodes/{id}/comments。
+
+    对齐 Kazumi getBangumiCommentsByEpisodeID：一次性返回全集主楼层数组，
+    每项含 user/content/createdAt/replies（楼中楼）。next.bgm /p1 历史上出现过
+    裸数组与 {list: []} 包装两种形态，统一兼容。
+    """
+
+    def setUp(self):
+        self.mgr = PluginManager()
+
+    def _rsp(self, payload, code=200):
+        r = _Rsp(code, payload)
+        return r
+
+    def test_bare_array(self):
+        payload = [{'user': {'nickname': '甲'}, 'content': '好活', 'createdAt': 1700000000, 'replies': []}]
+        with mock.patch('http_client.get', return_value=self._rsp(payload)) as m:
+            out = self.mgr.bangumi_episode_comments(102)
+        self.assertEqual(out, payload)
+        url = m.call_args[0][0]
+        self.assertIn('/p1/episodes/102/comments', url)
+        # UA 必须是 Bangumi 官方要求的应用标识（与 bangumi_comments 同口径）
+        from kazumi.plugin_manager import BANGUMI_UA
+        self.assertEqual(m.call_args[1]['headers']['User-Agent'], BANGUMI_UA)
+
+    def test_list_wrapper_compat(self):
+        # {list: [...]} 包装形态兼容（next.bgm 历史变体）
+        payload = {'list': [{'user': {'nickname': '乙'}, 'content': 'x', 'replies': []}]}
+        with mock.patch('http_client.get', return_value=self._rsp(payload)):
+            out = self.mgr.bangumi_episode_comments(102)
+        self.assertEqual(out, payload['list'])
+
+    def test_data_wrapper_compat(self):
+        payload = {'data': [{'content': 'y'}]}
+        with mock.patch('http_client.get', return_value=self._rsp(payload)):
+            out = self.mgr.bangumi_episode_comments(102)
+        self.assertEqual(out, payload['data'])
+
+    def test_non_list_payload_degrades_to_empty(self):
+        # 奇异形态（字符串/对象且无 list/data 键）：空列表兜底，不抛异常
+        with mock.patch('http_client.get', return_value=self._rsp('weird')):
+            self.assertEqual(self.mgr.bangumi_episode_comments(102), [])
+        with mock.patch('http_client.get', return_value=self._rsp({'foo': 1})):
+            self.assertEqual(self.mgr.bangumi_episode_comments(102), [])
+
+    def test_network_error_returns_empty(self):
+        with mock.patch('http_client.get', side_effect=RuntimeError('boom')):
+            self.assertEqual(self.mgr.bangumi_episode_comments(102), [])
+
+
+class TestBangumiCommentsTotal(unittest.TestCase):
+    """番剧吐槽（detail.js 吐槽页签）：GET next.bgm /p1/subjects/{id}/comments。
+
+    正常响应为 {data: [...], total: N}（total 为该条目吐槽总数，与 limit/offset
+    无关，UI 据此显示「共 N 条」真实总数而非「共 100 条+」）。统一返回
+    {'list': [...], 'total': int}；裸数组/失败形态 total 回退已加载数/0。
+    """
+
+    def setUp(self):
+        self.mgr = PluginManager()
+
+    def test_dict_payload_with_total(self):
+        payload = {'data': [{'user': {'nickname': '甲'}, 'comment': '好'}], 'total': 6984}
+        with mock.patch('http_client.get', return_value=_Rsp(200, payload)) as m:
+            out = self.mgr.bangumi_comments(876, 100, 0)
+        self.assertEqual(out, {'list': payload['data'], 'total': 6984})
+        url = m.call_args[0][0]
+        self.assertIn('/p1/subjects/876/comments', url)
+        self.assertEqual(m.call_args[1]['params'], {'limit': 100, 'offset': 0})
+
+    def test_total_missing_falls_back_to_items_len(self):
+        # 无 total 键（历史变体）：回退 items 长度（分页下仅已加载部分可知）
+        payload = {'data': [{'comment': 'a'}, {'comment': 'b'}]}
+        with mock.patch('http_client.get', return_value=_Rsp(200, payload)):
+            out = self.mgr.bangumi_comments(876, 100, 0)
+        self.assertEqual(out, {'list': payload['data'], 'total': 2})
+
+    def test_bare_array_payload(self):
+        payload = [{'comment': 'x'}, {'comment': 'y'}, {'comment': 'z'}]
+        with mock.patch('http_client.get', return_value=_Rsp(200, payload)):
+            out = self.mgr.bangumi_comments(876, 100, 0)
+        self.assertEqual(out, {'list': payload, 'total': 3})
+
+    def test_list_wrapper_compat(self):
+        # {list: [...]} 包装形态兼容（next.bgm 历史变体）
+        payload = {'list': [{'comment': 'w'}]}
+        with mock.patch('http_client.get', return_value=_Rsp(200, payload)):
+            out = self.mgr.bangumi_comments(876, 100, 0)
+        self.assertEqual(out, {'list': payload['list'], 'total': 1})
+
+    def test_non_list_payload_degrades_to_empty(self):
+        with mock.patch('http_client.get', return_value=_Rsp(200, 'weird')):
+            self.assertEqual(self.mgr.bangumi_comments(876, 100, 0), {'list': [], 'total': 0})
+        with mock.patch('http_client.get', return_value=_Rsp(200, {'foo': 1})):
+            self.assertEqual(self.mgr.bangumi_comments(876, 100, 0), {'list': [], 'total': 0})
+
+    def test_network_error_returns_empty(self):
+        with mock.patch('http_client.get', side_effect=RuntimeError('boom')):
+            self.assertEqual(self.mgr.bangumi_comments(876, 100, 0), {'list': [], 'total': 0})
+
+    def test_total_non_numeric_degrades(self):
+        # total 为非数值（脏数据）：忽略并回退 items 长度
+        payload = {'data': [{'comment': 'a'}], 'total': 'many'}
+        with mock.patch('http_client.get', return_value=_Rsp(200, payload)):
+            out = self.mgr.bangumi_comments(876, 100, 0)
+        self.assertEqual(out, {'list': payload['data'], 'total': 1})
 
 
 class TestPluginCaptchaImageField(unittest.TestCase):

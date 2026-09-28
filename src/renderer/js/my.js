@@ -10,11 +10,11 @@
  * 我的收藏：复用 records.js makeRecordView 工厂（容器 #my-panel-favorites）。
  * 埋点在 player.js _recordWatch（mpv 退出时累计）。
  */
-/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel, UIState, BgmRate, confirmDialog */
+/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel, UIState, confirmDialog */
 
 // Bangumi 账号收藏本地持久缓存（cache.js）：切页/重启即时上屏，只在收藏状态变动或手动同步时刷新。
 // 无 TTL（0=永久）——账号收藏仅由「本地收藏变更(FavHub)/同步按钮」触发失效，不靠时间过期。
-const MY_BGMCOL_KEY = 'my::bgmcol::v1';
+const MY_BGMCOL_KEY = 'my::bgmcol::v3'; // v3：bgmScore/bgmRank 改读 subject 顶层 score/rank（列表端点 subject 无 rating 对象），v2 缓存条目字段为空故升版
 
 const My = {
     _inited: false,
@@ -50,37 +50,9 @@ const My = {
             });
         }
         $('#view-my').on('click', '[data-my-tab]', (e) => this.selectTab(String($(e.currentTarget).data('my-tab') || 'stats')));
-        // 收藏网格 Bangumi 条目的「评分/吐槽」操作：打开 BgmRate 对话框（对齐 Kazumi 评分能力）。
-        // 委托提升到 document 级（修复：独立收藏页 #view-favorites 的镜像 Bangumi 卡不在
-        // #view-my 内，原委托根点不开对话框；document 级不受任何容器动态重建影响）。
-        // handler 先 closest('.rec-bgm-rate') 判定事件源，避免全局误伤；
-        // 点按钮先被 records.js 的卡片委托（root 更深、冒泡先执行）按
-        // e.target 过滤放行（不进详情），再冒泡到本处开对话框。
-        $(document).on('click', '.rec-bgm-rate', async (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            const el = $(e.currentTarget);
-            const card = el.closest('.vod-card');
-            const sid = String(card.data('id') || '');
-            if (!sid) { warnToast('缺少 Bangumi 条目 ID'); return; }
-            if (typeof BgmRate === 'undefined') { warnToast('评分组件未加载'); return; }
-            // 预填：本地缓存里该条目的 myRate/myComment（列表接口不带评分时为 null，
-            // 由 BgmRate.fetchCurrent 单条补查 GET /v0/users/{u}/collections/{id}）
-            const pool = Array.isArray(this._bgmCache) ? this._bgmCache : [];
-            const hit = pool.find((it) => it && String(it.vodId) === sid) || null;
-            const cur = await BgmRate.fetchCurrent(sid, hit);
-            await BgmRate.openRateDialog({
-                subjectId: sid,
-                name: String(card.data('name') || (hit && hit.name) || ''),
-                rate: cur.rate,
-                comment: cur.comment,
-            });
-            // 评分/吐槽变更已由 BgmRate 内部 FavHub.changed 广播 → my.js 订阅回调
-            // 作废缓存并重拉；此处兜底刷新当前收藏网格（重渲后按钮由 recCard 自带）
-            if (this._tab === 'favorites' && this._favorites) {
-                await this._favorites.render();
-            }
-        });
+        // Bangumi 评分/吐槽入口已挪到详情页 hero 操作行（T80，detail.js #detail-bgm-rate）：
+        // 收藏卡片不再渲染「★ 评分」按钮，原 document 级 .rec-bgm-rate 委托随之移除。
+        // 卡片上的「我的 N★」徽章仍在（myRate 展示）。
         // 同步 Bangumi 按钮：先把本地可匹配收藏单向上传到账号，再拉取/合并远端收藏重渲染网格
         $('#my-favorites-bgm-sync').on('click', async () => {
             const token = (typeof Kazumi !== 'undefined' && Kazumi._getBangumiToken) ? await Kazumi._getBangumiToken() : '';
@@ -171,6 +143,10 @@ const My = {
                 // 「我的 N★」徽章（myRate 1-10），并作为「评分」对话框预填数据；
                 // 旧响应无此字段时为 null（不渲染徽章，对话框由 BgmRate.fetchCurrent 单条补查）
                 const myRate = (it.rate === 0 || it.rate) ? Number(it.rate) : null;
+                // 条目公共评分/排名：收藏列表端点的 subject 是精简对象——不含 rating，
+                // 但顶层直接带 score/rank（官方 /v0/users/{u}/collections 实测）；
+                // 兼容旧/镜像形态的 rating 对象。供 recCard 渲染时间行评分 + 右上角排名徽章
+                const rt = (subj.rating && typeof subj.rating === 'object') ? subj.rating : subj;
                 return {
                     site: 'bangumi',
                     siteName: 'Bangumi',
@@ -182,6 +158,8 @@ const My = {
                     bangumi: true,
                     myRate: (myRate !== null && myRate >= 1 && myRate <= 10) ? myRate : null,
                     myComment: String(it.comment || ''),
+                    bgmScore: (Number(rt.score) || 0) || null,
+                    bgmRank: (Number(rt.rank) || 0) || null,
                     ts: Date.now(),
                 };
             });

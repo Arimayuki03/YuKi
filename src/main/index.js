@@ -1127,6 +1127,15 @@ app.whenReady().then(() => {
                 'mp.add_key_binding(nil, "ep-next", function()',
                 '  mp.set_property("user-data/yuki/ep-skip", "1")',
                 'end)',
+                // 跳片头/片尾登记（T81）：右键菜单「标记片头结束点/标记片尾起点」→
+                // 信号通道同 ep-skip（渲染层 _recordOpEdFromPlayback 消费，读当前
+                // time-pos 登记 AdSkip）。原 Shift+O/E 主窗口热键因 mpv 焦点问题废弃。
+                'mp.add_key_binding(nil, "oped-op", function()',
+                '  mp.set_property("user-data/yuki/oped-record", "op")',
+                'end)',
+                'mp.add_key_binding(nil, "oped-ed", function()',
+                '  mp.set_property("user-data/yuki/oped-record", "ed")',
+                'end)',
                 'mp.add_key_binding(nil, "a4k-cycle", function()',
                 '  local arr = { "off", "a", "aa", "restore" }',
                 '  local pos = { off = 1, a = 2, aa = 3, restore = 4 }',
@@ -1646,6 +1655,12 @@ app.whenReady().then(() => {
         if (!fileMgr) throw new Error('root not set');
         return fileMgr.delFolder(rel);
     });
+    // 批量删除（多选模式）：文件逐个删；目录经 delMany 保留 P2-7 三道防线（确认框
+    // 整批只弹一次）。未初始化时显式抛错由 fileIpc 收敛为 ok:false（与单删同口径）。
+    fileIpc('yuki:file-del-many', async (rels) => {
+        if (!fileMgr) throw new Error('root not set');
+        return fileMgr.delMany(rels);
+    });
 
     // 本地与下载视频预览图：ffmpeg 抓帧缓存（userData/local-thumbs）；ffmpeg 未就绪返回 ok:false 用占位图
     fileIpc('yuki:file-thumb', async (rel) => {
@@ -1778,6 +1793,58 @@ app.whenReady().then(() => {
         started.sessionId = -Math.abs(started.sessionId);
         afterPlay();
         return attachAnime4kInfo(started);
+    });
+
+    // 本地媒体批量播放（多选/同类命名播放列表）：rel 数组逐个过白名单解析 +
+    // 媒体扩展名校验（与 yuki:file-push 同口径），有效项组成整组交给播放器。
+    // mpv：≥2 项走原生 m3u 队列（右键菜单/F8 可切集连播）；外部播放器为主播放器
+    // 时经 launchExternalPlayerItems 写 m3u 起播（单有效项退化为直启）。
+    fileIpc('yuki:file-push-many', async (rels) => {
+        const list = (Array.isArray(rels) ? rels : []).map((r) => String(r || '')).filter(Boolean);
+        if (!list.length) return { ok: false, reason: 'empty selection' };
+        const extPrimary = primaryExternalPlayer();
+        if (!extPrimary && !mpv.isAvailable()) return { ok: false, reason: 'mpv-missing' };
+        if (!fileMgr || !fileMgr.root) return { ok: false, reason: 'path-denied' };
+        // 逐项解析 + 校验（与单播同口径）：失败项跳过不中断整批
+        const items = [];
+        for (const rel of list) {
+            let abs;
+            try { abs = fileMgr.resolveSafe(rel); } catch (e) { continue; }
+            let isFile = false;
+            try { isFile = fs.existsSync(abs) && fs.statSync(abs).isFile(); } catch (e) { /* 保持 false */ }
+            if (!isFile || !fileMgr.isMedia(abs)) continue;
+            items.push({ url: abs.replace(/\\/g, '/'), title: path.basename(abs) });
+        }
+        if (!items.length) return { ok: false, reason: 'no-playable' };
+        if (extPrimary) {
+            // 本地文件无鉴权头；launchExternalPlayerItems 多条目写 m3u、单条目直启。
+            // 单条目必须先过 toExternalLocalUrl（与 yuki:file-push/dl-play 同口径）：
+            // launchExternalPlayerItems 的单条目分支不做本地路径转换，VLC 会把
+            // 正斜杠盘符路径当未知 URI 静默拒载（只拉窗口不播，R21 同根因）。
+            const extKind = externalPlayerKind(extPrimary);
+            const extItems = items.map((it) => ({
+                url: items.length === 1 ? toExternalLocalUrl(it.url, extKind) : it.url,
+                title: it.title,
+                header: null,
+            }));
+            const r = await launchExternalPlayerItems(extPrimary, extItems);
+            return r.ok ? { ...r, viaExternal: true, count: items.length } : r;
+        }
+        // 与 yuki:play / yuki:file-push 对齐：起播前刷新 Anime4K 着色器链
+        mpv.anime4kShaders = anime4kChainFromSettings();
+        mpv._queueTitles = items.map((it) => it.title);
+        mpv._queueSeriesTitle = '本地文件';
+        // keepRawTitle：m3u 的 EXTINF 集名保持默认文件名——本地文件名以 .mp4 等
+        // 结尾不是抓流产物，默认净化规则（回落第N集）不适用（见 buildM3u 注）。
+        const first = mpv.play(items, { title: '本地文件', noSeq: true, resume: false, keepRawTitle: true });
+        // verifyMpvStart 需要在校验前知道这是原生队列（代际抖动豁免，见其内注释）
+        first.nativeQueue = items.length > 1;
+        if (!first.ok) return first;
+        const started = await verifyMpvStart(first, MPV_START_TIMEOUT_MS);
+        if (!started.ok) return started;
+        started.sessionId = -Math.abs(started.sessionId);
+        afterPlay();
+        return attachAnime4kInfo({ ...started, count: items.length });
     });
 
     // ---- Phase 7 推送 / 解析 / 设置 ----
@@ -3516,6 +3583,14 @@ app.whenReady().then(() => {
 
     // 播放事件 → 渲染层（连播由渲染层在 mpv 退出后推进；附退出进度供「看完」判定）
     mpv.on('ended', (info) => send('yuki:player-ended', info));
+    // 片头/片尾登记（T81，右键菜单「标记片头结束点/标记片尾起点」）：转发渲染层
+    // _recordOpEdFromPlayback——按当前 time-pos 登记到 AdSkip（按片名+线路）。
+    mpv.on('oped-record', ({ kind } = {}) => {
+        try {
+            const k = (kind === 'op' || kind === 'ed') ? kind : '';
+            if (k) send('yuki:oped-record', { kind: k });
+        } catch (e) { /* ignore */ }
+    });
     // 播放器 IPC 就绪：用实时设置推送右键菜单初始档位。hints.lua 里的静态快照可能
     // 已过期（典型：默认开启在启动着色器下载完成后才写入设置，而 lua 在启动时已按
     // 'off' 生成），不重推会导致「着色器实际生效、菜单却显示关闭」。推送必然早于
@@ -4231,6 +4306,16 @@ app.whenReady().then(() => {
             if (label) {
                 const t = String(label).replace(/["$]/g, '');
                 args.push(`--title=yuki · ${t}`, `--force-media-title=yuki · ${t}`);
+            }
+            // 弹幕开关联动（外部模式唯一活入口）：外部 mpv 会加载用户全局配置目录
+            // （%APPDATA%\mpv）scripts/ 下的自装 danmaku 插件与 sub-auto 同名字幕，
+            // 无视 YuKi 的「自动加载弹幕」开关默认启动。danmakuEnable 关闭时显式
+            // 隔离——--load-scripts=no 只停 scripts/ 目录自动加载，不影响 OSC 等
+            // 内置脚本与显式 --script（mpv scripting.c mp_load_scripts 实证）；
+            // --sub-auto=no 与内置引擎（mpv-player.js）口径一致。开关开启时不干预，
+            // 尊重用户自身的 mpv 弹幕环境。
+            if (settings.get('danmakuEnable') !== true) {
+                args.push('--load-scripts=no', '--sub-auto=no');
             }
             args.push(url);
             return { args, headerSupported: true };

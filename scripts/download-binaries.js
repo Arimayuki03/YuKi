@@ -405,6 +405,80 @@ async function downloadMisans() {
     log(`MiSans 字体就绪（${ok}/${list.length} 分片）：${dir}`);
 }
 
+// dex-tools（dex2jar v2.4）+ dexdeps：jar 蜘蛛源含 classes.dex 时转换 DEX→JVM 用。
+// 杀软误报治理（Q9）：dex-tools 的 d2j-*.bat 命名是「HackTool」类静态启发式强特征，
+// 自 0.2.7 起不再打进安装包（package.json extraResources 已排除）：本脚本 CLI 手动
+// 补齐 vendor/，运行时缺漏由 python-backend/jar_bridge.py 按需下载到缓存目录。
+// 哈希均已对上游产物实证：
+// - dex-tools-v2.4.zip：pxb1988/dex2jar release v2.4 官方资产；
+// - dexdeps 五个 jar：Maven Central 对应坐标产物（与历史手工放置版逐字节一致）。
+const DEX_TOOLS_URL = 'https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip';
+const DEX_TOOLS_SHA256 = 'ee7c45eb3c1d2474a6145d8d447e651a736a22d9664b6d3d3be5a5a817dda23a';
+const DEXDEPS_FILES = [
+    // [落盘名, Maven Central 路径, sha256]
+    ['gson.jar', 'com/google/code/gson/gson/2.10.1/gson-2.10.1.jar',
+        '4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593'],
+    ['kotlin-stdlib.jar', 'org/jetbrains/kotlin/kotlin-stdlib/1.8.21/kotlin-stdlib-1.8.21.jar',
+        '042a1cd1ac976cdcfe5eb63f1d8e0b0b892c9248e15a69c8cfba495d546ea52a'],
+    ['okhttp3.jar', 'com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar',
+        'b1050081b14bb7a3a7e55a4d3ef01b5dcfabc453b4573a4fc019767191d5f4e0'],
+    ['okio.jar', 'com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar',
+        '67543f0736fc422ae927ed0e504b98bc5e269fda0d3500579337cb713da28412'],
+    ['org-json.jar', 'org/json/json/20240303/json-20240303.jar',
+        '3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed'],
+];
+const MAVEN_BASE = 'https://repo1.maven.org/maven2/';
+
+async function downloadDextools(vendorDir) {
+    const vendor = vendorDir || VENDOR;
+    const d2jJar = path.join(vendor, 'dex-tools', 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar');
+    if (fs.existsSync(d2jJar)) { log(`dex-tools 已存在：${d2jJar}`); return d2jJar; }
+    ensureDir(path.join(vendor, 'dex-tools'));
+    const stage = path.join(vendor, '.tmp');
+    ensureDir(stage);
+    const ghProxy = (u) => `https://ghfast.top/${u}`;
+    const archive = path.join(stage, 'dex-tools-v2.4.zip');
+    const src = await fetchVerified([ghProxy(DEX_TOOLS_URL), DEX_TOOLS_URL], archive,
+        DEX_TOOLS_SHA256, 'dex-tools v2.4');
+    if (!src) throw new Error('dex-tools 所有下载源（镜像/直连）均失败，请检查网络后重试');
+    const EXTRACT_DIR = 'yuki-dextools-extract';
+    extract('dex-tools-v2.4.zip', stage, EXTRACT_DIR);
+    const top = path.join(stage, EXTRACT_DIR, 'dex-tools-v2.4');
+    if (!fs.existsSync(path.join(top, 'lib', 'dex-tools-v2.4.jar'))) {
+        throw new Error('dex-tools-v2.4.jar not found in archive');
+    }
+    // 整目录落位（保留 lib/ 与 LICENSE/NOTICE——THIRD_PARTY.md 的再分发义务）。
+    // renameSync 不自动建父目录：rmSync 会把上面 ensureDir 的空 dex-tools/ 一并删掉，
+    // rename 前必须重建（实测缺失时抛 ENOENT）。
+    const dest = path.join(vendor, 'dex-tools');
+    fs.rmSync(dest, { recursive: true, force: true });
+    ensureDir(dest);
+    fs.renameSync(top, path.join(dest, 'dex-tools-v2.4'));
+    try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    log(`dex-tools 安装完成：${d2jJar}`);
+    return d2jJar;
+}
+
+async function downloadDexdeps(vendorDir) {
+    const vendor = vendorDir || VENDOR;
+    const dir = path.join(vendor, 'dexdeps');
+    ensureDir(dir);
+    let ok = 0;
+    for (const [name, rel, sha] of DEXDEPS_FILES) {
+        const dest = path.join(dir, name);
+        if (fs.existsSync(dest)) { ok += 1; continue; }
+        try {
+            await download(MAVEN_BASE + rel, dest);
+            await verifyDownload(dest, sha, `dexdeps ${name}`);
+            ok += 1;
+        } catch (e) {
+            log(`dexdeps ${name} 下载失败：${e.message}`);
+        }
+    }
+    log(`dexdeps 就绪（${ok}/${DEXDEPS_FILES.length}）：${dir}`);
+    return ok === DEXDEPS_FILES.length ? dir : null;
+}
+
 async function main() {
     const what = process.argv[2] || 'mpv';
     if (process.argv.includes('--winget') && WIN) {
@@ -417,6 +491,8 @@ async function main() {
     if (what === 'anime4k' || what === 'all') await downloadAnime4k();
     if (what === 'ffmpeg' || what === 'all') await downloadFfmpeg();
     if (what === 'misans' || what === 'all') await downloadMisans();
+    // dextools 不进 all：按需获取（仅 jar 蜘蛛源含 DEX 时用到），CI 打包不预置
+    if (what === 'dextools') { await downloadDextools(); await downloadDexdeps(); }
 }
 
 // 作为脚本直接运行时才执行 CLI 主流程；被 require（主进程一键补装）时仅导出函数。
@@ -442,4 +518,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { downloadMpv, downloadAria2, downloadFfmpeg, downloadAnime4k, downloadMisans };
+module.exports = { downloadMpv, downloadAria2, downloadFfmpeg, downloadAnime4k, downloadMisans, downloadDextools, downloadDexdeps };

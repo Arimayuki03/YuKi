@@ -4,7 +4,8 @@
  * 数据存 settings（favorites / history），条目 {site, siteName, vodId, name, pic, remarks, ts}，
  * 最新在前，上限 200 条。详情页打开时自动记入历史；收藏在详情页手动切换。
  * 两个视图共用网格渲染（recCard），卡片 ✕ 可单条移除；历史页保留一键清空（T40 起收藏页无清空）。
- * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）。
+ * 两页均支持搜索（片名/备注/源）；收藏额外带「想看/已看」标签（tag：want/seen，默认 want）
+ * 与来源筛选（全部/本地 CatVod/Bangumi 账号收藏，_src，与标签筛选叠加）。
  * Bangumi 收藏卡内嵌「★ 评分」按钮与「我的 N★」徽章（recCard 直接渲染，覆盖一切重建路径；
  * 点击事件由 my.js 在 document 级委托打开 BgmRate 对话框——独立收藏页 #view-favorites
  * 与「我的」页内嵌网格两处 Bangumi 卡都生效）。
@@ -222,6 +223,12 @@ const Records = {
 /** 归一化标签：旧数据无 tag 视同 want；显式取消（''）保持无标签。 */
 function normTag(t) { return (t === undefined || t === null) ? 'want' : t; }
 
+/** Bangumi 托管条目判定：远端账号收藏（bangumi 标志）或详情页同步写入的本地镜像（site='bangumi'）。
+ *  recCard 渲染与收藏来源筛选共用同一口径，避免「筛进 Bangumi 分类的卡片却按本地卡渲染」。 */
+function isBangumiItem(v) {
+    return !!v.bangumi || String(v.site || '') === 'bangumi';
+}
+
 // 收藏状态标签：''=无/未标记，want=想看，watching=在看，seen=已看(看过)，hold=搁置，dropped=抛弃。
 // 与 Bangumi 收藏类型 1想看/2看过/3在看/4搁置/5抛弃 对应（见 my.js 合并逻辑）。
 const TAG_LABEL = { want: '想看', watching: '在看', seen: '看过', hold: '搁置', dropped: '抛弃' };
@@ -246,17 +253,18 @@ function fmtTime(ts) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-/** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面左上角加状态标签）。
+/** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面徽章组带状态标签）。
  *  历史卡按次记录（T73）：每次播放一条，显示 集名 · 时长 · 播放时间，不再显示「已播 N 集」。
  *  Kazumi 源历史卡无源封面：复用 Bangumi 封面缓存，未命中占位图标 data-cover-missing 供 fillMissingCovers 补拉。
  *  Bangumi 条目（v.bangumi）：无移除/编辑/勾选按钮，来源徽标显示「Bangumi」，点击进 Bangumi 二级详情页；
- *  并内嵌「★ 评分」按钮（v.myRate 有值时另带「我的 N★」徽章），评分点击由 my.js 委托打开 BgmRate 对话框。 */
+ *  并内嵌「★ 评分」按钮（v.myRate 有值时另带「我的 N★」徽章），评分点击由 my.js 委托打开 BgmRate 对话框。
+ *  封面左下角徽章组（用户要求）：源徽章 → 状态徽章（源右侧）→ 已看集数徽章（状态右侧）。 */
 function recCard(v, editable, withTags, playCountByName) {
     // Bangumi 管理态判定（T79 补遗）：除远端条目自带 bangumi 标志外，详情页同步
     // 写入的本地镜像记录（site='bangumi'，带 bangumiId）同样按账号托管渲染——
     // 无删除/编辑按钮、标签只读，收藏操作走 Bangumi 详情页；否则去重后留下的卡
     // 仍带删除按钮，点删后「变成」不可操作的远端卡，观感割裂。
-    const isBgm = !!v.bangumi || String(v.site || '') === 'bangumi';
+    const isBgm = isBangumiItem(v);
     const tag = isBgm ? (v.tag || '') : normTag(v.tag);
     const progress = v.progress;
     const progressHtml = progress && progress.totalEps
@@ -281,30 +289,26 @@ function recCard(v, editable, withTags, playCountByName) {
     const isLocal = isFileRecord;
     // 历史卡播放信息（T73）：播放卡显示 集名 · 时长 · 播放时间；浏览卡只显示打开时间
     const isPlay = v.kind === 'play' || (v.playCount || 0) > 0;
-    // 集数信息行：按同名播放卡计数（去重）计算已看集数
+    // 集数徽章（用户要求）：已看/总集数，置于源徽章与状态徽章所在徽章组内。
+    //  - CatVod 本地卡（收藏 v.progress，player.js 逐集记账）：currentEp/totalEps
+    //  - 历史卡：按同名播放记录按集名去重计数（watchedCount）+ 记录自带 totalEps
+    // 无任何集数信息不渲染。
     const epTotal = v.totalEps || (progress && progress.totalEps) || 0;
     const nameKey = String(v.name || '').trim().toLowerCase();
     const watchedCount = (playCountByName && nameKey && playCountByName[nameKey]) || 0;
-    // 文字顺序：集名 → 已看N集 → 总共N集 → 播放时间（用户要求，修复重复显示）
+    const favWatched = (!isPlay && progress && (progress.currentEp === 0 || progress.currentEp)) ? Number(progress.currentEp) : 0;
+    const epWatched = isPlay ? watchedCount : favWatched;
+    // 文字顺序：集名 → 播放时长/播放时间（用户要求，修复重复显示）
     const epNameLine = isPlay && v.lastEpisode
         ? `<div class="rec-epline" title="${escHtml(String(v.lastEpisode))}">${escHtml(String(v.lastEpisode).slice(0, 20))}</div>`
         : '';
-    const epCountLine = isPlay
-        ? (() => {
-            const bits = [];
-            if (watchedCount > 0) bits.push(`已看 ${watchedCount} 集`);
-            if (epTotal) bits.push(`共 ${epTotal} 集`);
-            return bits.length ? `<div class="rec-epline">${bits.join(' · ')}</div>` : '';
-        })()
-        : '';
-    const playInfo = isPlay
-        ? `<div class="rec-playinfo" title="${fmtTime(v.ts)}${v.lastDuration ? ' 播放时长 ' + fmtDur(v.lastDuration) : ''}">${[v.lastDuration ? '播放 ' + fmtDur(v.lastDuration) : '', fmtTime(v.ts)].filter(Boolean).join(' · ')}</div>`
-        : (v.ts ? `<div class="rec-playinfo" title="${fmtTime(v.ts)}">${fmtTime(v.ts)}</div>` : '');
     const uid = escHtml(v.uid || '');
     // Bangumi 条目也可勾选（多选标记状态，同步到账号）；带 data-bgm 标识与 subject id
     const check = isBgm
         ? `<span class="rec-check" data-bgm="1" data-id="${escHtml(v.vodId)}" data-tag="${escHtml(v.tag || '')}" title="勾选后可批量标记状态"></span>`
         : `<span class="rec-check" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="勾选后可批量删除"></span>`;
+    // 状态徽章（想看/在看/看过…）：移入封面左下角徽章组（源徽章右侧，用户要求）。
+    // 本地卡点击循环切换（委托 .rec-tag），Bangumi 卡只读（rec-tag-static，去详情页改）。
     const tagBadge = withTags && tag
         ? (isBgm
             ? `<span class="rec-tag rec-tag-static" data-site="bangumi" title="Bangumi 收藏状态（在详情页修改）">${tagLabel(tag)}</span>`
@@ -312,35 +316,55 @@ function recCard(v, editable, withTags, playCountByName) {
         : '';
     const del = isBgm ? '' : `<button class="rec-del" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>`;
     const edit = (editable && !isBgm) ? `<button class="rec-edit" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : '';
-    // Bangumi 卡「★ 评分」操作按钮：并入 recCard 直接渲染（修复2）——任何重建路径
-    // （搜索防抖/标签筛选/翻页/标签切换/FavHub 重渲）都天然带按钮，不再依赖 my.js
-    // 渲染后注入。点击事件由 my.js 在 document 级委托处理（独立收藏页与「我的」页均生效）。
-    const rateBtn = isBgm && String(v.vodId || '')
-        ? `<button type="button" class="rec-bgm-rate" title="评分 / 吐槽（同步到 Bangumi）">★ 评分</button>`
-        : '';
+    // Bangumi 卡「★ 评分」按钮已挪到详情页 hero 操作行（T80）：评分是详情级操作，
+    // 挤在收藏卡封面上既遮挡封面又让每张卡背一份按钮。卡片上只保留「我的 N★」
+    // 徽章（myRate）作已评分展示；评分/吐槽入口见 detail.js #detail-bgm-rate。
     // 「我的 N★」徽章：v.myRate（1-10，my.js _fetchBangumiItems 映射远端收藏 rate）
     // 有值时渲染，封面右上角（左上角被状态标签 rec-tag 占用；bgm 卡无右上角删除按钮，不冲突）。
     // 数值经 escHtml 转义（远端可控字段防御，对齐 #11）。
+    // 封面右上角排名徽章（对齐推荐页/时间表卡片：bangumi-rank-badge 金色 #N，
+    // 同一 CSS 类；右上角与「我的 N★」徽章互斥——都占 right:6px 时优先排名徽章，
+    // 我的评分已体现在评分里不重复）
+    const rankBadge = (isBgm && (v.bgmRank === 0 || v.bgmRank))
+        ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(v.bgmRank))}">#${escHtml(String(v.bgmRank))}</span>`
+        : '';
     const myRateNum = (v.myRate === 0 || v.myRate) ? Number(v.myRate) : 0;
-    const myBadge = (isBgm && myRateNum >= 1 && myRateNum <= 10)
+    const myBadge = (isBgm && !rankBadge && myRateNum >= 1 && myRateNum <= 10)
         ? `<span class="bangumi-myrate-badge" style="left:auto; right:6px;" title="我的评分 ${myRateNum} 分">我的 ${escHtml(myRateNum)}★</span>`
         : '';
+    // 时间行（双行拆分，用户要求）：播放卡第一行「播放 X 分钟」、第二行日期；浏览卡仅日期。
+    // Bangumi 公共评分（scoreText）：播放行要求 lastDuration，收藏卡不满足——
+    // 无播放行时拼到日期行行首，保证 bgmScore 首渲有展示面（与补齐路径口径一致）。
+    const scoreNum = (v.bgmScore === 0 || v.bgmScore) ? Number(v.bgmScore) : 0;
+    const scoreText = (isBgm && scoreNum) ? `⭐${escHtml(String(scoreNum))} · ` : '';
+    const durText = isPlay && v.lastDuration ? `播放 ${fmtDur(v.lastDuration)}` : '';
+    const timeText = v.ts ? fmtTime(v.ts) : '';
+    const playDurLine = durText
+        ? `<div class="rec-playinfo${timeText ? ' rec-playinfo-tight' : ''}" title="播放时长 ${escHtml(fmtDur(v.lastDuration))}">${escHtml(scoreText + durText)}</div>`
+        : '';
+    const playTimeLine = timeText
+        ? `<div class="rec-playinfo rec-playinfo-date" title="${escHtml(timeText)}">${escHtml(scoreText + timeText)}</div>`
+        : '';
+    const playInfo = playDurLine + playTimeLine;
     const srcBadge = isBgm
         ? `<span class="rec-site" title="Bangumi 收藏">Bangumi</span>`
         : (v.siteName ? `<span class="rec-site" title="来源：${escHtml(v.siteName)}">源：${escHtml(v.siteName)}</span>` : '');
+    // 集数徽章：按同名记录去重计已看集数，有总数时显示「N/总」（无总数则 N/?），置于源徽章右侧
+    const epBadge = (isPlay || favWatched > 0) && (epWatched > 0 || epTotal > 0)
+        ? `<span class="rec-eps" title="已看 ${epWatched} 集 / 共 ${epTotal || '?'} 集">${epWatched > 0 ? epWatched : '?'}/${epTotal > 0 ? epTotal : '?'}</span>`
+        : '';
+    // 封面左下角徽章组：源徽章 + 状态徽章 + 集数徽章并排（状态在源右侧，集数在状态右侧，用户要求）
+    const coverBadges = (srcBadge || tagBadge || epBadge) ? `<div class="rec-cover-badges">${srcBadge}${tagBadge}${epBadge}</div>` : '';
     return `<div class="vod-card" data-uid="${uid}" data-site="${escHtml(isBgm ? 'bangumi' : v.site)}" data-source="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" data-kazumi-src="${escHtml(v.kazumiSrc || '')}" data-name="${escHtml(v.name)}" tabindex="0">
         ${check}
-        ${tagBadge}
         ${del}
         ${edit}
-        <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${srcBadge}${myBadge}</div>
+        <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${coverBadges}${myBadge}${rankBadge}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
         ${isPlay ? '' : `<div class="vod-remarks">${escHtml(v.remarks || '')}</div>`}
         ${epNameLine}
-        ${epCountLine}
         ${playInfo}
         ${progressHtml}
-        ${rateBtn}
     </div>`;
 }
 
@@ -447,15 +471,17 @@ async function confirmRecEdit() {
     warnToast('已保存');
 }
 
-/** 合并外部条目（Bangumi 收藏）并按 bangumiId 去重（T79）：详情页同步/收藏会为同一
- *  subject 写入本地条目（带 bangumiId），远端收藏里还有同 ID 条目——不去重则收藏页
- *  出现两张相同卡片（本地那张可删除、远端那张不可删）。本地无 bangumiId 的普通
- *  收藏不受影响；extra 内部按 vodId 自去重防远端重复。 */
+/** 合并外部条目（Bangumi 收藏）并按 bangumiId 去重：仅本地「Bangumi 镜像」条目
+ *  （site='bangumi'，详情页收藏/同步写入，T79）拦下远端同 ID 条目，避免同一账号
+ *  收藏出现两张 Bangumi 托管卡。普通源收藏（CatVod/本地文件等）带 bangumiId 只是
+ *  时间表关联用途——此前它们也会拦截远端条目，导致「同步 Bangumi」后账号收藏
+ *  全部被跳过、只显示本地源影片；现在有来源分类（全部/CatVod/Bangumi）区分，
+ *  同名不同源的收藏（本地源 + Bangumi）各自成卡正常展示。extra 内部按 vodId 自去重。 */
 function mergeExtraRecords(list, extra) {
     if (!Array.isArray(list)) list = [];
     if (!Array.isArray(extra) || !extra.length) return list;
     const localIds = new Set(
-        list.map((v) => (v && v.bangumiId !== undefined && v.bangumiId !== null) ? String(v.bangumiId) : '')
+        list.map((v) => (v && String(v.site || '') === 'bangumi' && v.bangumiId !== undefined && v.bangumiId !== null) ? String(v.bangumiId) : '')
             .filter(Boolean));
     const seen = new Set();
     const fresh = [];
@@ -478,6 +504,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         _selectMode: false, // 多选删除模式：卡片点击改为切换勾选
         _q: '',   // 搜索关键字（片名/备注/源，不区分大小写）
         _tag: '', // 标签筛选（want/watching/seen/hold/dropped，空=全部；仅 withTags 视图生效）
+        _src: '', // 来源筛选（''=全部 / catvod=本地收藏 / bangumi=Bangumi 账号收藏；仅收藏视图，见 isBangumiItem）
         _page: 1, // 客户端分页当前页（T6：超过每页条数时分页展示）
         _extra: null, // 可选异步扩展数据源（如 Bangumi 收藏），返回 [{site,name,pic,remarks,tag,bangumi,...}] 追加渲染
 
@@ -505,11 +532,6 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 })
                 .on('click', '.vod-card', (e) => {
                     const el = $(e.currentTarget);
-                    // 「★ 评分」操作按钮点击不进详情（对齐 bangumi-search.js 的 .bgm-card-rate 做法）：
-                    // 按钮自身 handler 委托在 document 级（my.js，独立收藏页与「我的」页均生效），
-                    // stopPropagation 拦不住本层委托（records.js 委托根更深、先于 document 执行），
-                    // 故在卡片委托入口按事件源过滤，点评分只开对话框不切页。
-                    if ($(e.target).closest('.rec-bgm-rate').length) return;
                     // 选择模式下点卡片 = 切换勾选，不打开详情
                     if (this._selectMode) {
                         const chk = el.find('.rec-check');
@@ -640,6 +662,16 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     if (el.hasClass('rec-tag-static')) return;
                     this.toggleTag(String(el.data('uid')));
                 });
+                // 来源筛选：全部/本地(CatVod)/Bangumi 账号收藏（与标签筛选叠加生效）；未知值钳回全部
+                $(`#${viewName}-srcs`).on('click', '.class-tab', (e) => {
+                    const el = $(e.currentTarget);
+                    $(`#${viewName}-srcs .class-tab`).removeClass('active');
+                    el.addClass('active');
+                    const src = String(el.data('src') || '');
+                    this._src = (src === 'catvod' || src === 'bangumi') ? src : '';
+                    this._page = 1;
+                    this.render();
+                });
             }
         },
 
@@ -671,17 +703,20 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     list = mergeExtraRecords(list, extra);
                 } catch (e) { /* 合并失败不影响本地列表 */ }
             }
-            // 搜索 + 标签过滤（不改存储顺序）
+            // 搜索 + 来源 + 标签过滤（不改存储顺序）
             if (this._q) list = list.filter((v) => `${v.name || ''}${v.remarks || ''}${v.siteName || ''}`.toLowerCase().includes(this._q));
+            if (withTags && this._src === 'bangumi') list = list.filter((v) => isBangumiItem(v));
+            // CatVod 分类：非 Bangumi 托管的全部本地收藏（CatVod 源/本地文件/下载/直链/Kazumi 规则源）
+            if (withTags && this._src === 'catvod') list = list.filter((v) => !isBangumiItem(v));
             if (withTags && this._tag) list = list.filter((v) => normTag(v.tag) === this._tag);
             const grid = $(`#${viewName}-grid`).empty();
             grid.toggleClass('selecting', this._selectMode);
             if (!list.length) {
                 if (this._selectMode) this.toggleSelectMode(); // 列表空时退出选择模式
                 $(`#${viewName}-pager`).empty();
-                // P3-18：_q/_tag/emptyTip 当前均为静态字面量或本地输入回显，
+                // P3-18：_q/_tag/_src/emptyTip 当前均为静态字面量或本地输入回显，
                 // 统一转义插值不改行为，仅堵「外部数据流入 emptyTip」的回归源
-                grid.html(`<div class="tip-line">${(this._q || this._tag) ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
+                grid.html(`<div class="tip-line">${(this._q || this._tag || this._src) ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
                 return;
             }
             // 客户端分页（T39）：每页条数取本页单独设置（收藏/历史各自一项，默认 20），超过即出底部分页器
@@ -710,6 +745,73 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             grid.html(slice.map((v) => recCard(v, editable, withTags, playCountByName)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
+            // Bangumi 卡公共评分/排名/已看话数补齐：本地镜像条目（详情页同步写入）与旧缓存
+            // 条目无 bgmScore/bgmRank 字段，按 subject_id 补拉 bangumiInfo（30 分钟缓存，与
+            // 时间表徽章同模式）后回填 DOM——已有字段的卡片（远端 v3 缓存）不发请求。
+            // 已看话数（用户要求，网站数据）：收藏状态接口回传 ep_status（看到第 N 话，0=未看），
+            // 总话数取 bangumiInfo 的 eps/total_episodes——经 getBangumiCollection（带本地缓存）
+            // 单条补查后回填 .rec-eps 徽章；仅「在看/看过」等实际开看的卡片拉取（want/hold/dropped
+            // 无进度语义，免发请求）。
+            if (storeKey === 'favorites' && typeof Kazumi !== 'undefined' && Kazumi.bangumiInfo) {
+                const pending = slice.filter((v) => v && v.bangumi
+                    && String(v.site || '') === 'bangumi'
+                    && !(v.bgmScore === 0 || v.bgmScore)
+                    && !(v.bgmRank === 0 || v.bgmRank)
+                    && String(v.vodId || '').match(/^\d+$/));
+                for (const item of pending) {
+                    const sid = String(item.vodId);
+                    Kazumi.bangumiInfo(sid).then((info) => {
+                        if (!info) return;
+                        const score = (Number(info.score) || (info.rating && Number(info.rating.score)) || 0) || null;
+                        const rank = (Number(info.rank) || (info.rating && Number(info.rating.rank)) || 0) || null;
+                        if (!score && !rank) return;
+                        // 回填内存条目 + DOM（翻页/重渲染后重走补齐流程，不落盘避免污染本地存储形状）
+                        if (item.bangumi) { item.bgmScore = item.bgmScore || score; item.bgmRank = item.bgmRank || rank; }
+                        const $card = grid.find(`.vod-card[data-site="bangumi"][data-id="${sid}"]`);
+                        if (!$card.length) return;
+                        const $cover = $card.find('.vod-cover');
+                        if (rank && !$cover.find('.bangumi-rank-badge').length) {
+                            $cover.append(`<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(rank))}">#${escHtml(String(rank))}</span>`);
+                        }
+                        if (score) {
+                            const $pi = $card.find('.rec-playinfo');
+                            if ($pi.length && !$pi.text().includes('⭐')) {
+                                $pi.text(`⭐${String(score)} · ` + $pi.text());
+                            }
+                        }
+                    }).catch(() => { /* 单条补查失败跳过 */ });
+                }
+                // 已看话数补齐（独立流程：查收藏状态而非番剧信息）。需同时有 token 才有意义；
+                // 无 Token/未收藏/失败静默跳过，保持卡片无集数徽章。
+                const epPending = slice.filter((v) => v && v.bangumi
+                    && String(v.site || '') === 'bangumi'
+                    && String(v.vodId || '').match(/^\d+$/)
+                    && (v.tag === 'watching' || v.tag === 'seen'));
+                for (const item of epPending) {
+                    const sid = String(item.vodId);
+                    Promise.all([
+                        Kazumi.getBangumiCollection ? Kazumi.getBangumiCollection(sid) : Promise.resolve(null),
+                        Kazumi.bangumiInfo(sid),
+                    ]).then(([col, info]) => {
+                        const watched = col ? (Number(col.ep_status) || 0) : 0;
+                        if (watched <= 0) return; // 未看/无进度：不出徽章
+                        const epsTotal = Number((info && (info.eps || info.total_episodes)) || 0);
+                        const text = epsTotal > 0 ? `${watched}/${epsTotal}` : `${watched}/?`;
+                        const $card = grid.find(`.vod-card[data-site="bangumi"][data-id="${sid}"]`);
+                        if (!$card.length) return;
+                        const $badges = $card.find('.rec-cover-badges');
+                        let $eps = $card.find('.rec-eps');
+                        if (!$eps.length && $badges.length) {
+                            $badges.append('<span class="rec-eps"></span>');
+                            $eps = $card.find('.rec-eps');
+                        }
+                        if ($eps.length) {
+                            $eps.text(text);
+                            $eps.attr('title', `已看 ${watched} 话 / 共 ${epsTotal || '?'} 话`);
+                        }
+                    }).catch(() => { /* 单条补查失败跳过 */ });
+                }
+            }
             // 入场错峰：收藏/历史整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
             playCardsEnter(grid);
             // 本地文件卡：异步抓帧封面（ffmpeg 截帧，替代占位图；失败/未就绪保持占位图）
