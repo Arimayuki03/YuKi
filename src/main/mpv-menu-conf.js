@@ -198,9 +198,11 @@ item(2, '仅修复', 'script-binding hints/a4k-restore', 'checked=p["user-data/y
 // 跳片头/片尾登记入口（T81）：原 Shift+O/E 热键挂在主窗口 renderer 上，mpv 播放时
 // 焦点在 mpv 窗口收不到按键——改为 mpv 右键菜单项（信号通道同 a4k/ep-skip：
 // script-binding → user-data 信号 → 主进程 → 渲染层 _recordOpEdFromPlayback 登记）。
+// 「清除标记」走同一 user-data 通道（值带 clear- 前缀），渲染层 _onOpEdClear 删除登记。
 gap();
 item(1, '标记片头结束点', 'script-binding hints/oped-op', 'disabled=idle_active');
 item(1, '标记片尾起点', 'script-binding hints/oped-ed', 'disabled=idle_active');
+item(1, '清除片头/片尾标记', 'script-binding hints/oped-clear', 'disabled=idle_active');
 item(1, '选择快捷键执行', 'script-binding select/select-binding');
 item(1, '查看全部属性', 'script-binding select/show-properties');
 item(1, '控制台', 'script-binding commands/open');

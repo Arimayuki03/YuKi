@@ -736,10 +736,13 @@ function createWindow() {
     win.setMenuBarVisibility(false);
     win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
     // 渲染端失败落盘：控制台的 warning/error 与渲染进程崩溃都写进 electron-main.log（redactSecrets 由 writer 负责）
-    win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-        // level: 0=log 1=warning 2=error 3=debug；只记 warning/error，避免刷屏
-        if (level >= 2) console.error(`[renderer] ${message} (${sourceId}:${line})`);
-        else if (level === 1) console.warn(`[renderer] ${message} (${sourceId}:${line})`);
+    win.webContents.on('console-message', (info) => {
+        // Electron 35 起新签名为单参数 (details)：第一个参数即 details 对象，
+        // level 是字符串（info/warning/error/debug），行号字段为 lineNumber。
+        // 旧的 (event, level, message, ...) 签名已废弃——若按双参数解构，
+        // 第二个位置会绑到废弃的数字 level，info 恒为 undefined。
+        if (info.level === 'error') console.error(`[renderer] ${info.message} (${info.sourceId}:${info.lineNumber})`);
+        else if (info.level === 'warning') console.warn(`[renderer] ${info.message} (${info.sourceId}:${info.lineNumber})`);
     });
     win.webContents.on('render-process-gone', (_e, details) => {
         console.error('[render-process-gone]', details && details.reason, details && details.exitCode);
@@ -1130,11 +1133,15 @@ app.whenReady().then(() => {
                 // 跳片头/片尾登记（T81）：右键菜单「标记片头结束点/标记片尾起点」→
                 // 信号通道同 ep-skip（渲染层 _recordOpEdFromPlayback 消费，读当前
                 // time-pos 登记 AdSkip）。原 Shift+O/E 主窗口热键因 mpv 焦点问题废弃。
+                // oped-clear：清除当前影片登记（渲染层 _onOpEdClear）。
                 'mp.add_key_binding(nil, "oped-op", function()',
                 '  mp.set_property("user-data/yuki/oped-record", "op")',
                 'end)',
                 'mp.add_key_binding(nil, "oped-ed", function()',
                 '  mp.set_property("user-data/yuki/oped-record", "ed")',
+                'end)',
+                'mp.add_key_binding(nil, "oped-clear", function()',
+                '  mp.set_property("user-data/yuki/oped-record", "clear")',
                 'end)',
                 'mp.add_key_binding(nil, "a4k-cycle", function()',
                 '  local arr = { "off", "a", "aa", "restore" }',
@@ -1836,7 +1843,9 @@ app.whenReady().then(() => {
         mpv._queueSeriesTitle = '本地文件';
         // keepRawTitle：m3u 的 EXTINF 集名保持默认文件名——本地文件名以 .mp4 等
         // 结尾不是抓流产物，默认净化规则（回落第N集）不适用（见 buildM3u 注）。
-        const first = mpv.play(items, { title: '本地文件', noSeq: true, resume: false, keepRawTitle: true });
+        // title 传首集文件名：本地批量连播也登记 OP/ED（本地文件无渲染层 _curMeta，
+        // 渲染层 oped-record 事件以 title 兜底建键；各集片头通常一致，同片名复用）。
+        const first = mpv.play(items, { title: items[0].title, noSeq: true, resume: false, keepRawTitle: true });
         // verifyMpvStart 需要在校验前知道这是原生队列（代际抖动豁免，见其内注释）
         first.nativeQueue = items.length > 1;
         if (!first.ok) return first;
@@ -2020,17 +2029,24 @@ app.whenReady().then(() => {
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
         'bangumiMirrorRoot', 'bangumiProgressSync', 'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
-        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableGitProxy',
+        // enableBangumiWebMirror：详情页「↗ Bangumi 页」条目页跳转跟随镜像开关（detail.js 跳转读取）
+        'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableBangumiWebMirror', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
         // opEdSkip：智能跳过片头/片尾开关（player.js play() 起播时读取，false 关闭）
-        'opEdSkip',
+        // opEdSave：保存已登记的片头/片尾记录开关（panels.js 设置页写入；false 时清空记录并停用登记入口）
+        'opEdSkip', 'opEdSave',
         'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
         // 各列表页每页条数（panels.js 动态 key 写入）
         'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
         'probeSourceUrl', 'probeFailStreak', 'probedAt', 'probedSites', 'probeFp', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
+        // 划词翻译（translate-bubble.js；LLM 凭据按次传后端，key 本身在 SENSITIVE_KEYS 加密落盘）
+        'translateEnable', 'translateTrigger', 'translateTarget',
+        'translateLLMEnable', 'translateLLMBase', 'translateLLMKey', 'translateLLMModel',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
-        'updateNotify', 'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim', 'watchStats', 'watchStatsEnabled',
+        'updateNotify', 'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim',
+        // watchProgress：通用观看进度表（不依赖收藏；records.js 经 settingsSet('watchProgress', map) 写入）
+        'watchProgress', 'watchStats', 'watchStatsEnabled',
         // WebDAV 同步全量键。此前 EnableSettings/EnableStats/AutoEnable/AutoMinutes
         // 漏在白名单外，四个开关的写入被静默忽略（重启后回退），此处一并补齐。
         // RestoreBackup 为恢复前本机备份快照，需可写以便误恢复后找回数据。
@@ -2340,7 +2356,9 @@ app.whenReady().then(() => {
 
     // 恢复默认设置：清偏好类键（保留收藏/历史/源/凭据等数据），重启应用确保全量生效
     ipcMain.handle('yuki:settings-reset', () => {
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
+        // settings.reset(keepKeys) 的参数是「要保留的键」列表：用户数据（收藏/历史/进度等）保留，只清偏好。
+        // watchProgress 是观看进度数据（非偏好），恢复默认时必须保留。
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'watchProgress', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
         // M-8：app.exit(0) 不触发 before-quit，复用退出清理序列停掉 mpv/aria2/推送/后端等子进程
         runQuitCleanup();
         app.relaunch();
@@ -3587,8 +3605,9 @@ app.whenReady().then(() => {
     // _recordOpEdFromPlayback——按当前 time-pos 登记到 AdSkip（按片名+线路）。
     mpv.on('oped-record', ({ kind } = {}) => {
         try {
-            const k = (kind === 'op' || kind === 'ed') ? kind : '';
-            if (k) send('yuki:oped-record', { kind: k });
+            // kind ∈ op/ed/clear：前两者登记，clear 走渲染层清除入口（同一信号通道）
+            const k = (kind === 'op' || kind === 'ed' || kind === 'clear') ? kind : '';
+            if (k) send('yuki:oped-record', { kind: k, title: mpv.getSessionTitle() });
         } catch (e) { /* ignore */ }
     });
     // 播放器 IPC 就绪：用实时设置推送右键菜单初始档位。hints.lua 里的静态快照可能

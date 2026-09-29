@@ -24,6 +24,13 @@ STAGES = [
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
     # Bangumi 评分/吐槽（rate/comment 单条透传）+ 验证码自动识别（animeko 思路，可选降级）
     ('kazumi-bgm-rating', [PY, os.path.join(HERE, 'test_kazumi_bgm_rating.py')]),
+    # 封面话数徽章批量详情链路（bangumi_info_batch 并发/截断/单条缓存回写）
+    ('kazumi-bgm-info-batch', [PY, os.path.join(HERE, 'test_kazumi_bgm_info_batch.py')]),
+    # 划词翻译：免费端点（edge/google）协议解析 + LLM 兼容 + failover/缓存
+    ('kazumi-translate', [PY, os.path.join(HERE, 'test_kazumi_translate.py')]),
+    # 验证码小模型推理（numpy 纯推理，权重随应用打包）+ 自动解题流程（桩网络）
+    ('kazumi-captcha-cnn', [PY, os.path.join(HERE, 'test_kazumi_captcha_cnn.py')]),
+    ('kazumi-captcha-solve', [PY, os.path.join(HERE, 'test_kazumi_captcha_solve.py')]),
     ('kazumi-cover-proxy', [PY, os.path.join(HERE, 'test_kazumi_cover_proxy.py')]),
     ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('webdav-conn', [PY, os.path.join(HERE, 'test_webdav_conn.py')]),

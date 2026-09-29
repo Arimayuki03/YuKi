@@ -42,6 +42,7 @@
     <script src="js/timeline.js" defer></script>
     <script src="js/popular.js" defer></script>
     <script src="js/ad-skip.js" defer></script>
+    <script src="js/translate-bubble.js" defer></script>
     <script src="js/player.js" defer></script>
     <script src="js/records.js" defer></script>
     <script src="js/downloads.js" defer></script>
@@ -480,6 +481,7 @@
                         <span class="settings-nav-item" data-cat="storage">缓存</span>
                         <span class="settings-nav-item" data-cat="source">CatVod源设置</span>
                         <span class="settings-nav-item" data-cat="kazumi">Kazumi规则</span>
+                        <span class="settings-nav-item" data-cat="translate">翻译</span>
                         <span class="settings-nav-item" data-cat="sync">同步</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
                         <span class="settings-nav-item" data-cat="about">关于</span>
@@ -562,8 +564,8 @@
                                 <select id="set_pagesize_home" class="md-select">
                                     <option value="10">10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
-                                    <option value="24">24 条</option>
+                                    <option value="20">20 条</option>
+                                    <option value="24" selected>24 条</option>
                                     <option value="36">36 条</option>
                                     <option value="60">60 条</option>
                                     <option value="120">120 条</option>
@@ -574,8 +576,8 @@
                                 <select id="set_pagesize_search" class="md-select">
                                     <option value="10">10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
-                                    <option value="24">24 条</option>
+                                    <option value="20">20 条</option>
+                                    <option value="24" selected>24 条</option>
                                     <option value="36">36 条</option>
                                     <option value="60">60 条</option>
                                     <option value="120">120 条</option>
@@ -584,9 +586,9 @@
                             <div class="pagesize-cell">
                                 <span class="tip-line pad0">收藏</span>
                                 <select id="set_pagesize_fav" class="md-select">
-                                    <option value="10">10 条</option>
+                                    <option value="10" selected>10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
+                                    <option value="20">20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
                                     <option value="60">60 条</option>
@@ -598,8 +600,8 @@
                                 <select id="set_pagesize_history" class="md-select">
                                     <option value="10">10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
-                                    <option value="24">24 条</option>
+                                    <option value="20">20 条</option>
+                                    <option value="24" selected>24 条</option>
                                     <option value="36">36 条</option>
                                     <option value="60">60 条</option>
                                     <option value="120">120 条</option>
@@ -610,11 +612,11 @@
                                 <select id="set_pagesize_live" class="md-select">
                                     <option value="10">10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
+                                    <option value="20">20 条</option>
                                     <option value="24">24 条</option>
                                     <option value="36">36 条</option>
                                     <option value="60">60 条</option>
-                                    <option value="120">120 条</option>
+                                    <option value="120" selected>120 条</option>
                                 </select>
                             </div>
                             <div class="pagesize-cell">
@@ -622,9 +624,9 @@
                                 <select id="set_pagesize_popular" class="md-select">
                                     <option value="10">10 条</option>
                                     <option value="16">16 条</option>
-                                    <option value="20" selected>20 条</option>
+                                    <option value="20">20 条</option>
                                     <option value="24">24 条</option>
-                                    <option value="36">36 条</option>
+                                    <option value="36" selected>36 条</option>
                                     <option value="60">60 条</option>
                                     <option value="120">120 条</option>
                                 </select>
@@ -656,15 +658,21 @@
                         <label class="md-switch" title="播放时自动把当前集下载到下载目录（网盘资源不支持，始终跳过）"><input type="checkbox" id="set_simuldl"><span class="md-switch-track"></span><span class="md-switch-label">边下边播</span></label>
                         <label class="md-switch" title="播放时自动加载弹弹 play 弹幕到 mpv（按片名+集数匹配，匹配不到则跳过）"><input type="checkbox" id="set_danmaku"><span class="md-switch-track"></span><span class="md-switch-label">自动加载弹幕</span></label>
                         <label class="md-switch" title="不记录播放历史"><input type="checkbox" id="set_incognito"><span class="md-switch-track"></span><span class="md-switch-label">隐身模式</span></label>
+                        <label class="md-switch" title="起播自动跳到已记录的片头结束点，接近片尾起点时自动跳过（在播放器右键菜单标记）"><input type="checkbox" id="set_oped_skip"><span class="md-switch-track"></span><span class="md-switch-label">跳过片头片尾</span></label>
+                        <div id="oped_save_fields" style="display:none;">
+                            <label class="md-switch" title="开启后保存播放器右键菜单登记的片头/片尾记录（存于本地）；关闭时立即清除全部记录，并不再保存新登记"><input type="checkbox" id="set_oped_save" checked><span class="md-switch-track"></span><span class="md-switch-label">保存已登记的片头/片尾记录</span></label>
+                        </div>
                         <label class="md-switch" title="m3u8 合成下载时跳过 CUE-OUT/CUE-IN 广告分段（实验性，个别源可能误判）"><input type="checkbox" id="set_hls_adfilter"><span class="md-switch-track"></span><span class="md-switch-label">m3u8 广告过滤</span></label>
                         <div class="set-group">画质</div>
                         <label class="md-switch" title="实时升频锐化，适合动漫；着色器首次启动时自动下载"><input type="checkbox" id="set_anime4k"><span class="md-switch-track"></span><span class="md-switch-label">Anime4K 动漫超分</span></label>
-                        <div class="tip-line pad0"  title="开启超分后选择，播放中修改即时生效">Anime4K 档位</div>
-                        <select id="set_anime4k_mode" class="md-select">
-                            <option value="a" selected>均衡（Mode A）</option>
-                            <option value="aa">细节增强（Mode A+A · 低清片源）</option>
-                            <option value="restore">仅修复（不升频 · 高清片源）</option>
-                        </select>
+                        <div id="anime4k_fields" style="display:none;">
+                            <div class="tip-line pad0"  title="开启超分后选择，播放中修改即时生效">Anime4K 档位</div>
+                            <select id="set_anime4k_mode" class="md-select">
+                                <option value="a" selected>均衡（Mode A）</option>
+                                <option value="aa">细节增强（Mode A+A · 低清片源）</option>
+                                <option value="restore">仅修复（不升频 · 高清片源）</option>
+                            </select>
+                        </div>
                         <div class="set-group">语言</div>
                         <div class="tip-line pad0" title="多音轨/多字幕时优先选择，下次起播生效">音轨 / 字幕语言</div>
                         <div class="hotkey-grid">
@@ -975,36 +983,40 @@
                             </div>
                         </div>
                         <label class="md-switch"  title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
-                        <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
-                        <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
-                        <label class="md-switch"><input type="checkbox" id="webdav_enable_settings"><span class="md-switch-track"></span><span class="md-switch-label">设置同步</span></label>
-                        <label class="md-switch"><input type="checkbox" id="webdav_enable_stats"><span class="md-switch-track"></span><span class="md-switch-label">观看统计同步</span></label>
-                        <label class="md-switch"><input type="checkbox" id="webdav_enable_rules"><span class="md-switch-track"></span><span class="md-switch-label">规则同步</span></label>
-                        <label class="md-switch" title="开启后按所选间隔自动「同步到云端」（需已保存地址与账号）"><input type="checkbox" id="webdav_auto_enable"><span class="md-switch-track"></span><span class="md-switch-label">定时自动同步</span></label>
-                        <label class="md-switch" title="开启后应用启动约 5 秒后自动「从云端恢复」一次（多设备场景先取云端数据）；失败仅提示不重试"><input type="checkbox" id="webdav_startup_pull"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动从云端恢复</span></label>
-                        <label class="md-switch" title="自签名证书的 NAS/自建 WebDAV 握手会失败；开启后跳过 HTTPS 证书校验（仅建议自建服务使用，公共网盘勿开）"><input type="checkbox" id="webdav_ssl_skip"><span class="md-switch-track"></span><span class="md-switch-label">跳过 HTTPS 证书校验（自签名服务器）</span></label>
-                        <div class="auto-interval-col">
-                            <span class="tip-line pad0">自动同步间隔</span>
-                            <select id="webdav_auto_interval" class="md-select">
-                                <option value="15">15 分钟</option>
-                                <option value="30">30 分钟</option>
-                                <option value="60" selected>1 小时</option>
-                                <option value="180">3 小时</option>
-                                <option value="360">6 小时</option>
-                                <option value="720">12 小时</option>
-                                <option value="1440">24 小时</option>
-                            </select>
-                        </div>
-                        <div class="tip-line pad0" id="webdav_auto_status"></div>
-                        <div class="md-field"><input id="webdav_url" class="md-input" placeholder="WebDAV 地址（如 https://dav.jianguoyun.com/dav/）" /></div>
-                        <div class="md-field"><input id="webdav_remote_dir" class="md-input" placeholder="远程目录（可选，默认 YuKiSync）" /></div>
-                        <div class="md-field"><input id="webdav_username" class="md-input" placeholder="用户名" /></div>
-                        <div class="md-field"><div class="webdav-pwd-wrap"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /><button type="button" id="webdav_pwd_eye" class="pan-cookie-eye" title="显示/隐藏密码">👁️</button></div></div>
-                        <div class="wall-row">
-                            <button id="webdav_save" class="md-btn md-btn-filled">保存配置</button>
-                            <button id="webdav_test" class="md-btn md-btn-tonal">测试连接</button>
-                            <button id="webdav_sync" class="md-btn md-btn-tonal">同步到云端</button>
-                            <button id="webdav_restore" class="md-btn md-btn-tonal">从云端恢复</button>
+                        <div id="webdav_fields" style="display:none;">
+                            <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
+                            <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
+                            <label class="md-switch"><input type="checkbox" id="webdav_enable_settings"><span class="md-switch-track"></span><span class="md-switch-label">设置同步</span></label>
+                            <label class="md-switch"><input type="checkbox" id="webdav_enable_stats"><span class="md-switch-track"></span><span class="md-switch-label">观看统计同步</span></label>
+                            <label class="md-switch"><input type="checkbox" id="webdav_enable_rules"><span class="md-switch-track"></span><span class="md-switch-label">规则同步</span></label>
+                            <label class="md-switch" title="开启后按所选间隔自动「同步到云端」（需已保存地址与账号）"><input type="checkbox" id="webdav_auto_enable"><span class="md-switch-track"></span><span class="md-switch-label">定时自动同步</span></label>
+                            <label class="md-switch" title="开启后应用启动约 5 秒后自动「从云端恢复」一次（多设备场景先取云端数据）；失败仅提示不重试"><input type="checkbox" id="webdav_startup_pull"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动从云端恢复</span></label>
+                            <label class="md-switch" title="自签名证书的 NAS/自建 WebDAV 握手会失败；开启后跳过 HTTPS 证书校验（仅建议自建服务使用，公共网盘勿开）"><input type="checkbox" id="webdav_ssl_skip"><span class="md-switch-track"></span><span class="md-switch-label">跳过 HTTPS 证书校验（自签名服务器）</span></label>
+                            <div id="webdav_auto_fields" style="display:none;">
+                                <div class="auto-interval-col">
+                                    <span class="tip-line pad0">自动同步间隔</span>
+                                    <select id="webdav_auto_interval" class="md-select">
+                                        <option value="15">15 分钟</option>
+                                        <option value="30">30 分钟</option>
+                                        <option value="60" selected>1 小时</option>
+                                        <option value="180">3 小时</option>
+                                        <option value="360">6 小时</option>
+                                        <option value="720">12 小时</option>
+                                        <option value="1440">24 小时</option>
+                                    </select>
+                                </div>
+                                <div class="tip-line pad0" id="webdav_auto_status"></div>
+                            </div>
+                            <div class="md-field"><input id="webdav_url" class="md-input" placeholder="WebDAV 地址（如 https://dav.jianguoyun.com/dav/）" /></div>
+                            <div class="md-field"><input id="webdav_remote_dir" class="md-input" placeholder="远程目录（可选，默认 YuKiSync）" /></div>
+                            <div class="md-field"><input id="webdav_username" class="md-input" placeholder="用户名" /></div>
+                            <div class="md-field"><div class="webdav-pwd-wrap"><input id="webdav_password" class="md-input" type="password" placeholder="密码" /><button type="button" id="webdav_pwd_eye" class="pan-cookie-eye" title="显示/隐藏密码">👁️</button></div></div>
+                            <div class="wall-row">
+                                <button id="webdav_save" class="md-btn md-btn-filled">保存配置</button>
+                                <button id="webdav_test" class="md-btn md-btn-tonal">测试连接</button>
+                                <button id="webdav_sync" class="md-btn md-btn-tonal">同步到云端</button>
+                                <button id="webdav_restore" class="md-btn md-btn-tonal">从云端恢复</button>
+                            </div>
                         </div>
                     </div>
                     <!-- Bangumi 同步（需 token，T46） -->
@@ -1062,30 +1074,35 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索 / 时间表 / 榜单 / 详情 / 角色 / 收藏同步等）改走全域名反代镜像（默认根域名 bangumi.vip，对应 api.bgm.tv → api.bangumi.vip，lain/next/fast/doujin 同理，免签名）；「Bangumi 镜像域名」可手动替换镜像根域名（镜像站域名失效时填入新根域名即可，子域自动映射）；「规则仓库镜像」则在拉取规则更新时使用镜像仓库。封面兜底镜像（lain.*）随镜像域名一同切换，且不受镜像开关影响。</div>
+                                <div class="info-detail">开启「Bangumi 镜像」后，Bangumi 全部接口（搜索 / 时间表 / 榜单 / 详情 / 角色 / 收藏同步等）改走全域名反代镜像（默认根域名 bangumi.vip，对应 api.bgm.tv → api.bangumi.vip，lain/next/fast/doujin 同理，免签名）；「Bangumi 镜像域名」可手动替换镜像根域名（镜像站域名失效时填入新根域名即可，子域自动映射）；「条目页跳转跟随镜像」控制详情页「↗ Bangumi 页」按钮：开启后在系统浏览器打开镜像站条目页（镜像根域名本身，如 bangumi.vip/subject/…），关闭则始终打开官方 bgm.tv——镜像站登录态与官方不互通，收藏/吐槽等账号操作请以开关选择为准；「规则仓库镜像」则在拉取规则更新时使用镜像仓库。封面兜底镜像（lain.*）随镜像域名一同切换，且不受镜像开关影响。</div>
                             </div>
                         </div>
                         <label class="md-switch" title="开启后图片/后端请求走代理"><input type="checkbox" id="set_proxy_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用代理</span></label>
                         <label class="md-switch" title="Bangumi 接口走全域名反代镜像（默认 api.bangumi.vip / next.bangumi.vip）"><input type="checkbox" id="set_bangumi_mirror"><span class="md-switch-track"></span><span class="md-switch-label">Bangumi 镜像</span></label>
+                        <label class="md-switch" title="详情页「↗ Bangumi 页」按钮跳转镜像站条目页（关闭时始终打开官方 bgm.tv）"><input type="checkbox" id="set_bangumi_web_mirror"><span class="md-switch-track"></span><span class="md-switch-label">条目页跳转跟随镜像</span></label>
                         <label class="md-switch" title="规则仓库镜像"><input type="checkbox" id="set_git_mirror"><span class="md-switch-track"></span><span class="md-switch-label">规则仓库镜像</span></label>
-                        <div class="tip-line pad0">Bangumi 镜像域名</div>
-                        <div class="md-field" >
-                            <input id="set_bangumi_mirror_root" class="md-input" type="text" placeholder="镜像根域名，默认 bangumi.vip" />
+                        <div id="bangumi_mirror_fields" style="display:none;">
+                            <div class="tip-line pad0">Bangumi 镜像域名</div>
+                            <div class="md-field" >
+                                <input id="set_bangumi_mirror_root" class="md-input" type="text" placeholder="镜像根域名，默认 bangumi.vip" />
+                            </div>
+                            <div class="wall-row" >
+                                <button id="set_bangumi_mirror_root_save" class="md-btn md-btn-tonal">保存镜像域名</button>
+                            </div>
                         </div>
-                        <div class="wall-row" >
-                            <button id="set_bangumi_mirror_root_save" class="md-btn md-btn-tonal">保存镜像域名</button>
-                        </div>
-                        <div class="tip-line pad0">网络代理</div>
-                        <div class="md-field">
-                            <input id="set_proxy_url" class="md-input" type="text" placeholder="如 http://127.0.0.1:7897" />
-                        </div>
-                        <div class="md-field" >
-                            <input id="set_proxy_test_url" class="md-input" type="text" placeholder="https://www.google.com/generate_204" />
-                        </div>
-                        <div class="wall-row" >
-                            <button id="set_proxy_test" class="md-btn md-btn-tonal">测试代理</button>
-                            <button id="set_proxy_save" class="md-btn md-btn-tonal">保存代理</button>
-                            <span id="set_proxy_test_result" class="tip-line pad0" style="font-size:12px;"></span>
+                        <div id="proxy_fields" style="display:none;">
+                            <div class="tip-line pad0">网络代理</div>
+                            <div class="md-field">
+                                <input id="set_proxy_url" class="md-input" type="text" placeholder="如 http://127.0.0.1:7897" />
+                            </div>
+                            <div class="md-field" >
+                                <input id="set_proxy_test_url" class="md-input" type="text" placeholder="https://www.google.com/generate_204" />
+                            </div>
+                            <div class="wall-row" >
+                                <button id="set_proxy_test" class="md-btn md-btn-tonal">测试代理</button>
+                                <button id="set_proxy_save" class="md-btn md-btn-tonal">保存代理</button>
+                                <span id="set_proxy_test_result" class="tip-line pad0" style="font-size:12px;"></span>
+                            </div>
                         </div>
                         <div class="set-group">定时关机</div>
                         <div class="md-field" >
@@ -1102,6 +1119,11 @@
                             </div>
                         </div>
                         <label class="md-switch" title="按周期自动清空日志目录，避免长期运行堆积"><input type="checkbox" id="set_log_autocleanup"><span class="md-switch-track"></span><span class="md-switch-label">定时清空日志</span></label>
+                        <div id="log_cleanup_fields" style="display:none;">
+                            <div class="md-field" >
+                                <input id="set_log_cleanup_days" class="md-input" type="number" min="1" max="90" placeholder="清理周期（天，默认 7）" />
+                            </div>
+                        </div>
                         <div class="tip-line pad0">日志级别</div>
                         <select id="set_log_level" class="md-select" title="低于此级别的日志不写入文件">
                             <option value="DEBUG">DEBUG（全部记录，仅排查问题时开启）</option>
@@ -1109,9 +1131,6 @@
                             <option value="WARN">WARN（仅警告及以上）</option>
                             <option value="ERROR">ERROR（仅错误）</option>
                         </select>
-                        <div class="md-field" >
-                            <input id="set_log_cleanup_days" class="md-input" type="number" min="1" max="90" placeholder="清理周期（天，默认 7）" />
-                        </div>
                         <div class="wall-row" >
                             <button id="log-viewer-open" class="md-btn md-btn-tonal">查看应用日志</button>
                             <button id="set_reset" class="md-btn md-btn-danger-tonal">恢复默认设置</button>
@@ -1135,6 +1154,41 @@
                         <div class="about-version">版本 <span id="about-version">0.1.0</span></div>
                         <div class="about-desc">面向 PC 桌面的影视聚合应用：聚合 TVBox 系配置源（CMS / JS / JAR），整合 Kazumi 规则引擎、Bangumi 元数据、网盘影视源与本地播放。</div>
                     </div>
+                    <div class="tool-card" data-setcat="translate">
+                        <div class="tool-card-title">划词翻译</div>
+                        <label class="md-switch" title="选中界面文字（简介/评论/搜索结果等）后弹出翻译气泡"><input type="checkbox" id="set_translate_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用划词翻译</span></label>
+                        <div id="translate_fields" style="display:none;">
+                            <div class="tip-line pad0">触发方式</div>
+                            <select id="set_translate_trigger" class="md-select">
+                                <option value="button">显示「译」按钮，点击翻译</option>
+                                <option value="auto" selected>选中后自动翻译</option>
+                            </select>
+                            <div class="tip-line pad0">目标语言</div>
+                            <select id="set_translate_target" class="md-select">
+                                <option value="zh-CN" selected>简体中文</option>
+                                <option value="zh-TW">繁體中文</option>
+                                <option value="en">English</option>
+                                <option value="ja">日本語</option>
+                            </select>
+                            <div class="tip-line pad0" style="margin-top:10px;">翻译服务：默认免费通道（Edge 主 + Google 备，自动互切）；配置 LLM 后优先走 LLM（OpenAI 兼容接口）。</div>
+                            <label class="md-switch" title="优先使用自建 LLM 翻译（质量更好；失败自动回落免费通道）"><input type="checkbox" id="set_translate_llm_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 LLM 翻译</span></label>
+                            <div id="translate_llm_fields" style="display:none;">
+                                <div class="tip-line pad0">Base URL</div>
+                                <div class="md-field"><input id="set_translate_llm_base" class="md-input" type="text" placeholder="如 https://api.openai.com/v1" /></div>
+                                <div class="tip-line pad0">API Key</div>
+                                <div class="webdav-pwd-wrap">
+                                    <input id="set_translate_llm_key" class="md-input" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+                                    <button type="button" id="set_translate_llm_key_eye" class="pan-cookie-eye" title="显示/隐藏 API Key" aria-label="显示或隐藏 API Key">👁️</button>
+                                </div>
+                                <div class="tip-line pad0">模型</div>
+                                <div class="md-field"><input id="set_translate_llm_model" class="md-input" type="text" placeholder="如 gpt-4o-mini" /></div>
+                                <div class="wall-row">
+                                    <button id="set_translate_llm_test" class="md-btn md-btn-tonal">测试连接</button>
+                                    <div class="tip-line pad0" id="set_translate_llm_test_result" hidden></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div class="tool-card" data-setcat="about">
                         <div class="tool-card-title">致谢</div>
                         <div class="tip-line pad0 info-tip">
@@ -1148,6 +1202,7 @@
                             <div class="about-credit"><b>播放与处理</b> · mpv（播放器内核）、FFmpeg（m3u8 合成与缩略图抓帧）、aria2（多协议下载引擎）</div>
                             <div class="about-credit"><b>超分与识图</b> · Anime4K（v4.1 实时动漫超分着色器，均衡 / 细节 / 仅修复三档位）、trace.moe（以图搜番）</div>
                             <div class="about-credit"><b>字体与前端</b> · MiSans（小米免费商用字体）、jQuery</div>
+                            <div class="about-credit"><b>划词翻译逻辑</b> · auto-translate（MIT，定位算法与免费翻译端点协议移植）</div>
                             <div class="about-credit"><b>宿主与后端</b> · Electron / electron-builder / electron-updater、FastAPI / Uvicorn / Pydantic</div>
                             <div class="about-credit"><b>数据与社区</b> · Bangumi 番组数据与 API，以及所有提交 Issue、贡献代码与完善文档的贡献者</div>
                         </div>
@@ -1526,8 +1581,18 @@
                 <div class="bgm-rate-actions">
                     <button type="button" id="bgm-rate-clear" class="md-btn md-btn-tonal md-btn-sm" title="清除评分（同步为未评分）">清除评分</button>
                 </div>
-                <textarea id="bgm-rate-comment" class="md-input" rows="4" maxlength="10000"
-                    placeholder="吐槽（可选）：同步到 Bangumi 收藏备注…"></textarea>
+                <div class="bgm-rate-comment-wrap">
+                    <textarea id="bgm-rate-comment" class="md-input" rows="4" maxlength="10000"
+                        placeholder="吐槽（可选）：同步到 Bangumi 收藏备注…"></textarea>
+                    <div id="bgm-rate-comment-resize" class="bgm-rate-resize" title="拖拽调整高度" aria-hidden="true"><i></i></div>
+                </div>
+                <div class="bgm-rate-kamoji-wrap">
+                    <button type="button" id="bgm-rate-kamoji-btn" class="bgm-rate-kamoji-btn"
+                        aria-haspopup="true" aria-expanded="false" aria-controls="bgm-rate-kamoji-panel"
+                        title="颜文字（悬停展开，点击固定）">颜文字 ▾</button>
+                    <div id="bgm-rate-kamoji-panel" class="bgm-rate-kamoji-panel" role="menu"
+                        aria-label="颜文字列表（点击插入到吐槽）"></div>
+                </div>
                 <div class="bgm-rate-tags-block">
                     <div class="bgm-rate-tags-head">
                         <span class="bgm-rate-tags-title">标签</span>

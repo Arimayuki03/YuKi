@@ -760,6 +760,29 @@ class PluginManager:
             logger.warning('[kazumi] bangumi info failed: %s', e)
             return None
 
+    def bangumi_info_batch(self, subject_ids, max_workers=6):
+        """批量番剧详情：逐 id 并发复用 bangumi_info（单条 30 分钟缓存生效），
+        供封面话数徽章整页一次往返。失败条目值为 None（不拖垮整批）；
+        超出上限（防滥用）的 id 直接置 None 不回源。"""
+        ids = [str(s) for s in (subject_ids or []) if str(s).strip()][:60]
+        if not ids:
+            return {}
+        results = {}
+        workers = max(1, min(int(max_workers), len(ids)))
+        if workers == 1:
+            for sid in ids:
+                results[sid] = self.bangumi_info(sid)
+            return results
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='bgm-info-batch') as pool:
+            futures = {pool.submit(self.bangumi_info, sid): sid for sid in ids}
+            for fut in futures:
+                sid = futures[fut]
+                try:
+                    results[sid] = fut.result()
+                except Exception:
+                    results[sid] = None
+        return results
+
     @staticmethod
     def _calendar_air_date(subject):
         """从 Bangumi 日历 subject 中提取统一的 YYYY-MM-DD 日期。"""

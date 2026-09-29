@@ -4,6 +4,8 @@
 对齐 Kazumi lib/services/plugin/rule_engine.dart。
 """
 import logging
+import threading
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -21,6 +23,46 @@ logger = logging.getLogger('yuki.kazumi.engine')
 
 # 手动跟重定向的跳数上限（对齐 http_client.fetch_follow_redirects 的 5 跳口径）
 _MAX_RULE_REDIRECTS = 5
+
+# 域名 → 最近一次验证码自动解题成功的时间（monotonic 秒）。
+# solve 成功后前端立即重搜会撞站点搜索频率限制（提示页无结果节点，表现为
+# NoResultException）——search_with_captcha_retry 据此对刚验证的源做一次
+# 隔 3.5s 的短重试（进程内即可，重启后 Cookie 已有效、频率窗口早过）。
+_RECENT_SOLVED = {}
+
+# 域名 → 最后一次请求时刻（monotonic）：solve 与搜索共用节流（_throttle_site），
+# 保证验证通过返回前端时距上次站点请求 ≥3.6s，避开「搜索间隔 3 秒」风控窗。
+_SITE_LAST_REQUEST = {}
+
+# _throttle_site 的锁：「读 last / 算 wait / 预占名额」必须原子，否则并发搜索
+# 同一域时双双通过间隔检查（check-then-act 竞态）。sleep 刻意放锁外——
+# 长达 min_gap 的等待不能持有锁阻塞其他域的节流。
+_THROTTLE_LOCK = threading.Lock()
+
+
+# 验证码取图门禁（_looks_like_image）的图片魔数白名单。MacCMS/ThinkPHP
+# verify 端点的输出格式由站点 GD/Imagick 配置决定，PNG 之外 JPEG/GIF/WebP
+# 同样常见——此前只认 PNG 魔数，非 PNG 源会把 3 轮重试全烧在
+# image_fetch_failed 上、永不进 OCR（下层 ddddocr/小模型链路本就支持多格式）。
+_IMAGE_MAGIC_PREFIXES = (
+    b'\x89PNG\r\n\x1a\n',  # PNG
+    b'\xff\xd8\xff',        # JPEG（SOI 起始）
+    b'GIF87a',              # GIF 87a
+    b'GIF89a',              # GIF 89a
+)
+
+
+def _looks_like_image(content):
+    """响应体是否为图片（前导魔数白名单），solve_captcha 取图门禁用。
+
+    WebP 无固定前导魔数（RIFF 容器）：以 'RIFF' + bytes[8:12]=='WEBP' 判定。
+    以 '<' 开头（<!DOCTYPE / <html 等）是 HTML 拦截页，绝不当作图片——保留
+    原有「取到 HTML → 换图重试」的拒绝路径。空内容同样拒绝。"""
+    if not content or content[:1] == b'<':
+        return False
+    if content.startswith(_IMAGE_MAGIC_PREFIXES):
+        return True
+    return content[:4] == b'RIFF' and content[8:12] == b'WEBP'
 
 
 class RuleEngine:
@@ -117,6 +159,8 @@ class RuleEngine:
                 roads=parsed.roads,
                 diagnostics=parsed.diagnostics,
             )
+        except CaptchaRequiredException:
+            raise  # 章节页验证码拦截：透传给端点转结构化状态（前端自动解题）
         except ChapterErrorException:
             raise
         except Exception as e:
@@ -140,18 +184,59 @@ class RuleEngine:
         验证码图片地址（规则 captchaImage XPath 解析）不在本路径自动抓取：
         消费方出现时按需调用 _captcha_image_url。
         """
-        try:
-            return self.search(config, keyword, cancel_token, filters=filters)
-        except CaptchaRequiredException as e:
+        def _captcha_payload(exc):
+            """组装验证码结构化 payload（外层 except 与 NoResult 重试分支共用，
+            见下方重试分支——server.py 只消费 dict，异常绝不能逃逸本函数）。"""
             page_url = config.search_url.replace('@keyword', keyword)
             classified = looks_like_image_captcha_url(page_url)
             return {
                 'captcha_required': True,
-                'plugin_name': e.plugin_name,
+                'plugin_name': exc.plugin_name,
                 'captcha_url': page_url,
                 'captcha_url_classified': classified,
                 'ocr_available': _captcha_mod.ocr_available(),
             }
+
+        try:
+            return self.search(config, keyword, cancel_token, filters=filters)
+        except CaptchaRequiredException as e:
+            return _captcha_payload(e)
+        except NoResultException:
+            # 验证刚通过的源：solve 成功后前端立即重搜，会撞站点的搜索频率
+            # 限制（如 2kdm 系「搜索时间间隔为3秒」——提示页无结果节点，表现
+            # 为 NoResultException，2026-09-29 日志+浏览器双重复盘实证）。对
+            # 该域做一次隔 4s 的短重试；未验证过的源不重试（真无结果不该被
+            # 拖慢）。重试前先过节流（距上次请求 <4s 则补齐）。
+            if self.cookie_jar and self.cookie_jar.has_cookies() \
+                    and self._recently_solved(config):
+                if not (cancel_token and cancel_token.is_set()):
+                    self._throttle_site(config.base_url, min_gap=4.0)
+                    try:
+                        return self.search(config, keyword, cancel_token, filters=filters)
+                    except CaptchaRequiredException as e:
+                        # 重试又撞验证码：说明新会话也失效了。返回结构化
+                        # payload 让前端再走解题流程，而不是让异常逃逸出
+                        # 本方法破坏「遇验证码返回 dict」契约。
+                        return _captcha_payload(e)
+            raise
+
+    def captcha_ocr_available(self):
+        """验证码自动识别能力探测（供端点组装 payload；懒加载封装在此，
+        避免调用方直接 import captcha 模块）。"""
+        return _captcha_mod.ocr_available()
+
+    def _recently_solved(self, config, ttl=60):
+        """该源域名是否在 ttl 秒内刚完成验证码自动解题（频率窗口重试的门槛）。"""
+        key = (urlparse(config.base_url or '').hostname or '').lower()
+        if not key:
+            return False
+        now = time.monotonic()
+        solved = _RECENT_SOLVED.get(key)
+        if solved and now - solved <= ttl:
+            return True
+        if solved:
+            _RECENT_SOLVED.pop(key, None)
+        return False
 
     def _captcha_image_url(self, config, cancel_token=None):
         """从规则反爬配置提取验证码图片地址（captchaImage XPath 首个节点 / <img> src）。
@@ -203,6 +288,251 @@ class RuleEngine:
             return urlunparse((p.scheme, p.netloc, p.path, p.params, p.query, ''))
         except Exception:
             return ''
+
+    # ---------------------------------------------------------------- 验证码自动解题
+
+    # MacCMS 系验证码交互的常见端点形态（相对 base_url）：
+    #   图片：/index.php/verify/index.html（刷新会话内的验证码）
+    #   提交：/index.php/ajax/verify_check（POST 表单 type=search&verify=<码>，
+    #         与站点 JS 的 MAC.Ajax 'post' 口径一致；响应 code==1 为通过）
+    # 规则未声明 captchaImage XPath 时按该约定探测；声明了则优先规则。
+    _MACCMS_VERIFY_IMAGE = '/index.php/verify/index.html'
+    _MACCMS_VERIFY_CHECK = '/index.php/ajax/verify_check'
+
+    def solve_captcha(self, config, cancel_token=None, max_attempts=3):
+        """图片验证码自动解题：建会话 → 取图 → OCR 识别 → 表单提交 → 复验。
+
+        独立动作端点（/kazumi/action?do=kazumiCaptchaSolve）专用，绝不挂在
+        搜索主链路上——主链路 payload 契约保持零网络请求。识别失败/提交后
+        仍检出验证码即换一张图重试，共 ≤ max_attempts 轮，仍失败返回
+        {'ok': False}，由前端回落人工验证窗口（该路径始终可用）。
+
+        会话机制（2026-09-29 修复，三源全败的根因）：验证码答案由站点记在
+        「发图那次请求的会话」里，取图与提交必须共享同一 PHPSESSID。进程
+        共享 Session 挂 _NoStoreCookiePolicy（禁 Cookie 落地），原实现每次
+        请求都是陌生会话——答案永远对不上，必败。故这里建独立
+        requests.Session 存会话 Cookie：先请求搜索页建会话（站点同时把
+        验证码答案绑到该会话），再取图/提交/复验。
+
+        每跳仍过 http_client._guard_hop（kind='site'，与 _send_guarded 同
+        一 SSRF 守卫口径；规则派生地址同级不可信）。成功时验证会话 Cookie
+        显式落盘 cookie_jar（重启后免重验，与人工窗口同一生效链路）。
+        """
+        from urllib.parse import urljoin
+        base = (config.base_url or '').rstrip('/')
+        if not base:
+            return {'ok': False, 'reason': 'no_base_url'}
+        anti = getattr(config, 'anti_crawler_config', None) or {}
+        has_rule_image = bool((anti.get('captchaImage') or '').strip())
+        ua = config.user_agent or get_random_ua()
+        referer = f'{base}/'
+        page_url = config.search_url.replace('@keyword', '')
+
+        sess = requests.Session()
+        sess.trust_env = False  # 代理不走 trust_env 环境变量，显式解析见下
+        headers = {'referer': referer, 'user-agent': ua}
+        # C1：验证会话不走 trust_env——代理经 http_client.system_proxies 显式
+        # 解析（优先环境变量=应用内「代理设置」主进程注入，其次 WinINET 系统代理
+        # 注册表），与 _send/get/post 主链路同一口径。否则依赖代理的用户主搜索
+        # 正常而 solve 的独立会话直连失败，永远 session_init_failed。
+        proxies = http_client.system_proxies(base) or None
+
+        def _guarded_get(url, extra_headers=None, timeout=(5, 10)):
+            """独立会话 GET，每跳过 SSRF 守卫（手动跟重定向，口径同 _send_guarded）。
+
+            发出前过 _throttle_site：solve 过程的请求同样计入站点频率窗，
+            不节流会让复验/后续搜索连锁撞「搜索间隔 3 秒」提示页。"""
+            from urllib.parse import urljoin as _urljoin
+            current = http_client._guard_hop(url, kind='site')
+            current_headers = {**headers, **(extra_headers or {})}
+            for _ in range(_MAX_RULE_REDIRECTS + 1):
+                if cancel_token and cancel_token.is_set():
+                    raise requests.exceptions.RequestException('cancelled')
+                self._throttle_site(base, min_gap=1.2)
+                rsp = sess.get(current, headers=dict(current_headers),
+                               proxies=proxies, timeout=timeout,
+                               allow_redirects=False, verify=True)
+                status = getattr(rsp, 'status_code', None)
+                if status not in http_client._REDIRECT_STATUSES or 'Location' not in rsp.headers:
+                    return rsp
+                rsp.close()
+                nxt = _urljoin(current, rsp.headers.get('Location') or '')
+                # 跨 host 跳转不带 referer（M-1，口径同 _send_guarded）：首跳
+                # referer 是规则 base_url 的标识，交给 Location 指向的第三方
+                # 没有正当性。对当跳 headers 副本操作，不污染外层 headers。
+                if self._hop_host(nxt) != self._hop_host(current):
+                    current_headers.pop('referer', None)
+                current = http_client._guard_hop(nxt, kind='site', trust_redirect=True)
+            raise ValueError(f'too many redirects (>{_MAX_RULE_REDIRECTS}): {url}')
+
+        def _guarded_post(url, data, extra_headers=None, timeout=(5, 10)):
+            """独立会话 POST（verify_check 表单），守卫口径同 _guarded_get。"""
+            from urllib.parse import urljoin as _urljoin
+            current = http_client._guard_hop(url, kind='site')
+            current_headers = {**headers, **(extra_headers or {})}
+            for _ in range(_MAX_RULE_REDIRECTS + 1):
+                if cancel_token and cancel_token.is_set():
+                    raise requests.exceptions.RequestException('cancelled')
+                self._throttle_site(base, min_gap=1.2)
+                rsp = sess.post(current, data=data,
+                                headers=dict(current_headers), proxies=proxies,
+                                timeout=timeout, allow_redirects=False, verify=True)
+                status = getattr(rsp, 'status_code', None)
+                if status not in http_client._REDIRECT_STATUSES or 'Location' not in rsp.headers:
+                    return rsp
+                rsp.close()
+                nxt = _urljoin(current, rsp.headers.get('Location') or '')
+                # 跨 host 跳转不带 referer（M-1，口径同 _guarded_get/_send_guarded）
+                if self._hop_host(nxt) != self._hop_host(current):
+                    current_headers.pop('referer', None)
+                current = http_client._guard_hop(nxt, kind='site', trust_redirect=True)
+            raise ValueError(f'too many redirects (>{_MAX_RULE_REDIRECTS}): {url}')
+
+        # 0) 建会话：先请求搜索页，站点 Set-Cookie 会话并预绑定验证码状态
+        try:
+            _guarded_get(page_url)
+        except requests.exceptions.RequestException as e:
+            # 取消以 RequestException('cancelled') 传播，保持 cancelled 语义
+            if cancel_token and cancel_token.is_set():
+                return {'ok': False, 'reason': 'cancelled'}
+            logger.warning('[%s] 验证会话建立失败: %s', config.plugin_name, e)
+            return {'ok': False, 'reason': 'session_init_failed'}
+        except Exception as e:
+            logger.warning('[%s] 验证会话建立失败: %s', config.plugin_name, e)
+            return {'ok': False, 'reason': 'session_init_failed'}
+
+        for attempt in range(1, max_attempts + 1):
+            if cancel_token and cancel_token.is_set():
+                return {'ok': False, 'reason': 'cancelled'}
+            # 1) 取图：规则声明 captchaImage 时从验证页解析（与人工窗口同源），
+            #    否则按 MacCMS 约定端点直取
+            image_url = ''
+            if has_rule_image:
+                image_url = self._captcha_image_url(config, cancel_token=cancel_token)
+            if not image_url:
+                image_url = urljoin(base, self._MACCMS_VERIFY_IMAGE)
+            try:
+                rsp = _guarded_get(image_url)
+                status = getattr(rsp, 'status_code', None)
+                content = rsp.content or b''
+                # 取到 HTML（跳回验证页/拦截页）说明图端点不可用，直接换图重试；
+                # 非图片内容同样处理——魔数白名单见 _looks_like_image（PNG/JPEG/
+                # GIF/WebP，此前只认 PNG 会把 GIF/JPEG/WebP 源全烧成 image_fetch_failed）
+                if (status is not None and status != 200) or not _looks_like_image(content):
+                    if attempt == max_attempts:
+                        return {'ok': False, 'reason': 'image_fetch_failed', 'attempts': attempt}
+                    continue
+            except ValueError as e:
+                logger.warning('[%s] 验证码取图重定向异常: %s', config.plugin_name, e)
+                return {'ok': False, 'reason': 'image_fetch_failed', 'attempts': attempt}
+            except Exception as e:
+                logger.warning('[%s] 验证码取图失败: %s', config.plugin_name, e)
+                return {'ok': False, 'reason': 'image_fetch_failed', 'attempts': attempt}
+
+            # 2) OCR 识别（两级链，失败换图重试）
+            code = _captcha_mod.recognize_captcha_bytes(content)
+            if not code:
+                continue
+
+            # 3) 提交：MacCMS verify_check 用 POST 表单（与站点 JS 提交一致，
+            #    GET 同端点不被接受）。响应体 code==1 才是真成功——code:1002
+            #    「验证码错误」也回 200。**不能**以"复验页不再检出验证码"作为
+            #    成功标准：答案错误时站点把搜索页替换成「请勿频繁操作」提示页，
+            #    该页无 captchaImage 节点，会被检测器误判为放行（2026-09-29
+            #    三源全败复盘实证），必须逐次校验提交响应。
+            check_url = urljoin(base, self._MACCMS_VERIFY_CHECK)
+            try:
+                check_rsp = _guarded_post(check_url, {'type': 'search', 'verify': code},
+                                          {'x-requested-with': 'XMLHttpRequest'})
+            except Exception as e:
+                logger.warning('[%s] 验证码提交失败: %s', config.plugin_name, e)
+                continue
+            check_ok = False
+            try:
+                import json as _json
+                check_body = _json.loads((check_rsp.text or '').strip() or '{}')
+                check_ok = check_body.get('code') == 1
+            except Exception:
+                check_ok = False
+            if not check_ok:
+                logger.info('[%s] 验证码答案被拒（第 %d 轮，换图重试）',
+                            config.plugin_name, attempt)
+                continue
+
+            # 4) 复验：提交已确认成功，再请求搜索页确认验证码态解除。
+            #    频率提示页（「请不要频繁操作」）等 2s 重试一次，绝不把
+            #    提示页误判为放行——只认验证码态消失。
+            try:
+                rsp = _guarded_get(page_url)
+                html = rsp.text or ''
+                if '请不要频繁操作' in html or '搜索时间间隔' in html:
+                    time.sleep(2.5)
+                    rsp = _guarded_get(page_url)
+                    html = rsp.text or ''
+            except Exception as e:
+                logger.warning('[%s] 验证码复验失败: %s', config.plugin_name, e)
+                return {'ok': False, 'reason': 'recheck_failed', 'attempts': attempt}
+            detected = self._xpath_strategy._detects_captcha(
+                html, anti, self._xpath_strategy._document_element(html))
+            if not detected:
+                self._persist_session_cookies(base, sess)
+                _RECENT_SOLVED[(urlparse(base).hostname or '').lower()] = time.monotonic()
+                # 预留频率冷却窗：solve 过程的取图/提交/复验密集请求会吃掉
+                # 站点「搜索间隔 N 秒」的窗口（2kdm 系 3s，提示页算一次搜索）。
+                # 前端拿到 ok 后立即重搜，不预留就会撞提示页 → no result →
+                # 源被前端折叠成"消失"（2026-09-29 浏览器实测：验证态本身
+                # 正常，连发第二次必撞提示页）。max(0, 3.6 - 距上次请求)。
+                self._throttle_site(base, min_gap=3.6)
+                return {'ok': True, 'code': code, 'attempts': attempt}
+        return {'ok': False, 'reason': 'max_attempts', 'attempts': max_attempts}
+
+    def _throttle_site(self, base_url, min_gap=3.6):
+        """站点搜索频率冷却：距该域上次请求不足 min_gap 秒时 sleep 补齐。
+
+        solve/搜索共用（按域名记录最后请求时刻）；误差 ±0.1s。
+        并发口径（修复 check-then-act 竞态）：「读 last → 算 wait → 登记
+        发送时刻」在 _THROTTLE_LOCK 内原子完成，同域并发调用不再双双通过
+        间隔检查；sleep 刻意放锁外——min_gap 级的等待不能持锁阻塞其他域。
+        登记值为本次请求的（预定）发送时刻：需等待者先登记 now+wait 再在
+        锁外补睡，后到者据此排到 min_gap 之后，语义与逐次记录发送时刻一致。"""
+        key = (urlparse(base_url).hostname or '').lower()
+        if not key:
+            return
+        with _THROTTLE_LOCK:
+            now = time.monotonic()
+            last = _SITE_LAST_REQUEST.get(key)
+            wait = min_gap - (now - last) if last else 0
+            # 名额预占：>0.1s 容差外的等待把预定发送时刻（now+wait）登记进
+            # 表，锁外补睡期间同域并发调用看到的已是占用态；≤0.1s 直接放行。
+            _SITE_LAST_REQUEST[key] = now + wait if wait > 0.1 else now
+        if wait > 0.1:
+            time.sleep(wait)
+
+    def _persist_session_cookies(self, base_url, session=None):
+        """把验证会话 Cookie 落盘 cookie_jar（与人工窗口同一生效链路）。
+
+        solve_captcha 用独立 requests.Session 持有验证会话（PHPSESSID 等），
+        成功后从这里显式收割落盘；session 缺席时回退收割共享 Session
+        （历史口径，兜底无独立会话的调用方）。重启后由 cookie_header 同域
+        派生生效，免重复验证。"""
+        if not self.cookie_jar:
+            return
+        try:
+            from urllib.parse import urlparse as _urlparse
+            domain = (_urlparse(base_url).hostname or '').lower()
+            if not domain:
+                return
+            cookies = []
+            jar = session.cookies if session is not None else http_client.get_session().cookies
+            for c in jar:
+                c_domain = (getattr(c, 'domain', '') or '').lstrip('.')
+                if domain == c_domain or domain.endswith('.' + c_domain) \
+                        or c_domain.endswith('.' + domain):
+                    cookies.append({'name': c.name, 'value': c.value, 'domain': c_domain})
+            if cookies:
+                self.cookie_jar.set_domain_cookies(domain, cookies)
+        except Exception as e:
+            logger.warning('[kazumi] 验证会话 Cookie 落盘失败（不影响验证结果）: %s', e)
 
     # ---------------------------------------------------------------- HTTP 执行
 

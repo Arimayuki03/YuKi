@@ -28,6 +28,7 @@ hoststate.configure(data_dir=os.environ['YUKI_DATA_DIR'])
 
 from kazumi.plugin import Plugin
 from kazumi.plugin_manager import PluginManager
+from kazumi.utils import CaptchaRequiredException
 from kazumi.rule_engine import RuleEngine
 from kazumi.cookie_jar import CookieJar
 from kazumi.xpath_strategy import XPathRuleStrategy
@@ -153,6 +154,31 @@ class TestXPathStrategy(unittest.TestCase):
         self.assertEqual(result.roads[0].name, '播放线路1')
         self.assertEqual(len(result.roads[0].data), 2)
         self.assertEqual(result.roads[0].identifier[0], '第1集')
+
+    def test_parse_chapters_captcha_detected(self):
+        # 章节页验证码拦截：与搜索解析同口径抛 CaptchaRequiredException（2026-09-29）
+        cfg = Plugin.from_json({
+            'api': '5', 'name': 'test', 'baseURL': 'https://example.com',
+            'searchURL': 'https://example.com/s?wd=@keyword',
+            'searchList': '//div[@class="item"]', 'searchName': './/a', 'searchResult': './/a',
+            'chapterRoads': '//ul[@class="road"]', 'chapterResult': './/li/a',
+            'antiCrawlerConfig': {'enabled': 1, 'captchaDetectType': 2, 'captchaDetectValue': '请输入验证码'},
+        }).execution_config()
+        with self.assertRaises(CaptchaRequiredException):
+            self.strategy.parse_chapters('<div>请输入验证码</div>', cfg)
+
+    def test_parse_chapters_captcha_not_detected_when_disabled(self):
+        # 反爬未启用/无命中时正常解析，不误伤
+        cfg = Plugin.from_json({
+            'api': '5', 'name': 'test', 'baseURL': 'https://example.com',
+            'searchURL': 'https://example.com/s?wd=@keyword',
+            'searchList': '//div[@class="item"]', 'searchName': './/a', 'searchResult': './/a',
+            'chapterRoads': '//ul[@class="road"]', 'chapterResult': './/li/a',
+            'antiCrawlerConfig': {'enabled': 1, 'captchaDetectType': 2, 'captchaDetectValue': '请输入验证码'},
+        }).execution_config()
+        result = self.strategy.parse_chapters(
+            '<ul class="road"><li><a href="/play/1">第1集</a></li></ul>', cfg)
+        self.assertEqual(len(result.roads), 1)
 
     def test_parse_search_missing_name(self):
         html = '<div class="item"><a href="/vod/1"></a></div>'

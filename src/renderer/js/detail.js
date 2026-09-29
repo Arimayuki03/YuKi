@@ -7,7 +7,7 @@
  *  - 概览：可收起简介 + 播放源/选集
  *  - 其他页签：Bangumi 数据（仅当匹配到 Bangumi 时显示）
  */
-/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, Kazumi, FavHub, bangumiCover, localCacheGet, localCacheSet, localCacheDel, BgmRate */
+/* global $, doAction, escHtml, stripHtml, normalizePic, warnToast, showLoading, hideLoading, registerEsc, openDialog, closeDialog, App, Player, Records, abortCoverFill, Kazumi, FavHub, bangumiCover, bangumiWebUrl, localCacheGet, localCacheSet, localCacheDel, BgmRate */
 
 const DETAIL_TABS = ['概览', '分集', '选集讨论', '吐槽', '角色', '制作', '关联'];
 
@@ -29,6 +29,39 @@ function _detailCacheSet(prefix, key, value, ttl) {
     try { localCacheSet(prefix + key, value, ttl); } catch (e) { /* 缓存失败忽略 */ }
 }
 
+/** 收藏状态图标：对齐 Kazumi CollectButton 的官方映射（lib/bean/widget/collect_button.dart
+ *  getIconByInt——1在看=favorite 2想看=star_rounded 3搁置=pending_actions 4看过=done
+ *  5抛弃=heart_broken 未追=favorite_border；Kazumi 内部编号与 Bangumi API 编号不同，
+ *  此处按状态语义对齐到本项目的 Bangumi 口径）。SVG path 取自 Material Icons Round
+ *  字体字形（24 viewBox，currentColor 随按钮着色）。 */
+const DETAIL_COL_ICON_PATHS = {
+    favorite: 'M13.36 20.11C12.61 20.81 11.44 20.81 10.64 20.11L10.55 20.02C5.3 15.28 1.88 12.14 2.02 8.3C2.06 6.56 2.95 4.97 4.36 3.98C6.98 2.2 10.22 3.05 12.0 5.11C13.78 3.05 17.02 2.2 19.64 3.98C21.05 4.97 21.94 6.56 21.98 8.3C22.12 12.14 18.7 15.28 13.45 20.06L13.36 20.11Z',
+    star_rounded: 'M12.0 17.25 16.17 19.78C16.92 20.25 17.86 19.55 17.62 18.7L16.55 13.97L20.2 10.78C20.86 10.22 20.53 9.14 19.64 9.05L14.81 8.62L12.94 4.17C12.56 3.38 11.44 3.38 11.06 4.17L9.19 8.62L4.36 9.05C3.47 9.09 3.14 10.22 3.8 10.78L7.45 13.97L6.38 18.7C6.14 19.55 7.08 20.25 7.83 19.78L12.0 17.25Z',
+    pending_actions: 'M18.0 3.0H14.81C14.39 1.83 13.31 0.98 12.0 0.98C10.69 0.98 9.61 1.83 9.19 3.0H6.0C4.92 3.0 3.98 3.89 3.98 5.02V20.02C3.98 21.09 4.92 21.98 6.0 21.98H12.09C11.53 21.42 11.06 20.77 10.69 20.02H6.0V5.02H8.02V6.0C8.02 7.08 8.91 8.02 9.98 8.02H14.02C15.09 8.02 15.98 7.08 15.98 6.0V5.02H18.0V10.08C18.7 10.17 19.36 10.41 20.02 10.69V5.02C20.02 3.89 19.08 3.0 18.0 3.0ZM12.0 5.02C11.44 5.02 11.02 4.55 11.02 3.98C11.02 3.47 11.44 3.0 12.0 3.0C12.56 3.0 12.98 3.47 12.98 3.98C12.98 4.55 12.56 5.02 12.0 5.02ZM17.02 12.0C14.25 12.0 12.0 14.25 12.0 17.02C12.0 19.78 14.25 21.98 17.02 21.98C19.78 21.98 21.98 19.78 21.98 17.02C21.98 14.25 19.78 12.0 17.02 12.0ZM18.28 18.98 16.64 17.34C16.55 17.25 16.5 17.11 16.5 17.02V14.53C16.5 14.25 16.69 14.02 16.97 14.02C17.25 14.02 17.48 14.25 17.48 14.53V16.78L18.98 18.28C19.17 18.52 19.17 18.8 18.98 19.03C18.8 19.22 18.47 19.22 18.28 18.98Z',
+    done: 'M9.0 16.22 5.48 12.7C5.11 12.33 4.5 12.33 4.08 12.7C3.7 13.08 3.7 13.69 4.08 14.11L8.3 18.28C8.67 18.7 9.33 18.7 9.7 18.28L20.3 7.69C20.67 7.31 20.67 6.7 20.3 6.28C19.92 5.91 19.31 5.91 18.89 6.28L9.0 16.22Z',
+    heart_broken: 'M19.55 3.94C17.67 2.67 15.47 2.77 13.78 3.7L12.0 9.0H13.64C14.34 9.0 14.81 9.66 14.62 10.31L12.8 16.36C12.7 16.64 12.28 16.55 12.33 16.27L12.98 9.98H11.34C10.69 9.98 10.17 9.38 10.36 8.72L11.53 4.64C9.7 2.91 6.7 2.3 4.27 4.03C2.81 5.06 2.02 6.7 2.02 8.48C1.97 12.28 5.53 15.19 10.64 19.78C11.44 20.48 12.56 20.48 13.36 19.78C18.33 15.38 22.22 12.23 21.98 8.2C21.89 6.47 21.0 4.92 19.55 3.94Z',
+    favorite_border: 'M19.64 3.98C17.02 2.2 13.78 3.05 12.0 5.11C10.22 3.05 6.98 2.2 4.36 3.98C2.95 4.97 2.06 6.56 2.02 8.3C1.88 12.14 5.3 15.28 10.55 20.06L10.64 20.11C11.39 20.81 12.56 20.81 13.36 20.11L13.45 20.02C18.7 15.28 22.12 12.14 21.98 8.25C21.94 6.56 21.05 4.97 19.64 3.98ZM12.09 18.56 12.0 18.66 11.91 18.56C7.12 14.25 3.98 11.39 3.98 8.48C3.98 6.52 5.48 5.02 7.5 5.02C9.05 5.02 10.55 6.0 11.06 7.36H12.94C13.45 6.0 14.95 5.02 16.5 5.02C18.52 5.02 20.02 6.52 20.02 8.48C20.02 11.39 16.88 14.25 12.09 18.56Z',
+    // 评分/吐槽按钮（对齐 Kazumi 评分对话框主图标 Icons.edit_note_rounded）
+    edit_note: 'M14.016 11.016C14.016 11.531 13.547 12.0 12.984 12.0H3.984C3.469 12.0 3.0 11.531 3.0 11.016C3.0 10.453 3.469 9.984 3.984 9.984H12.984C13.547 9.984 14.016 10.453 14.016 11.016ZM3.0 6.984C3.0 7.547 3.469 8.016 3.984 8.016H12.984C13.547 8.016 14.016 7.547 14.016 6.984C14.016 6.469 13.547 6.0 12.984 6.0H3.984C3.469 6.0 3.0 6.469 3.0 6.984ZM9.984 15.0C9.984 14.438 9.562 14.016 9.0 14.016H3.984C3.469 14.016 3.0 14.438 3.0 15.0C3.0 15.562 3.469 15.984 3.984 15.984H9.0C9.562 15.984 9.984 15.562 9.984 15.0ZM18.0 12.891 18.703 12.141C19.125 11.766 19.734 11.766 20.109 12.141L20.859 12.891C21.234 13.266 21.234 13.875 20.859 14.297L20.109 15.0L18.0 12.891ZM17.297 13.594 12.141 18.75C12.047 18.844 12.0 18.938 12.0 19.078V20.484C12.0 20.766 12.234 21.0 12.516 21.0H13.922C14.062 21.0 14.156 20.953 14.25 20.859L19.406 15.703L17.297 13.594Z',
+};
+// key 双口径：本地 tag（want/watching/seen/hold/dropped/''）与 Bangumi type
+// （1想看 2看过 3在看 4搁置 5抛弃；-1/''=未收藏），单按钮两条同步路径共用
+const DETAIL_COL_ICON_KEY = {
+    none: 'favorite_border', '': 'favorite_border', '-1': 'favorite_border',
+    want: 'star_rounded', 1: 'star_rounded',
+    watching: 'favorite', 3: 'favorite',
+    seen: 'done', 2: 'done',
+    hold: 'pending_actions', 4: 'pending_actions',
+    dropped: 'heart_broken', 5: 'heart_broken',
+};
+const _detailIconSvg = (d, cls) => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
+/** 收藏状态图标 HTML（未知 key 回退未收藏空心心形）。 */
+function detailColStateIcon(key) {
+    return _detailIconSvg(DETAIL_COL_ICON_PATHS[DETAIL_COL_ICON_KEY[key] || 'favorite_border'], 'detail-col-state-svg');
+}
+/** 评分/吐槽按钮图标（批注笔，对齐 Kazumi 评分对话框 Icons.edit_note_rounded）。 */
+const DETAIL_RATE_ICON_HTML = _detailIconSvg(DETAIL_COL_ICON_PATHS.edit_note, 'detail-rate-svg');
+
 const Detail = {
     site: '',
     vodId: '',
@@ -48,7 +81,8 @@ const Detail = {
     _charCommentDesc: true, // 角色吐槽排序默认倒序（同番剧吐槽）
     _epComments: [],        // 选集评论（当前选中集；next.bgm /p1/episodes/{id}/comments）
     _epCommentsEpisodeId: 0, // 当前集对应的 Bangumi episode_id（防集号歧义：SP/OP/ED 同号）
-    _epCommentsDesc: true,  // 选集评论排序（同吐槽默认倒序）
+    _epCommentsDesc: true,  // 选集评论排序（同吐槽默认倒序；外层「切正/倒序」按钮）
+    _epGridDesc: true,      // 选集弹层格网排列方向（独立于评论排序；弹层内小图标）
     _epCommentsLoading: false,
     _epCommentsGen: 0,      // 选集评论加载世代：切换番剧/集数作废在途请求
     _escBound: false,
@@ -56,6 +90,7 @@ const Detail = {
     _vod: null,
     _bgmInfo: null,      // Bangumi 匹配到的信息
     _bgmId: null,         // Bangumi subject ID
+    _kazumiOrigin: null,  // Kazumi 搜索来源（{site:'kazumi:规则名', src:结果URL}）：「开始观看」默认回到该源；非 Kazumi 搜索进入为 null
     _activeTab: '概览',
     _descCollapsed: true, // 简介折叠态（默认收起三行；点「展开全部」看全文）
     _tagsExpanded: false, // 概览 Bangumi 标签展开状态（默认只展示前 13 个，点「展开全部」看全部）
@@ -77,6 +112,9 @@ const Detail = {
             this._unsubFav = FavHub.onChanged(() => {
                 if (typeof App === 'undefined' || App.currentView !== 'detail') return;
                 this._refreshLocalCol();
+                // 播放逐集记账（Favorites.updateProgress → recSet）也会走到这里：
+                // 详情页开着时本地观看进度行随之实时刷新
+                this._refreshLocalProgress();
                 // 同步刷新 Bangumi 收藏按钮高亮（如有匹配）
                 if (this._bgmId && typeof Kazumi !== 'undefined' && Kazumi._applyBangumiColState) {
                     Kazumi._applyBangumiColState(this._bgmId);
@@ -146,7 +184,7 @@ const Detail = {
             // Bangumi 收藏同步（统一详情页 T74）：六态列表内的状态按钮
             .on('click', '.kazumi-col-btn', async (e) => {
                 const btn = $(e.currentTarget);
-                // 单按钮模式：点击「当前状态」按钮（含内置箭头）= 展开六态列表
+                // 单按钮模式：点击「当前状态」按钮 = 展开六态列表
                 if (btn.attr('id') === 'detail-col-current') {
                     const menu = btn.closest('.detail-col-wrap').find('.detail-col-menu');
                     const show = !menu.is(':visible');
@@ -193,6 +231,8 @@ const Detail = {
             // 收藏状态弹出列表：点其他区域收起（含本地收藏菜单，同一容器 class 口径）
             .on('click', (e) => {
                 if (!$(e.target).closest('.detail-col-wrap').length) $('.detail-col-menu').hide();
+                // 选集讨论长列表弹层：点弹层外收起（弹层自身点击由 stopPropagation 拦下）
+                if (!$(e.target).closest('.ep-comments-picker').length) $('.ep-comments-grid').hide();
             })
             // 跳源站网页（CatVod 详情，与「↗ Bangumi 页」同位）：URL 由 _siteWebUrl
             // 从站点 api 推导（scheme://host/），非 http(s) 不渲染按钮，此处双重校验
@@ -201,10 +241,12 @@ const Detail = {
                 if (!/^https?:\/\//i.test(u)) { warnToast('该源未配置网页地址'); return; }
                 window.open(u, '_blank'); // 主进程转系统浏览器
             })
-            // 开始观看（Kazumi 源，Bangumi-only 详情）
+            // 开始观看（Kazumi 源，Bangumi-only 详情）：经 Kazumi 搜索进入时
+            // （_kazumiOrigin）默认直达该源解析剧集；其余进入路径打开全源选源弹窗
             .on('click', '#detail-kazumi-start', () => {
                 if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
-                    Kazumi.openSourceDialog(this.vodName || '', 'kazumi', '');
+                    const origin = this._kazumiOrigin;
+                    Kazumi.openSourceDialog(this.vodName || '', origin ? origin.site : 'kazumi', origin ? origin.src : '');
                 }
             })
             // 评分/吐槽/标签（T80）：hero 操作行按钮 → BgmRate 对话框（打分+吐槽+标签合并提交）。
@@ -226,12 +268,13 @@ const Detail = {
                         ? this._bgmInfo.tags.map((t) => (t && typeof t === 'object') ? t.name : t) : [],
                 });
             })
-            // 一键跳转 bgm.tv 条目页（系统浏览器）。URL 拼自 _bgmId（数字字符白名单校验，
+            // 一键跳转 Bangumi 条目页（系统浏览器）。URL 拼自 _bgmId（数字字符白名单校验，
             // 防注入）：openBangumi 详情必然有 _bgmId；CatVod 详情匹配到 Bangumi 时才有按钮。
+            // 目标域由 bangumiWebUrl 决定——「条目页跳转跟随镜像」开启时走镜像站，否则官方 bgm.tv。
             .on('click', '#detail-bgm-open', () => {
                 const sid = String(this._bgmId || '');
                 if (!sid || !/^\d+$/.test(sid)) { warnToast('缺少 Bangumi 条目 ID'); return; }
-                window.open(`https://bgm.tv/subject/${sid}`, '_blank'); // 主进程转系统浏览器
+                window.open(bangumiWebUrl(sid), '_blank'); // 主进程转系统浏览器
             })
             // 开始播放（CatVod 源详情头部，与「开始观看」同位置）：打开线路+集数弹窗（T79）
             .on('click', '#detail-catvod-start', () => {
@@ -302,6 +345,7 @@ const Detail = {
         this.site = site;
         this.vodId = vodId;
         this.vodName = fallbackName || '';
+        this._kazumiOrigin = null; // CatVod 详情无 Kazumi 搜索来源概念（防上次 Bangumi 详情残留）
         this._bgmInfo = null;
         this._bgmId = null;
         this._comments = [];
@@ -321,8 +365,10 @@ const Detail = {
     },
 
     /** 打开 Bangumi-only 详情（时间表/推荐/收藏/Bangumi 搜索进入，T74 统一详情页）。
-     *  无 CatVod 源；以「开始观看」（Kazumi 规则源）为主播放入口。 */
-    async openBangumi(subjectId, fallbackName) {
+     *  无 CatVod 源；以「开始观看」（Kazumi 规则源）为主播放入口。
+     *  kazumiOrigin：Kazumi 搜索结果进入时携带的默认源（{site, src}），
+     *  「开始观看」优先直达该源解析剧集，免重新全源检索。 */
+    async openBangumi(subjectId, fallbackName, kazumiOrigin) {
         if (!subjectId) { warnToast('缺少 Bangumi ID'); return; }
         if (typeof Kazumi === 'undefined') { warnToast('Kazumi 引擎不可用'); return; }
         abortCoverFill();
@@ -336,6 +382,8 @@ const Detail = {
         this.site = '';
         this.vodId = String(subjectId);
         this.vodName = fallbackName || '';
+        this._kazumiOrigin = (kazumiOrigin && String(kazumiOrigin.site || '').startsWith('kazumi:') && kazumiOrigin.src)
+            ? { site: String(kazumiOrigin.site), src: String(kazumiOrigin.src) } : null;
         // 清掉上一次 CatVod 详情残留的 vod（T4）：否则 toggleFav 会写出 site:'' 的错误收藏，
         // 且 _lastVod 残留会串入上一部影片的封面/源名。
         this._vod = null;
@@ -380,6 +428,7 @@ const Detail = {
         return {
             site: this.site, vodId: this.vodId, vodName: this.vodName,
             _vod: this._vod, _bgmId: this._bgmId, _bgmInfo: this._bgmInfo,
+            _kazumiOrigin: this._kazumiOrigin,
             _activeTab: this._activeTab, sources: this.sources, activeSource: this.activeSource,
         };
     },
@@ -401,7 +450,16 @@ const Detail = {
         this._bgmExtraLoaded = false;
         App.showView('detail');
         this.render();
-        if (this._bgmId) this._loadBgmExtra();
+        if (this._bgmId) {
+            this._loadBgmExtra();
+            // 嵌套返回恢复的 Bangumi 详情同样做进度对账（CatVod 快照无 _bgmId，走本地进度行）
+            if (typeof Kazumi !== 'undefined' && Kazumi._applyBangumiColState) {
+                Kazumi._applyBangumiColState(this._bgmId);
+                Kazumi._applyBangumiColState(this._bgmId, { force: true });
+            }
+        } else if (this._vod) {
+            this._refreshLocalProgress(); // 嵌套返回恢复的 CatVod 详情：回填本地进度行
+        }
         return true;
     },
 
@@ -618,7 +676,7 @@ const Detail = {
         // 封面进度徽章已删除（话数/完结信息在头部 meta 行展示，封面重复展示嫌挤）
         // 操作行布局对齐 Bangumi 范式：匹配到 Bangumi 时 Bangumi 操作行在上、
         // 本地收藏+网页按钮成行置下（两套收藏体系并存）；纯 CatVod 时单行
-        // [▶ 开始播放][本地收藏 ▾][↗ 网页]（_catvodStartHtml 内嵌 localFrag）。
+        // [▶ 开始播放][本地收藏][↗ 网页]（_catvodStartHtml 内嵌 localFrag）。
         const bgmColHtml = this._bangumiColHtml(bgm);
         const heroActions = bgmColHtml
             ? bgmColHtml + (localFrag
@@ -637,6 +695,7 @@ const Detail = {
                     <span class="detail-fact-label">播放信息</span>
                     <span class="detail-fact-value">${this.sources.length ? `${this.sources.length} 条线路 · 共 ${this.sources[0].episodes.length} 集` : '暂无播放线路'}</span>
                 </div>`}
+                ${hasBgm ? '' : this._watchProgressBarHtml('detail-local-progress')}
                 <div class="detail-hero-actions">${heroActions}</div>
             </div>
         </div>`;
@@ -652,17 +711,22 @@ const Detail = {
         $('#detail-body').addClass('detail-page-anim').html(html);
         this._refreshLocalCol();
         this._renderTabContent();
+        // 本地观看进度行（CatVod 源）：从收藏条目 progress 回填「看到第 N 集 / 共 M 集」
+        if (!hasBgm && vod) this._refreshLocalProgress();
         // 后台加载 Bangumi 补充数据
         if (hasBgm) {
             this._loadBgmExtra();
             if (typeof Kazumi !== 'undefined' && Kazumi._applyBangumiColState) {
-                Kazumi._applyBangumiColState(this._bgmId); // 高亮当前收藏状态
+                // 先用缓存即时回填收藏高亮，再 force 回源对账一次：缓存 6h TTL 内
+                // ep_status 可能落后（他设备打点/换设备），回源后进度行按远端重算
+                Kazumi._applyBangumiColState(this._bgmId);
+                Kazumi._applyBangumiColState(this._bgmId, { force: true });
             }
         }
     },
 
-    /** 本地收藏按钮（CatVod 源）：与 Bangumi 收藏单按钮同款交互——按钮内含当前
-     *  状态文案 + ▾ 箭头，点击弹出六态列表，选中即写本地收藏并收起。
+    /** 本地收藏按钮（CatVod 源）：与 Bangumi 收藏单按钮同款交互——按钮内含状态图标 +
+     *  当前状态文案，点击弹出六态列表，选中即写本地收藏并收起。
      *  资源片段模式（只渲染按钮本体，不含行容器）：纯 CatVod 详情时由
      *  _catvodStartHtml 并入操作行；匹配 Bangumi 时 render() 补包一层行容器。
      *  按钮用独立 id #detail-local-col-current，避免与 Bangumi 收藏按钮
@@ -670,16 +734,16 @@ const Detail = {
     _localColHtml() {
         return `<span class="detail-col-wrap detail-local-col-wrap">
             <button type="button" id="detail-local-col-current" class="md-btn md-btn-sm kazumi-col-btn" title="选择本地收藏状态">
-                <span class="detail-col-label">未收藏</span><span class="detail-col-caret">▾</span>
+                ${detailColStateIcon('')}<span class="detail-col-label">未收藏</span>
             </button>
             <div class="detail-col-menu detail-local-col-menu" style="display:none;">
                 <div class="kazumi-col-btns detail-local-col-btns">
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="">未收藏</button>
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="want">想看</button>
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="watching">在看</button>
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="seen">看过</button>
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="hold">搁置</button>
-                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="dropped">抛弃</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="">${detailColStateIcon('')}未收藏</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="want">${detailColStateIcon('want')}想看</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="watching">${detailColStateIcon('watching')}在看</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="seen">${detailColStateIcon('seen')}看过</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="hold">${detailColStateIcon('hold')}搁置</button>
+                    <button type="button" class="md-btn md-btn-sm detail-col-btn" data-tag="dropped">${detailColStateIcon('dropped')}抛弃</button>
                 </div>
             </div>
         </span>`;
@@ -726,13 +790,26 @@ const Detail = {
             <div class="detail-stat-rank"><span class="detail-stat-label">Bangumi 排名</span><strong>${rank ? `#${escHtml(String(rank))}` : '—'}</strong>${rank ? '' : '<span class="detail-stat-note">暂无排名</span>'}</div>
             ${histogram}
             ${colHtml}
+            ${this._watchProgressBarHtml()}
+        </div>`;
+    },
+
+    /** 观看进度条行（方案 C）：细进度条 + 「看到第 N 话（集）/ 共 M 话（集）」。
+     *  默认隐藏；回填逻辑（Bangumi 走 _applyBangumiColState、CatVod 走
+     *  _refreshLocalProgress）查到进度后填条宽与文案并点亮。
+     *  extraClass：附加定位 class（CatVod 场景传 detail-local-progress，
+     *  挂在播放信息下方独立行；Bangumi 场景不传，挂统计区底部 grid-column:1/-1）。 */
+    _watchProgressBarHtml(extraClass) {
+        return `<div class="detail-watch-progress ${extraClass || ''}" style="display:none;">
+            <div class="detail-watch-progress-track"><div class="detail-watch-progress-fill"></div></div>
+            <span class="detail-watch-progress-text tip-line pad0"></span>
         </div>`;
     },
 
     /** Bangumi 操作行（统一详情页，T74/T80）。
-     *  收藏单按钮（无独立容器）：按钮内含当前状态文案 + ▾ 箭头，点击弹出六态
-     *  列表供选择，选中即同步 Bangumi 并收起；按钮置于「开始观看」右侧。
-     *  「★ 评分 / 吐槽」恒在；「在 Bangumi 打开」转系统浏览器。
+     *  收藏单按钮（无独立容器）：按钮内含状态图标 + 当前状态文案，点击
+     *  弹出六态列表供选择，选中即同步 Bangumi 并收起；按钮置于「开始观看」右侧。
+     *  「评分 / 吐槽」（批注笔图标）恒在；「在 Bangumi 打开」转系统浏览器。
      *  观看进度行（看到第 N 话）由 _applyBangumiColState 回填。 */
     _bangumiColHtml(bgm) {
         if (!bgm || !bgm.id) return '';
@@ -744,26 +821,25 @@ const Detail = {
             ${startBtn}
             <span class="detail-col-wrap">
                 <button type="button" id="detail-col-current" class="md-btn md-btn-sm kazumi-col-btn" data-type="-1" title="选择 Bangumi 收藏状态">
-                    <span class="detail-col-label">未收藏</span><span class="detail-col-caret">▾</span>
+                    ${detailColStateIcon('-1')}<span class="detail-col-label">未收藏</span>
                 </button>
-                <span class="detail-col-progress tip-line pad0" style="display:none;"></span>
                 <div class="detail-col-menu" style="display:none;">
                     <div class="kazumi-col-btns" data-id="${escHtml(bgm.id)}">
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">未收藏</button>
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="1">想看</button>
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="3">在看</button>
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="2">看过</button>
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="4">搁置</button>
-                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="5">抛弃</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="-1">${detailColStateIcon('-1')}未收藏</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="1">${detailColStateIcon(1)}想看</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="3">${detailColStateIcon(3)}在看</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="2">${detailColStateIcon(2)}看过</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="4">${detailColStateIcon(4)}搁置</button>
+                        <button type="button" class="md-btn md-btn-sm kazumi-col-btn" data-type="5">${detailColStateIcon(5)}抛弃</button>
                     </div>
                 </div>
             </span>
-            <button type="button" id="detail-bgm-rate" class="md-btn md-btn-sm" title="评分 / 吐槽 / 标签（同步到 Bangumi）">★ 评分 / 吐槽</button>
-            <button type="button" id="detail-bgm-open" class="md-btn md-btn-sm" title="在系统浏览器打开 bgm.tv 条目页">↗ Bangumi 页</button>
+            <button type="button" id="detail-bgm-rate" class="md-btn md-btn-sm" title="评分 / 吐槽 / 标签（同步到 Bangumi）">${DETAIL_RATE_ICON_HTML}评分 / 吐槽</button>
+            <button type="button" id="detail-bgm-open" class="md-btn md-btn-sm" title="在系统浏览器打开 Bangumi 条目页（跳转目标随设置「条目页跳转跟随镜像」）">↗ Bangumi 页</button>
         </div>`;
     },
 
-    /** CatVod 详情页 hero 操作行（无 Bangumi 匹配时）：[▶ 开始播放][本地收藏 ▾][↗ 网页]。
+    /** CatVod 详情页 hero 操作行（无 Bangumi 匹配时）：[▶ 开始播放][本地收藏][↗ 网页]。
      *  「开始播放」与 Kazumi 源「开始观看」同位置/同样式（#detail-kazumi-start
      *  的视觉口径），点击打开选源选集弹窗（T79，对齐 Bangumi「开始观看」引导范式）；
      *  「↗ 网页」与 Bangumi 行「↗ Bangumi 页」同位置，跳源站网页（_siteWebUrl）。
@@ -2023,6 +2099,14 @@ const Detail = {
         this._epCommentsLoading = false;
         this._epCommentsGen++;
         this._bgmEps = null;
+        // 跨会话记忆保留在 _epCommentsMemory（带 sid 归属），不在此清——
+        // 重开同一番剧时 _renderEpComments 按 sid 恢复上次选中的集
+    },
+
+    /** 记住当前番剧的选集（pickEp 调用）：{sid, eid}，重开详情/弹层时恢复。
+     *  只记最近一部：换番剧后旧记忆被新选择覆盖，sid 不匹配即作废。 */
+    _rememberEpSelection(eid) {
+        this._epCommentsMemory = { sid: String(this._bgmId || ''), eid: Number(eid) || 0 };
     },
 
     /** 定位「选集讨论」页签应展示的集：优先用户上次选中的集（同番剧内切页签回来
@@ -2056,12 +2140,23 @@ const Detail = {
         // 无分集数据：先拉分集列表（选集讨论与「分集」页签共用 _bgmEps 缓存）
         if (!(Array.isArray(this._bgmEps) && this._bgmEps.length)) {
             box.html('<div class="tip-line">载入分集列表中…</div>');
+            // await 前快照番剧身份：等待期间切到别的番剧（_bgmId 已变）时，在途
+            // _ensureBgmEpisodes 会因内部 sid 守卫返回 null，被当成「该番剧无分集」——
+            // 不复查身份就会把旧番剧的「暂无分集信息」覆盖新番剧已渲染好的页签内容
+            const sid = String(this._bgmId || '');
             const eps = await this._ensureBgmEpisodes();
             if (this._activeTab !== '选集讨论') return; // 等待期间已切页签
+            if (String(this._bgmId || '') !== sid) return; // 等待期间已切到别的番剧（与 _ensureBgmEpisodes 内部守卫同口径）
             if (!eps) { box.html('<div class="tip-line">暂无分集信息</div>'); return; }
         }
-        // 选中集：上次选择 > 第 1 集。以 episode_id 为主键（防 SP/OP/ED 与正片同号歧义）。
+        // 选中集：跨会话记忆 > 当前实例状态 > 第 1 集。重开同一番剧（reset 清了
+        // 实例态）按 sid 恢复上次选中的集（「点完集数再回来没有记忆」的修复）。
+        // 以 episode_id 为主键（防 SP/OP/ED 与正片同号歧义）。
         const eps = this._bgmEps;
+        const mem = this._epCommentsMemory;
+        if (!Number(this._epCommentsEpisodeId) && mem && mem.sid === String(this._bgmId || '')) {
+            this._epCommentsEpisodeId = Number(mem.eid) || 0;
+        }
         let cur = eps.find((ep) => ep && ep.id && Number(ep.id) === Number(this._epCommentsEpisodeId));
         if (!cur) {
             cur = eps.find((ep) => ep && Number(ep.type) === 0) || eps[0];
@@ -2071,45 +2166,141 @@ const Detail = {
         this._loadEpComments(cur);
     },
 
-    /** 页签骨架渲染：集数选择器（横向滚动 chips）+ 工具栏（排序）+ 评论列表容器。
-     *  切集/切排序只重绘对应部分，不动列表骨架。 */
+    /** 页签骨架渲染：集数选择器 + 工具栏（排序）+ 评论列表容器。
+     *  切集/切排序只重绘对应部分，不动列表骨架。
+     *  集数选择器统一为「第 N 集 / 共 M 集」按钮（与「切正序」同规格同字号、
+     *  位于其左）+ 向下悬浮网格弹层：向下展开盖在评论列表上方，永不越过
+     *  吸顶页签栏——页签内容区因入场动画 fill:both 形成层叠上下文，弹层
+     *  z-index 出不去，向上展开会被页签栏截断；弹层限高滚轮滚动（仿颜文字
+     *  面板），点选/点外收起（交互同收藏菜单）。head 自身提为堆叠上下文
+     *  （见 ui.css .ep-comments-head 注释），防下方评论卡把弹层盖住。
+     *  集号口径：显示用季内集号（ep）优先，sort 是跨季绝对集号（第二季起
+     *  连续累计，8 集的季度可能 sort=71..78），直接用会显示「第 78 集/共 8 集」；
+     *  ep 缺失或非数字才回退 sort，再回退位置序号。 */
     _renderEpCommentsShell(cur) {
         const box = $('#detail-tab-content');
         const eps = this._bgmEps || [];
+        const epNo = (ep, i) => {
+            const epn = Number((ep && ep.ep) || NaN);
+            if (Number.isFinite(epn) && epn > 0) return String(epn);
+            const sort = Number((ep && ep.sort) || NaN);
+            if (Number.isFinite(sort) && sort > 0) return String(sort);
+            return String(i + 1);
+        };
         const curId = Number((cur && cur.id) || 0);
-        // 集数 chips：全部分集（含 SP/OP/ED，以 type 徽标区分）横排可滚，当前集高亮
-        const chips = eps.map((ep, i) => {
-            const eid = Number(ep && ep.id) || 0;
-            const no = (ep && (ep.sort || ep.ep)) || (i + 1);
-            const type = Number(ep && ep.type) === 1 ? 'SP' : Number(ep && ep.type) === 2 ? 'OP' : Number(ep && ep.type) === 3 ? 'ED' : '';
-            return `<button type="button" class="ep-comments-chip${eid === curId ? ' active' : ''}" data-eid="${eid}"
-                title="${escHtml(String((ep && (ep.name_cn || ep.name)) || ''))}">${escHtml(String(no))}${type ? `<i>${type}</i>` : ''}</button>`;
-        }).join('');
         const curName = (cur && (cur.name_cn || cur.name)) || '';
-        const curNo = (cur && (cur.sort || cur.ep)) || '?';
+        const curIdx = Math.max(0, eps.findIndex((x) => Number(x && x.id) === curId));
+        const curNo = epNo(cur, curIdx);
+        const pickerBtnHtml = (ep) => `第 ${escHtml(epNo(ep, Math.max(0, eps.findIndex((x) => Number(x && x.id) === Number(ep && ep.id)))))} 集 / 共 ${eps.length} 集`;
+        // 网格 cells：全集格（含 SP/OP/ED，以 type 徽标区分），当前集高亮按
+        // _epCommentsEpisodeId 实时取（弹层内点选后重排仍高亮正确集）。
+        // 弹层内小图标只切格网排列方向（独立状态 _epGridDesc），不动评论排序；
+        // 外层「切正/倒序」只管评论列表——两控件语义分离，互不重写对方文案。
+        const gridCellsHtml = () => eps.map((ep, i) => {
+            const src = this._epGridDesc ? eps[eps.length - 1 - i] : eps[i];
+            const idx = this._epGridDesc ? eps.length - 1 - i : i;
+            const eid = Number(src && src.id) || 0;
+            const type = Number(src && src.type) === 1 ? 'SP' : Number(src && src.type) === 2 ? 'OP' : Number(src && src.type) === 3 ? 'ED' : '';
+            return `<button type="button" class="ep-comments-cell${eid === Number(this._epCommentsEpisodeId) ? ' active' : ''}" data-eid="${eid}"
+                title="${escHtml(String((src && (src.name_cn || src.name)) || ''))}">${escHtml(epNo(src, idx))}${type ? `<i>${type}</i>` : ''}</button>`;
+        }).join('');
+        const gridOrderLabel = () => (this._epGridDesc ? '↓ 倒序' : '↑ 正序');
         box.html(`<div class="ep-comments-head">
-                <div class="ep-comments-title">第 ${escHtml(String(curNo))} 集讨论<span class="ep-comments-sub">${escHtml(curName)}</span></div>
+                <div class="ep-comments-title">第 ${escHtml(curNo)} 集讨论<span class="ep-comments-sub">${escHtml(curName)}</span></div>
+                <span class="ep-comments-picker">
+                    <button type="button" id="ep-comments-picker-btn" class="md-btn md-btn-tonal md-btn-sm">${pickerBtnHtml(cur)}</button>
+                    <div class="ep-comments-grid" style="display:none;">
+                        <div class="ep-comments-grid-bar">
+                            <span class="ep-comments-grid-hint">共 ${eps.length} 集</span>
+                            <button type="button" id="ep-comments-grid-order" class="ep-comments-grid-order" title="切换集数排列方向">${gridOrderLabel()}</button>
+                        </div>
+                        <div class="ep-comments-grid-jump">
+                            <input type="text" id="ep-comments-jump-input" class="ep-comments-jump-input" inputmode="numeric"
+                                maxlength="4" placeholder="集号，回车跳转">
+                            <button type="button" id="ep-comments-jump-go" class="ep-comments-jump-go">跳转</button>
+                            <span id="ep-comments-jump-err" class="ep-comments-jump-err" style="display:none;"></span>
+                        </div>
+                        <div class="ep-comments-grid-cells">${gridCellsHtml()}</div>
+                    </div>
+                </span>
                 <button type="button" id="ep-comments-order" class="md-btn md-btn-tonal md-btn-sm">${this._epCommentsDesc ? '⇅ 切正序' : '⇅ 切倒序'}</button>
             </div>
-            <div class="ep-comments-chips">${chips}</div>
             <div class="ep-comments-list" id="ep-comments-list"><div class="tip-line">加载评论中…</div></div>`);
         box.find('#ep-comments-order').on('click', () => {
             this._epCommentsDesc = !this._epCommentsDesc;
             $('#ep-comments-order').text(this._epCommentsDesc ? '⇅ 切正序' : '⇅ 切倒序');
             this._renderEpCommentsList();
         });
-        // 切集：更新选中态 + 标题，重拉评论（走后端 10 分钟 TTL 缓存）
-        box.find('.ep-comments-chip').on('click', (e) => {
-            const eid = Number($(e.currentTarget).data('eid') || 0);
+        // 切集公共动作：更新标题（含按钮文案）+ 重拉评论 + 记忆（跨重开恢复）。
+        // 同帧重写格网 cells：把高亮迁到新集上——弹层只是 toggle 显隐（DOM 不重建），
+        // 不重写的话下次点开仍是旧集高亮（「选中格子无变化」的根因）
+        const pickEp = (eid) => {
             const ep = eps.find((x) => x && Number(x.id) === eid);
-            if (!ep || eid === this._epCommentsEpisodeId) return;
+            if (!ep || eid === this._epCommentsEpisodeId) return false;
             this._epCommentsEpisodeId = eid;
-            box.find('.ep-comments-chip').removeClass('active');
-            $(e.currentTarget).addClass('active');
+            this._rememberEpSelection(eid);
             const nm = (ep.name_cn || ep.name) || '';
-            box.find('.ep-comments-title').html(`第 ${escHtml(String(ep.sort || ep.ep || '?'))} 集讨论<span class="ep-comments-sub">${escHtml(nm)}</span>`);
+            const no = epNo(ep, Math.max(0, eps.findIndex((x) => Number(x && x.id) === eid)));
+            box.find('.ep-comments-title').html(`第 ${escHtml(no)} 集讨论<span class="ep-comments-sub">${escHtml(nm)}</span>`);
+            box.find('#ep-comments-picker-btn').html(pickerBtnHtml(ep));
+            box.find('.ep-comments-grid-cells').html(gridCellsHtml());
             box.find('#ep-comments-list').html('<div class="tip-line">加载评论中…</div>');
             this._loadEpComments(ep);
+            return true;
+        };
+        // 网格：按钮开合弹层，点选后收起并同步按钮文案与高亮
+        box.find('#ep-comments-picker-btn').on('click', (e) => {
+            const grid = $(e.currentTarget).closest('.ep-comments-picker').find('.ep-comments-grid');
+            grid.toggle(!grid.is(':visible'));
+            e.stopPropagation();
+        });
+        // 弹层内排序切换小图标：只切格网排列方向（独立状态 _epGridDesc），
+        // 不动评论排序、不重写外层按钮文案——两控件互不干扰
+        box.find('#ep-comments-grid-order').on('click', (e) => {
+            e.stopPropagation();
+            this._epGridDesc = !this._epGridDesc;
+            $(e.currentTarget).text(gridOrderLabel());
+            box.find('.ep-comments-grid-cells').html(gridCellsHtml());
+        });
+        // 集号跳转：几百集的长番滚动翻找效率太低，输入集号（按显示集号口径
+        // ep→sort 匹配）回车或点「跳转」直达。成功后收起错误提示、滚动到新
+        // 高亮格（几千格也不迷路）；无匹配/非数字在行内提示，不打断输入。
+        const showJumpErr = (msg) => {
+            const err = box.find('#ep-comments-jump-err');
+            err.text(msg).show();
+            clearTimeout(this._epJumpErrTimer);
+            this._epJumpErrTimer = setTimeout(() => err.hide(), 2500);
+        };
+        const jumpToNo = () => {
+            const input = box.find('#ep-comments-jump-input');
+            const raw = String(input.val() || '').trim();
+            const num = Number(raw);
+            if (!raw || !Number.isFinite(num) || num <= 0) { showJumpErr('请输入集号'); return; }
+            const target = eps.find((ep, i) => epNo(ep, i) === raw);
+            if (!target) { showJumpErr(`没有第 ${raw} 集`); return; }
+            box.find('#ep-comments-jump-err').hide();
+            const eid = Number(target.id) || 0;
+            pickEp(eid);
+            // 跳转成功收起弹层；target 命中但 pickEp 返回 false = 本就是当前集，仍收起
+            box.find('.ep-comments-grid').hide();
+            input.val('');
+        };
+        box.find('#ep-comments-jump-go').on('click', (e) => {
+            e.stopPropagation();
+            jumpToNo();
+        });
+        box.find('#ep-comments-jump-input').on('keydown', (e) => {
+            e.stopPropagation(); // 防触发对话框 Esc/全局快捷键
+            if (e.key === 'Enter') { e.preventDefault(); jumpToNo(); }
+        });
+        // 网格格子点选：委托挂在 .ep-comments-grid-cells 上——弹层内切方向会整片
+        // 重写 cells innerHTML，直接绑定会随旧节点一起被丢掉，导致重排后点格子
+        // 无响应（「点了集数讨论不更新」）；委托容器不动，重排后依旧生效
+        box.find('.ep-comments-grid-cells').on('click', '.ep-comments-cell', (e) => {
+            const el = $(e.currentTarget);
+            const picked = pickEp(Number(el.data('eid') || 0));
+            el.closest('.ep-comments-grid').hide();
+            if (picked) el.closest('.ep-comments-picker').find('#ep-comments-picker-btn').html(pickerBtnHtml(eps.find((x) => Number(x && x.id) === Number(this._epCommentsEpisodeId))));
         });
     },
 
@@ -2197,12 +2388,49 @@ const Detail = {
         $('#detail-body .detail-col-btn').removeClass('active');
         $(`#detail-body .detail-col-btn[data-tag="${cur}"]`).addClass('active');
         // 单按钮同款同步（Bangumi 收藏按钮 #detail-col-current 的回填口径）：
-        // 当前态文案写进按钮内 label；选中非空态时按钮高亮
+        // 当前态图标+文案写进按钮内 label；选中非空态时按钮高亮
         const single = $('#detail-local-col-current');
         if (single.length) {
             single.find('.detail-col-label').text(cur ? (labels[cur] || cur) : '未收藏');
+            single.find('.detail-col-state-svg').replaceWith(detailColStateIcon(cur));
             single.toggleClass('active', !!cur);
         }
+    },
+
+    /** 本地观看进度条（CatVod 源详情，方案 C 同口径）：从通用观看进度表
+     *  （Records.getWatchProgress，player.js 逐集记账写入，不依赖收藏——未收藏影片
+     *  也有进度）回填细进度条 + 「看到第 N 集 / 共 M 集」。旧版本数据回退读收藏条目
+     *  progress 字段（Favorites.getProgress 内部已做该回退）。无任何进度记录时隐藏；
+     *  Bangumi 匹配详情无本行（进度走统计区底部 .detail-watch-progress）。
+     *  播放中每集看完 → Favorites.updateProgress → FavHub/点名刷新本条。 */
+    async _refreshLocalProgress() {
+        const el = $('#detail-body .detail-local-progress');
+        if (!el.length) return; // Bangumi 匹配详情无本行（进度走统计区进度条）
+        const site = String(this.site || '');
+        const vodId = String(this.vodId || '');
+        let prog = null;
+        try {
+            if (typeof Records !== 'undefined' && Records.getWatchProgress) {
+                prog = await Records.getWatchProgress(site, vodId);
+            }
+            // 通用表未命中（旧版本数据只有收藏条目字段）→ 回退收藏条目读取
+            if (!prog && typeof Favorites !== 'undefined' && Favorites.getProgress) {
+                prog = await Favorites.getProgress(site, vodId);
+            }
+        } catch (e) { /* 读失败按无进度隐藏 */ }
+        // 竞态守卫：await 期间详情页已切到别的影片，旧进度不写新页面
+        if (el.length && $('#detail-body .detail-local-progress').length === 0) return;
+        const cur = Number(prog && prog.currentEp) || 0;
+        if (!prog || cur <= 0) { el.hide(); return; }
+        const total = Number(prog.totalEps) || (this.sources[0] && this.sources[0].episodes.length) || 0;
+        // 条宽优先按集数比例（看完整季的比例语义），集数未知时退单集观看百分比
+        const pct = (total > 0)
+            ? Math.min(100, Math.round(cur / total * 100))
+            : Math.min(100, Math.round(Number(prog.percent) || 0));
+        el.find('.detail-watch-progress-fill').css('width', pct + '%');
+        // 文案精简（用户口径）：1/12；集数未知时 N/?（单集观看百分比已并入条宽）
+        el.find('.detail-watch-progress-text').text(total > 0 ? `${cur}/${total}` : `${cur}/?`);
+        el.show();
     },
 
     /** 本地收藏六态设置（对齐 Bangumi 收藏交互）：空标签=移除收藏，其余=收藏并置状态。
@@ -2434,6 +2662,9 @@ const Detail = {
         return null;
     },
 };
+
+// kazumi.js 单按钮同步路径（Bangumi type 口径）复用状态图标映射：跨文件走 Detail 命名空间
+Detail._colStateIcon = detailColStateIcon;
 
 (function (root) {
     root.YUKI = root.YUKI || {};

@@ -14,7 +14,9 @@
 /* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar, UIState */
 
 /**
- * T39：直播每页频道数 = 铺满一屏的容量（铺满后才翻页）。
+ * T39：直播每页频道数取「直播每页条数」设置（默认 120）；pageSizeOf 未设置时
+ * 恒回 120 兜底，「按窗口容量铺满一屏」的回退路径已删除，本函数已不在分页
+ * 路径上，保留仅供测试直驱防回归。
  * 频道列表为 auto-fill minmax(220px,1fr) gap 10 的 grid，行高 ≈ 45 + 10 间距。
  */
 function liveFitPageSize() {
@@ -33,7 +35,7 @@ const Live = {
     channels: [],      // [{group, name, url}]
     group: '',
     _page: 1,          // 频道列表当前页（T34：客户端分页，同首页分页器规格）
-    _pageSize: 0,      // 每页频道数：影片每页条数 ×3（频道行紧凑），切源时刷新
+    _pageSize: 0,      // 每页频道数：取「直播每页条数」设置（pageSizeOf 缺省恒回 120 兜底），0=未读
     _inited: false,
     _dirty: false,     // 自定义直播源增删后置脏，下次进入直播页强制重载下拉
     _probeToken: 0,    // 探测批次令牌：切源/刷新自增，旧批次结果返回时比对后丢弃
@@ -191,8 +193,8 @@ const Live = {
         const token = ++this._probeToken; // 作废旧探测批次（切源/刷新）
         this._clearProbeBar();
         this._clearStatusTimer(); // 上一轮的「已按缓存载入」状态条隐藏 timer 作废
-        // 设置值优先；未设置时按窗口容量铺满一屏。
-        this._pageSize = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
+        // 每页频道数：取「直播每页条数」设置（pageSizeOf 对缺省恒回 120，不会为 falsy）
+        this._pageSize = await pageSizeOf('pageSizeLive');
         this._page = 1;
         $('#live-status').hide();
         if (!quietLoad) { showLoading(); this._loadingShown = token; } // 手动切源/刷新即时反馈；后台静默刷新不上遮罩
@@ -460,12 +462,13 @@ const Live = {
             $('#live-pager').empty();
             return;
         }
-        const size = this._pageSize || liveFitPageSize();
+        const size = this._pageSize;
         const pagecount = Math.ceil(shown.length / size);
         this._page = Math.min(Math.max(1, this._page), pagecount);
-        // T65：当前页频道拼串一次性写入（替代逐条 append）
-        const html = shown.slice((this._page - 1) * size, this._page * size).map(({ c, i }) =>
-            `<div class="live-item" data-idx="${i}" tabindex="0">
+        // T65：当前页频道拼串一次性写入。animate 时按「可见序号」内联错峰延迟
+        //（30ms/张，全部频道逐张跃入，不设前 N 张上限；CSP style-src 允许内联 style）
+        const html = shown.slice((this._page - 1) * size, this._page * size).map(({ c, i }, vi) =>
+            `<div class="live-item" data-idx="${i}"${animate ? ` style="animation-delay:${vi * 30}ms"` : ''} tabindex="0">
                 <span class="live-name">${escHtml(c.name)}</span>
                 <span class="live-group">${escHtml(c.group)}</span></div>`).join('');
         box.html(html);
@@ -486,7 +489,7 @@ const Live = {
         // 每页数量设置变更（invalidatePageSizeCache 已作废 pageSizeOf 缓存）：
         // 与当前列表不一致时重排分页并播入场动画（同全量重渲染惯例），不重新探测频道
         if (this.channels && this.channels.length) {
-            const size = (await pageSizeOf('pageSizeLive')) || liveFitPageSize();
+            const size = await pageSizeOf('pageSizeLive');
             if (size !== this._pageSize) {
                 this._pageSize = size;
                 this._page = 1;

@@ -300,6 +300,10 @@ function loadBgmRateInteractive(overrides) {
             on: () => api, off: () => api, text: () => api, val: () => '',
             show: () => api, html: () => api, trigger: () => api,
             hide: () => { calls.hide.push(String(sel)); return api; },
+            // openRateDialog 复位后调 _kamojiSync（开窗前清上一会话残影）：
+            // 面板/按钮常驻元素需要 toggleClass/attr，自反桩安全透传
+            toggleClass: () => api,
+            attr: () => api,
             prop: (k, v) => {
                 if (k === 'disabled') calls.disabled.push(v);
                 return api;
@@ -455,6 +459,222 @@ test('submit 标签脏检查：初始一致不带 tags 键；有改动整体覆�
     assert.deepEqual(sent[0].tags, []);
 });
 
+// ---------------------------------------------------------------- 颜文字悬浮面板（单按钮 + 悬停/钉住展开）
+
+test('颜文字清单与常量口径：非空、去重、均为纯文本（可直接进 Bangumi 吐槽）', () => {
+    const R = loadBgmRate();
+    assert.ok(Array.isArray(R.KAMOJI) && R.KAMOJI.length >= 15, '清单应足够丰富（≥15 个）');
+    assert.equal(new Set(R.KAMOJI).size, R.KAMOJI.length, '清单不得重复');
+    for (const k of R.KAMOJI) {
+        assert.equal(typeof k, 'string');
+        assert.ok(k.trim().length > 0);
+        assert.ok(k.length <= 20, `颜文字过长（${k}）：保持面板按钮紧凑`);
+        // 纯文本表情：不得夹带会破坏标签输入/展示的标记字符
+        assert.ok(!/[<>"'&]/.test(k), `颜文字含 HTML 特殊字符（${k}）`);
+    }
+    assert.equal(typeof R.KAMOJI_HIDE_DELAY, 'number');
+    assert.ok(R.KAMOJI_HIDE_DELAY > 0 && R.KAMOJI_HIDE_DELAY <= 500, '悬停收起延时应为短延时（毫秒级）');
+});
+
+test('_renderKamoji：全量渲染进悬浮面板网格（data-kamoji 转义）', () => {
+    let captured = '';
+    const source = read('src/renderer/js/bgm-rate.js');
+    const context = {
+        console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+        setTimeout, clearTimeout,
+        $: (sel) => ({
+            on: () => ({}), off: () => ({}), text: () => ({}), val: () => '',
+            show: () => ({}), hide: () => ({}), trigger: () => ({}), toggleClass: () => ({}),
+            html: (h) => { if (sel === '#bgm-rate-kamoji-panel') captured = h; },
+            find: () => ({ on: () => ({}), length: 0 }),
+        }),
+        doAction: async () => ({}), warnToast: () => {},
+        escHtml: (s) => String(s),
+        openDialog: () => {}, closeDialog: () => {},
+        FavHub: { changed: () => {} },
+        Kazumi: { _getBangumiToken: async () => 'tok' },
+    };
+    context.globalThis = context;
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+    const R2 = context.__R;
+    R2._renderKamoji();
+    const html = captured || '';
+    const countButtons = (h, cls) => (h.match(new RegExp(cls, 'g')) || []).length;
+    // 全量清单一次渲染进面板（不再有「更多」折叠——显隐由面板自身状态机负责）
+    assert.equal(countButtons(html, 'class="bgm-rate-kamoji"'), R2.KAMOJI.length, '全量渲染进面板');
+    assert.ok(!html.includes('bgm-rate-kamoji-more'), '不应再有「更多」折叠按钮');
+    assert.match(html, /data-kamoji=/, '插入目标走 data-kamoji 属性');
+});
+
+test('颜文字面板状态机：悬停展开/离开延时收起/点击钉住/点外收起', async () => {
+    // setTimeout 桩：不真等待，直接执行回调并记录是否被清除（验证「清延时器」语义）
+    const timers = [];
+    const mk = () => {
+        const source = read('src/renderer/js/bgm-rate.js');
+        const classes = { panel: [], btn: [] };
+        const attrs = {}; // 记录 aria 等属性写入（kamojiSync 应同步 aria-expanded）
+        const ret = { attrs };
+        const context = {
+            console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+            setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+            clearTimeout: (id) => { if (id) timers[id - 1] = null; },
+            $: (sel) => ({
+                on: () => ({}), off: () => ({}), text: () => ({}), val: () => '',
+                show: () => ({}), hide: () => ({}), trigger: () => ({}), html: () => ({}),
+                attr: (name, value) => {
+                    if (value === undefined) return attrs[sel + '|' + name];
+                    attrs[sel + '|' + name] = value;
+                    return {};
+                },
+                toggleClass: (cls, on) => {
+                    if (sel === '#bgm-rate-kamoji-panel') classes.panel.push([cls, !!on]);
+                    if (sel === '#bgm-rate-kamoji-btn') classes.btn.push([cls, !!on]);
+                },
+                find: () => ({ on: () => ({}), length: 0 }),
+            }),
+            doAction: async () => ({}), warnToast: () => {},
+            escHtml: (s) => String(s),
+            openDialog: () => {}, closeDialog: () => {},
+            FavHub: { changed: () => {} },
+            Kazumi: { _getBangumiToken: async () => 'tok' },
+        };
+        context.globalThis = context;
+        context.window = context;
+        vm.createContext(context);
+        vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+        const R = context.__R;
+        return { R, classes, attrs };
+    };
+    const last = (arr) => (arr.length ? JSON.parse(JSON.stringify(arr[arr.length - 1])) : null);
+    // ① 悬停展开：面板与按钮同步点亮 .open/.active
+    const s1 = mk();
+    s1.R._kamojiHoverIn();
+    assert.deepEqual(last(s1.classes.panel), ['open', true], '悬停后面板展开');
+    assert.deepEqual(last(s1.classes.btn), ['active', true], '悬停后按钮高亮');
+    assert.equal(s1.attrs['#bgm-rate-kamoji-btn|aria-expanded'], true, '展开时同步 aria-expanded=true（HTML 静态写死 false 需被覆盖）');
+    // ② 离开（未钉住）：挂收起延时器且按时执行
+    s1.R._kamojiHoverOut();
+    const pending = timers.filter(Boolean);
+    assert.equal(pending.length, 1, '离开后挂一个收起延时器');
+    assert.equal(pending[0].ms, s1.R.KAMOJI_HIDE_DELAY, '延时值与常量一致');
+    pending[0].fn();
+    assert.deepEqual(last(s1.classes.panel), ['open', false], '延时到期后面板收起');
+    assert.equal(s1.R._kamojiOpen, false, '状态机复位');
+    assert.equal(s1.attrs['#bgm-rate-kamoji-btn|aria-expanded'], false, '收起后同步 aria-expanded=false');
+    // ③ 离开（已钉住）：不挂收起延时器
+    const s2 = mk();
+    s2.R._kamojiTogglePin();   // 点击钉住 → 展开
+    assert.equal(s2.R._kamojiPinned, true, '点击后钉住');
+    assert.deepEqual(last(s2.classes.panel), ['open', true], '钉住后面板展开');
+    timers.length = 0;
+    s2.R._kamojiHoverOut();
+    assert.equal(timers.filter(Boolean).length, 0, '钉住态离开不挂收起延时器');
+    // ④ 再点按钮（钉住态）：toggle 收起并解除钉住
+    s2.R._kamojiTogglePin();
+    assert.equal(s2.R._kamojiOpen, false, '再点按钮收起');
+    assert.equal(s2.R._kamojiPinned, false, '收起同时解除钉住');
+    assert.deepEqual(last(s2.classes.panel), ['open', false], '面板同步收起');
+    // ⑤ 点面板外 dismiss：收起 + 解除钉住
+    const s3 = mk();
+    s3.R._kamojiTogglePin();
+    s3.R._kamojiDismiss();
+    assert.equal(s3.R._kamojiOpen, false, '点外收起');
+    assert.equal(s3.R._kamojiPinned, false, '点外解除钉住');
+    // ⑥ 悬停进入清除挂起的收起延时器（指针跨间隙防闪烁）
+    const s4 = mk();
+    s4.R._kamojiHoverOut();   // 先挂收起延时器
+    assert.equal(timers.filter(Boolean).length, 1);
+    s4.R._kamojiHoverIn();    // 又移回来了
+    assert.equal(timers.filter(Boolean).length, 0, '悬停进入清除收起延时器');
+    assert.equal(s4.R._kamojiOpen, true, '重新展开');
+});
+
+test('_insertKamoji：光标处插入/文末追加/选区替换/空串忽略', async () => {
+    // 可交互 VM 加载：$ 桩按选择器模拟 #bgm-rate-comment 的值与光标状态，
+    // val(next) 写入捕获到外层变量（VM realm 闭包不可直读，经捕获值断言）
+    const mk = (value, selStart, selEnd) => {
+        const source = read('src/renderer/js/bgm-rate.js');
+        const state = { value, set: null, focused: false };
+        const context = {
+            console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+            setTimeout, clearTimeout,
+            document: { activeElement: { tag: 'other' } },
+            $: (sel) => {
+                if (sel !== '#bgm-rate-comment') {
+                    // 模块绑定期会按选择器访问其他常驻控件：返回惰性自反桩
+                    const api = { on: () => api, off: () => api, text: () => api, val: () => '',
+                        show: () => api, hide: () => api, html: () => api, trigger: () => api,
+                        prop: () => api, data: () => '', find: () => ({ on: () => api, length: 0 }), length: 0 };
+                    return api;
+                }
+                return {
+                    val: (nv) => (nv === undefined ? state.value : (state.value = nv, state.set = nv, {})),
+                    prop: (k) => (k === 'selectionStart' ? selStart : k === 'selectionEnd' ? selEnd : undefined),
+                    trigger: (ev) => { if (ev === 'focus') state.focused = true; },
+                    0: { tag: 'textarea' },
+                };
+            },
+            doAction: async () => ({}), warnToast: () => {},
+            escHtml: (s) => String(s),
+            openDialog: () => {}, closeDialog: () => {},
+            FavHub: { changed: () => {} },
+            Kazumi: { _getBangumiToken: async () => 'tok' },
+        };
+        context.globalThis = context;
+        context.window = context;
+        vm.createContext(context);
+        vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+        return { R: context.__R, state };
+    };
+    // 光标中插：'好看' 光标 pos=1 → '好' + 颜文字 + '看'，并聚焦输入框
+    const a = mk('好看', 1, 1);
+    a.R._insertKamoji('(￣▽￣)');
+    assert.equal(a.state.value, '好(￣▽￣)看', '插入到光标处');
+    assert.equal(a.state.focused, true, '插入后聚焦吐槽框');
+    // 选区替换：1..3 的 '看极' 被替换为 Orz
+    const b = mk('好看极了', 1, 3);
+    b.R._insertKamoji('Orz');
+    assert.equal(b.state.value, '好Orz了', '选区被替换');
+    // 未聚焦过（selectionStart 非有限数值，模拟未定位光标）：文末追加
+    const c = mk('好看', NaN, NaN);
+    c.R._insertKamoji('Orz');
+    assert.equal(c.state.value, '好看Orz', '无有效光标时追加到文末');
+    // 空串忽略：正文不动
+    const d = mk('x', 0, 0);
+    d.R._insertKamoji('');
+    assert.equal(d.state.value, 'x', '空串不写入');
+    assert.equal(d.state.focused, false, '空串不触发聚焦');
+});
+
+test('颜文字 UI 集成形态：index.html 按钮+悬浮面板结构 + bgm-rate.js 委托绑定 + CSS', () => {
+    const html = read('src/renderer/index.html');
+    assert.ok(html.includes('id="bgm-rate-kamoji-btn"'), 'index.html 应包含 #bgm-rate-kamoji-btn 触发按钮');
+    assert.ok(html.includes('id="bgm-rate-kamoji-panel"'), 'index.html 应包含 #bgm-rate-kamoji-panel 悬浮面板');
+    // 无障碍：haspopup/expanded/controls 标注齐全
+    assert.match(html, /id="bgm-rate-kamoji-btn"[^>]*aria-haspopup="true"/, '按钮应标注 aria-haspopup');
+    assert.match(html, /id="bgm-rate-kamoji-btn"[^>]*aria-controls="bgm-rate-kamoji-panel"/, '按钮应标注 aria-controls');
+    // 结构：按钮 + 面板包在同一个 wrap 里，wrap 紧跟吐槽 textarea（外层 resize wrap 之后）
+    assert.match(html, /id="bgm-rate-comment-resize"[\s\S]*?<\/div>\s*<\/div>\s*<div class="bgm-rate-kamoji-wrap">/, '颜文字区应紧跟吐槽输入框（含 resize wrap）');
+    assert.match(html, /class="bgm-rate-kamoji-wrap">[\s\S]*?id="bgm-rate-kamoji-panel"/, '面板应位于 wrap 内（绝对定位锚点）');
+    const bgmSrc = read('src/renderer/js/bgm-rate.js');
+    assert.match(bgmSrc, /'#bgm-rate-kamoji-panel'\)\.on\('click', '\.bgm-rate-kamoji'/, '面板内颜文字点击委托');
+    assert.match(bgmSrc, /'#bgm-rate-kamoji-btn'\)\.on\('mouseenter'/, '按钮悬停展开');
+    assert.match(bgmSrc, /'#bgm-rate-kamoji-btn'\)\.on\('click'/, '按钮点击钉住（触屏/键盘路径）');
+    assert.match(bgmSrc, /_renderKamoji\(\)/, '对话框渲染时应渲染颜文字面板');
+    const cssSrc = read('src/renderer/css/ui.css');
+    assert.match(cssSrc, /\.bgm-rate-kamoji-panel\s*\{/, 'ui.css 应有悬浮面板样式');
+    assert.match(cssSrc, /\.bgm-rate-kamoji-panel\.open/, 'ui.css 应有面板展开态样式');
+    assert.match(cssSrc, /\.bgm-rate-kamoji-btn\s*\{/, 'ui.css 应有触发按钮样式');
+    assert.match(cssSrc, /\.bgm-rate-kamoji\s*\{/, 'ui.css 应有颜文字按钮样式');
+    // 面板必须绝对定位悬浮（不挤动文档流），锚点是 wrap
+    const panelCss = cssSrc.match(/\.bgm-rate-kamoji-panel\s*\{[^}]*\}/)[0];
+    assert.match(panelCss, /position:\s*absolute/, '面板应绝对定位悬浮');
+    const wrapCss = cssSrc.match(/\.bgm-rate-kamoji-wrap\s*\{[^}]*\}/)[0];
+    assert.match(wrapCss, /position:\s*relative/, 'wrap 应为定位锚点');
+});
+
 // ---------------------------------------------------------------- 标签 UI 集成形态
 
 test('标签编辑 UI：index.html 对话框结构 + detail/bangumi-search 入口透传 tags', () => {
@@ -479,6 +699,28 @@ test('标签编辑 UI：index.html 对话框结构 + detail/bangumi-search 入�
     assert.match(bgmSrc, /'#bgm-rate-tags-selected'\)\.on\('click', '\.bgm-rate-tag-remove'/, '已选 chips 移除委托');
     assert.match(bgmSrc, /'#bgm-rate-tags-popular'\)\.on\('click', '\.bgm-rate-tag-pop'/, '热门标签 toggle 委托');
     assert.match(bgmSrc, /'#bgm-rate-tag-input'\)\.on\('keydown'/, '自定义标签回车添加');
+});
+
+test('吐槽框自定义拉伸：wrap+把手结构、resize:none、指针拖拽钳制 84~240px、标签输入行等高对齐', () => {
+    const html = read('src/renderer/index.html');
+    // 结构：textarea 包在 resize wrap 内，把手为独立元素（原生把手已弃用）
+    assert.match(html, /<div class="bgm-rate-comment-wrap">\s*<textarea id="bgm-rate-comment"/, '吐槽框应有 resize wrap 包裹');
+    assert.match(html, /id="bgm-rate-comment-resize" class="bgm-rate-resize"/, '应有自定义拉伸把手元素');
+    const bgmSrc = read('src/renderer/js/bgm-rate.js');
+    assert.match(bgmSrc, /'#bgm-rate-comment-resize'\)\.on\('pointerdown'/, '应绑定把手 pointerdown 拖拽');
+    assert.match(bgmSrc, /MIN_H = 84, MAX_H = 240/, '拖拽高度钳制 84~240px（与 CSS min/max 一致）');
+    assert.match(bgmSrc, /setPointerCapture/, '拖拽应 setPointerCapture（指针滑出把手持续跟踪）');
+    const cssSrc = read('src/renderer/css/ui.css');
+    const taCss = cssSrc.match(/#bgm-rate-comment\s*\{[^}]*\}/)[0];
+    assert.match(taCss, /resize:\s*none/, '原生 resize 把手应关闭（斜纹三角遮挡滚动条的根因）');
+    assert.match(taCss, /overflow-y:\s*auto/, '超高内容内部滚动');
+    const handleCss = cssSrc.match(/\.bgm-rate-resize\s*\{[^}]*\}/)[0];
+    assert.match(handleCss, /cursor:\s*ns-resize/, '把手应为纵向拉伸光标');
+    // 标签输入行：输入框与「添加」按钮同高 32px、stretch 对齐
+    const rowCss = cssSrc.match(/\.bgm-rate-tags-input-row\s*\{[^}]*\}/)[0];
+    assert.match(rowCss, /align-items:\s*stretch/, '输入行应 stretch 等高对齐');
+    const inputCss = cssSrc.match(/\.bgm-rate-tags-input-row \.md-input\s*\{[^}]*\}/)[0];
+    assert.match(inputCss, /height:\s*32px/, '输入框应压到与 md-btn-sm 按钮同高 32px');
 });
 
 test('fetchCurrent：收藏 GET 回传 tags 归一化进上下文', async () => {

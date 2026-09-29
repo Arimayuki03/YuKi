@@ -37,6 +37,40 @@ function loadParser() {
     return context.__P;
 }
 
+/** 加载完整 BangumiSearch 对象（同一最小桩），用于 onViewShown 行为单测。 */
+function loadSearch() {
+    const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/bangumi-search.js'), 'utf8');
+    const noop = function () { return this; };
+    const $stub = () => ({
+        on: noop, off: noop, empty: noop, html: noop, text: noop, val: noop,
+        show: noop, hide: noop, toggle: noop, addClass: noop, removeClass: noop,
+        find: () => ({ on: noop, each: noop, removeClass: noop, addClass: noop }),
+        each: noop, prop: noop, trigger: noop, toggleClass: noop,
+    });
+    const sizes = [20];
+    let pageSize = 20;
+    const loads = [];
+    const context = {
+        console, Map, Set, Promise, Date, Math, JSON, String, Array, Object,
+        parseInt, parseFloat, Number, RegExp, isNaN,
+        setTimeout, clearTimeout,
+        $: $stub,
+        doAction: async () => ({ items: [], total: 0 }),
+        warnToast: () => {}, showLoading: () => {}, hideLoading: () => {},
+        renderPagerBox: () => {}, pageSizeOf: async () => { sizes.push(pageSize); return pageSize; },
+        bangumiCard: (item) => `<div data-id="${item.id}"></div>`,
+        escHtml: (s) => String(s), fitVodTitles: () => {},
+        openDialog: () => {}, closeDialog: () => {},
+        App: {}, Kazumi: {},
+    };
+    context.globalThis = context;
+    vm.createContext(context);
+    vm.runInContext(`${source}\n;globalThis.__B = BangumiSearch;`, context, { filename: 'bangumi-search.js' });
+    const B = context.__B;
+    B.load = async (page) => { loads.push(page || 1); }; // 截获 load：onViewShown 单测不触网
+    return { B, loads, setPageSize: (n) => { pageSize = n; }, sizes };
+}
+
 const P = loadParser();
 
 // VM 上下文里构造的对象/数组原型来自不同 realm，deepStrictEqual 会因原型不等而误判；
@@ -124,4 +158,38 @@ test('hasAdvancedFilters 正确识别纯关键词与含筛选', () => {
     assert.equal(P.hasAdvancedFilters(P.toFilterState('孤独摇滚')), false);
     assert.equal(P.hasAdvancedFilters(P.toFilterState('孤独摇滚 tag:音乐')), true);
     assert.equal(P.hasAdvancedFilters(P.toFilterState('sort:rank')), true);
+});
+
+test('onViewShown：无结果/无状态时不动作（进页不发网络请求）', async () => {
+    const { B, loads } = loadSearch();
+    await B.onViewShown();
+    assert.deepEqual(loads, []);
+    B._items = [{ id: 1 }];
+    B._state = null; // 有结果但状态缺失（理论边界）同样不动作
+    await B.onViewShown();
+    assert.deepEqual(loads, []);
+});
+
+test('onViewShown：条数变化且有结果——按新条数重拉当前页（T39 补遗）', async () => {
+    const { B, loads, setPageSize } = loadSearch();
+    B._state = { keyword: '孤独摇滚' };
+    B._items = [{ id: 1 }, { id: 2 }];
+    B._size = 20;
+    B._page = 3;
+    setPageSize(24); // 设置里改了「搜索每页条数」
+    await B.onViewShown();
+    assert.deepEqual(loads, [3], '应重拉当前页而非回第 1 页');
+    assert.equal(B._size, 24, '生效条数应在重拉前同步更新');
+});
+
+test('onViewShown：条数未变——不重拉', async () => {
+    const { B, loads, setPageSize } = loadSearch();
+    B._state = { keyword: '孤独摇滚' };
+    B._items = [{ id: 1 }];
+    B._size = 24;
+    B._page = 1;
+    setPageSize(24);
+    await B.onViewShown();
+    assert.deepEqual(loads, []);
+    assert.equal(B._size, 24);
 });

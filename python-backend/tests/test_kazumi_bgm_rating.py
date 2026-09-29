@@ -37,6 +37,7 @@ from kazumi.utils import (  # noqa: E402
     detect_image_captcha_html,
 )
 from kazumi import captcha as captcha_mod  # noqa: E402
+from kazumi import captcha_cnn as captcha_cnn_mod  # noqa: E402
 from kazumi.rule_engine import RuleEngine  # noqa: E402
 from kazumi.plugin import Plugin  # noqa: E402
 from kazumi.utils import CaptchaRequiredException  # noqa: E402
@@ -377,7 +378,8 @@ class TestCaptchaOcr(unittest.TestCase):
         self.assertIsNone(captcha_mod.recognize_captcha_bytes(None))
 
     def test_recognize_uses_ocr_when_available(self):
-        # mock 识别器：验证「合法结果透传 / 噪声结果拒绝」两分支
+        # mock 识别器：验证「合法结果透传 / 噪声结果拒绝」两分支。
+        # ddddocr 是主链：噪声拒绝后小模型兜底也要屏蔽，才能断言最终 None。
         class FakeOcr:
             def __init__(self, text):
                 self.text = text
@@ -386,18 +388,30 @@ class TestCaptchaOcr(unittest.TestCase):
                 return self.text
 
         fake = FakeOcr('w2x9')
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake):
+        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
+                mock.patch.object(captcha_mod, '_load_cnn') as m_cnn:
             self.assertEqual(captcha_mod.recognize_captcha_bytes(b'img'), 'w2x9')
+            m_cnn.assert_not_called()  # ddddocr 命中时不走小模型
         fake.text = 'x' * 30  # 过长噪声 → 拒绝
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake):
+        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
+                mock.patch.object(captcha_mod, '_load_cnn',
+                                  return_value=mock.MagicMock(recognize=lambda _: None)):
             self.assertIsNone(captcha_mod.recognize_captcha_bytes(b'img'))
-        fake.text = 'ok'
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake):
-            # classification 抛异常 → 降级 None
+        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
+                mock.patch.object(captcha_mod, '_load_cnn',
+                                  return_value=mock.MagicMock(recognize=lambda _: None)):
+            # classification 抛异常 → 降级小模型（也 None）→ 最终 None
             def boom(_data):
                 raise RuntimeError('model broken')
             fake.classification = boom
             self.assertIsNone(captcha_mod.recognize_captcha_bytes(b'img'))
+
+    def test_recognize_falls_back_to_cnn(self):
+        # ddddocr 噪声/缺席 → 自研小模型兜底链生效
+        with mock.patch.object(captcha_mod, '_load_ocr', return_value=None), \
+                mock.patch.object(captcha_mod, '_load_cnn',
+                                  return_value=mock.MagicMock(recognize=lambda _: '4486')):
+            self.assertEqual(captcha_mod.recognize_captcha_bytes(b'img'), '4486')
 
 
 class TestCaptchaLazyLoadRace(unittest.TestCase):
@@ -424,14 +438,16 @@ class TestCaptchaLazyLoadRace(unittest.TestCase):
             gate.wait(timeout=5)
             return FakeOcr()
 
-        barrier = threading.Barrier(8)
-        results = []
+        # ocr_available 现在两级链：小模型可用会短路 ddddocr 探测，必须先屏蔽
+        with mock.patch.object(captcha_cnn_mod, 'model_available', return_value=False), \
+                mock.patch.dict('sys.modules', {'ddddocr': mock.MagicMock(DdddOcr=fake_ddddocr_cls)}):
+            barrier = threading.Barrier(8)
+            results = []
 
-        def probe():
-            barrier.wait(timeout=5)
-            results.append(captcha_mod.ocr_available())
+            def probe():
+                barrier.wait(timeout=5)
+                results.append(captcha_mod.ocr_available())
 
-        with mock.patch.dict('sys.modules', {'ddddocr': mock.MagicMock(DdddOcr=fake_ddddocr_cls)}):
             threads = [threading.Thread(target=probe) for _ in range(8)]
             for t in threads:
                 t.start()

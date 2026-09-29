@@ -178,12 +178,17 @@ test('ended 按会话归属：旧会话 ended 不误判新会话「看完」', (
     assert.equal(player._isDone({ sessionId: 602, pos: null, duration: null }), true);
 });
 
-test('isDone：有进度时按剩余时长判定', () => {
+test('isDone：有进度时按观看比例判定（pos/duration ≥70%）', () => {
     const settings = {};
     const player = loadPlayer(settings);
-    assert.equal(player._isDone({ sessionId: 701, pos: 95, duration: 100 }), true);  // 剩 5s
-    assert.equal(player._isDone({ sessionId: 702, pos: 50, duration: 100 }), false); // 剩 50s
-    assert.equal(player._isDone({ sessionId: 703, pos: null, duration: null }), false);
+    // 45 分钟长视频：旧固定 8s 口径要看到最后 8 秒才算，比例口径看到 70% 即算
+    assert.equal(player._isDone({ sessionId: 701, pos: 95, duration: 100 }), true);   // 95%
+    assert.equal(player._isDone({ sessionId: 707, pos: 70, duration: 100 }), true);   // 70% 整
+    assert.equal(player._isDone({ sessionId: 704, pos: 1890, duration: 2700 }), true); // 70% 整（45min 番看到 31.5min）
+    assert.equal(player._isDone({ sessionId: 705, pos: 1889, duration: 2700 }), false); // 69.96% 差一点
+    assert.equal(player._isDone({ sessionId: 702, pos: 50, duration: 100 }), false);  // 50%
+    assert.equal(player._isDone({ sessionId: 706, pos: 0, duration: 100 }), false);   // 0%
+    assert.equal(player._isDone({ sessionId: 703, pos: null, duration: null }), false); // 进度缺失走 ended 兜底（无记录 false）
 });
 
 test('pos 缺失（IPC 未观测到进度）仍计一次观看次数/部数，秒数不计', async () => {

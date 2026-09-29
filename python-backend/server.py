@@ -6,6 +6,7 @@
 - GET/POST /cache         spider 缓存协议 get/set/del（免 token，仅 127.0.0.1）
 - GET/POST /proxy         spider localProxy 媒体代理（需有效 token，do=ck 健康检查豁免）
 - POST /action            内容 API + 面板指令（需 token）
+- POST /translate         划词翻译：免费端点互备 + 可选 LLM（需 token）
 
 本地文件面板（原 /file /upload 等占位）Phase 5 起改走 Electron 主进程
 file-manager IPC，后端不再提供该组端点。
@@ -66,6 +67,8 @@ from kazumi.plugin_manager import BANGUMI_MIRROR_ROOT, BANGUMI_UA, PluginManager
 from kazumi.plugin import Plugin
 from kazumi.rule_engine import RuleEngine
 from kazumi.cookie_jar import CookieJar
+from kazumi.utils import CaptchaRequiredException
+from kazumi import translate as translate_svc
 from proxy_contract import (
     decode_proxy_body,
     iter_body,
@@ -1870,7 +1873,8 @@ def create_app():
                 try:
                     trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), word, filters=filters)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
-                        return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
+                        return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', ''),
+                                'ocrAvailable': bool(trace.get('ocr_available'))}
                     data = [vars(it) for it in trace.response.data]
                     return {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
                 except Exception as e:
@@ -1884,6 +1888,7 @@ def create_app():
                     'status': r.get('captcha') and 'captcha' or r.get('status') or ('error' if r.get('error') else 'noresult'),
                     'captcha': r.get('captcha') or False,
                     'captchaUrl': r.get('captchaUrl', ''),
+                    'ocrAvailable': r.get('ocrAvailable') or False,
                     'msg': r.get('msg', ''),
                 }, ensure_ascii=False)
 
@@ -2089,6 +2094,36 @@ def create_app():
                                  media_type='application/json; charset=utf-8',
                                  headers=headers)
 
+    # ------------------------------------------------------------ 划词翻译端点
+
+    @fastapi_app.post('/translate')
+    async def translate_endpoint(request: Request):
+        """划词翻译：{text, from?, to?, prefer?, llm?} → {code, text?, provider?, msg?}。
+
+        免费端点互备（microsoft → google）+ 可选 LLM；结果按内容 hash 缓存
+        24h。llm 凭据按次传入不落盘（与 Bangumi token 同策略）。"""
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({'code': 1, 'msg': 'invalid json'}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({'code': 1, 'msg': 'invalid body'}, status_code=400)
+        text = payload.get('text') or ''
+        if not str(text).strip():
+            return JSONResponse({'code': 1, 'msg': 'empty text'}, status_code=400)
+        result = await run_in_threadpool(
+            translate_svc.translate_text,
+            text,
+            str(payload.get('to') or 'zh-CN'),
+            str(payload.get('from') or ''),
+            str(payload.get('prefer') or ''),
+            payload.get('llm') if isinstance(payload.get('llm'), dict) else None,
+        )
+        # 探测请求（设置页「测试连接」）恒 200：成败由 body 的 code/err 表达，
+        # 渲染层按错误分类展示；正常翻译失败才以 502 语义上报
+        status = 200 if (result.get('code') == 0 or result.get('probe')) else 502
+        return JSONResponse(result, status_code=status)
+
     # ------------------------------------------------------------ Kazumi 规则引擎端点
 
     @fastapi_app.api_route('/kazumi/action', methods=['POST'])
@@ -2166,6 +2201,8 @@ def create_app():
 # ?refresh=1 绕过。info/episodes 变动罕见给 30min，search/listByTag 结果时效性稍强给 10min。
 _BANGUMI_CACHE_TTL = {
     'kazumiBangumiInfo': 1800,
+    # 批量详情（话数徽章整包）：TTL 同单条；逐 id 读写单条缓存，整包只是传输聚合
+    'kazumiBangumiInfoBatch': 1800,
     'kazumiBangumiEpisodes': 1800,
     'kazumiBangumiSearch': 600,
     'kazumiBangumiSearchFilter': 600,
@@ -2180,7 +2217,10 @@ _BANGUMI_CACHE_TTL = {
 
 def _bangumi_cache_key(do, form):
     """按 endpoint + 相关参数 hash 生成缓存键（忽略 token/refresh 等无关项）。"""
-    keys = ('id', 'episodeId', 'keyword', 'limit', 'offset', 'tag',
+    # ids：kazumiBangumiInfoBatch 的批量 id 集——不在键里会让所有批次共用同一个
+    # 整包缓存键，首个批次写入后 30 分钟内其他页面的批量请求全部命中旧批次
+    # （前端按当前页 id 查不到值 → 徽章静默不拉取），必须按 id 集各自成键。
+    keys = ('id', 'ids', 'episodeId', 'keyword', 'limit', 'offset', 'tag',
             'tags', 'sort', 'dateStart', 'dateEnd',
             'rankMin', 'rankMax', 'scoreMin', 'scoreMax', 'weekdays')
     parts = [do] + ['%s=%s' % (k, form.get(k, '')) for k in keys]
@@ -2218,6 +2258,14 @@ def _bangumi_body_ok(do, body):
         return False
     if do == 'kazumiBangumiInfo':
         return bool(d.get('info'))
+    if do == 'kazumiBangumiInfoBatch':
+        # 必须全部 id 都取到才值得整包缓存：部分失败（瞬时网络抖动得 None）
+        # 若整包缓存 30min，前端对 None 的 id 不写 localStorage，翻页重发
+        # 永远命中陈旧 None 包 → 徽章静默缺失且无自愈。逐 id 磁盘缓存已天然
+        # 聚合成功条目，整包缓存只做传输加速、不做降级兜底。
+        infos = d.get('infos')
+        return isinstance(infos, dict) and bool(infos) and \
+            all(v is not None for v in infos.values())
     if do == 'kazumiBangumiEpisodes':
         return bool(d.get('episodes'))
     if do == 'kazumiBangumiSearch':
@@ -2625,7 +2673,8 @@ def dispatch_kazumi_action(form):
                     try:
                         trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), keyword)
                         if isinstance(trace, dict) and trace.get('captcha_required'):
-                            results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', '')}
+                            results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', ''),
+                                            'ocrAvailable': bool(trace.get('ocr_available'))}
                         else:
                             data = [vars(it) for it in trace.response.data]
                             results[idx] = {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
@@ -2652,7 +2701,18 @@ def dispatch_kazumi_action(form):
                 return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
 
             def _build_chapters():
-                trace = kazumi_engine.query_chapters(plugin.execution_config(), src)
+                # 章节页验证码拦截：转结构化状态（前端自动 solve → 重试解析），
+                # 不走「解析失败」泛化分支；验证码态 roads 为空，不会被缓存包装器落盘。
+                try:
+                    trace = kazumi_engine.query_chapters(plugin.execution_config(), src)
+                except CaptchaRequiredException:
+                    cfg = plugin.execution_config()
+                    return 200, json.dumps({
+                        'code': 200, 'captcha': True, 'roads': [],
+                        'captchaUrl': (cfg.search_url or '').replace('@keyword', ''),
+                        'ocrAvailable': kazumi_engine.captcha_ocr_available(),
+                        'msg': '剧集页需要验证码验证',
+                    }, ensure_ascii=False)
                 return 200, json.dumps({'code': 200, 'roads': [
                     {'name': r.name, 'data': r.data, 'identifier': r.identifier}
                     for r in trace.roads
@@ -2748,6 +2808,22 @@ def dispatch_kazumi_action(form):
             _kazumi_invalidate_caches(chapters=True)
             return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
 
+        # ---- 图片验证码自动解题（独立动作端点，不在搜索主链路上） ----
+        # 取图 → 小模型/ddddocr 识别 → MacCMS verify_check 提交 → 复验搜索页
+        # （≤3 轮）。成功后验证会话 Cookie 已落盘，前端直接重搜即可；失败返回
+        # result.ok=false，前端回落人工验证窗口。result 整体嵌套：solve 结果里
+        # 的 code 是 OCR 识别出的验证码答案（字符串），若平铺展开会覆盖信封的
+        # code==200 成功标记，违反本 dispatcher「code==200 表示成功」契约。
+        if do == 'kazumiCaptchaSolve':
+            plugin = kazumi_mgr.get(form.get('plugin', '').strip())
+            if not plugin:
+                return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
+            result = kazumi_engine.solve_captcha(plugin.execution_config())
+            if result.get('ok'):
+                # 会话状态已变（验证通过），清缓存让重搜拿到真实结果
+                _kazumi_invalidate_caches(chapters=True)
+            return 200, json.dumps({'code': 200, 'result': result}, ensure_ascii=False)
+
         # ---- Bangumi 元数据 ----
         if do == 'kazumiBangumiSearch':
             def _build():
@@ -2795,6 +2871,41 @@ def dispatch_kazumi_action(form):
                 subject_id = form.get('id', '')
                 info = kazumi_mgr.bangumi_info(subject_id)
                 return 200, json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
+            return _cached_bangumi(do, form, _build)
+
+        # 批量番剧详情（封面话数徽章整页一次往返）：ids 逗号分隔。逐 id 先查
+        # 磁盘缓存（与单条 kazumiBangumiInfo 同键同 TTL），缺失的才并发回源——
+        # 单条缓存命中即免网络，重复开页零回源。整包响应再经 _cached_bangumi
+        # 一起缓存（TTL 同单条 30min，键含全部 ids）。
+        if do == 'kazumiBangumiInfoBatch':
+            def _build():
+                ids = [s for s in str(form.get('ids', '')).split(',') if s.strip()][:60]
+                infos = {sid: None for sid in ids}
+                missing = []
+                for sid in ids:
+                    try:
+                        cached = cache_store.get(_bangumi_cache_key('kazumiBangumiInfo', {'id': sid})) if cache_store is not None else ''
+                    except Exception:
+                        cached = ''
+                    if cached:
+                        try:
+                            infos[sid] = json.loads(cached).get('info')
+                            continue
+                        except (ValueError, TypeError):
+                            pass
+                    missing.append(sid)
+                if missing:
+                    fetched = kazumi_mgr.bangumi_info_batch(missing)
+                    for sid, info in fetched.items():
+                        infos[sid] = info
+                        if info and cache_store is not None:
+                            try:
+                                body = json.dumps({'code': 200, 'info': info}, ensure_ascii=False)
+                                cache_store.set(_bangumi_cache_key('kazumiBangumiInfo', {'id': sid}), body,
+                                                _BANGUMI_CACHE_TTL.get('kazumiBangumiInfo', 0))
+                            except Exception:
+                                pass
+                return 200, json.dumps({'code': 200, 'infos': infos}, ensure_ascii=False)
             return _cached_bangumi(do, form, _build)
 
         if do == 'kazumiBangumiCalendar':

@@ -43,7 +43,7 @@
 | 左侧无独立关于入口/视图 | ✅ 无 `data-view="about"` 导航项与 `#view-about` |
 | 系统页无画中画 / 无版本号 | ✅ 系统分类卡片无 PiP 元素、无版本号文案/控件 |
 | 关于分类渲染版本号 | ✅ `#about-version` = `0.1.0` |
-| 关于分类渲染系统信息 | ✅ Electron 31.7.7 / Chromium 126 / Node 20.18 / V8 / win32·x64 |
+| 关于分类渲染系统信息 | ✅ Electron 44.4.5 / Chromium 152 / Node 24.21 / V8 / win32·x64 |
 | 无 MiSans 动态注入 | ✅ 仅加载 `ui.css`，无 MiSans link/`@font-face`，根字体为系统字体栈 |
 | 控制台错误 | ✅ 0 条（仅 1 条与 2A 无关的 Electron CSP 安全提示） |
 

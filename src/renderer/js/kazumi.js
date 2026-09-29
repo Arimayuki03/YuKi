@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, localCacheDel, _coverCache, setBangumiMirrorRoot */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, localCacheDel, _coverCache, setBangumiMirrorRoot, bangumiWebFollowMirror */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -109,12 +109,20 @@ const Kazumi = {
         $('#set_bangumi_mirror').on('change', function () {
             const on = this.checked;
             window.yuki.settingsSet('enableBangumiProxy', on);
+            $('#bangumi_mirror_fields').toggle(on); // 未开镜像时收起根域名配置
             doAction('kazumiSetMirror', { bangumi: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
         });
         $('#set_git_mirror').on('change', function () {
             const on = this.checked;
             window.yuki.settingsSet('enableGitProxy', on);
             doAction('kazumiSetMirror', { git: on ? '1' : '0' }, '/kazumi/action').catch(() => { });
+        });
+        // 「↗ Bangumi 页」条目页跳转跟随镜像：纯渲染层跳转目标选择，不经后端。
+        // 开启后 detail.js 点击按钮走 bangumiWebUrl → bgm.{镜像根域名}（镜像根域名
+        // 变更即时生效）；关闭始终官方 bgm.tv（镜像站与官方登录态不互通）。
+        $('#set_bangumi_web_mirror').on('change', function () {
+            bangumiWebFollowMirror = this.checked;
+            window.yuki.settingsSet('enableBangumiWebMirror', bangumiWebFollowMirror);
         });
         // 手动替换 Bangumi 镜像根域名（镜像站域名失效时救急）：归一化校验后
         // 存 settings + 更新 common.js 全局（封面兜底链即时生效）+ 同步后端；
@@ -168,6 +176,7 @@ const Kazumi = {
         $('#webdav_enable').on('change', function () {
             const on = this.checked;
             window.yuki.settingsSet('webDavEnable', on);
+            $('#webdav_fields').toggle(on); // 主开关关闭时收起全部子开关与配置表单
             if (!on) {
                 $('#webdav_enable_history').prop('checked', false);
                 $('#webdav_enable_collect').prop('checked', false);
@@ -176,6 +185,7 @@ const Kazumi = {
                 $('#webdav_enable_rules').prop('checked', false);
                 $('#webdav_auto_enable').prop('checked', false);
                 $('#webdav_startup_pull').prop('checked', false);
+                $('#webdav_auto_fields').hide(); // 联动关闭定时同步时一并收起间隔选择
                 window.yuki.settingsSet('webDavEnableHistory', false);
                 window.yuki.settingsSet('webDavEnableCollect', false);
                 window.yuki.settingsSet('webDavEnableSettings', false);
@@ -203,6 +213,7 @@ const Kazumi = {
         // 定时自动同步：开关/间隔变更即时重排调度（无需重启）
         $('#webdav_auto_enable').on('change', function () {
             window.yuki.settingsSet('webDavAutoEnable', this.checked);
+            $('#webdav_auto_fields').toggle(this.checked); // 未开启定时同步时收起间隔与状态行
             Kazumi.scheduleWebdavAutoSync();
         });
         $('#webdav_auto_interval').on('change', function () {
@@ -661,6 +672,7 @@ const Kazumi = {
             if (s.webDavPassword) $('#webdav_password').val(s.webDavPassword);
             if (s.webDavRemoteDir) $('#webdav_remote_dir').val(s.webDavRemoteDir);
             $('#webdav_enable').prop('checked', !!s.webDavEnable);
+            $('#webdav_fields').toggle(!!s.webDavEnable); // 主开关关闭时保持收起
             $('#webdav_enable_history').prop('checked', s.webDavEnableHistory !== false);
             $('#webdav_enable_collect').prop('checked', s.webDavEnableCollect !== false);
             $('#webdav_enable_settings').prop('checked', s.webDavEnableSettings !== false);
@@ -669,6 +681,7 @@ const Kazumi = {
             $('#webdav_ssl_skip').prop('checked', !!s.webDavSslSkip);
             $('#webdav_startup_pull').prop('checked', !!s.webDavStartupPull);
             $('#webdav_auto_enable').prop('checked', !!s.webDavAutoEnable);
+            $('#webdav_auto_fields').toggle(!!s.webDavAutoEnable); // 定时同步未开启时收起间隔
             if (s.webDavAutoMinutes) $('#webdav_auto_interval').val(String(s.webDavAutoMinutes));
         } catch (e) { /* 读取失败不阻塞 */ }
     },
@@ -678,7 +691,11 @@ const Kazumi = {
         try {
             const s = (await window.yuki.settingsGet()) || {};
             $('#set_bangumi_mirror').prop('checked', !!s.enableBangumiProxy);
+            $('#bangumi_mirror_fields').toggle(!!s.enableBangumiProxy); // 镜像未开启时保持收起
             $('#set_git_mirror').prop('checked', !!s.enableGitProxy);
+            // 条目页跳转跟随镜像：回填开关 + common.js 全局（detail.js 跳转即时按此取域）
+            bangumiWebFollowMirror = s.enableBangumiWebMirror === true;
+            $('#set_bangumi_web_mirror').prop('checked', bangumiWebFollowMirror);
             // 镜像根域名：settings 无值（未设置过）保持默认；后端启动时也从
             // mirror.json 自恢复，这里再同步一次保证双端一致（含封面兜底链）
             const root = setBangumiMirrorRoot(s.bangumiMirrorRoot || 'bangumi.vip');
@@ -1176,9 +1193,10 @@ const Kazumi = {
         try { localCacheDel(this._bgmColCacheKey(subjectId)); } catch (e) { /* ignore */ }
     },
 
-    /** 查询某 subject 的收藏状态（返回 {type} 或 null）。
+    /** 查询某 subject 的收藏状态（返回 {type, ep_status...} 或 null）。
      *  先读本地缓存（未过期且 token 一致）：详情页打开即上屏，零网络等待；
-     *  未命中才回源 GET，回源成功后写缓存。仅 force 时跳过缓存（写操作后核对用）。 */
+     *  未命中才回源 GET，回源成功后写缓存。opts.force 时跳过缓存强制回源
+     *  （写操作后核对、详情页后台对账用），回源成功后回写缓存。 */
     async getBangumiCollection(subjectId, opts = {}) {
         const token = await this._getBangumiToken();
         if (!token) return null;
@@ -1209,10 +1227,16 @@ const Kazumi = {
      *  属性值即原始值；反查选择器必须用 CSS.escape(原始值) 才与之匹配——拼 escHtml
      *  后的串会在 id 含 &/'/"/<> 时失配，且未转义 \ 与 ] 直接构成非法选择器。
      *  详情页单按钮模式（detail.js）：同步把当前状态文案写到 #detail-col-current，
-     *  并把收藏接口回传的 ep_status（看到第 N 话）显示到 .detail-col-progress 行。 */
-    async _applyBangumiColState(subjectId) {
-        const col = await this.getBangumiCollection(subjectId);
-        const sel = CSS.escape(String(subjectId));
+     *  并把收藏接口回传的 ep_status（看到第 N 话）显示到统计区底部 .detail-watch-progress
+     *  进度行。opts.force：跳过 6h 收藏缓存强制回源（详情页打开时的进度对账用——缓存里的
+     *  ep_status 可能落后于远端：他设备打点、或上次打点成功但未走缓存更新路径），
+     *  拉到新数据回写缓存后重算进度行。进度行选择器是全局 $('.detail-watch-progress')，
+     *  写入前以 isCurDetail（Detail._bgmId 与 sid 归一比对）限定仅当前详情页可写，
+     *  防止弹窗等场景把别的条目进度写到当前页 .detail-watch-progress 上。 */
+    async _applyBangumiColState(subjectId, opts = {}) {
+        const sid = String(subjectId);
+        const col = await this.getBangumiCollection(sid, opts);
+        const sel = CSS.escape(sid);
         const wrap = $(`.kazumi-col-btns[data-id="${sel}"]`);
         if (!wrap.length) return;
         wrap.find('.kazumi-col-btn').removeClass('active');
@@ -1221,23 +1245,37 @@ const Kazumi = {
         const t = col ? Number(col.type) : NaN;
         const cur = Number.isFinite(t) ? t : -1;
         wrap.find(`.kazumi-col-btn[data-type="${CSS.escape(String(cur))}"]`).addClass('active');
-        // 详情页收藏单按钮：同步当前态文案到按钮内 label（▾ 箭头常驻按钮内）
+        // 详情页收藏单按钮：仅当前详情页的 subject 才写（弹窗路径复用本方法时不串档）
         const labels = { '-1': '未收藏', 1: '想看', 2: '看过', 3: '在看', 4: '搁置', 5: '抛弃' };
         const single = $('#detail-col-current');
-        if (single.length) {
+        const isCurDetail = (typeof Detail === 'undefined') || !Detail._bgmId
+            || String(Detail._bgmId) === sid;
+        if (single.length && isCurDetail) {
             single.find('.detail-col-label').text(labels[cur] || '未收藏');
+            // 状态图标随文案同口径切换（图标映射在 detail.js，跨文件复用）
+            if (typeof Detail !== 'undefined' && Detail._colStateIcon) {
+                single.find('.detail-col-state-svg').replaceWith(Detail._colStateIcon(cur));
+            }
             single.attr('data-type', String(cur));
             single.toggleClass('active', cur >= 1);
         }
-        // 观看进度行：ep_status（看到第几话，0=未看）+ 总话数（_bgmInfo.eps）
-        const progress = $('.detail-col-progress');
-        if (progress.length) {
+        // 观看进度条（统计区底部整行，方案 C）：ep_status（看到第几话，0=未看）+
+        // 总话数（_bgmInfo.eps）→ 条宽百分比 + 文案。限定当前详情页的 subject；
+        // 无进度/未收藏时整条隐藏（填 0 宽 + 文案清空 + display:none）。
+        const progress = $('.detail-watch-progress');
+        if (progress.length && isCurDetail) {
             const epsTotal = Number((typeof Detail !== 'undefined' && Detail._bgmInfo && (Detail._bgmInfo.eps || Detail._bgmInfo.total_episodes)) || 0);
             const watched = col ? (Number(col.ep_status) || 0) : 0;
             if (watched > 0) {
-                progress.text(epsTotal > 0 ? `进度：看到第 ${watched} 话 / 共 ${epsTotal} 话` : `进度：看到第 ${watched} 话`).show();
+                const pct = epsTotal > 0 ? Math.min(100, Math.round(watched / epsTotal * 100)) : 0;
+                progress.find('.detail-watch-progress-fill').css('width', pct + '%');
+                // 文案精简（用户口径）：1/12；无总话数时 N/?
+                progress.find('.detail-watch-progress-text').text(epsTotal > 0 ? `${watched}/${epsTotal}` : `${watched}/?`);
+                progress.show();
             } else {
-                progress.text('').hide();
+                progress.find('.detail-watch-progress-fill').css('width', '0%');
+                progress.find('.detail-watch-progress-text').text('');
+                progress.hide();
             }
         }
         // （Detail._bgmColCache 死写已移除：全仓库无读者，弹窗路径复用前不得
@@ -1398,6 +1436,8 @@ const Kazumi = {
             score: num(rating.score) || num(item && item.score),
             rank: num(rating.rank) || num(item && item.rank),
             air_date: String((item && (item.air_date || item.date)) || ''),
+            // 总话数：搜索页 Kazumi 卡补集数徽章（对齐时间表/推荐卡话数徽章）用
+            eps: num(item && (item.eps || item.total_episodes)),
         };
     },
 
@@ -1519,6 +1559,7 @@ const Kazumi = {
         m.score = metaNum(mt.score) || metaNum(cur.score) || 0;
         m.rank = metaNum(mt.rank) || metaNum(cur.rank) || 0;
         m.air_date = String(mt.air_date || cur.air_date || '');
+        m.eps = metaNum(mt.eps) || metaNum(cur.eps) || 0;
         this._setBgmMatch(key, m);
         this._saveBgmMatchCache();
     },
@@ -1611,6 +1652,56 @@ const Kazumi = {
         } catch (e) {
             return null;
         }
+    },
+
+    /** 批量番剧详情（封面话数徽章整页一次往返）：ids 去重后先过 localStorage
+     *  逐 id 缓存（键/净化/TTL 与单条 bangumiInfo 完全一致，缓存命中零网络），
+     *  缺失部分合并成一次 kazumiBangumiInfoBatch（后端再逐 id 复用磁盘缓存 +
+     *  并发回源）。同一帧内重复调用共享同一在途 Promise（防并发重复打包请求）；
+     *  单条失败/缺值为 null 不拖垮整批。 */
+    async bangumiInfoBatch(subjectIds) {
+        const uniq = [];
+        const seen = new Set();
+        for (const raw of (subjectIds || [])) {
+            const id = String(raw || '').trim();
+            if (id && !seen.has(id)) { seen.add(id); uniq.push(id); }
+        }
+        if (!uniq.length) return {};
+        const out = {};
+        const missing = [];
+        for (const id of uniq) {
+            if (typeof localCacheGet === 'function') {
+                try {
+                    const hit = this._sanitizeBangumiInfo(localCacheGet(this._bgmInfoCacheKey(id)));
+                    if (hit && hit.id) { out[id] = hit; continue; }
+                } catch (e) { /* 缓存读失败走回源 */ }
+            }
+            missing.push(id);
+        }
+        if (!missing.length) return out;
+        const batchKey = missing.join(',');
+        // 在途去重：同帧多个调用方（换页连点/多网格）共享同一次批量请求
+        this._bgmInfoBatchPending = this._bgmInfoBatchPending || new Map();
+        let pending = this._bgmInfoBatchPending.get(batchKey);
+        if (!pending) {
+            pending = doAction('kazumiBangumiInfoBatch', { ids: batchKey }, '/kazumi/action')
+                .then((rsp) => {
+                    const raw = (rsp && rsp.infos) || {};
+                    const clean = {};
+                    for (const id of missing) {
+                        const info = this._sanitizeBangumiInfo(raw[id] || null);
+                        clean[id] = info;
+                        if (info && info.id && typeof localCacheSet === 'function') {
+                            try { localCacheSet(this._bgmInfoCacheKey(id), info, 30 * 60 * 1000); } catch (e) { /* 忽略 */ }
+                        }
+                    }
+                    return clean;
+                })
+                .finally(() => { this._bgmInfoBatchPending.delete(batchKey); });
+            this._bgmInfoBatchPending.set(batchKey, pending);
+        }
+        const fetched = await pending.catch(() => ({})); // 网络失败：吞掉，保底返回缓存命中部分
+        return Object.assign(out, fetched);
     },
 
     /** Bangumi 番剧分集信息。 */
@@ -1771,9 +1862,16 @@ const Kazumi = {
         $('#kazumi-dialog-title').text(this._dlDownloadMode ? '选择下载源' : '选择播放源');
         openDialog('kazumiSourceDialog');
 
-        // 来自搜索结果（kazumi: 前缀）→ 直接解析该源剧集
+        // 来自搜索结果（kazumi: 前缀）→ 直接解析该源剧集。同时预建全源选源状态
+        // （全部 pending、不启动流式检索）：选集视图「← 返回选源」有处可回
+        // （回全源卡片列表再点「重新检索/手动检索」），单源重查结果也能正常上卡。
         if (String(site).startsWith('kazumi:') && src) {
             const pluginName = String(site).slice(7);
+            const plugins = Object.create(null);
+            this._rules.filter((r) => r.enabled !== false && r.validity !== 'invalid').forEach((r) => {
+                plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
+            });
+            this._dlgState = { title, token, keyword: title, plugins, expanded: pluginName };
             await this._loadChapters(pluginName, src, title, token);
             return;
         }
@@ -1953,7 +2051,7 @@ const Kazumi = {
         let body = '';
         if (open) {
             if (p.searching || p.status === 'pending') {
-                body = '<div class="kazumi-src-body"><div class="tip-line">检索中…</div></div>';
+                body = `<div class="kazumi-src-body"><div class="tip-line">${escHtml(p.solveHint || '检索中…')}</div></div>`;
             } else if (p.status === 'success') {
                 const items = p.results.map((it) => `
                     <div class="kazumi-result-item" data-plugin="${escHtml(name)}" data-src="${escHtml(it.src)}" data-name="${escHtml(it.name)}">
@@ -2012,12 +2110,42 @@ const Kazumi = {
             const rsp = await doAction('kazumiChapters', { pluginName, src }, '/kazumi/action');
             if (token !== this._dlgToken) return;
             const roads = (rsp && rsp.roads) || [];
+            if (!roads.length && rsp && rsp.captcha) {
+                // 章节页撞验证码：自动解题（同搜索环节的 solve），成功后重试解析
+                await this._solveChapterCaptcha(pluginName, name, token, src);
+                return;
+            }
             if (!roads.length) { this._backToSources(); warnToast('未解析到剧集线路'); return; }
             this._renderChapterRoads(pluginName, roads, name, token, src);
         } catch (e) {
             if (token !== this._dlgToken) return;
             this._backToSources();
             warnToast('剧集解析失败');
+        }
+    },
+
+    /** 章节页验证码自动解题：solve 成功 → 重试解析；失败/无能力 → 人工验证窗口
+     *  （验证会话按站点生效，验证后重试解析）。 */
+    async _solveChapterCaptcha(pluginName, name, token, src) {
+        $('#kazumi-dialog-body').html('<div class="tip-line">剧集页需要验证码，正在自动识别…</div>');
+        let solved = false;
+        try {
+            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000);
+            solved = !!(rsp && rsp.result && rsp.result.ok);
+        } catch (e) { /* 走人工回落 */ }
+        if (token !== this._dlgToken) return;
+        if (solved) {
+            await this._openSearchItem(pluginName, src, name, token);
+            return;
+        }
+        // 回落人工验证窗口：验证完成后重试解析
+        const captchaRsp = await doAction('kazumiChapters', { pluginName, src }, '/kazumi/action').catch(() => null);
+        const captchaUrl = (captchaRsp && captchaRsp.captchaUrl) || '';
+        if (captchaUrl) {
+            this._openCaptchaWindow(captchaUrl, () => { this._openSearchItem(pluginName, src, name, token); });
+        } else {
+            this._backToSources();
+            warnToast('该源需要验证码，暂无自动识别能力');
         }
     },
 
@@ -2034,13 +2162,43 @@ const Kazumi = {
         if (action === 'retry') {
             await this._queryPlugin(keyword, pluginName, token);
         } else if (action === 'captcha') {
-            const url = (st.plugins[pluginName] || {}).captchaUrl || '';
-            if (url) this._openCaptchaWindow(url, () => this._queryPlugin(keyword, pluginName, token));
-            else warnToast('该源暂无验证链接');
+            await this._solveSourceCaptcha(pluginName, token, keyword);
         } else if (action === 'manual') {
             this._showKeywordDialog(pluginName, token, '手动检索');
         } else if (action === 'browser') {
             this._openPluginSearchPage(pluginName, keyword);
+        }
+    },
+
+    /** 源卡「进行验证」：先自动识别解题（与搜索页验证码标签/章节页同口径），
+     *  成功直接重查该源；失败/无能力回落人工验证窗口（原路径始终可用）。
+     *  solve 端点不依赖 captchaUrl——后端按规则 captchaImage XPath 或 MacCMS
+     *  约定端点自行取图，故无链接也先试自动，仅「自动失败且无链接」才提示无入口。 */
+    async _solveSourceCaptcha(pluginName, token, keyword) {
+        const st = this._dlgState;
+        if (!st) return;
+        const p = st.plugins[pluginName];
+        if (!p) return;
+        const url = p.captchaUrl || '';
+        // 识别中占位：卡片体收敛为提示行（操作按钮随 body 消失，天然防连点）
+        p.searching = true;
+        p.solveHint = '正在自动识别验证码…';
+        this._renderSourceCard(pluginName);
+        let solved = false;
+        try {
+            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000);
+            solved = !!(rsp && rsp.result && rsp.result.ok);
+        } catch (e) { /* 网络异常等按失败口径走人工回落 */ }
+        if (token !== this._dlgToken) return;
+        p.solveHint = '';
+        p.searching = false;
+        this._renderSourceCard(pluginName);
+        if (solved) {
+            await this._queryPlugin(keyword, pluginName, token);
+        } else if (url) {
+            this._openCaptchaWindow(url, () => this._queryPlugin(keyword, pluginName, token));
+        } else {
+            warnToast('自动识别失败，且该源暂无验证链接');
         }
     },
 
@@ -2115,12 +2273,18 @@ const Kazumi = {
         }
     },
 
-    /** 打开 Bangumi 番剧详情（T74 统一详情页）：复用 #view-detail，Bangumi-only 自适应渲染。 */
-    async openBangumiInfoPage(subjectId) {
+    /**
+     * 打开 Bangumi 番剧详情（T74 统一详情页）：复用 #view-detail，Bangumi-only 自适应渲染。
+     * @param {string} subjectId Bangumi subject id
+     * @param {{site?:string, src?:string}} [kazumiOrigin] Kazumi 搜索结果进入时携带的
+     *   默认源（site=kazumi:规则名 + 源页 URL）：详情页「开始观看」据此直达该源
+     *   解析剧集，免重新全源检索；其他入口不传则维持全源选源弹窗。
+     */
+    async openBangumiInfoPage(subjectId, kazumiOrigin) {
         const curView = (typeof App !== 'undefined' && App.currentView) ? App.currentView : 'home';
         if (curView && curView !== 'detail') this._infoReferrer = curView;
         if (typeof Detail !== 'undefined' && Detail.openBangumi) {
-            await Detail.openBangumi(subjectId, '');
+            await Detail.openBangumi(subjectId, '', kazumiOrigin);
         }
     },
 
@@ -2739,6 +2903,9 @@ Kazumi.imageSearch = async function (imageFile) {
  * - cacheDir/dlDir/wallpaper：本机绝对路径，跨设备无意义；
  * - settingsCat：纯本机界面记忆。
  * - webDavRestoreBackup：恢复前的本机备份快照，体积大且仅本机有意义
+ * 注意 watchProgress（通用观看进度表，records.js 维护）不在排除表内——它是用户数据，
+ * 理应随「设置同步」快照通道上传/恢复（恢复侧经 WEBDAV_RESTORE_ALLOWED 显式放行）；
+ * favorites/history/watchStats 则走各自独立文件通道，不经此快照。
  */
 const WEBDAV_SETTINGS_EXCLUDE = new Set([
     'favorites', 'history', 'watchStats',
@@ -2784,8 +2951,9 @@ const WEBDAV_RESTORE_ALLOWED = new Set([
     // 数据/探针纯数据键
     'blockedReason', 'blockedSites', 'probedSites', 'probedAt', 'probeFp',
     'probeFailStreak', 'lastSourceMap', 'recentWatches', 'watchStatsEnabled',
+    'watchProgress', // 通用观看进度表（records.js 维护，随设置快照通道同步/恢复）
     'sourceAutoDetect', 'catvodBgmMatch', 'legacyParser', 'customLives',
-    'liveProbeCache', 'enableBangumiProxy', 'enableGitProxy',
+    'liveProbeCache', 'enableBangumiProxy', 'enableBangumiWebMirror', 'enableGitProxy',
     // 各列表页每页条数
     'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive',
     'pageSizePopular', 'pageSizeSearch',
@@ -2854,8 +3022,11 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
             // 覆盖前备份：恢复直接覆盖本机数据且不可撤销，先把将被覆盖且有差异的
             // 本地原值存到 webDavRestoreBackup（仅本机、不参与同步快照），供误恢复后找回
             const backup = { ts: Date.now() };
-            ['favorites', 'history', 'watchStats'].forEach((k) => {
-                if (d[k] && JSON.stringify(s[k] ?? null) !== JSON.stringify(d[k])) backup[k] = s[k] ?? null;
+            // watchProgress 走 settings 快照通道（云端新值在 d.settings 内，不在顶层 d[k]），
+            // 其余键为独立通道（云端新值在 d[k]）；备份逻辑统一从对应通道取「云端新值」
+            ['favorites', 'history', 'watchStats', 'watchProgress'].forEach((k) => {
+                const incoming = (k === 'watchProgress') ? d.settings && d.settings[k] : d[k];
+                if (incoming && JSON.stringify(s[k] ?? null) !== JSON.stringify(incoming)) backup[k] = s[k] ?? null;
             });
             if (d.kazumiRules && (this._rules || []).length) backup.kazumiRules = this._rules;
             const backedUp = Object.keys(backup).length > 1;

@@ -540,6 +540,7 @@ class MpvPlayer extends EventEmitter {
             endReason: null,    // 最近一次 end-file reason（eof/quit/stop/error…），用于区分断流与用户关闭
             userStopped: false, // 应用主动 stop() 置位：退出时不得断流重连
             ready: false,       // 已收到 file-loaded / core-idle=false，才算真正开始播放
+            title: String(opts.title || ''), // 会话标题（本地文件等无渲染层元信息的播放，登记 OP/ED 用）
             stderr: '',         // 最近一段 mpv 错误输出（避免错误日志无限增长）
             nativeQueue,        // 原生多集队列：ended 逐集携带 nativeQueue/playlistPos 供渲染层逐集记账
             pendingSeekSec: deferredSeekSec, // 首集装载后一次性 seek（原生队列替代全局 --start）
@@ -908,9 +909,10 @@ class MpvPlayer extends EventEmitter {
                 this.command('set', 'user-data/yuki/ep-skip', '').catch(() => { });
                 if (dir === -1 || dir === 1) this.emit('ep-skip', { dir });
             }
-            // 片头/片尾登记信号（hints/oped-*，右键菜单）：读后清零，同 kind 可连续触发
+            // 片头/片尾登记信号（hints/oped-*，右键菜单）：读后清零，同 kind 可连续触发。
+            // kind ∈ op/ed/clear（clear=清除登记，同通道转发渲染层 _onOpEdClear）。
             if (msg.name === 'user-data/yuki/oped-record' && typeof msg.data === 'string' && msg.data) {
-                const kind = (msg.data === 'op' || msg.data === 'ed') ? msg.data : '';
+                const kind = (msg.data === 'op' || msg.data === 'ed' || msg.data === 'clear') ? msg.data : '';
                 this.command('set', 'user-data/yuki/oped-record', '').catch(() => { });
                 if (kind) this.emit('oped-record', { kind });
             }
@@ -946,15 +948,17 @@ class MpvPlayer extends EventEmitter {
                         this.command('show-text', MpvPlayer.escapeOsdText(full), 1200).catch(() => { });
                     }
                 }).catch(() => { });
-                // 原生队列的首集续播位置：--start 会作用到每一集（全局选项），故只在
-                // 首次 file-loaded 后经 IPC seek 一次，后续集数从头播。
+                // 原生队列逐集跳片头/续播：--start 是全局选项会作用到每一集，故经 IPC seek。
+                // 逐集应用（每次装载都重新判定）：opEd 片头位置是「片名+线路」级记录，
+                // 同片名各集片头位置一致复用正是其设计语义——此前只在首集 seek 一次
+                // （seekApplied 一次性标记），连播第 2 集起片头跳过静默失效（用户报告）。
                 // 下发前先读当前 time-pos 守卫：mpv 的 --save-position-on-quit 会把
                 // watch-later 记录的续播位置在装载时自行应用（time-pos 已落在记录处），
                 // 此时的 opEd/续播 seek 若无条件执行会把播放位置拉回目标秒（典型表现：
                 // 看到中途退出，重进同一集被拽回片头/跳片点）。仅当位置仍在片头附近
-                // （未发生任何续播跳转）时才应用本次 seek。
-                if (active.pendingSeekSec != null && !active.seekApplied) {
-                    active.seekApplied = true;
+                // （未发生任何续播跳转）时才应用本次 seek；已恢复续播的本集不 seek，
+                // 下一集装载时重新判定。
+                if (active.pendingSeekSec != null) {
                     const sec = active.pendingSeekSec;
                     this.getProperty('time-pos').then((v) => {
                         // 结果到达时会话可能已切换，只对原会话生效
@@ -1079,6 +1083,15 @@ class MpvPlayer extends EventEmitter {
      * 属性不可用时回退观察缓存），无会话/未连接时为 null。同步方法：渲染层
      * 经 yuki:player 'get-pos' 消费，仅作位置展示/估算，不承担精确时钟职责。
      */
+    /**
+     * 当前会话标题（本地文件等主进程直起播放）：oped-record 转发渲染层时携带，
+     * 渲染层 _curMeta 为空时以此登记 AdSkip。无会话返回 ''。
+     */
+    getSessionTitle() {
+        const active = this._activeSession;
+        return (active && active.title) || '';
+    }
+
     getTimePos() {
         const active = this._activeSession;
         if (!this.proc || !active || !this._connected || !this.socket) return null;

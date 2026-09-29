@@ -338,11 +338,23 @@ test('catvod hero 操作行：本地收藏改为单按钮+六态下拉（Bangumi
     Detail.activeSource = 0;
     Detail.render();
     const html = String(htmlBySel.get('#detail-body') || '');
-    // 单按钮：独立 id + 状态文案 + ▾ 箭头 + 六态菜单容器
+    // 单按钮：独立 id + 状态图标 + 状态文案 + 六态菜单容器（无下拉箭头）
     assert.ok(html.includes('id="detail-local-col-current"'), '应渲染本地收藏单按钮 #detail-local-col-current');
-    assert.ok(/detail-local-col-current[^>]*>.*detail-col-label.*detail-col-caret/s.test(html),
-        '单按钮内应含状态文案 label 与 ▾ 箭头');
+    assert.ok(/detail-local-col-current[^>]*>.*detail-col-label/s.test(html),
+        '单按钮内应含状态文案 label');
+    assert.ok(/id="detail-local-col-current"[^>]*>.*detail-col-state-svg.*detail-col-label/s.test(html),
+        '单按钮内状态图标应在文字左侧（detail-col-state-svg 先于 label）');
+    assert.ok(!html.includes('detail-col-caret'), '单按钮不应再渲染下拉箭头');
     assert.ok(html.includes('detail-local-col-menu'), '应渲染六态下拉菜单容器');
+    // 菜单内六态按钮图标在文字左侧且按状态各异（星/▶/✓/暂停/✕）
+    for (const t of ['want', 'watching', 'seen', 'hold', 'dropped']) {
+        assert.ok(html.includes(`data-tag="${t}"`), `六态菜单应含 data-tag="${t}"`);
+        const seg = html.slice(html.indexOf(`data-tag="${t}"`));
+        const btnHtml = seg.slice(0, seg.indexOf('</button>'));
+        assert.ok(btnHtml.includes('detail-col-state-svg'), `data-tag="${t}" 菜单按钮应含状态图标`);
+        assert.ok(btnHtml.indexOf('detail-col-state-svg') < btnHtml.search(/想看|在看|看过|搁置|抛弃/),
+            `data-tag="${t}" 图标应在文字左侧`);
+    }
     // 与 Bangumi 收藏按钮同一视觉口径（kazumi-col-btn + detail-col-wrap）
     assert.ok(/id="detail-local-col-current" class="md-btn md-btn-sm kazumi-col-btn"/.test(html),
         '单按钮样式应与 Bangumi 收藏按钮同款（kazumi-col-btn）');
@@ -507,15 +519,19 @@ test('本地收藏单按钮：点击展开六态菜单，菜单内状态按钮�
 
 test('_refreshLocalCol：收藏状态回填单按钮文案与高亮（Bangumi 收藏按钮同款口径）', async () => {
     // 最小 $ 桩：链式记录 text/toggleClass 目标，验证单按钮回填
-    const calls = { text: [], active: [] };
+    const calls = { text: [], active: [], icon: [] };
     const makeNode = (sel) => {
         const node = {
             sel: String(sel), length: 1,
             text(s) { calls.text.push([node.sel, String(s)]); return node; },
             toggleClass(_cls, on) { if (node.sel.includes('detail-local-col-current')) calls.active.push(!!on); return node; },
             addClass() { return node; }, removeClass() { return node; },
-            attr() { return node; }, find() { return node; }, on() { return node; },
+            attr() { return node; }, on() { return node; },
             data() { return undefined; },
+            // find('<子选择器>') 返回带子选择器的新节点（jQuery 语义）：replaceWith 按
+            // 子选择器记录（.detail-col-state-svg 命中时收集图标 HTML）
+            find(child) { return makeNode(`${node.sel} >> ${child}`); },
+            replaceWith(html) { if (node.sel.includes('detail-col-state-svg')) calls.icon.push(String(html)); return node; },
         };
         return node;
     };
@@ -540,12 +556,18 @@ test('_refreshLocalCol：收藏状态回填单按钮文案与高亮（Bangumi �
     await Detail._refreshLocalCol();
     const label = calls.text.find(([, txt]) => txt === '在看');
     assert.ok(label, `收藏状态「watching」应回填文案「在看」（实际 ${JSON.stringify(calls.text)}）`);
+    // 图标对齐 Kazumi CollectButton：在看=favorite（实心心）
+    assert.ok(calls.icon.some((h) => h.includes('detail-col-state-svg') && h.includes('M13.36 20.11')),
+        `收藏状态「watching」应回填 favorite 实心心图标（实际 ${JSON.stringify(calls.icon)}）`);
     assert.ok(calls.active.length && calls.active[calls.active.length - 1] === true, '已收藏时单按钮应高亮');
-    // 未收藏：文案回「未收藏」且不高亮
+    // 未收藏：文案回「未收藏」、图标回空心心形且不高亮
     context.Records.isFavorite = async () => false;
-    calls.text.length = 0; calls.active.length = 0;
+    calls.text.length = 0; calls.active.length = 0; calls.icon.length = 0;
     await Detail._refreshLocalCol();
     const label2 = calls.text.find(([, txt]) => txt === '未收藏');
     assert.ok(label2, '未收藏时文案回「未收藏」');
+    // 图标对齐 Kazumi：未追=favorite_border（空心心）
+    assert.ok(calls.icon.some((h) => h.includes('detail-col-state-svg') && h.includes('M19.64 3.98')),
+        '未收藏时应回填 favorite_border 空心心图标');
     assert.ok(calls.active.length && calls.active[calls.active.length - 1] === false, '未收藏时单按钮不高亮');
 });

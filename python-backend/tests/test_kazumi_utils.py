@@ -1120,10 +1120,15 @@ def test_validate_search_config_paths():
 # ================================================================ captcha
 
 def test_ocr_available_reflects_module_state_without_crashing():
-    """无 ddddocr 时 ocr_available() 返回 False 且 tried 置位（不会每次重复 import）。"""
+    """无 ddddocr 时 ocr_available() 返回 False 且 tried 置位（不会每次重复 import）。
+
+    两级识别链（2026-09-28）：小模型可用会短路 ddddocr 探测——屏蔽小模型
+    后本用例测的才是 ddddocr 路径。"""
     captcha_mod.reset_ocr_cache()
     prior = captcha_mod._ocr_holder['tried']
-    available = captcha_mod.ocr_available()
+    with mock.patch.object(captcha_mod, '_load_cnn',
+                           return_value=mock.MagicMock(model_available=lambda: False)):
+        available = captcha_mod.ocr_available()
     assert isinstance(available, bool)
     assert captcha_mod._ocr_holder['tried'] is True
     assert prior is False  # reset 后确实清空过（cache 语义）
@@ -1151,7 +1156,10 @@ def test_load_ocr_double_checked_locking_constructs_once():
         barrier.wait(timeout=5)
         results.append(captcha_mod.ocr_available())
 
-    with mock.patch.dict(sys.modules, {'ddddocr': fake_module}):
+    # 两级识别链：小模型可用会短路 ddddocr 探测，必须先屏蔽（测 ddddocr 路径）
+    with mock.patch.object(captcha_mod, '_load_cnn',
+                           return_value=mock.MagicMock(model_available=lambda: False)), \
+            mock.patch.dict(sys.modules, {'ddddocr': fake_module}):
         threads = [threading.Thread(target=probe) for _ in range(8)]
         for t in threads:
             t.start()

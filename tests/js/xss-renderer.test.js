@@ -30,7 +30,7 @@ function loadCommon(extra = {}) {
     };
     context.globalThis = context;
     vm.createContext(context);
-    vm.runInContext(`${source}\n;globalThis.__card = bangumiCard; globalThis.__escHtml = escHtml;`,
+    vm.runInContext(`${source}\n;globalThis.__card = bangumiCard; globalThis.__escHtml = escHtml; globalThis.__epBadge = bangumiEpBadge;`,
         context, { filename: 'common.js' });
     return context;
 }
@@ -97,6 +97,41 @@ test('#11 bangumiCard：Bangumi 远端可控字段（rank/score/name）进 HTML 
     const ok = ctx.__card({ id: '42', name: '日常', rating: { score: 8.3, rank: 107 }, air_date: '2011-04-03' });
     assert.match(ok, /#107/);
     assert.match(ok, /⭐8\.3/);
+});
+
+test('bangumiCard：eps 有值时渲染 .vod-fav-row 行内 .rec-eps 话数徽章（对齐时间表卡）', () => {
+    const ctx = loadCommon();
+    // eps 有值且无放送日：按全量已播 →「12话」（时间表卡回源补齐后同款）
+    const withEps = ctx.__card({ id: 1, name: '片', eps: 12 });
+    assert.match(withEps, /<div class="vod-fav-row"><span class="rec-eps" title="[^"]*">12话<\/span><\/div>/);
+    // total_episodes 兜底字段同效
+    assert.match(ctx.__card({ id: 2, name: '片2', total_episodes: 24 }), /共 24 话/);
+    // eps=0 / 缺省：不渲染徽标行（时间表异步补挂路径接管）
+    const noEps = ctx.__card({ id: 3, name: '片3' });
+    assert.doesNotMatch(noEps, /vod-fav-row/);
+    assert.doesNotMatch(ctx.__card({ id: 4, name: '片4', eps: 0 }), /vod-fav-row/);
+});
+
+test('bangumiEpBadge：已完结「N话」+完结 title；连载中「N/总」+已播 title（四页统一口径）', () => {
+    const ctx = loadCommon();
+    const badge = ctx.__epBadge;
+    // 无日期：无法推算进度与完结 → 按全量已播「12话」
+    assert.equal(badge(12, ''), '<span class="rec-eps" title="共 12 话">12话</span>');
+    // 放送日久远（12 话 + 每周一话远早于今日）→ 已完结「12话」+ 完结 title
+    assert.equal(badge(12, '2020-01-06'), '<span class="rec-eps" title="放送已完结 · 共 12 话">12话</span>');
+    // 放送日在本周内（1 天前开播）→ 连载「1/12」+ 已播 title（与时间表同款推算）
+    const recent = new Date(Date.now() - 1 * 86400000);
+    const pad = (n) => String(n).padStart(2, '0');
+    const recentStr = `${recent.getFullYear()}-${pad(recent.getMonth() + 1)}-${pad(recent.getDate())}`;
+    assert.equal(badge(12, recentStr), '<span class="rec-eps" title="已播出 1 话 / 共 12 话">1/12</span>');
+    // 放送日在未来（首播日未到）→ aired clamp 到 0 →「0/12」
+    const future = new Date(Date.now() + 7 * 86400000);
+    const futureStr = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}`;
+    assert.equal(badge(12, futureStr), '<span class="rec-eps" title="已播出 0 话 / 共 12 话">0/12</span>');
+    // eps<=0 → 空串（不渲染）
+    assert.equal(badge(0, '2020-01-06'), '');
+    assert.equal(badge(undefined), '');
+    assert.equal(badge(-3), '');
 });
 
 test('#11 home renderGrid：data.error（字符串/对象）经 escHtml 再进 .html()', () => {

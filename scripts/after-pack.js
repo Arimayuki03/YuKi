@@ -15,6 +15,19 @@
  * 3. Electron 自带 vulkan-1.dll（产物根）——Windows 上 Chromium/ANGLE 默认走 D3D11，
  *    仅显式 --use-angle=vulkan 时才用到（应用代码零引用）；火绒等按「系统同名 DLL 落盘」
  *    规则拦截未签名安装包的写入，属可剔除的误报面。
+ * 4. resources/elevate.exe（electron-builder 默认塞入的 UAC 提权助手）——无签名、唯一
+ *    功能是弹 UAC 框再起进程，「未签名提权器」是 360「风险程序」类的经典命中项。
+ *    YuKi 是纯 per-user 安装（nsis 未设 perMachine，默认装 %LocalAppData%\Programs），
+ *    安装器自身不需要它；应用内升级走 electron-updater NsisUpdater，仅在安装器报
+ *    UNKNOWN/EACCES 或更新元数据标记 isAdminRightsRequired 时才调 elevate.exe，
+ *    二者对本应用都不成立，缺失时 NsisUpdater 另有 shell.openPath 兜底。
+ *    packElevateHelper:false 已在源头关闭，此处兜底防御版本差异并给出可操作报错。
+ *
+ * 职责三：可执行体版本信息门禁（fail build）
+ *    package.json 缺 author 字段时 electron-builder 不写 CompanyName，YuKi.exe 保留
+ *    Electron 预编译二进制的原始值「GitHub, Inc.」——未签名程序冒用大公司名义是启发式
+ *    评分的显著扣分项（v0.2.6 及之前正是如此）。这里校验产物内 exe 的 CompanyName/
+ *    ProductName 已被 rcedit 正确覆盖，异常即构建失败。
  *
  * 职责二：敏感文件泄漏门禁（fail build）
  *    2026-09 曾发生真实事故：package.json 的 files 用 "python-backend 全量收纳" 写法，而
@@ -37,6 +50,94 @@ const path = require('node:path');
 const BACKEND_INTERNAL = path.join('resources', 'python-backend', 'yuki-backend', '_internal');
 const ROOT_NAMES = ['d3dcompiler_47.dll', 'vulkan-1.dll'];
 const UCRT_RE = /^(ucrtbase\.dll|api-ms-win-.+\.dll|vcruntime140(_1)?\.dll)$/i;
+const ELEVATE = path.join('resources', 'elevate.exe');
+
+/**
+ * 读取 PE 文件的 VERSION_INFO 资源（VS_VERSIONINFO StringFileInfo）。
+ * 不引第三方依赖：定位资源目录后按 PE 规范遍历，找不到版本资源返回 null。
+ * electron-builder 用 rcedit 写入的键值即标准 VS_VERSIONINFO 布局。
+ */
+function readVersionStrings(file) {
+    const buf = fs.readFileSync(file);
+    if (buf.length < 0x40 || buf.readUInt16LE(0) !== 0x5a4d) return null; // 'MZ'
+    const peOff = buf.readUInt32LE(0x3c);
+    if (peOff + 24 > buf.length || buf.readUInt32LE(peOff) !== 0x00004550) return null; // 'PE\0\0'
+    const numSections = buf.readUInt16LE(peOff + 6);
+    const optSize = buf.readUInt16LE(peOff + 20);
+    const sectionsOff = peOff + 24 + optSize;
+    // OptionalHeader DataDirectory：PE32+ 基址 = peOff+24+112，PE32 = peOff+24+96；
+    // 第 2 项（index 2，Resource Table）RVA 在基址 + 2*8。
+    const ddBase = buf.readUInt16LE(peOff + 24) === 0x20b ? peOff + 24 + 112 : peOff + 24 + 96;
+    const resRva = buf.readUInt32LE(ddBase + 16);
+    if (resRva === 0) return null;
+    const rvaToOff = (rva) => {
+        for (let i = 0; i < numSections; i++) {
+            const s = sectionsOff + i * 40;
+            const va = buf.readUInt32LE(s + 12);
+            const rawSize = buf.readUInt32LE(s + 16);
+            const raw = buf.readUInt32LE(s + 20);
+            if (rva >= va && rva < va + Math.max(rawSize, buf.readUInt32LE(s + 8))) return rva - va + raw;
+        }
+        return null;
+    };
+    const resOff = rvaToOff(resRva);
+    if (resOff == null) return null;
+
+    // 资源目录树：Type(16=RT_VERSION) -> Name -> Language，共三层；每项 8 字节 =
+    // DWORD 名称/ID + DWORD 偏移（高位 0x80000000 表示指向子目录，否则指向叶子前的
+    // IMAGE_RESOURCE_DATA_ENTRY，其 OffsetToData 才是数据 RVA）。
+    const walk = (off) => {
+        const named = buf.readUInt16LE(off + 12);
+        const ids = buf.readUInt16LE(off + 14);
+        for (let i = 0; i < named + ids; i++) {
+            const entry = off + 16 + i * 8;
+            const ptr = buf.readUInt32LE(entry + 4);
+            if (ptr & 0x80000000) {
+                const leaf = walk(resOff + (ptr & 0x7fffffff));
+                if (leaf != null) return leaf;
+            } else {
+                return buf.readUInt32LE(resOff + ptr); // IMAGE_RESOURCE_DATA_ENTRY.OffsetToData
+            }
+        }
+        return null;
+    };
+    const named = buf.readUInt16LE(resOff + 12);
+    const ids = buf.readUInt16LE(resOff + 14);
+    let dataRva = null;
+    for (let i = 0; i < named + ids; i++) {
+        const entry = resOff + 16 + i * 8;
+        const nameOrId = buf.readUInt32LE(entry);
+        const isId = (nameOrId & 0x80000000) === 0;
+        if (isId && nameOrId === 16) { // RT_VERSION
+            dataRva = walk(resOff + (buf.readUInt32LE(entry + 4) & 0x7fffffff));
+            break;
+        }
+    }
+    if (dataRva == null) return null;
+    const dataOff = rvaToOff(dataRva);
+    if (dataOff == null) return null;
+
+    // VS_VERSIONINFO 里字符串键值均为 UTF-16LE。每条 StringStruct 布局：6 字节头 +
+    // 键名 + null + （补齐到 4 字节边界的 padding，0~6 字节）+ 值 + null。直接全文扫
+    // 键名，跳过 null 与 padding 后取值，省去逐层结构解析。
+    const strings = {};
+    for (const key of ['CompanyName', 'FileDescription', 'ProductName', 'LegalCopyright']) {
+        const keyBytes = Buffer.from(key, 'utf16le');
+        let idx = buf.indexOf(keyBytes, dataOff);
+        if (idx < 0) continue;
+        let p = idx + keyBytes.length + 2; // 跳过键名自身 null
+        while (p + 1 < buf.length && buf.readUInt16LE(p) === 0) p += 2; // 跳过对齐 padding
+        // 值的 null 终止：按 UTF-16LE 双字节找「完整 wchar 为 0」，避免把值内字符的
+        // 高位 0 字节误判为终止符（如 0x006E 'n' 的低字节在前会命中 [00,xx]）。
+        let end = -1;
+        for (let q = p; q + 1 < buf.length; q += 2) {
+            if (buf.readUInt16LE(q) === 0) { end = q; break; }
+        }
+        if (end < 0 || end === p) continue;
+        strings[key] = buf.slice(p, end).toString('utf16le');
+    }
+    return strings;
+}
 
 /** 递归收集目录下命中 re 的文件（绝对路径）。 */
 function walkMatching(dir, re, out) {
@@ -130,6 +231,11 @@ module.exports = function afterPack(context) {
             + '\n修复：收窄 package.json build.files，勿用 python-backend/** 这类全量收纳。');
     }
 
+    if (context.electronPlatformName === 'win') {
+        stripElevateHelper(context.appOutDir);
+        checkExecutableMetadata(context.appOutDir);
+    }
+
     if (process.env.YUKI_KEEP_SYSTEM_DLLS === '1') {
         console.log('[after-pack] YUKI_KEEP_SYSTEM_DLLS=1：保留全部冗余系统 DLL（杀软可能误报）');
         return;
@@ -142,6 +248,49 @@ module.exports = function afterPack(context) {
     }
 };
 
+/**
+ * 剔除 resources/elevate.exe（杀软误报源，职责一第 4 条）。packElevateHelper:false
+ * 已在源头关闭，这里兜底旧版 electron-builder 忽略该选项的情况——文件存在即构建失败
+ * （提示手动处置），避免静默漏删造成「配置以为关了、包里其实还在」。
+ */
+function stripElevateHelper(appOutDir) {
+    const exe = path.join(appOutDir, ELEVATE);
+    if (!fs.existsSync(exe)) return;
+    fs.rmSync(exe);
+    console.log('[after-pack] 已剔除 resources/elevate.exe（未签名提权助手，杀软误报源；'
+        + 'per-user 安装与 electron-updater 降级路径均不依赖它）');
+}
+
+/**
+ * 校验产物内主 exe 的版本信息已被 rcedit 正确覆盖（职责三）。
+ * CompanyName 缺失/仍为 Electron 原始值 = package.json 缺 author 字段，启发式扣分项。
+ */
+function checkExecutableMetadata(appOutDir) {
+    const exe = path.join(appOutDir, 'YuKi.exe');
+    if (!fs.existsSync(exe)) return; // 非 win 产物或布局变更时静默跳过
+    const strings = readVersionStrings(exe);
+    if (strings == null) {
+        throw new Error('[after-pack] 无法解析 YuKi.exe 的 VERSION_INFO 资源（PE 结构异常或版本资源缺失）。'
+            + '缺失版本信息的未签名 exe 是杀软启发式的重点命中对象，请检查产物完整性。');
+    }
+    const bad = [];
+    if (!strings.CompanyName || /GitHub/i.test(strings.CompanyName)) {
+        bad.push(`CompanyName="${strings.CompanyName || '<缺失>'}"（应为项目作者名）。`
+            + '根因：package.json 缺 author 字段时 electron-builder 不覆盖 Electron 预编译二进制的原始值；');
+    }
+    if (!strings.ProductName) {
+        bad.push('ProductName 缺失。根因：package.json 缺 productName 或 description；');
+    }
+    if (bad.length > 0) {
+        throw new Error('[after-pack] 可执行体版本信息异常（杀软启发式扣分项，构建终止）：\n  - '
+            + bad.join('\n  - '));
+    }
+    console.log(`[after-pack] 版本信息校验通过：CompanyName="${strings.CompanyName}" ProductName="${strings.ProductName}"`);
+}
+
 module.exports.stripSystemDlls = stripSystemDlls;
 module.exports.findSecrets = findSecrets;
+module.exports.readVersionStrings = readVersionStrings;
+module.exports.checkExecutableMetadata = checkExecutableMetadata;
+module.exports.stripElevateHelper = stripElevateHelper;
 

@@ -432,6 +432,15 @@ describe('home.js · vodCard 卡片 HTML 构造', () => {
         assert.match(html, /<div class="vod-remarks">更新至 12 集<\/div>/);
     });
 
+    test('CatVod 卡不带集数徽章（用户要求）：备注含「N 集」也不渲染 .rec-eps', () => {
+        const ctx = loadHome();
+        // 集数信息只在备注行原样展示，封面无任何徽章
+        const html = ctx.__vodCard({ vod_id: '1', vod_name: '片', vod_remarks: '更新至 12 集' }, 'site-a');
+        assert.doesNotMatch(html, /rec-eps/, 'CatVod 卡不渲染集数徽章');
+        assert.match(html, /<div class="vod-remarks">更新至 12 集<\/div>/, '备注行原文保留');
+        assert.match(html, /<div class="vod-cover"><img [^>]*><\/div>/, '封面容器内无徽章节点');
+    });
+
     test('缺字段：无 remarks / 无 name / 无 id 均不抛错且产生空串兜底', () => {
         const ctx = loadHome();
         const html = ctx.__vodCard({}, 'site-a');

@@ -1059,7 +1059,7 @@ const Home = {
         } catch (e) { /* 缓存失败忽略 */ }
     },
 
-    /** 铺满首页的目标卡片数（T39：跟随「首页每页条数」设置，默认 20）。 */
+    /** 铺满首页的目标卡片数（T39：跟随「首页每页条数」设置，默认 24）。 */
     async _adaptiveTarget() {
         return await pageSizeOf('pageSizeHome');
     },
@@ -1247,7 +1247,7 @@ const Home = {
         }
     },
 
-    /** 生效的每页条数（T39：首页单独设置 pageSizeHome，默认 20）。 */
+    /** 生效的每页条数（T39：首页单独设置 pageSizeHome，默认 24）。 */
     async _pageSize() {
         return await pageSizeOf('pageSizeHome');
     },
@@ -1688,12 +1688,14 @@ const Home = {
 
 // 复用于 search.js 的卡片渲染（封面标签由 common.js vodCoverImg 统一生成，T31；
 // src 参数写入 data-source 供 T42 封面补拉定位源；eager=true 封面立即加载，T59）
+// CatVod 源卡不带集数徽章（用户要求）：集数信息保留在备注行原样展示。
 function vodCard(v, src, eager) {
     const name = String(v.vod_name || '');
+    const remarks = String(v.vod_remarks || '');
     return `<div class="vod-card" data-id="${escHtml(v.vod_id)}" data-name="${escHtml(name)}"${src != null ? ` data-source="${escHtml(src)}"` : ''} tabindex="0">
         <div class="vod-cover">${vodCoverImg(v.vod_pic, eager)}</div>
         <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
-        <div class="vod-remarks">${escHtml(v.vod_remarks || '')}</div>
+        <div class="vod-remarks">${escHtml(remarks)}</div>
     </div>`;
 }
 

@@ -7,7 +7,8 @@
  *
  * 覆盖目标：
  *   - liveFitPageSize：不同容器宽高下的列数/行数计算与下限钳制、缺 DOM 回退、
- *     NaN/0/负数等脏入参
+ *     NaN/0/负数等脏入参（注：该函数已不在分页路径上——pageSizeOf 对 pageSizeLive
+ *     恒回 120 兜底；此处仅直接驱动其计算逻辑防回归）
  *   - normalizeLive：非 http(s) / proxy:// 坏 base64 / 空条目一律剔除（含 URL 透传）
  *   - parseTxt / parseM3u：分组与频道解析、多地址保留、非法行跳过
  *   - load：/sites 展平、自定义源并入、无源时提示态、选项渲染与转义
@@ -493,6 +494,23 @@ test('renderList：切分组/翻页传 animate 时挂 .anim-cards，不传则摘
     assert.equal(h.$.lastAnim(), false, '后台探测分批刷新：摘掉 .anim-cards 防反复重播闪烁');
     L.renderList(true);
     assert.equal(h.$.lastAnim(), true, '再次全量重渲染重新挂回');
+});
+
+test('renderList：错峰延迟覆盖全部频道（内联 animation-delay 按可见序号 30ms 递增，无前 N 张上限）', () => {
+    const h = loadLive();
+    const L = h.Live;
+    L.channels = Array.from({ length: 25 }, (_, i) => ({ group: 'G', name: `台${i}`, url: `http://a/${i}` }));
+    L._pageSize = 25;
+    L.renderList(true);
+    const html = h.$.lastHtml('#live-list');
+    const delays = [...html.matchAll(/style="animation-delay:(\d+)ms"/g)].map((m) => Number(m[1]));
+    assert.equal(delays.length, 25, '全部 25 张卡都带内联延迟（不再限于前 10 张）');
+    delays.forEach((d, i) => assert.equal(d, i * 30, `第 ${i + 1} 张延迟 ${i * 30}ms（可见序号 × 30ms）`));
+    assert.equal(delays[24], 720, '末张 24×30=720ms，无封顶截断');
+
+    // 不播动画（探测分批刷新）时不带内联延迟：原地重写不重启动画
+    L.renderList();
+    assert.ok(!/animation-delay/.test(h.$.lastHtml('#live-list')), '非动画渲染不写 animation-delay');
 });
 
 test('loadChannels：进页首渲/切源/手动刷新也播入场动画（缓存命中路径同口径）', async () => {

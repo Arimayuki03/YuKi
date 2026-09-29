@@ -28,3 +28,14 @@ jsonpath-ng>=1.8,<2.0
 curl-cffi>=0.16
 qrcode>=8.2
 pillow>=12.3
+
+# Kazumi 图片验证码自动识别（2026-09-29 定案）：ddddocr 为主识别器——专为中文
+# 站点字符验证码训练（花体/斜体艺术字实测直接命中，自研合成模型分布外全错），
+# 模型内置在 pip 包、MIT 许可、离线推理。onnxruntime/opencv 为传递依赖（Python
+# 3.14 轮子可用性已实测 OK），打包增重约 200MB，换真实站可用性。
+# 自研 tiny-CNN（kazumi/captcha_cnn.py + assets 权重）降为数字域兜底。
+ddddocr>=1.6
+
+# 验证码小模型兜底链推理（kazumi/captcha_cnn.py，numpy 纯推理 + PIL 解码，
+# 权重随应用打包）。PIL 已在上文，此处显式声明推理直连依赖。
+numpy>=2.0

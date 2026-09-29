@@ -91,6 +91,12 @@ const cmd = [
     // PyInstaller 静态分析抓不到；不显式声明的话扫码二维码在打包版里渲染为空。
     '--hidden-import', 'qrcode.image.pil',
     '--hidden-import', 'PIL.Image',
+    // ddddocr（验证码识别主链）：onnxruntime C 扩展与包内 onnx 模型按平台
+    // 动态加载，静态分析抓不全；不声明的话自动识别在打包版里静默降级为
+    // 人工窗口（CI 构建机缺依赖时 PyInstaller 只告警不失败，锁文件校准兜底）。
+    '--hidden-import', 'ddddocr',
+    '--hidden-import', 'onnxruntime',
+    '--collect-all', 'ddddocr',
     'server.py',
 ].join(' ');
 

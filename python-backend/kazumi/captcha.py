@@ -10,24 +10,29 @@ animeko（open-ani/ani）的做法（app/shared/app-data/.../web/captcha/）：
 本模块按同一分层移植到 YuKi 的 python 后端：
   - URL/HTML 启发式分类器在 kazumi/utils.py（looks_like_image_captcha_url /
     detect_image_captcha_html，animeko WebCaptchaDetector 对应位）；
-  - 本文件只做「识别一件事」：验证码图片字节 → 文本（recognize_captcha_bytes，
-    预留接口，尚未挂载生产调用方）。
-    优先用 ddddocr（专为中文站点滑块/字符验证码训练的轻量 OCR，含自带 onnx
-    模型，无需额外模型文件），import 失败或调用异常一律返回 None——未来接入
-    方把 None 视为「未识别」，渲染层沿既有交互兜底：展示验证码图给用户手动
-    输入（animeko InteractiveSolveDialog 对应位）。不阻塞登录/搜索主链路。
+  - 本文件只做「识别一件事」：验证码图片字节 → 文本（recognize_captcha_bytes）。
+    识别链两级（2026-09-29 重排，ddddocr 为主识别器）：① ddddocr（专为中文
+    站点滑块/字符验证码训练，含自带 onnx 模型）；② 自研 tiny-CNN 兜底
+    （captcha_cnn.py，numpy 纯推理，权重随应用打包，参考 animeko 小模型
+    契约——机制可借鉴、其 AGPL 代码/模型不可搬），4 位数字 MacCMS 验证码。
+    任何一级 import 失败或调用异常一律返回
+    None——渲染层把 None 视为「未识别」，沿既有交互兜底：人工验证窗口
+    （animeko InteractiveSolveDialog 对应位）。不阻塞登录/搜索主链路。
 
-依赖策略：ddddocr **不进 requirements.txt 锁文件**（本轮决策）：
-  - ddddocr 依赖 onnxruntime，Python 3.14（本项目 venv 版本）无预编译轮子，
-    pip 安装大概率失败，进锁文件会让 CI/全新构建直接红；
-  - onnxruntime 体积 ~200MB，随应用 PyInstaller 打包会显著增大产物；
-  - 因此定位为「开发者本机可选增强」：装得上就自动识别，装不上静默降级，
-    用户仍走原有的验证窗口手动输入路径（该路径始终可用）。
+依赖策略：numpy / ddddocr（连带 onnxruntime、opencv-python）均进
+requirements.txt 锁文件——2026-09-29 起真实站验证码为花体艺术字，自研合成
+模型分布外全错、ddddocr 大部分直接命中，已升级为主识别器随 PyInstaller 打包
+（增重约 200MB 换真实站可用性）。
 """
 import logging
 import threading
 
 logger = logging.getLogger('yuki.kazumi.captcha')
+
+# 注意：captcha_cnn（连带 numpy）必须**懒加载**——numpy import ~120ms，
+# 顶部 import 会拖慢 kazumi 包的加载链，spider worker 子进程的冷启动超时
+# （test_config_content_blackbox 并发用例）会因此大面积 502。
+# 仅在验证码识别路径真正触达时才付出这笔成本。
 
 # 识别结果边界：Bangumi/常见番剧站验证码为 4-6 位字符（字母数字）。
 # 超出视为识别失败（避免把噪声当结果提交，对齐 animeko 识别后仍要过
@@ -75,8 +80,26 @@ def reset_ocr_cache():
         _ocr_holder['tried'] = False
 
 
+def _load_cnn():
+    """懒加载小模型模块（首次调用付 numpy import ~120ms，之后走模块缓存）。"""
+    from . import captcha_cnn
+    return captcha_cnn
+
+
 def ocr_available():
-    """当前进程是否具备自动识别能力（只探测，不识别）。"""
+    """当前进程是否具备自动识别能力（只探测，不识别）。
+
+    两级识别链任一可用即为 True：ddddocr（主识别器）或自研小模型
+    （权重随应用打包）。"""
+    # _load_cnn() 会触发 import captcha_cnn → 顶部 import numpy：numpy 缺失
+    # 时 ImportError 必须在本模块边界吞掉降级，不能从「只探测」的探测口溢出
+    # （本模块契约：任何一级 import 失败一律降级）。
+    try:
+        if _load_cnn().model_available():
+            return True
+    except Exception as e:
+        # 只吞加载类异常（ImportError 等）；探测路径正常情况不抛业务异常
+        logger.info('[kazumi] 小模型探测不可用（降级 ddddocr 探测）: %s', e)
     return _load_ocr() is not None
 
 
@@ -95,23 +118,38 @@ def is_plausible_captcha_text(text):
 def recognize_captcha_bytes(image_bytes):
     """验证码图片字节 → 文本；无法识别返回 None（调用方降级手动输入）。
 
-    预留接口，尚未挂载：当前无生产调用方（验证码主路径只做分类与手动输入
-    兜底）。未来接入自动识别时按「识别失败降级手动」的约定调用。
+    两级识别链（2026-09-29 重排：真实站验证码是花体/斜体艺术字，自研
+    合成模型分布外全错、ddddocr 大部分直接命中，见 roadmap B 节复盘）：
+      1. ddddocr（优先）：专为中文站点字符验证码训练，模型内置在 pip 包，
+         MIT 许可；PyInstaller 打包增重约 200MB（onnxruntime + opencv），
+         换取真实站可用性。
+      2. 自研 tiny-CNN（captcha_cnn，权重随应用打包）：数字域兜底，在
+         ddddocr 结果不可信（3-8 位门槛拒绝）时尝试。
 
     任何异常（缺库/模型损坏/图片非法/结果不可信）都吞掉并返回 None：
     本模块是可选增强，绝不让识别失败破坏搜索/登录主链路。"""
     if not image_bytes:
         return None
+    # 第一级：ddddocr
     ocr = _load_ocr()
-    if ocr is None:
-        return None
+    if ocr is not None:
+        try:
+            text = ocr.classification(bytes(image_bytes))
+        except Exception as e:
+            logger.warning('[kazumi] ddddocr 识别异常（继续小模型链）: %s', e)
+            text = None
+        text = str(text or '').strip()
+        if is_plausible_captcha_text(text):
+            return text
+        if text:
+            logger.info('[kazumi] ddddocr 结果不可信: %r', text[:16])
+    # 第二级：自研小模型（4 位数字域兜底）
     try:
-        text = ocr.classification(bytes(image_bytes))
+        text = _load_cnn().recognize(image_bytes)
+        if text and is_plausible_captcha_text(text):
+            return text
+        if text:
+            logger.info('[kazumi] 小模型验证码结果不可信: %r', str(text)[:16])
     except Exception as e:
-        logger.warning('[kazumi] 验证码识别失败（降级手动输入）: %s', e)
-        return None
-    text = str(text or '').strip()
-    if not is_plausible_captcha_text(text):
-        logger.info('[kazumi] 验证码识别结果不可信，降级手动输入: %r', text[:16])
-        return None
-    return text
+        logger.warning('[kazumi] 小模型验证码识别异常: %s', e)
+    return None

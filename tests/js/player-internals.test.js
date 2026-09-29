@@ -421,6 +421,7 @@ describe('player', () => {
         const storeBacking = new Map();
         const { player, sink, AdSkip } = loadPlayer({ storeBacking });
         AdSkip.recordOpEd('番剧P', '线路A', 'ed', 1200);
+        player._opEdSkipEnabled = true; // 默认关，本用例直接调用 tick 故显式开启
         player._curMeta = { site: 's', title: '番剧P', flag: '线路A' };
         sink.videoEl = { currentTime: 1196, duration: 1400 };   // ed=1200，lead=5 → [1195,1200)
         player._onPreviewTick();
@@ -432,6 +433,7 @@ describe('player', () => {
         const storeBacking = new Map();
         const { player, sink, AdSkip } = loadPlayer({ storeBacking });
         AdSkip.recordOpEd('番剧Q', '线路A', 'ed', 1200);
+        player._opEdSkipEnabled = true; // 默认关，本用例直接调用 tick 故显式开启
         player._curMeta = { site: 's', title: '番剧Q', flag: '线路A' };
         sink.videoEl = { currentTime: 1196, duration: 1400 };
         player._onPreviewTick();
@@ -448,6 +450,7 @@ describe('player', () => {
         const storeBacking = new Map();
         const { player, sink, AdSkip } = loadPlayer({ storeBacking });
         AdSkip.recordOpEd('番剧R', '线路A', 'ed', 1200);
+        player._opEdSkipEnabled = true; // 默认关，本用例直接调用 tick 故显式开启
         player._curMeta = { site: 's', title: '番剧R', flag: '线路A' };
         sink.videoEl = { currentTime: 1180, duration: 1400 };   // [ed-30, ed-5) → toast
         player._onPreviewTick();

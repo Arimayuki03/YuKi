@@ -241,7 +241,7 @@ test('play() 集成：opEdSkip=false 关闭时不跳片头', async () => {
 });
 
 test('play() 集成：源站续播 position 优先，opEd 片头位置让位', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     backing.set('yuki_oped_skip_v1',
         JSON.stringify({ byKey: { '影片P|线路A': { op: 90, ed: null, ts: 1 } } }));
@@ -258,7 +258,7 @@ test('play() 集成：源站续播 position 优先，opEd 片头位置让位', a
 });
 
 test('play() 直链快路径：parse=1 已是媒体直链时也注入 opEd 片头位置', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     backing.set('yuki_oped_skip_v1',
         JSON.stringify({ byKey: { '影片D|线路A': { op: 90, ed: null, ts: 1 } } }));
@@ -281,7 +281,7 @@ test('play() 直链快路径：parse=1 已是媒体直链时也注入 opEd 片�
 });
 
 test('play() 直链快路径：源站续播优先且不弹「已自动跳过片头」', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     backing.set('yuki_oped_skip_v1',
         JSON.stringify({ byKey: { '影片D2|线路A': { op: 90, ed: null, ts: 1 } } }));
@@ -301,7 +301,7 @@ test('play() 直链快路径：源站续播优先且不弹「已自动跳过片�
 });
 
 test('play() 集成：有片头记录时经 position（毫秒）传给 playUrl', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     backing.set('yuki_oped_skip_v1',
         JSON.stringify({ byKey: { '影片Z|线路A': { op: 90, ed: null, ts: 1 } } }));
@@ -332,9 +332,10 @@ test('play() 集成：无记录时不注入 position', async () => {
 });
 
 test('_recordOpEdFromPlayback：mpv 模式经 get-pos 记录当前位置并提示', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（默认关，本用例直接调用登记入口故显式开启）
     player._curMeta = { title: '影片M', flag: '线路B', site: 'siteA' };
     // get-pos 返回真实 time-pos：登记成功
     context.yuki.playerControl = async (cmd) => (cmd === 'get-pos' ? { ok: true, pos: 95 } : { ok: false });
@@ -345,10 +346,11 @@ test('_recordOpEdFromPlayback：mpv 模式经 get-pos 记录当前位置并提�
 });
 
 test('_recordOpEdFromPlayback：get-pos 不可用（reject/ok:false/pos:null）降级不登记', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     // reject：R1 未合入（主进程未放行 get-pos → unknown cmd 返回 ok:false；IPC 异常则 reject）
     const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用登记入口故显式开启）
     player._curMeta = { title: '影片M', flag: '线路B', site: 'siteA' };
     context.yuki.playerControl = async () => { throw new Error('unknown cmd'); };
     await player._recordOpEdFromPlayback('op');
@@ -367,9 +369,10 @@ test('_recordOpEdFromPlayback：get-pos 不可用（reject/ok:false/pos:null）�
 });
 
 test('_recordOpEdFromPlayback：pos=0 视为无法获取，不落「太靠前」提示', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用登记入口故显式开启）
     player._curMeta = { title: '影片M0', flag: '线路B', site: 'siteA' };
     context.yuki.playerControl = async () => ({ ok: true, pos: 0 });
     await player._recordOpEdFromPlayback('op');
@@ -392,9 +395,10 @@ test('_recordOpEdFromPlayback：opEdSkip=false 时登记入口关闭并提示', 
 });
 
 test('_onOpEdRecord（T81 菜单入口）：op/ed 触发登记，非法 kind 不触发', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用菜单入口故显式开启）
     player._curMeta = { title: '影片H', flag: '线路C', site: 'siteA' };
     context.yuki.playerControl = async () => ({ ok: true, pos: 80 });
     // mpv 右键菜单信号：{kind:'op'|'ed'}
@@ -421,6 +425,71 @@ test('_onOpEdRecord：opEdSkip=false 时菜单入口提示功能已关闭', asyn
     await player._onOpEdRecord({ kind: 'op' });
     assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
     assert.equal(backing.get('yuki_oped_skip_v1'), undefined);
+});
+
+test('_recordOpEdFromPlayback：opEdSave=false 时登记不落盘并提示', async () => {
+    const settings = { opEdSkip: true, opEdSave: false };
+    const backing = new Map();
+    const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例只验证 opEdSave 守卫故显式开启）
+    player._curMeta = { title: '影片S2', flag: '线路B', site: 'siteA' };
+    player._opEdSaveEnabled = false; // play() 起播时按设置缓存
+    let getPosCalled = 0;
+    context.yuki.playerControl = async () => { getPosCalled += 1; return { ok: true, pos: 90 }; };
+    await player._recordOpEdFromPlayback('op');
+    assert.equal(getPosCalled, 0); // 保存关闭不发起 get-pos 查询
+    assert.equal(backing.get('yuki_oped_skip_v1'), undefined); // 不得落盘
+    assert.ok(context.__toasts.includes('保存片头/片尾记录已关闭（设置页可开启）'));
+});
+
+test('_recordOpEdFromPlayback：opEdSave 默认开启（未设置也照常登记）', async () => {
+    const settings = { opEdSkip: true };
+    const backing = new Map();
+    const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例只验证 opEdSave 默认值故显式开启）
+    player._curMeta = { title: '影片S3', flag: '线路B', site: 'siteA' };
+    assert.equal(player._opEdSaveEnabled, null); // 初值：尚未从设置加载（null 哨兵），登记时现场回读
+    context.yuki.playerControl = async () => ({ ok: true, pos: 85 });
+    await player._recordOpEdFromPlayback('op');
+    assert.equal(player._opEdSaveEnabled, true); // settings 未设置 opEdSave → 回读后按开启落地
+    const data = JSON.parse(backing.get('yuki_oped_skip_v1'));
+    assert.equal(data.byKey['影片S3|线路B'].op, 85);
+});
+
+test('_onOpEdRecord：opEdSave=false 时菜单入口同步停用', async () => {
+    const settings = { opEdSkip: true, opEdSave: false };
+    const backing = new Map();
+    const { player, context } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例只验证 opEdSave 守卫故显式开启）
+    player._curMeta = { title: '影片H3', flag: '线路C', site: 'siteA' };
+    player._opEdSaveEnabled = false;
+    await player._onOpEdRecord({ kind: 'op' });
+    assert.ok(context.__toasts.includes('保存片头/片尾记录已关闭（设置页可开启）'));
+    assert.equal(backing.get('yuki_oped_skip_v1'), undefined);
+});
+
+test('setOpEdSaveEnabled：热同步缓存值，非 false 视为开启', () => {
+    const { player } = loadPlayer({}, new Map());
+    player.setOpEdSaveEnabled(false);
+    assert.equal(player._opEdSaveEnabled, false);
+    player.setOpEdSaveEnabled(true);
+    assert.equal(player._opEdSaveEnabled, true);
+    player.setOpEdSaveEnabled(undefined); // 开关异常载荷按开启降级
+    assert.equal(player._opEdSaveEnabled, true);
+});
+
+test('play() 起播缓存 opEdSave 开关到 _opEdSaveEnabled', async () => {
+    const settings = { opEdSave: false };
+    const { player } = loadPlayerWithIpc(settings, new Map());
+    player.getVipFlags = async () => [];
+    await player.play('siteA', '线路A', 'ep1', '影片N2', '第1集', null, 0, '');
+    assert.equal(player._opEdSaveEnabled, false);
+    // 读设置失败：默认开启
+    const loaded2 = loadPlayerWithIpc({}, new Map());
+    loaded2.context.yuki.settingsGet = async () => { throw new Error('ipc down'); };
+    loaded2.player.getVipFlags = async () => [];
+    await loaded2.player.play('siteA', '线路A', 'ep1', '影片N2', '第1集', null, 0, '');
+    assert.equal(loaded2.player._opEdSaveEnabled, true);
 });
 
 test('T81：主窗口 Shift+O/E 热键已移除（入口迁至 mpv 右键菜单信号通道）', () => {
@@ -466,16 +535,21 @@ test('play() 起播缓存 opEdSkip 开关到 _opEdSkipEnabled', async () => {
     player.getVipFlags = async () => [];
     await player.play('siteA', '线路A', 'ep1', '影片N', '第1集', null, 0, '');
     assert.equal(player._opEdSkipEnabled, false);
-    // 读设置失败：默认开启
+    // 读设置失败：默认关闭
     const loaded2 = loadPlayerWithIpc({}, new Map());
     loaded2.context.yuki.settingsGet = async () => { throw new Error('ipc down'); };
     loaded2.player.getVipFlags = async () => [];
     await loaded2.player.play('siteA', '线路A', 'ep1', '影片N', '第1集', null, 0, '');
-    assert.equal(loaded2.player._opEdSkipEnabled, true);
+    assert.equal(loaded2.player._opEdSkipEnabled, false);
+    // 显式开启：opEdSkip=true 时缓存为开
+    const loaded3 = loadPlayerWithIpc({ opEdSkip: true }, new Map());
+    loaded3.player.getVipFlags = async () => [];
+    await loaded3.player.play('siteA', '线路A', 'ep1', '影片N', '第1集', null, 0, '');
+    assert.equal(loaded3.player._opEdSkipEnabled, true);
 });
 
 test('play() 集成（回归）：有片头记录时经 position（毫秒）传给 playUrl', async () => {
-    const settings = {};
+    const settings = { opEdSkip: true };
     const backing = new Map();
     backing.set('yuki_oped_skip_v1',
         JSON.stringify({ byKey: { '影片Z|线路A': { op: 90, ed: null, ts: 1 } } }));
@@ -489,4 +563,168 @@ test('play() 集成（回归）：有片头记录时经 position（毫秒）传�
     // position 应为 90000 毫秒（90s × 1000，主进程换算 mpv --start）
     assert.equal(capturedMeta.position, 90000);
     assert.equal(player._opEdStartPos, 90);
+});
+
+// ═══════════════════════════════════════════════════════════════ clearOpEd / clearAllOpEd
+// 右键菜单「清除片头/片尾标记」与设置页「清除全部」（撤销入口，此前记录无法删除）
+
+test('clearOpEd：清除单字段；双字段全空时整条删除；无记录幂等返回 false', () => {
+    const { AdSkip, backing } = loadAdSkip();
+    AdSkip.recordOpEd('番剧A', '线路1', 'op', 90);
+    AdSkip.recordOpEd('番剧A', '线路1', 'ed', 1200);
+    // 只清片头：片尾保留
+    assert.equal(AdSkip.clearOpEd('番剧A', '线路1', 'op'), true);
+    const rec = AdSkip.getOpEd('番剧A', '线路1');
+    assert.equal(rec.op, null);
+    assert.equal(rec.ed, 1200);
+    // 再清片尾：双字段全空 → 整条删除
+    assert.equal(AdSkip.clearOpEd('番剧A', '线路1', 'ed'), true);
+    assert.equal(AdSkip.getOpEd('番剧A', '线路1'), null);
+    // 未知 kind：整条删除
+    AdSkip.recordOpEd('番剧B', '', 'op', 60);
+    assert.equal(AdSkip.clearOpEd('番剧B', '', 'other'), true);
+    assert.equal(AdSkip.getOpEd('番剧B', ''), null);
+    // 无记录/键非法：幂等 false
+    assert.equal(AdSkip.clearOpEd('不存在', '', 'op'), false);
+    assert.equal(AdSkip.clearOpEd('', '', 'op'), false);
+    assert.equal(backing.has(AdSkip.STORE_KEY), true, '清除后存储仍可写（后续登记不受影响）');
+});
+
+test('clearOpEd：只影响目标键，其他影片记录不受影响', () => {
+    const { AdSkip } = loadAdSkip();
+    AdSkip.recordOpEd('番剧A', '线路1', 'op', 90);
+    AdSkip.recordOpEd('番剧B', '线路1', 'op', 95);
+    AdSkip.clearOpEd('番剧A', '线路1');
+    assert.equal(AdSkip.getOpEd('番剧A', '线路1'), null);
+    assert.equal(AdSkip.getOpEd('番剧B', '线路1').op, 95);
+});
+
+test('clearAllOpEd：整库清空并返回条数；空库返回 0', () => {
+    const { AdSkip } = loadAdSkip();
+    assert.equal(AdSkip.clearAllOpEd(), 0); // 空库：0
+    AdSkip.recordOpEd('番剧A', '线路1', 'op', 90);
+    AdSkip.recordOpEd('番剧B', '', 'ed', 700);
+    assert.equal(AdSkip.clearAllOpEd(), 2);
+    assert.equal(AdSkip.getOpEd('番剧A', '线路1'), null);
+    assert.equal(AdSkip.getOpEd('番剧B', ''), null);
+    // 清空后仍可正常登记（存储未被破坏）
+    assert.equal(AdSkip.recordOpEd('番剧C', '', 'op', 30).op, 30);
+});
+
+// ═══════════════════════════════════════════════════════════════ 本地文件标记（title 兜底）
+
+test('_recordOpEdFromPlayback：_curMeta 为空时退回主进程会话标题登记（本地文件）', async () => {
+    const settings = { opEdSkip: true };
+    const { player, context, backing } = loadPlayer(settings, new Map());
+    context.yuki.playerControl = async (cmd) => (cmd === 'get-pos' ? { ok: true, pos: 85 } : { ok: false });
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用登记入口故显式开启）
+    player._curMeta = null; // 本地文件直起播放：渲染层无元信息
+    await player._recordOpEdFromPlayback('op', '番剧A 第01集 [1080p].mp4');
+    // player 沙箱内的 AdSkip 与 loadAdSkip() 不共享 store：直接从 backing 断言
+    const data = JSON.parse(backing.get('yuki_oped_skip_v1'));
+    assert.equal(data.byKey['番剧A 第01集 [1080p].mp4|'].op, 85, '按文件名建键登记（flag 为空）');
+});
+
+test('_recordOpEdFromPlayback：主进程标题与 _curMeta 均缺省时提示并拒绝登记', async () => {
+    const settings = { opEdSkip: true };
+    const { player, context, backing } = loadPlayer(settings, new Map());
+    context.yuki.playerControl = async (cmd) => (cmd === 'get-pos' ? { ok: true, pos: 85 } : { ok: false });
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用登记入口故显式开启）
+    player._curMeta = null;
+    const toasts = context.__toasts;
+    await player._recordOpEdFromPlayback('op', '   ');
+    assert.ok(!backing.get('yuki_oped_skip_v1'), '不得写入任何记录');
+    assert.ok(toasts.some((m) => m.includes('没有正在播放的影片')), '应提示无播放中的影片');
+});
+
+test('_onOpEdClear：kind 缺省时整条清除当前影片登记', async () => {
+    const settings = { opEdSkip: true };
+    const backing = new Map();
+    backing.set('yuki_oped_skip_v1',
+        JSON.stringify({ byKey: { '影片Z|线路A': { op: 90, ed: 700, ts: 1 } } }));
+    const { player } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true; // play() 起播时按设置缓存（本用例直接调用清除入口故显式开启）
+    player._curMeta = { title: '影片Z', flag: '线路A' };
+    await player._onOpEdClear({});
+    // 整条记录删除后 byKey 为空对象（clearOpEd 仍会回写一次空库）
+    const after = JSON.parse(backing.get('yuki_oped_skip_v1') || '{"byKey":{}}');
+    assert.deepEqual(after.byKey, {}, '整条记录应被删除');
+});
+
+test('_onOpEdClear：无记录时提示「没有已登记的标记」而非误报已清除', async () => {
+    const settings = { opEdSkip: true };
+    const backing = new Map();
+    const { player } = loadPlayer(settings, backing);
+    player._opEdSkipEnabled = true;
+    player._curMeta = { title: '影片W', flag: '线路A' };
+    await player._onOpEdClear({});
+    assert.ok(!backing.get('yuki_oped_skip_v1'), '无记录不得落盘');
+});
+
+// ═══════════════════════════════════════════════════════════════ 开关缓存未加载哨兵（null）
+// 本地文件/直链播放（yuki:file-push 等）不经 play()，缓存停留初值 null；
+// 登记入口守卫须现场回读设置，不得误报「功能已关闭」。
+
+test('缓存未加载（null）：登记入口现场回读设置，opEdSkip=true 时不再误拦', async () => {
+    const settings = { opEdSkip: true };
+    const backing = new Map();
+    const { player, context } = loadPlayer(settings, backing);
+    assert.equal(player._opEdSkipEnabled, null, '初值应为 null 哨兵（未经 play() 不算已加载）');
+    assert.equal(player._opEdSaveEnabled, null);
+    player._curMeta = { title: '影片L1', flag: '线路B' };
+    context.yuki.playerControl = async (cmd) => (cmd === 'get-pos' ? { ok: true, pos: 90 } : { ok: false });
+    await player._recordOpEdFromPlayback('op');
+    const data = JSON.parse(backing.get('yuki_oped_skip_v1'));
+    assert.equal(data.byKey['影片L1|线路B'].op, 90, '本地文件场景（未走 play()）也可登记');
+    assert.equal(player._opEdSkipEnabled, true, '回读后缓存落地');
+});
+
+test('缓存未加载（null）：opEdSkip=false 时现场回读后仍按守卫拦截', async () => {
+    const settings = { opEdSkip: false };
+    const backing = new Map();
+    const { player, context } = loadPlayer(settings, backing);
+    player._curMeta = { title: '影片L2', flag: '线路B' };
+    let settingsGetCalls = 0;
+    context.yuki.settingsGet = async () => {
+        settingsGetCalls += 1;
+        return { opEdSkip: false };
+    };
+    await player._recordOpEdFromPlayback('op');
+    assert.equal(settingsGetCalls, 1, '应现场回读一次设置');
+    assert.equal(player._opEdSkipEnabled, false);
+    assert.equal(backing.get('yuki_oped_skip_v1'), undefined);
+    assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
+    // 二次调用不再回读（缓存已落地）
+    await player._recordOpEdFromPlayback('op');
+    assert.equal(settingsGetCalls, 1);
+});
+
+test('缓存未加载（null）：清除入口现场回读，设置开启时可正常清除并按返回值提示', async () => {
+    const settings = { opEdSkip: true };
+    const backing = new Map();
+    backing.set('yuki_oped_skip_v1',
+        JSON.stringify({ byKey: { '影片L3|': { op: 60, ed: null, ts: 1 } } }));
+    const { player, context } = loadPlayer(settings, backing);
+    assert.equal(player._opEdSaveEnabled, null);
+    player._localSessionTitle = '影片L3'; // 本地文件：无 _curMeta，按主进程会话标题建键
+    await player._onOpEdClear({});
+    assert.equal(player._opEdSkipEnabled, true);
+    const after = JSON.parse(backing.get('yuki_oped_skip_v1'));
+    assert.deepEqual(after.byKey, {}, '记录应被整条清除');
+    assert.ok(context.__toasts.some((t) => t.includes('已清除本片片头/片尾标记')));
+    // 再清一次：clearOpEd 返回 false → 提示「没有已登记的标记」
+    await player._onOpEdClear({});
+    assert.ok(context.__toasts.some((t) => t.includes('本片没有已登记的片头/片尾标记')),
+        'clearOpEd=false 时不得再报「已清除」');
+});
+
+test('缓存未加载（null）：settingsGet 失败时按默认降级（skip 关、save 开）', async () => {
+    const { player, context } = loadPlayer({ opEdSkip: true }, new Map());
+    context.yuki.settingsGet = async () => { throw new Error('ipc down'); };
+    player._curMeta = { title: '影片L4', flag: '线路B' };
+    context.yuki.playerControl = async (cmd) => (cmd === 'get-pos' ? { ok: true, pos: 90 } : { ok: false });
+    await player._recordOpEdFromPlayback('op');
+    assert.equal(player._opEdSkipEnabled, false, '回读失败按默认关');
+    assert.equal(player._opEdSaveEnabled, true, '回读失败按默认开');
+    assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
 });

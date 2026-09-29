@@ -125,6 +125,38 @@
     }
 
     /**
+     * 清除某片名+线路的登记记录（右键菜单「清除片头/片尾标记」撤销入口）。
+     * kind: 'op' | 'ed' 只清对应字段；其余值（含缺省）整条删除。
+     * @returns true=有记录被清除；false=本就无记录/键非法（幂等）。
+     */
+    function clearOpEd(title, flag, kind, store) {
+        const key = opEdKey(title, flag);
+        if (!key || key === '|') return false;
+        const data = _load(store);
+        const rec = data.byKey[key];
+        if (!rec) return false;
+        if (kind === 'op' || kind === 'ed') {
+            rec[kind] = null;
+            if (rec.op == null && rec.ed == null) delete data.byKey[key];
+        } else {
+            delete data.byKey[key];
+        }
+        _save(data, store);
+        return true;
+    }
+
+    /**
+     * 清空全部片头/片尾登记（设置页「保存已登记的片头/片尾记录」开关关闭时调用）。
+     * @returns 清除的记录条数（键数）；存储不可用返回 0。
+     */
+    function clearAllOpEd(store) {
+        const data = _load(store);
+        const n = Object.keys(data.byKey || {}).length;
+        if (n > 0) _save({ byKey: {} }, store);
+        return n;
+    }
+
+    /**
      * 跨线路提示查询：当前线路无记录时，找同片名其他线路的最新记录。
      * 返回 { flag, rec }（含兄弟线路名与记录）或 null。
      * 仅作提示来源（见 findSiblingHint）：不同压制线路的片头长度可能不同，
@@ -232,6 +264,8 @@
         opEdKey,
         recordOpEd,
         getOpEd,
+        clearOpEd,
+        clearAllOpEd,
         findSiblingOpEd,
         findSiblingHint,
         decideStartSec,

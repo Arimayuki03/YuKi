@@ -80,6 +80,11 @@ class XPathRuleStrategy:
 
     def parse_chapters(self, raw, config):
         root = self._document_element(raw)
+        # 反爬检测（与搜索解析同口径）：章节页被验证码拦截时抛出，由上层
+        # 端点转成结构化状态（前端自动解题 → 重试），不再静默表现为
+        # 「未解析到剧集线路」。
+        if self._detects_captcha(raw, config.anti_crawler_config, root):
+            raise CaptchaRequiredException(config.plugin_name)
         roads = []
         diagnostics = []
         road_nodes = self._run_selector('chapterRoads', config.chapter_roads,

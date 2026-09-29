@@ -10,7 +10,7 @@
  * 我的收藏：复用 records.js makeRecordView 工厂（容器 #my-panel-favorites）。
  * 埋点在 player.js _recordWatch（mpv 退出时累计）。
  */
-/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel, UIState, confirmDialog */
+/* global $, makeRecordView, doAction, escHtml, vodCoverImg, warnToast, Kazumi, localCacheGet, localCacheSet, localCacheDel, UIState, confirmDialog, pageSizeOf */
 
 // Bangumi 账号收藏本地持久缓存（cache.js）：切页/重启即时上屏，只在收藏状态变动或手动同步时刷新。
 // 无 TTL（0=永久）——账号收藏仅由「本地收藏变更(FavHub)/同步按钮」触发失效，不靠时间过期。
@@ -20,6 +20,7 @@ const My = {
     _inited: false,
     _tab: 'stats',
     _shownTab: null,   // 最近一次完成渲染的页签：切回同页签且数据未变时复用现有内容
+    _favSize: 0,       // 最近一次渲染收藏网格时的每页条数：设置变更后切回强制重渲
     _dirty: false,     // 离开本页期间收藏有变更（FavHub 置脏）：切回时强制重渲染
     _favorites: null,
 
@@ -203,6 +204,13 @@ const My = {
             if (st && st.tab) tab = st.tab;
         }
         if (tab) this._tab = tab;
+        // 每页条数设置变更检查（设置页保存时 invalidatePageSizeCache 已作废缓存，
+        // 此处重读并比对）：收藏页签复用旧网格前若条数变了，强制重渲按新条数分页
+        if (this._tab === 'favorites') {
+            const favSize = typeof pageSizeOf === 'function' ? await pageSizeOf('pageSizeFavorites') : 0;
+            if (this._favSize && favSize && favSize !== this._favSize) this._dirty = true;
+            this._favSize = favSize;
+        }
         this.selectTab(this._tab, false);
         // 收藏页签且数据无变更（离开期间的收藏改动由 FavHub 置脏）：直接复用已渲染
         // 的网格，切回零重建；统计页每次轻量重渲（innerHTML 原位替换），保持观看

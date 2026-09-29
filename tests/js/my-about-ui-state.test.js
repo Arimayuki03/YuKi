@@ -667,6 +667,33 @@ describe('my', () => {
         assert.equal(views['my-favorites'].entered, 1, '收藏页签应 enter 收藏视图');
     });
 
+    test('my：enter 收藏页签每页条数变更——复用判定前强制重渲（设置改后回页即生效）', async () => {
+        // 第一次进入 favorites 且完成渲染（_shownTab 落位），pageSizeOf 返回 20
+        let size = 20;
+        const { My, views } = loadMy({ extra: { pageSizeOf: async () => size, UIState: { get: () => null, set: () => {} } } });
+        My.init();
+        await My.enter('favorites');
+        assert.equal(views['my-favorites'].rendered, 1, '首次进入应渲染');
+        assert.equal(My._favSize, 20, '应记录本次渲染的每页条数');
+        // 条数未变：复用已渲染网格（零重建）
+        await My.enter('favorites');
+        assert.equal(views['my-favorites'].rendered, 1, '条数未变应复用旧网格');
+        // 条数变更：复用判定被绕过，强制重渲
+        size = 10;
+        await My.enter('favorites');
+        assert.equal(views['my-favorites'].rendered, 2, '条数变更后切回应强制重渲');
+        assert.equal(My._favSize, 10, '记录值应同步更新');
+        assert.equal(My._dirty, false, '重渲后脏标记应清除');
+    });
+
+    test('my：enter 收藏页签 pageSizeOf 缺席（沙箱）——不置脏不崩', async () => {
+        const { My, views } = loadMy({});
+        My.init();
+        await assert.doesNotReject(() => My.enter('favorites'));
+        assert.equal(views['my-favorites'].rendered, 1, '应照常渲染');
+        assert.equal(My._favSize, 0, '无 pageSizeOf 时记录 0');
+    });
+
     test('my：render 走 stats 页签时渲染统计并触发收藏分类计数', async () => {
         const { My, jq } = loadMy({ settings: statsFixture });
         My.init();

@@ -202,6 +202,21 @@ test('yuki:settings-set: opEdSkip 不再 ignored（player.js 跳片头开关可�
     }
 });
 
+test('yuki:settings-set: opEdSave 放行（设置页「保存片头/片尾记录」开关可持久化）', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'yuki-intg-'));
+    try {
+        const { handlers } = await loadMainIndexReady(tmpRoot, makeMpvStub());
+        const set = handlers.get('yuki:settings-set');
+        const off = await set(null, 'opEdSave', false);
+        assert.equal(off.ignored, undefined, 'false 写入不应被忽略（关闭即清空记录的开关必须可落盘）');
+        assert.equal(off.value, false);
+        const all = await handlers.get('yuki:settings-get')();
+        assert.equal(all.opEdSave, false);
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+});
+
 // ------------------------------------------------------------------
 // ② danmakuEnable → mpv.danmakuEnabled 接线
 // ------------------------------------------------------------------

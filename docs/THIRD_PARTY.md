@@ -33,7 +33,7 @@
 
 | 包 | 版本要求 | 用途 | 许可证 |
 |---|---|---|---|
-| electron | ^31.0.0（实测 31.7.7） | 桌面宿主 | MIT |
+| electron | ^44.4.5 | 桌面宿主 | MIT |
 | electron-builder | ^25.1.8 | 打包（devDependency） | MIT |
 | electron-updater | ^6.6.2 | 自动更新基础链路 | MIT |
 | @electron/asar | ^3.4.1（devDependency） | afterPack 构建门禁（清单解析 fail-closed） | MIT |
@@ -72,8 +72,12 @@
 | pillow | 12.3.0 | HPND / MIT-CMU（qrcode PNG 工厂） |
 | cffi | 2.1.1 | MIT |
 | pycparser | 3.0 | BSD-3-Clause |
+| ddddocr | 1.6.1 | MIT（图片验证码主识别器，2026-09-29 起随 PyInstaller 打包） |
+| onnxruntime | 1.30.0 | MIT（ddddocr 运行时依赖） |
+| opencv-python | 5.0.0.93 | Apache-2.0（ddddocr 运行时依赖） |
+| numpy | 2.5.3 | BSD-3-Clause（ddddocr 与自研 tiny-CNN 验证码识别共同依赖） |
 
-> **可选依赖（不进锁文件）**：`python-backend/kazumi/captcha.py` 的图片验证码识别骨架优先使用 [ddddocr](https://github.com/sml2h3/ddddocr)（MIT，含自带 onnx 模型），用户自行 `pip install ddddocr` 即启用；未安装时走降级路径。因 ddddocr 依赖 onnxruntime、Python 3.14 无预编译轮子，本轮决策不进 requirements.txt 锁文件（2026-09-24 时点该模块接口预留、未挂载到产品流程）。
+> **验证码识别链（2026-09-29 更新）**：`python-backend/kazumi/captcha.py` 的图片验证码识别链为 [ddddocr](https://github.com/sml2h3/ddddocr)（MIT，含自带 onnx 模型）优先、自研 tiny-CNN（`kazumi/captcha_cnn.npz`，numpy 纯推理）数字域兜底。**ddddocr 已进 requirements.txt 锁文件**（ddddocr==1.6.1，连带 onnxruntime==1.30.0、opencv-python==5.0.0.93），随 PyInstaller 打包增重约 200MB，换取真实站（花体/斜体艺术字验证码）识别可用性——原「Python 3.14 无预编译轮子、不进锁文件、开发者本机可选」的 2026-09-24 决策已失效废止。自研小模型为兜底级，仍失败时降级人工验证窗口。
 
 ## 五、依赖审计豁免记录
 
@@ -101,3 +105,4 @@ YuKi 的实现参考并受益于以下上游项目：
 - [FongMi/TV](https://github.com/FongMi/TV) 与 CatVod 生态 —— TVBox 配置契约与爬虫生态参照；
 - [bloc97/Anime4K](https://github.com/bloc97/Anime4K) —— 超分辨率着色器；
 - [dsrkafuu/misans](https://github.com/dsrkafuu/misans) —— MiSans 字体子集化打包。
+- [auto-translate](https://github.com/Arimayuki03/auto-translate)（MIT, © 2026 Arimayuki03）—— 划词翻译的纯逻辑来源：`placeFixedInViewport` 定位算法（transform/zoom 下 fixed 漂移的两点采样反解）、选中检测/去重/关闭路径框架、Edge 与 Google 免费翻译端点协议（python-backend/kazumi/translate.py 与 src/renderer/js/translate-bubble.js 移植）。

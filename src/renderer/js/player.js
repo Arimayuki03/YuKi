@@ -8,7 +8,7 @@
  *
  * 自动连播（统一由渲染层驱动，直链/解析源同一套逻辑）：
  *   每次只交 mpv 单集；mpv 播完自然退出（yuki:player-exit 附带进度），
- *   渲染层判定「看完」（剩余<8s 或刚收到 ended）且队列还有下一集时，
+ *   渲染层判定「看完」（观看比例 ≥70% 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
 /* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel, AdSkip */
@@ -83,10 +83,12 @@ const Player = {
     _reconnectInProgress: false,
     _carrySpeed: null,       // 连播时从上一集延续的倍速
     _carryFullscreen: null,  // 连播时从上一集延续的全屏状态
-    _opEdSkipEnabled: true,  // opEdSkip 开关缓存（play() 起播时读取；登记入口/预览 tick 守卫用，读失败默认开）
+    _opEdSkipEnabled: null,  // opEdSkip 开关缓存（play() 起播时读取；null=尚未从设置加载，登记入口现场回读；false=关）
+    _opEdSaveEnabled: null,  // opEdSave 开关缓存（play() 起播时读取；null=尚未从设置加载，登记入口现场回读；读失败默认开）
     _opEdEdFired: false,     // 本次会话已自动跳过片尾（每集只跳一次，防 seek 循环）
     _opEdEdToasted: false,   // 本次会话已弹过「即将进入片尾」提示
     _opEdStartPos: 0,        // 本次起播应用的片头位置（秒；0=未应用，供 Kazumi 分支换算毫秒）
+    _localSessionTitle: '',  // 主进程会话标题兜底（本地文件直起播放无 _curMeta，登记/清除 OP/ED 用）
 
     init() {
         $('#player-close').on('click', () => this._close());
@@ -122,8 +124,14 @@ const Player = {
         // 「标记片头结束点/标记片尾起点」——原热键挂在主窗口 renderer 的 keydown 上，
         // mpv 播放时焦点在 mpv 窗口，主窗口根本收不到按键（不可用的根因）。菜单经
         // hints.lua → user-data 信号 → 主进程 → 此通道回到渲染层，焦点在 mpv 内即可触发。
+        // info.title：主进程会话标题（本地文件直起播放无 _curMeta，登记/清除均按它建键）。
+        // kind='clear' 复用同通道：右键菜单「清除片头/片尾标记」→ _onOpEdClear。
         if (window.yuki && window.yuki.onOpEdRecord) {
-            window.yuki.onOpEdRecord((info) => this._onOpEdRecord(info));
+            window.yuki.onOpEdRecord((info) => {
+                if (info && info.title) this._localSessionTitle = String(info.title);
+                if (info && info.kind === 'clear') this._onOpEdClear(info);
+                else this._onOpEdRecord(info);
+            });
         }
         // 外部播放器（PotPlayer/VLC 等）进程退出：墙钟时长记账（独立于 mpv 事件通道）
         if (window.yuki && window.yuki.onExternalPlayerExit) {
@@ -138,32 +146,107 @@ const Player = {
 
     /** mpv 右键菜单「标记片头结束点/标记片尾起点」（T81）：转发共用登记逻辑。
      *  原主窗口 Shift+O/E keydown 热键已移除——mpv 播放时焦点在 mpv 窗口，
-     *  主窗口收不到按键，该入口从未真正可用。 */
-    _onOpEdRecord({ kind } = {}) {
+     *  主窗口收不到按键，该入口从未真正可用。info.title 是主进程附带的会话标题：
+     *  本地文件等无渲染层 _curMeta 的播放（yuki:file-push/dl-play 直起）以此兜底，
+     *  否则登记入口直接报「没有正在播放的影片」（用户报告：本地文件不能标记）。 */
+    _onOpEdRecord({ kind, title } = {}) {
         const k = (kind === 'op' || kind === 'ed') ? kind : '';
         if (!k) return;
-        return this._recordOpEdFromPlayback(k);
+        return this._recordOpEdFromPlayback(k, title);
     },
 
     /** 快捷键/悬浮按钮共用的登记逻辑：读当前位置 → 存 AdSkip → toast 反馈。
-     *  async：mpv 模式需 await get-pos；登记入口（快捷键）fire-and-forget 不阻塞键盘事件。 */
-    async _recordOpEdFromPlayback(kind) {
+     *  async：mpv 模式需 await get-pos；登记入口（快捷键）fire-and-forget 不阻塞键盘事件。
+     *  titleFallback：主进程会话标题（本地文件播放时 _curMeta 为空，按文件名登记）。 */
+    async _recordOpEdFromPlayback(kind, titleFallback) {
         const adskip = _adSkip();
         if (!adskip) return;
+        // 缓存未加载哨兵（null）：本地文件/直链播放不经 play()，开关缓存停留初值。
+        // 现场回读一次设置，避免「设置已开启但缓存仍为初始关」导致登记被误拦截。
+        if (this._opEdSkipEnabled === null || this._opEdSaveEnabled === null) {
+            try {
+                const s = (await window.yuki.settingsGet()) || {};
+                this._opEdSkipEnabled = s.opEdSkip === true;
+                this._opEdSaveEnabled = s.opEdSave !== false;
+            } catch (e) {
+                this._opEdSkipEnabled = false; // 读失败：按默认关降级（与 play() 失败分支一致）
+                this._opEdSaveEnabled = true;
+            }
+        }
         // 开关守卫：opEdSkip 关闭时整个登记入口一并停用（与自动跳过同源同义）
         if (this._opEdSkipEnabled === false) {
             warnToast('跳过片头片尾功能已关闭');
             return;
         }
+        // 保存守卫：opEdSave 关闭时只展示不落盘（设置页「保存已登记的片头/片尾记录」关闭）
+        if (this._opEdSaveEnabled === false) {
+            warnToast('保存片头/片尾记录已关闭（设置页可开启）');
+            return;
+        }
         const meta = this._curMeta;
-        if (!meta || !meta.title) { warnToast('当前没有正在播放的影片，无法记录'); return; }
+        // 键优先用播放元信息的片名；本地文件/推送等直起播放退回主进程会话标题
+        const title = (meta && meta.title) || String(titleFallback || '').trim();
+        if (!title) { warnToast('当前没有正在播放的影片，无法记录'); return; }
         const sec = await this._estimateCurrentSec();
         if (sec == null) { warnToast('无法获取播放位置'); return; } // get-pos 不可用：降级不登记
         if (!sec || sec < 5) { warnToast('当前位置太靠前，不像片头/片尾'); return; }
-        adskip.recordOpEd(meta.title, meta.flag || this._flagOfPlayback(), kind, sec);
+        adskip.recordOpEd(title, (meta && meta.flag) || this._flagOfPlayback(), kind, sec);
         warnToast(kind === 'op'
             ? `已记录片头结束点（${Math.round(sec)}s）：下次播放本片将自动跳过`
             : `已记录片尾起点（${Math.round(sec)}s）：后续集数接近时会自动跳过`);
+    },
+
+    /** mpv 右键菜单「清除片头/片尾标记」：删除当前影片（片名+线路）的登记记录，
+     *  kind 缺省时整条记录一并清除。误登记（把正片当中当片头）后的撤销入口——
+     *  此前记录只能等被覆盖或被容量淘汰，错误跳过无法关闭（用户报告）。
+     *  async：缓存未加载（null 哨兵）时需 await settingsGet 现场回读；
+     *  唯一调用点是 onOpEdRecord 通道回调（fire-and-forget），改 async 安全。 */
+    async _onOpEdClear({ kind } = {}) {
+        const adskip = _adSkip();
+        if (!adskip || !adskip.clearOpEd) return;
+        // 缓存未加载哨兵（null）：本地文件/直链播放不经 play()，现场回读设置再守卫
+        // （否则新起应用直开本地文件时清除入口被误报「功能已关闭」）。
+        if (this._opEdSkipEnabled === null || this._opEdSaveEnabled === null) {
+            try {
+                const s = (await window.yuki.settingsGet()) || {};
+                this._opEdSkipEnabled = s.opEdSkip === true;
+                this._opEdSaveEnabled = s.opEdSave !== false;
+            } catch (e) {
+                this._opEdSkipEnabled = false; // 读失败：按默认关降级（与 play() 失败分支一致）
+                this._opEdSaveEnabled = true;
+            }
+        }
+        if (this._opEdSkipEnabled === false) {
+            warnToast('跳过片头片尾功能已关闭');
+            return;
+        }
+        // 保存守卫：opEdSave 关闭时清除入口同步停用（记录已随开关关闭被清空）
+        if (this._opEdSaveEnabled === false) {
+            warnToast('保存片头/片尾记录已关闭（设置页可开启）');
+            return;
+        }
+        const meta = this._curMeta;
+        const title = (meta && meta.title) || String(this._localSessionTitle || '').trim();
+        if (!title) { warnToast('当前没有正在播放的影片'); return; }
+        const cleared = adskip.clearOpEd(title, (meta && meta.flag) || this._flagOfPlayback(), kind);
+        const which = (kind === 'op' || kind === 'ed') ? (kind === 'op' ? '片头' : '片尾') : '片头/片尾';
+        // clearOpEd 返回 false=本就无记录：如实提示，不再误报「已清除」
+        warnToast(cleared ? `已清除本片${which}标记` : `本片没有已登记的${which}标记`);
+    },
+
+    /** 设置页「保存已登记的片头/片尾记录」开关热同步：登记/清除入口按此守卫，
+     *  播放中切换无需等下次起播（panels.js change 回调调用）。非 false 载荷
+     *  （含 undefined）一律按开启降级，与 play() 缓存语义一致。 */
+    setOpEdSaveEnabled(v) {
+        this._opEdSaveEnabled = v !== false;
+    },
+
+    /** 设置页「跳过片头片尾」开关热同步：登记/清除入口与片尾自动跳过按此守卫，
+     *  播放中切换无需等下次起播（panels.js change 回调调用）。语义与默认值一致
+     *  （opEdSkip 默认关）：非 true 载荷一律按关闭降级；不改 null 哨兵语义
+     *  （仅显式开关变更时调用，缓存未加载时的现场回读路径不受影响）。 */
+    setOpEdSkipEnabled(v) {
+        this._opEdSkipEnabled = v === true;
     },
 
     /** 当前线路名：_curMeta.flag 由 play() 维护；Kazumi 源 flag 可能缺省。 */
@@ -196,7 +279,7 @@ const Player = {
     },
 
     /** <video> 预览 tick：接近记录的片尾点时 toast 提示 / 自动 seek 跳过。
-     *  受 opEdSkip 开关约束（play() 起播时缓存到 _opEdSkipEnabled，读失败默认开）。 */
+     *  受 opEdSkip 开关约束（play() 起播时缓存到 _opEdSkipEnabled，默认关）。 */
     _onPreviewTick() {
         const adskip = _adSkip();
         const pv = document.getElementById('player-video');
@@ -409,11 +492,13 @@ const Player = {
             .then(() => this._writeWatch(progress, { ...meta }, watched));
     },
 
-    /** 「看完」判定：退出时剩余 <8s 视为播完；进度取不到（IPC 已断）时按会话匹配 ended（10s 内），
-     *  无会话号再退回全局兜底。判定会消耗该会话的 ended 记录。 */
+    /** 「看完」判定：按观看比例——已看时长 / 总时长 ≥ 70% 视为看完（剩余固定 8s 的旧口径
+     *  对长视频过苛：45 分钟的番看到最后 8 秒才认定看完，片尾曲拖一下就漏计）。
+     *  进度取不到（IPC 已断）时按会话匹配 ended（10s 内），无会话号再退回全局兜底。
+     *  判定会消耗该会话的 ended 记录。 */
     _isDone(info) {
         if (info && typeof info.pos === 'number' && typeof info.duration === 'number' && info.duration > 0) {
-            return (info.duration - info.pos) < 8;
+            return (info.pos / info.duration) >= 0.7;
         }
         const sid = (info && typeof info.sessionId === 'number') ? info.sessionId : 0;
         const endedAt = (sid && this._endedSessions.has(sid)) ? this._endedSessions.get(sid) : this._endedAt;
@@ -449,7 +534,7 @@ const Player = {
 
     /**
      * mpv 进程退出：连播核心驱动点。
-     * 「看完」判定：退出时剩余时长 <8s；进度取不到（IPC 已断）时，
+     * 「看完」判定：退出时观看比例 ≥70%（pos/duration）；进度取不到（IPC 已断）时，
      * 10s 内收到过 ended 事件同样视为看完。提前关闭 → 终止连播链。
      */
     async _onExit(info) {
@@ -477,7 +562,7 @@ const Player = {
         if (info && typeof info.sessionId === 'number' && info.sessionId && info.sessionId !== this._session) return;
         const token = this._playToken;
         const done = this._isDone(info);
-        // RM-5 Bangumi 观看进度自动上报：逐集会话「看完」（剩余<8s 或刚 ended）即上报当前集。
+        // RM-5 Bangumi 观看进度自动上报：逐集会话「看完」（观看比例 ≥70% 或刚 ended）即上报当前集。
         // 元信息取本会话绑定的观看 meta（含集名 subtitle）——不能用 _seq：末集/单集播完时
         // _seq 为 null（连播只在未来还有下一集时才建）。无会话号才回退 _currentPlayback
         // （旧协议路径）；原生队列已在 _onEnded 逐集上报，此分支不会重复触发。fire-and-forget。
@@ -824,12 +909,16 @@ const Player = {
         this._opEdEdFired = false;
         this._opEdEdToasted = false;
         this._opEdStartPos = 0;  // 本次起播应用的片头位置（秒，仅 Kazumi 分支换算毫秒用）
-        // 读取 opEdSkip 开关（默认开）：登记入口/预览 tick 均按此守卫；
-        // settingsGet 失败时保持 true（降级为开启，不因读失败废掉功能）
+        // 读取 opEdSkip/opEdSave 开关（opEdSkip 默认关、opEdSave 默认开）：登记入口/预览 tick/写入守卫均按此守卫；
+        // settingsGet 失败时保持默认（opEdSkip 关、opEdSave 开，不因读失败误开自动跳过）
         try {
             const s0 = (await window.yuki.settingsGet()) || {};
-            this._opEdSkipEnabled = s0.opEdSkip !== false;
-        } catch (e) { this._opEdSkipEnabled = true; }
+            this._opEdSkipEnabled = s0.opEdSkip === true;
+            this._opEdSaveEnabled = s0.opEdSave !== false;
+        } catch (e) {
+            this._opEdSkipEnabled = false;
+            this._opEdSaveEnabled = true;
+        }
         // 读取该片名+线路已记录的片头位置：
         // 记录存在时经 position=毫秒 交主进程换算 mpv --start（FongMi 语义），
         // 实现「起播即落在片头之后」。nativeQueue 场景主进程已支持
@@ -840,7 +929,7 @@ const Player = {
         try {
             const adskip = _adSkip();
             const s = (await window.yuki.settingsGet()) || {};
-            if (adskip && s.opEdSkip !== false && title) {
+            if (adskip && s.opEdSkip === true && title) {
                 const startSec = adskip.resolveAutoOpSec(title, flag || '', null);
                 if (startSec > 0) {
                     this._opEdStartPos = startSec;

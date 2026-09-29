@@ -4,7 +4,8 @@
  * 数据链路：
  *   - 本周在播：POST /kazumi/action do=kazumiBangumiCalendar → 星期桶 [{weekday:{id}, items}]
  *   - 历史季度：do=kazumiBangumiSeason(start,end) → 同形状星期桶（v0/search/subjects 按 air_date 过滤分桶）
- * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示。
+ * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示、
+ *       封面悬停收藏状态徽标（六态，默认隐藏）。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
 /* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, localCacheDel, UIState, showLoading, hideLoading */
@@ -37,10 +38,14 @@ const Timeline = {
     _colAvailable: false,
     _colSets: { dropped: new Set(), watched: new Set(), watching: new Set() },
     _filters: { dropped: false, watched: false, onlyWatching: false },
+    // 封面悬停收藏徽标的 id→type 映射：收集全部六态（过滤三桶只收 看过/在看/抛弃，
+    // 想看/搁置不建桶），_loadColSets 构建后由 _renderGrid 注入徽标；空 Map 表示无收藏数据
+    _colStateMap: new Map(),
     // Bangumi 账号收藏集合内存缓存（避免每次进入时间表都分页拉全量；本地收藏仍每次重读合并）
     _colCache: null,
     _colCacheToken: '',
     _colCacheTs: 0,
+    _colStatePending: null, // getColStateMap 在途 Promise：并发页面共享一次拉取
     // 无缓存命中时的加载遮罩状态（防闪现：延迟弹出，快响应直接上屏不闪）
     _maskTimer: null,
     _maskShown: false,
@@ -252,7 +257,16 @@ const Timeline = {
             }
         } catch (e) { /* Bangumi 拉取失败时仅用本地集合 */ }
         this._colSets = this._buildColSets(all);
-        await this._mergeLocalCollections(this._colSets);
+        // 悬停收藏徽标映射：与过滤三桶同源构建（账号收藏 + 本地标记合并后），
+        // 收录全部六态；先重建映射（覆盖旧态，防翻页/刷新残留 stale 徽标）。
+        this._colStateMap = this._buildColStateMap(all);
+        // 本地收藏一次读取共享给两处合并（recGet 每次都全量 settingsGet，勿重复 IPC）
+        const favs = await this._readLocalFavorites();
+        await this._mergeLocalCollections(this._colSets, favs);
+        await this._mergeLocalStates(this._colStateMap, favs);
+        // 首屏渲染先于收藏数据就绪的场景：映射到手后补挂当前网格的徽标行
+        //（网格未渲染/为空时 _lastSlice 为空数组，零操作）
+        this._attachFavBadges($('#timeline-grid'), this._lastSlice || []);
         // 只要有本地标记或 Bangumi 账号任一可用即启用过滤
         const hasAny = this._colSets.watching.size || this._colSets.watched.size || this._colSets.dropped.size || !!token;
         this._setColAvailable(!!hasAny);
@@ -265,6 +279,25 @@ const Timeline = {
     async refreshCollections() {
         await this._loadColSets();
         this._renderGrid();
+    },
+
+    /** 跨页面共享的收藏状态映射（推荐/搜索页徽标管线复用入口）。
+     *  账号收藏复用 _loadColSets 的既有三级缓存（内存 5min + 持久 30min + 网络），
+     *  各页面间不重复拉取；本地标记每次重读（低开销 settingsGet）。并发调用共享
+     *  同一在途 Promise；映射为快照副本（调用方持有后不随 invalidate 失效，但
+     *  FavHub 广播路径会重新拉取并补挂各页面网格）。
+     *  返回 Map（id → type 1..5）；无任何收藏数据时为空 Map。 */
+    getColStateMap() {
+        // 在途请求共享：同一时刻多页进入只发一次网络
+        if (this._colStatePending) return this._colStatePending;
+        this._colStatePending = (async () => {
+            // _loadColSets 尾部的时间表网格补挂（$ 选择器）在宿主缺失时可能抛错，
+            // 但收藏数据本身已就绪——单独隔离，避免连带共享入口返回空映射
+            try { await this._loadColSets(); } catch (e) { /* 时间表网格补挂失败不影响映射 */ }
+            this._colStatePending = null;
+            return this._colStateMap;
+        })().catch(() => { this._colStatePending = null; return new Map(); });
+        return this._colStatePending;
     },
 
     /** 状态变更后的即时同步（详情页/收藏页删改收藏后调用）：重读本地收藏并重渲染。
@@ -312,12 +345,13 @@ const Timeline = {
     },
 
     /** 合并本地收藏（records.js favorites）里带 bangumiId 的项到过滤集合，按 tag 归类。
-     *  tag：watching=在看 seen=看过 dropped=抛弃（与 records.js TAG_ORDER 一致）。 */
-    async _mergeLocalCollections(sets) {
+     *  tag：watching=在看 seen=看过 dropped=抛弃（与 records.js TAG_ORDER 一致）。
+     *  favs 可传入预读的收藏列表（与 _mergeLocalStates 共享一次读取），缺省自读。 */
+    async _mergeLocalCollections(sets, favs) {
         try {
             if (typeof recGet !== 'function') return;
-            const favs = await recGet('favorites');
-            (favs || []).forEach((f) => {
+            const list = Array.isArray(favs) ? favs : await recGet('favorites');
+            (list || []).forEach((f) => {
                 if (!f) return;
                 // 本地收藏的 Bangumi subject id：优先 bangumiId，其次 site==='bangumi' 时的 vodId
                 const id = String(f.bangumiId || (String(f.site) === 'bangumi' ? f.vodId : '') || '');
@@ -328,6 +362,48 @@ const Timeline = {
                 else if (tag === 'dropped') sets.dropped.add(id);
             });
         } catch (e) { /* 本地合并失败不影响 Bangumi 集合 */ }
+    },
+
+    /** 由 Bangumi 收藏条目构建「悬停收藏徽标」id→态映射。与 _buildColSets 同构
+     *  （同一套 id 兼容口径：subject_id||subject.id||id、type 统一 Number），但收录
+     *  全部六态——1想看 2看过 3在看 4搁置 5抛弃（过滤桶只收 2/3/5，想看/搁置不参与筛选
+     *  但徽标要如实展示）。循环遍历一次产出，不单独再拉网络。 */
+    _buildColStateMap(items) {
+        const map = new Map();
+        (items || []).forEach((it) => {
+            if (!it) return;
+            const subj = it.subject || {};
+            const id = String(it.subject_id || subj.id || it.id || '');
+            if (!id) return;
+            const type = Number(it.type);
+            if (type >= 1 && type <= 5) map.set(id, type);
+        });
+        return map;
+    },
+
+    /** 合并本地收藏 tag 到徽标映射（want=想看 seen=看过 watching=在看 hold=搁置
+     *  dropped=抛弃，与 records.js TAG_LABEL 一致）。账号收藏优先：已有账号态的
+     *  条目不被本地标记覆盖（账号是事实源，本地可能落后于上次同步）。
+     *  favs 可传入预读的收藏列表（与 _mergeLocalCollections 共享一次读取），缺省自读。 */
+    async _mergeLocalStates(map, favs) {
+        try {
+            if (typeof recGet !== 'function') return;
+            const list = Array.isArray(favs) ? favs : await recGet('favorites');
+            const tag2type = { want: 1, seen: 2, watching: 3, hold: 4, dropped: 5 };
+            (list || []).forEach((f) => {
+                if (!f) return;
+                // 本地收藏的 Bangumi subject id：优先 bangumiId，其次 site==='bangumi' 时的 vodId
+                const id = String(f.bangumiId || (String(f.site) === 'bangumi' ? f.vodId : '') || '');
+                if (!id) return;
+                const type = tag2type[f.tag];
+                if (type && !map.has(id)) map.set(id, type);
+            });
+        } catch (e) { /* 本地合并失败不影响 Bangumi 映射 */ }
+    },
+
+    /** 读本地收藏 favorites（recGet 不可用时静默返回空列表）。 */
+    async _readLocalFavorites() {
+        try { return (typeof recGet === 'function') ? await recGet('favorites') : []; } catch (e) { return []; }
     },
 
     _setColAvailable(av) {
@@ -539,6 +615,7 @@ const Timeline = {
         const pagecount = Math.max(1, Math.ceil(items.length / size));
         this._page = Math.min(Math.max(1, this._page), pagecount);
         const slice = items.slice((this._page - 1) * size, this._page * size);
+        this._lastSlice = slice; // 存当前页条目：收藏映射异步就绪后补挂徽标行用
         const grid = $('#timeline-grid').empty();
         if (!this._calendar.length) {
             // 日历整体为空：多为网络无法访问 Bangumi，落到网络/镜像引导空态
@@ -549,8 +626,11 @@ const Timeline = {
             grid.html(slice.map((item) => this._renderCard(item)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
+            // 封面徽标行（话数徽章常驻 + 收藏徽标悬停显形，样式见 .vod-fav-row）：
+            // 需在 _attachEpBadges 之前挂行——话数徽章补拉回来后 prepend 进同一行。
+            this._attachFavBadges(grid, slice);
             // 封面左下角进度徽章（排名徽章 #N 的对角）：补拉条目详情拿总话数（bangumiInfo
-            // 30 分钟缓存，同条目跨页/跨视图复用），放送完结→「已完结」；未完结→「N/总话数」。
+            // 30 分钟缓存，同条目跨页/跨视图复用），放送完结→「N话」；连载中→「N/总话数」。
             this._attachEpBadges(grid, slice).catch(() => { /* 徽章补齐失败不外溢成全局未捕获 */ });
         }
         renderPagerBox($('#timeline-pager'), {
@@ -564,18 +644,102 @@ const Timeline = {
         return bangumiCard(item);
     },
 
-    /** 封面左下角话数徽章（bangumi-rank-badge 的对角）：放送日期 + 总话数推算完结态——
-     *  已完结显示「已完结」，未完结显示「N/总话数」（N=当前已播出话数，按每周一话
-     *  从放送日推算；无总话数的条目不显示）。bangumiInfo 有 30 分钟缓存，页内切换
-     *  重复开免网络。并发拉取后按条目 id 定位卡片追加，换页/切周时由 grid 重渲染自然作废。 */
-    async _attachEpBadges(grid, items) {
-        const ids = items.map((it) => String(it.id || '')).filter(Boolean);
-        await Promise.all(ids.map(async (id) => {
-            let info = null;
-            try { info = (typeof Kazumi !== 'undefined' && Kazumi.bangumiInfo) ? await Kazumi.bangumiInfo(id) : null; } catch (e) { /* 单条失败跳过 */ }
-            if (!info) return;
+    /** 封面左下角徽标行：挂 .vod-fav-row 容器（话数徽章常驻其行首），仅当前页里
+     *  存在收藏态的条目注入 .vod-fav-badge 收藏徽标（默认塌缩隐藏，悬停时从话数
+     *  徽章右侧滑入展开）。同步执行（映射内存即得，无网络）；映射为空时零 DOM 改动。
+     *  文案对齐 records.js 的收藏标签语义（想看/在看/看过/搁置/抛弃），样式对齐
+     *  「我的」收藏卡 .rec-tag（CSS 端定义）。
+     *  mapState 可选传入外部 id→type 映射（推荐页复用徽章管线时带自己的映射）；
+     *  缺省读时间表自身的 _colStateMap。
+     *  卡片定位双口径：条目缺省按 `.bangumi-card[data-id]` 选择器定位（时间表/
+     *  推荐页的卡片 data-id 即 Bangumi subject id）；条目可带 el（jQuery 引用，
+     *  指向该卡 .vod-cover 节点）——搜索页 Kazumi 卡的 data-id 是播放源串而非
+     *  subject id、类名也是 vod-card kazumi-card，选择器双失配，复用方（search.js）
+     *  反查 subject id 后把自己定位好的封面节点直接传入，彻底绕开选择器失配。 */
+    _attachFavBadges(grid, items, mapState) {
+        const map = mapState || this._colStateMap;
+        if (!map || !map.size) return;
+        // type → [文案, 着色类]（1想看 2看过 3在看 4搁置 5抛弃，与 records.js TAG_LABEL 一致）
+        const FAV = { 1: ['想看', 'want'], 2: ['看过', 'seen'], 3: ['在看', 'watching'], 4: ['搁置', 'hold'], 5: ['抛弃', 'dropped'] };
+        items.forEach((it) => {
+            const id = String((it && (it.id || (it.subject && it.subject.id))) || '');
+            const type = id ? map.get(id) : 0;
+            if (!type) return; // 未收藏：不渲染徽标行（悬停无元素可显示）
+            const meta = FAV[type] || FAV[1];
+            // 定位：优先条目自带的 el 引用（搜索 Kazumi 卡），缺省走 data-id 选择器
+            const $card = (it && it.el && it.el.length) ? it.el : grid.find(`.bangumi-card[data-id="${id}"] .vod-cover`);
+            if (!$card.length) return;
+            // 重挂场景（FavHub 广播 / 映射重建后补挂）必须保住既有话数徽章：
+            // 行容器里的话数徽章随 remove() 一起销毁，先取 HTML、删行重建后吸回行首，
+            // 否则「详情页同步收藏 → 返回推荐页」时收藏卡片的话数徽章集体消失。
+            // .rec-eps（bangumiCard 直出/搜索卡）与 .timeline-ep-badge（异步补挂）
+            // 两种形态都要吸——二者不会并存（重挂前先归一为行内首项）。
+            const $oldEp = $card.find('.timeline-ep-badge');
+            let oldEpHtml = ($oldEp.length && $oldEp[0] && $oldEp[0].outerHTML) ? $oldEp[0].outerHTML : '';
+            if (!oldEpHtml) {
+                const $oldEps = $card.find('.rec-eps');
+                if ($oldEps.length && $oldEps[0] && $oldEps[0].outerHTML) oldEpHtml = $oldEps[0].outerHTML;
+            }
+            // 源徽章（.kazumi-badge，搜索页 Kazumi 卡行内常驻）同模式吸回：
+            // 删行重建会把行内这枚徽章连带删除，先取 outerHTML 备份，新行挂上后
+            // 与话数徽章一起回归行内（时间表/推荐页无此徽章，取空串零影响）。
+            const $oldKz = $card.find('.kazumi-badge');
+            const kzHtml = ($oldKz.length && $oldKz[0] && $oldKz[0].outerHTML) ? $oldKz[0].outerHTML : '';
+            $card.find('.vod-fav-row').remove();
+            // bangumiCard 直出的话数徽章可能直挂 .vod-cover（无行）：一并吸进行内
+            const $staleEps = $card.find('.rec-eps');
+            if ($staleEps.length && $staleEps[0] && $staleEps[0].outerHTML && !oldEpHtml) {
+                oldEpHtml = $staleEps[0].outerHTML;
+            }
+            $staleEps.remove();
+            $card.append(`<div class="vod-fav-row"><span class="vod-fav-badge vod-fav-${meta[1]}" title="Bangumi 收藏状态（在详情页修改）">${meta[0]}</span></div>`);
+            // 话数徽章/源徽章吸回行首（优先复用刚保住的既有徽章；收藏数据晚于首屏
+            // 时徽章直挂封面，同位重叠问题也在此一并吸附归行）
+            if (oldEpHtml || kzHtml) {
+                $oldEp.remove();
+                $staleEps.remove();
+                $oldKz.remove();
+                $card.find('.vod-fav-row').prepend(kzHtml + oldEpHtml);
+            }
+        });
+    },
+
+    /** 封面左下角话数徽章（bangumi-rank-badge 的对角）：完结态分两式——
+     *  已完结显示「N话」（对齐 Bangumi 搜索卡徽章口径），连载中显示
+     *  「N/总话数」（N=当前已播出话数，按每周一话从放送日推算；无总话数的条目
+     *  不显示）。整页缺总话数的条目合并成一次 bangumiInfoBatch 批量回源（30 分钟
+     *  双层缓存：前端 localStorage 逐 id + 后端磁盘逐 id，页内切换/重复开页零网络），
+     *  徽章就绪一枚挂一枚；换页/切周时由 grid 重渲染自然作废。
+     *  快捷分支：条目已带 eps/air_date 字段（推荐页趋势/榜单接口响应自带）时直接用，
+     *  整页免回源（复用方 传 itemsFull=true 声明条目完整）；时间表日历/搜索条目
+     *  无总话数的部分仍走批量补拉。 */
+    async _attachEpBadges(grid, items, itemsFull) {
+        const byId = new Map();
+        for (const it of items) {
+            const id = String((it && (it.id || (it.subject && it.subject.id))) || '');
+            if (id) byId.set(id, it);
+        }
+        // 快捷分支可就地取材的条目；其余（含 itemsFull 但条目缺 eps 的兜底）走批量
+        const direct = [];
+        const needFetch = [];
+        for (const [id, it] of byId) {
+            if (itemsFull && (Number(it.eps || it.total_episodes) || 0) > 0) direct.push(id);
+            else needFetch.push(id);
+        }
+        const infos = new Map();
+        for (const id of direct) infos.set(id, byId.get(id));
+        if (needFetch.length) {
+            let batch = null;
+            try {
+                batch = (typeof Kazumi !== 'undefined' && Kazumi.bangumiInfoBatch)
+                    ? await Kazumi.bangumiInfoBatch(needFetch)
+                    : null;
+            } catch (e) { /* 批量失败整体跳过（单条路径也已下线） */ }
+            if (batch) for (const [id, info] of Object.entries(batch)) if (info) infos.set(id, info);
+        }
+        for (const [id, info] of infos) {
             const eps = Number(info.eps || info.total_episodes) || 0;
-            if (!eps) return;
+            if (!eps) continue;
             // 已播出话数：放送日 + 7 天/话推算（clamp 到 [1, eps]）；日期缺失按全量已播
             const dateStr = String(info.date || info.air_date || '');
             const m = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
@@ -590,12 +754,24 @@ const Timeline = {
             const finished = m
                 ? Date.now() > (new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() + eps * 7 * 86400000 + 3 * 86400000)
                 : false;
+            // 已完结 → 徽章文本为总话数「12话」（与搜索卡 .rec-eps 同款）；
+            // 连载中 →「N/总话数」
             const badge = finished
-                ? '<span class="detail-progress-badge timeline-ep-badge" title="放送已完结">已完结</span>'
+                ? `<span class="detail-progress-badge timeline-ep-badge" title="放送已完结 · 共 ${eps} 话">${eps}话</span>`
                 : `<span class="detail-progress-badge timeline-ep-badge" title="已播出 ${Math.max(aired, 0)} 话 / 共 ${eps} 话">${Math.max(aired, 0)}/${eps}</span>`;
             const $card = grid.find(`.bangumi-card[data-id="${id}"] .vod-cover`);
-            if ($card.length) { $card.find('.timeline-ep-badge').remove(); $card.append(badge); }
-        }));
+            if (!$card.length) continue;
+            $card.find('.timeline-ep-badge').remove();
+            // 徽标行容器（_attachFavBadges 建 / bangumiCard 直出）：话数徽章 prepend
+            // 行首常驻，收藏徽标在其右侧（悬停滑入显形）。行内已有 .rec-eps 直出徽章
+            // （搜索响应自带 eps）时跳过补挂，避免同一行出现两枚话数徽章。
+            const $row = $card.find('.vod-fav-row');
+            if ($row.length) {
+                if (!$row.find('.rec-eps').length) $row.prepend(badge);
+            } else {
+                $card.append(badge);
+            }
+        }
     },
 };
 

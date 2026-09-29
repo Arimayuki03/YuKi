@@ -142,6 +142,34 @@ const Records = {
         await recSet('history', list);
     },
 
+    /** 通用观看进度表（不依赖收藏）：settings.watchProgress，键 'site|vodId' → progress。
+     *  所有真实播放（player.js 逐集记账）都写这里，未收藏影片也有「看到第 N 集」；
+     *  详情页进度行统一读本表（详情页旧收藏条目回退读条目 progress 字段做升级兼容）。
+     *  按 ts LRU 限 500 条（看完即走的影片占位不无限增长）。 */
+    async setWatchProgress(site, vodId, progress) {
+        if (!site || !vodId || !progress || typeof progress !== 'object') return;
+        try {
+            const s = (await window.yuki.settingsGet()) || {};
+            const map = (s.watchProgress && typeof s.watchProgress === 'object') ? s.watchProgress : {};
+            map[String(site) + '|' + String(vodId)] = { ...progress, ts: Number(progress.ts) || Date.now() };
+            const keys = Object.keys(map);
+            if (keys.length > 500) {
+                keys.sort((a, b) => (Number(map[b] && map[b].ts) || 0) - (Number(map[a] && map[a].ts) || 0));
+                for (const k of keys.slice(500)) delete map[k];
+            }
+            await window.yuki.settingsSet('watchProgress', map);
+        } catch (e) { /* 保存失败不影响播放 */ }
+    },
+
+    /** 读通用观看进度表：无记录返回 null。 */
+    async getWatchProgress(site, vodId) {
+        try {
+            const s = (await window.yuki.settingsGet()) || {};
+            const map = (s.watchProgress && typeof s.watchProgress === 'object') ? s.watchProgress : {};
+            return map[String(site) + '|' + String(vodId)] || null;
+        } catch (e) { return null; }
+    },
+
     async isFavorite(site, vodId) {
         const list = await recGet('favorites');
         return list.some((x) => String(x.site) === String(site) && String(x.vodId) === String(vodId));
@@ -267,11 +295,6 @@ function recCard(v, editable, withTags, playCountByName) {
     const isBgm = isBangumiItem(v);
     const tag = isBgm ? (v.tag || '') : normTag(v.tag);
     const progress = v.progress;
-    const progressHtml = progress && progress.totalEps
-        ? `<div class="rec-progress" title="观至第 ${progress.currentEp} 集 / 共 ${progress.totalEps} 集">
-             <div class="rec-progress-bar" style="width:${Math.min(100, Math.round(progress.percent || 0))}%"></div>
-           </div>`
-        : '';
     // 封面：Kazumi 源历史卡无源封面，先复用 Bangumi 封面缓存（T73 补拉成功的结果）
     const fileSite = String(v.site || '');
     // 直链（site='direct'）与本地/下载文件同待遇：vodId 存播放 URL，异步截帧作封面
@@ -325,8 +348,9 @@ function recCard(v, editable, withTags, playCountByName) {
     // 封面右上角排名徽章（对齐推荐页/时间表卡片：bangumi-rank-badge 金色 #N，
     // 同一 CSS 类；右上角与「我的 N★」徽章互斥——都占 right:6px 时优先排名徽章，
     // 我的评分已体现在评分里不重复）
-    const rankBadge = (isBgm && (v.bgmRank === 0 || v.bgmRank))
-        ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(v.bgmRank))}">#${escHtml(String(v.bgmRank))}</span>`
+    const rankNum = Number(v.bgmRank) || 0;
+    const rankBadge = (isBgm && rankNum >= 1)
+        ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(rankNum))}">#${escHtml(String(rankNum))}</span>`
         : '';
     const myRateNum = (v.myRate === 0 || v.myRate) ? Number(v.myRate) : 0;
     const myBadge = (isBgm && !rankBadge && myRateNum >= 1 && myRateNum <= 10)
@@ -361,10 +385,9 @@ function recCard(v, editable, withTags, playCountByName) {
         ${edit}
         <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${coverBadges}${myBadge}${rankBadge}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
-        ${isPlay ? '' : `<div class="vod-remarks">${escHtml(v.remarks || '')}</div>`}
+        ${isPlay ? '' : '<div class="vod-remarks"></div>'}
         ${epNameLine}
         ${playInfo}
-        ${progressHtml}
     </div>`;
 }
 
@@ -719,7 +742,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 grid.html(`<div class="tip-line">${(this._q || this._tag || this._src) ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
                 return;
             }
-            // 客户端分页（T39）：每页条数取本页单独设置（收藏/历史各自一项，默认 20），超过即出底部分页器
+            // 客户端分页（T39）：每页条数取本页单独设置（收藏默认 10、历史默认 24），超过即出底部分页器
             const size = await pageSizeOf(pageSizeKey);
             const pagecount = Math.ceil(list.length / size);
             this._page = Math.min(Math.max(1, this._page), pagecount);
@@ -745,18 +768,20 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             grid.html(slice.map((v) => recCard(v, editable, withTags, playCountByName)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
-            // Bangumi 卡公共评分/排名/已看话数补齐：本地镜像条目（详情页同步写入）与旧缓存
+            // Bangumi 卡公共评分/排名补齐：本地镜像条目（详情页同步写入）与旧缓存
             // 条目无 bgmScore/bgmRank 字段，按 subject_id 补拉 bangumiInfo（30 分钟缓存，与
             // 时间表徽章同模式）后回填 DOM——已有字段的卡片（远端 v3 缓存）不发请求。
-            // 已看话数（用户要求，网站数据）：收藏状态接口回传 ep_status（看到第 N 话，0=未看），
-            // 总话数取 bangumiInfo 的 eps/total_episodes——经 getBangumiCollection（带本地缓存）
-            // 单条补查后回填 .rec-eps 徽章；仅「在看/看过」等实际开看的卡片拉取（want/hold/dropped
-            // 无进度语义，免发请求）。
+            // 两个过滤坑（修复「部分 Bangumi 卡不显示评分/排名」）：
+            //  ① 托管判定原要求 v.bangumi 标志，但详情页收藏写入的本地镜像条目
+            //     （site='bangumi'）不带该标志，整批被跳过——改用与 recCard 渲染同口径
+            //     的 isBangumiItem（远端标志 OR 镜像 site 判定）。
+            //  ② 条件原为 !score && !rank（两字段都缺才补拉），只缺其一的卡同样整卡
+            //     跳过、缺的那半永远补不上——改为逐字段判定，缺哪个补哪个。
             if (storeKey === 'favorites' && typeof Kazumi !== 'undefined' && Kazumi.bangumiInfo) {
-                const pending = slice.filter((v) => v && v.bangumi
-                    && String(v.site || '') === 'bangumi'
-                    && !(v.bgmScore === 0 || v.bgmScore)
-                    && !(v.bgmRank === 0 || v.bgmRank)
+                const hasScore = (x) => (x.bgmScore === 0 || x.bgmScore);
+                const hasRank = (x) => (x.bgmRank === 0 || x.bgmRank);
+                const pending = slice.filter((v) => v && isBangumiItem(v)
+                    && (!hasScore(v) || !hasRank(v))
                     && String(v.vodId || '').match(/^\d+$/));
                 for (const item of pending) {
                     const sid = String(item.vodId);
@@ -765,8 +790,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         const score = (Number(info.score) || (info.rating && Number(info.rating.score)) || 0) || null;
                         const rank = (Number(info.rank) || (info.rating && Number(info.rating.rank)) || 0) || null;
                         if (!score && !rank) return;
-                        // 回填内存条目 + DOM（翻页/重渲染后重走补齐流程，不落盘避免污染本地存储形状）
-                        if (item.bangumi) { item.bgmScore = item.bgmScore || score; item.bgmRank = item.bgmRank || rank; }
+                        // 回填内存条目（已有字段不覆盖）+ DOM（翻页/重渲染后重走补齐流程，
+                        // 不落盘避免污染本地存储形状）
+                        if (score && !hasScore(item)) item.bgmScore = score;
+                        if (rank && !hasRank(item)) item.bgmRank = rank;
                         const $card = grid.find(`.vod-card[data-site="bangumi"][data-id="${sid}"]`);
                         if (!$card.length) return;
                         const $cover = $card.find('.vod-cover');
@@ -781,36 +808,59 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         }
                     }).catch(() => { /* 单条补查失败跳过 */ });
                 }
-                // 已看话数补齐（独立流程：查收藏状态而非番剧信息）。需同时有 token 才有意义；
+                // 已看话数徽章补齐（独立流程：查收藏状态而非番剧信息）。需同时有 token 才有意义；
                 // 无 Token/未收藏/失败静默跳过，保持卡片无集数徽章。
-                const epPending = slice.filter((v) => v && v.bangumi
-                    && String(v.site || '') === 'bangumi'
-                    && String(v.vodId || '').match(/^\d+$/)
-                    && (v.tag === 'watching' || v.tag === 'seen'));
-                for (const item of epPending) {
-                    const sid = String(item.vodId);
-                    Promise.all([
-                        Kazumi.getBangumiCollection ? Kazumi.getBangumiCollection(sid) : Promise.resolve(null),
-                        Kazumi.bangumiInfo(sid),
-                    ]).then(([col, info]) => {
-                        const watched = col ? (Number(col.ep_status) || 0) : 0;
-                        if (watched <= 0) return; // 未看/无进度：不出徽章
-                        const epsTotal = Number((info && (info.eps || info.total_episodes)) || 0);
-                        const text = epsTotal > 0 ? `${watched}/${epsTotal}` : `${watched}/?`;
-                        const $card = grid.find(`.vod-card[data-site="bangumi"][data-id="${sid}"]`);
-                        if (!$card.length) return;
-                        const $badges = $card.find('.rec-cover-badges');
-                        let $eps = $card.find('.rec-eps');
-                        if (!$eps.length && $badges.length) {
-                            $badges.append('<span class="rec-eps"></span>');
-                            $eps = $card.find('.rec-eps');
-                        }
-                        if ($eps.length) {
-                            $eps.text(text);
-                            $eps.attr('title', `已看 ${watched} 话 / 共 ${epsTotal || '?'} 话`);
-                        }
-                    }).catch(() => { /* 单条补查失败跳过 */ });
-                }
+                // 托管判定同上用 isBangumiItem：镜像条目（site='bangumi' 无标志）此前同样被跳过。
+                // tag 过滤坑（修复「有观看进度却不显示集数徽章」）：状态标签可被本地循环切换
+                // （含切回未打点的 want/hold/dropped），远端 ep_status 却仍在——tag 只是本地
+                // 记号，不该决定「有没有进度徽章」。现放开为全部托管条目查询（getBangumiCollection
+                // 走 6h 本地缓存，多这一批查询不放大请求数；ep_status=0 的本来就不出徽章）。
+                // 条目若带 bgmEpStatus（上次收藏状态查询/打点时记录的远端 ep_status），回源为
+                // null（60s 负缓存吞掉的瞬时失败/未回写打点的 6h 正缓存）时用它兜底出徽章。
+                // 预留：bgmEpStatus 当前无写入方，打点回写实际走 kazumi.js 乐观缓存路径，
+                // 回源即可出徽章；本分支仅为兜底保留。
+                const epPending = slice.filter((v) => v && isBangumiItem(v)
+                    && String(v.vodId || '').match(/^\d+$/));
+                // 并发池对齐 fillMissingCovers（queue/busy/limit + pump）：单页每张卡是
+                // getBangumiCollection+bangumiInfo 双请求，pageSizeFavorites 可设 120，
+                // 无上限时双缓存皆空的页面一瞬可达 ~240 并发，故限制为 4。
+                const epPool = { queue: epPending.slice(), busy: 0, limit: 4 };
+                const epPump = () => {
+                    while (epPool.busy < epPool.limit && epPool.queue.length) {
+                        const item = epPool.queue.shift();
+                        epPool.busy++;
+                        const sid = String(item.vodId);
+                        Promise.all([
+                            Kazumi.getBangumiCollection ? Kazumi.getBangumiCollection(sid) : Promise.resolve(null),
+                            Kazumi.bangumiInfo(sid),
+                        ]).then(([col, info]) => {
+                            let watched = col ? (Number(col.ep_status) || 0) : 0;
+                            // 回源 col 为 null（未收藏 / 60s 负缓存吞掉的瞬时失败 / 6h 正缓存未回写打点）
+                            // 时不再直接判「无进度」：远端打点记录过 ep_status 的条目用记录值兜底，
+                            // 保证刚打完点回到收藏页徽章即出现，瞬时失败不冻结徽章。
+                            if (watched <= 0 && Number(item.bgmEpStatus) > 0) watched = Number(item.bgmEpStatus);
+                            if (watched <= 0) return; // 未看/无进度：不出徽章
+                            const epsTotal = Number((info && (info.eps || info.total_episodes)) || 0);
+                            const text = epsTotal > 0 ? `${watched}/${epsTotal}` : `${watched}/?`;
+                            const $card = grid.find(`.vod-card[data-site="bangumi"][data-id="${sid}"]`);
+                            if (!$card.length) return;
+                            const $badges = $card.find('.rec-cover-badges');
+                            let $eps = $card.find('.rec-eps');
+                            if (!$eps.length && $badges.length) {
+                                $badges.append('<span class="rec-eps"></span>');
+                                $eps = $card.find('.rec-eps');
+                            }
+                            if ($eps.length) {
+                                $eps.text(text);
+                                $eps.attr('title', `已看 ${watched} 话 / 共 ${epsTotal || '?'} 话`);
+                            }
+                        }).catch(() => { /* 单条补查失败跳过 */ }).finally(() => {
+                            epPool.busy--;
+                            epPump();
+                        });
+                    }
+                };
+                epPump();
             }
             // 入场错峰：收藏/历史整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
             playCardsEnter(grid);
@@ -940,22 +990,29 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             warnToast(`已将 ${bits.join(' + ')} 标记为${tagLabel(tag)}`);
         },
 
-        /** 观看进度追踪：更新收藏条目的观看进度（仅收藏）。按 site|vodId 定位（条目级身份）。 */
-        async updateProgress(site, vodId, progress) {
-            const list = await recGet(storeKey);
-            const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
-            if (!it) return;
-            it.progress = progress; // { currentEp, totalEps, percent, ts }
-            it.ts = Date.now(); // 置顶
-            await recSet(storeKey, list);
-        },
+    /** 观看进度追踪：更新收藏条目的观看进度（仅收藏）。按 site|vodId 定位（条目级身份）。
+     *  同时写入通用进度表 watchProgress（不依赖收藏，收藏页卡片徽章与详情页共用）。
+     *  本方法在 makeRecordView 产物上，通用表函数挂 Records，直接引用而非 this。 */
+    async updateProgress(site, vodId, progress) {
+        await Records.setWatchProgress(site, vodId, progress); // 通用表必写（未收藏也有进度）
+        const list = await recGet(storeKey);
+        const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
+        if (!it) return;
+        it.progress = progress; // { currentEp, totalEps, percent, ts }
+        it.ts = Date.now(); // 置顶
+        await recSet(storeKey, list);
+    },
 
-        /** 获取收藏条目的观看进度。按 site|vodId 定位（条目级身份）。 */
-        async getProgress(site, vodId) {
-            const list = await recGet(storeKey);
-            const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
-            return it ? it.progress : null;
-        },
+    /** 获取收藏条目的观看进度。按 site|vodId 定位（条目级身份）。
+     *  优先读通用进度表（新旧条目口径统一、未收藏也有）；表里没有再回退收藏条目的
+     *  progress 字段（旧版本数据升级兼容），都没有返回 null。通用表函数挂 Records。 */
+    async getProgress(site, vodId) {
+        const wp = await Records.getWatchProgress(site, vodId);
+        if (wp) return wp;
+        const list = await recGet(storeKey);
+        const it = list.find((x) => String(x.site) === site && String(x.vodId) === vodId);
+        return it ? (it.progress || null) : null;
+    },
 
         /** 批量删除勾选项（仅本地条目；Bangumi 条目不参与删除，跳过）。 */
         async removeChecked() {

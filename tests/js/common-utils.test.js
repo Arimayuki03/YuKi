@@ -126,7 +126,7 @@ function loadCommon(extra = {}) {
     vodPlaceholder, coverFadeIn, vodCoverImg, coverChainNext, localPlayToast,
     vodCoverChain, bangumiResizeUrl, setBangumiMirrorRoot, bangumiMirrorUrl,
     isBangumiCoverUrl, bangumiCoverImg, bangumiCover, errorTextOf, bangumiCard,
-    normalizePic, fmtSize, stripHtml, toFileUrl,
+    normalizePic, fmtSize, stripHtml, toFileUrl, bangumiWebUrl,
 };`, context, { filename: 'common.js' });
     // 源码内 `function warnToast` 声明会覆盖外部同名桩（localPlayToast 直调它），
     // 加载后重绑定，让 toast 文案落到 __toasts 供断言（同 records.test.js 手法）。
@@ -858,4 +858,28 @@ test('bangumiCover：images 对象按 size 取变体，旧缓存裸 URL 走 resi
     assert.equal(bangumiCover(images, 'card'), images.common);
     assert.equal(bangumiCover(images.large, 'card'), images.common);
     assert.equal(bangumiCover(null, 'card'), '');
+});
+
+// ---------------------------------------------------------------- bangumiWebUrl（条目页跳转目标：官方/镜像双形态）
+
+test('bangumiWebUrl：默认官方 bgm.tv；跟随镜像开启走镜像站主域（根域名本身，无 bgm. 前缀）；换根域名即时生效', () => {
+    const vm = require('node:vm');
+    const ctx = loadCommon();
+    const api = {
+        bangumiWebUrl: (sid) => ctx.__api.bangumiWebUrl(sid),
+        setRoot: (root) => ctx.__api.setBangumiMirrorRoot(root),
+        // let 声明不挂 globalThis：赋值须经 VM 内脚本执行
+        setFollow: (on) => vm.runInContext(`bangumiWebFollowMirror = ${on === true}`, ctx),
+    };
+    // 默认（开关未开）：始终官方 bgm.tv
+    assert.equal(api.bangumiWebUrl('123'), 'https://bgm.tv/subject/123');
+    // 开启跟随：bgm.tv 无子域名，镜像侧对应根域名本身（实测 bangumi.vip/subject/N 可达）
+    api.setFollow(true);
+    assert.equal(api.bangumiWebUrl('123'), 'https://bangumi.vip/subject/123');
+    // 镜像根域名手动替换后同一全局即时生效
+    api.setRoot('bangumi.example');
+    assert.equal(api.bangumiWebUrl('456'), 'https://bangumi.example/subject/456');
+    // 关闭跟随：回到官方
+    api.setFollow(false);
+    assert.equal(api.bangumiWebUrl('456'), 'https://bgm.tv/subject/456');
 });

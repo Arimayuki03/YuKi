@@ -229,11 +229,10 @@ test('file-loaded 续播守卫：mpv 已自行恢复到中途（time-pos>5s）�
         if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(1200.5);
         return Promise.resolve();
     };
-    p._activeSession = { id: 60, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._activeSession = { id: 60, ready: false, pendingSeekSec: 90, itemStartMs: Date.now() };
     p._onEvent({ event: 'file-loaded' });
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(seeks, [], 'watch-later 已恢复到中途位置：不得再下发 seek 覆盖');
-    assert.equal(p._activeSession.seekApplied, true, '守卫只判定一次，后续集数不再重试');
 });
 
 test('file-loaded 续播守卫：当前位置仍在片头（≤5s）时照常应用 opEd/续播 seek', async () => {
@@ -245,7 +244,7 @@ test('file-loaded 续播守卫：当前位置仍在片头（≤5s）时照常应
         if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(0.3);
         return Promise.resolve();
     };
-    p._activeSession = { id: 61, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._activeSession = { id: 61, ready: false, pendingSeekSec: 90, itemStartMs: Date.now() };
     p._onEvent({ event: 'file-loaded' });
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(seeks, [['seek', 90, 'absolute+exact']]);
@@ -263,7 +262,7 @@ test('file-loaded 续播守卫：time-pos 属性不可用时按无恢复处理�
         assert.equal(name, 'time-pos');
         return Promise.reject(new Error('property unavailable'));
     };
-    p._activeSession = { id: 62, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    p._activeSession = { id: 62, ready: false, pendingSeekSec: 90, itemStartMs: Date.now() };
     p._onEvent({ event: 'file-loaded' });
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(seeks, [['seek', 90, 'absolute+exact']], '守卫失败必须保持 opEd/续播 seek 原有行为');
@@ -281,10 +280,10 @@ test('file-loaded 续播守卫：读 time-pos 期间会话已切换时不再对�
         }
         return Promise.resolve();
     };
-    const oldSession = { id: 63, ready: false, pendingSeekSec: 90, seekApplied: false, itemStartMs: Date.now() };
+    const oldSession = { id: 63, ready: false, pendingSeekSec: 90, itemStartMs: Date.now() };
     p._activeSession = oldSession;
     p._onEvent({ event: 'file-loaded' });
-    p._activeSession = { id: 64, ready: false, seekApplied: false }; // 新会话接管
+    p._activeSession = { id: 64, ready: false }; // 新会话接管
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(seeks, [], '旧会话的续播 seek 不得落在新会话头上');
 });
@@ -824,7 +823,7 @@ test('buildM3u(): keepRawTitle——本地文件批量入口的媒体扩展名�
     assert.ok(odd.includes('#EXTINF:-1,第2集'), '空标题仍回落第N集');
 });
 
-test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用一次，ready 照常逐次发出', async () => {
+test('原生队列逐集跳片头：每次 file-loaded 都应用 pendingSeekSec（连播各集不再从头播），ready 照常逐次发出', async () => {
     const p = Object.create(MpvPlayer.prototype);
     p._pending = new Map();
     const seeks = [];
@@ -835,15 +834,34 @@ test('原生队列首集续播：pendingSeekSec 只在首次 file-loaded 应用�
         if (args[0] === 'get_property') return Promise.resolve(0);
         return Promise.resolve();
     };
-    p._activeSession = { id: 30, ready: false, pendingSeekSec: 95.5, seekApplied: false, itemStartMs: Date.now() };
+    p._activeSession = { id: 30, ready: false, pendingSeekSec: 95.5, itemStartMs: Date.now() };
     let readyCount = 0;
     p.on('ready', () => { readyCount += 1; });
     p._onEvent({ event: 'file-loaded' });
-    p._onEvent({ event: 'file-loaded' }); // 第二集装载：不再 seek
+    p._onEvent({ event: 'file-loaded' }); // 第二集装载：同片名各集片头位置一致，逐集 seek
     await new Promise((r) => setImmediate(r)); // 守卫读 time-pos 异步返回后才 seek
-    assert.deepEqual(seeks, [['seek', 95.5, 'absolute+exact']]);
+    assert.deepEqual(seeks, [['seek', 95.5, 'absolute+exact'], ['seek', 95.5, 'absolute+exact']]);
     assert.equal(readyCount, 2); // waitForReady 依赖每次 file-loader 的 ready 事件
-    assert.equal(p._activeSession.seekApplied, true);
+});
+
+test('原生队列逐集跳片头：上一集已续播到中途时本集守卫放行（片头附近照常 seek），不残留 seekApplied 状态依赖', async () => {
+    // 回归背景：旧实现用 seekApplied 一次性标记，第 2 集起片头跳过静默失效。
+    // 新实现逐集判定：只要装载时位置仍在片头附近就 seek，无需跨集状态。
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    const seeks = [];
+    p.command = (...args) => {
+        if (args[0] === 'seek') seeks.push(args);
+        if (args[0] === 'get_property' && args[1] === 'time-pos') return Promise.resolve(0.2);
+        return Promise.resolve();
+    };
+    p._activeSession = { id: 30, ready: false, pendingSeekSec: 45, itemStartMs: Date.now() };
+    p._onEvent({ event: 'file-loaded' });
+    await new Promise((r) => setImmediate(r));
+    p._onEvent({ event: 'file-loaded' }); // 第二集：无 seekApplied 依赖，照常 seek
+    await new Promise((r) => setImmediate(r));
+    assert.equal(seeks.length, 2, '逐集判定：每集装载各 seek 一次');
+    assert.deepEqual(seeks[1], ['seek', 45, 'absolute+exact']);
 });
 
 test('ended 载荷：原生队列携带 nativeQueue/playlistPos/itemWallSec/pos/duration 供渲染层逐集记账', () => {

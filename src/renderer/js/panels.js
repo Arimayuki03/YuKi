@@ -9,7 +9,7 @@
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId,
-          applyMisansFont, localPlayToast, UIState */
+          applyMisansFont, localPlayToast, UIState, AdSkip, YukiTranslate, apiUrl */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -1623,8 +1623,22 @@ function initSettingsPanel() {
          else $('#set_watchstats').prop('checked', false);
          $('#set_simuldl').prop('checked', !!s.simulDownload); // 边下边播（默认关）
         $('#set_danmaku').prop('checked', !!s.danmakuEnable); // 自动加载弹幕（默认关）
+        // 划词翻译（默认关；回填严格按持久化值，未设置时保持默认关闭）
+        $('#set_translate_enable').prop('checked', s.translateEnable === true);
+        $('#translate_fields').toggle(s.translateEnable === true); // 主开关关闭时收起子项
+        $('#set_translate_trigger').val(s.translateTrigger || 'auto');
+        if (s.translateTarget) $('#set_translate_target').val(s.translateTarget);
+        $('#set_translate_llm_enable').prop('checked', s.translateLLMEnable === true);
+        $('#translate_llm_fields').toggle(s.translateLLMEnable === true);
+        $('#set_translate_llm_base').val(s.translateLLMBase || '');
+        $('#set_translate_llm_key').val(s.translateLLMKey || '');
+        $('#set_translate_llm_model').val(s.translateLLMModel || '');
+        $('#set_oped_skip').prop('checked', s.opEdSkip === true); // 跳过片头片尾（默认关，回填严格按持久化值）
+        $('#set_oped_save').prop('checked', s.opEdSave !== false); // 保存片头/片尾登记记录（默认开）
+        $('#oped_save_fields').toggle(s.opEdSkip === true); // 跳过片头片尾关闭时收起保存开关
         $('#set_hls_adfilter').prop('checked', !!s.hlsAdFilter); // m3u8 广告过滤（默认关）
         $('#set_anime4k').prop('checked', !!s.anime4k);
+        $('#anime4k_fields').toggle(!!s.anime4k); // 超分关闭时收起档位选择
         // 系统：关闭行为 / 隐身模式 / 缓存位置
         $('#set_closeaction').val(s.closeAction || 'tray');
         $('#set_incognito').prop('checked', !!s.incognito);
@@ -1638,11 +1652,13 @@ function initSettingsPanel() {
         $('#set_proxy_url').val(s.proxyUrl || '');
         // 代理开关严格按持久化值回填（proxyEnable === true 才开），避免旧版本/脏数据下误显示为开
         $('#set_proxy_enable').prop('checked', s.proxyEnable === true);
+        $('#proxy_fields').toggle(s.proxyEnable === true); // 代理未启用时收起地址表单
         // 系统：代理连通性测试：回填上次测试 URL
         $('#set_proxy_test_url').val(s.proxyTestUrl || '');
         // 系统：日志级别 + 定时清空日志
         $('#set_log_level').val(String(s.logLevel || 'INFO'));
         $('#set_log_autocleanup').prop('checked', s.logAutoCleanup === true);
+        $('#log_cleanup_fields').toggle(s.logAutoCleanup === true); // 未开启定时清空时收起周期输入
         $('#set_log_cleanup_days').val(s.logCleanupDays ? String(s.logCleanupDays) : '');
         refreshCacheDirLine(s.cacheDir);
         // 下载：目录展示（读持久化值，不拉起 aria2）+ 并发数回填
@@ -1822,10 +1838,108 @@ function initSettingsPanel() {
         if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         warnToast(this.checked ? '已开启自动加载弹幕' : '已关闭自动加载弹幕');
     });
+    // 划词翻译：持久化（translate-bubble.js 划词时实时读取，切开关即生效）
+    $('#set_translate_enable').on('change', function () {
+        window.yuki.settingsSet('translateEnable', this.checked);
+        $('#translate_fields').toggle(this.checked); // 关闭时收起触发/语言/LLM 子项
+        if (typeof YukiTranslate !== 'undefined' && YukiTranslate.close) YukiTranslate.close();
+        warnToast(this.checked ? '已开启划词翻译' : '已关闭划词翻译');
+    });
+    $('#set_translate_trigger').on('change', function () {
+        window.yuki.settingsSet('translateTrigger', this.value);
+    });
+    $('#set_translate_target').on('change', function () {
+        window.yuki.settingsSet('translateTarget', this.value);
+    });
+    $('#set_translate_llm_enable').on('change', function () {
+        window.yuki.settingsSet('translateLLMEnable', this.checked);
+        $('#translate_llm_fields').toggle(this.checked);
+    });
+    $('#set_translate_llm_base').on('change', function () {
+        window.yuki.settingsSet('translateLLMBase', String(this.value || '').trim());
+    });
+    $('#set_translate_llm_key').on('change', function () {
+        window.yuki.settingsSet('translateLLMKey', String(this.value || '').trim());
+    });
+    $('#set_translate_llm_model').on('change', function () {
+        window.yuki.settingsSet('translateLLMModel', String(this.value || '').trim());
+    });
+    // API Key 显隐：对齐 WebDAV 密码框惯例——遮蔽中 👁️（点击查看）、显示中 🙈（再点隐藏）
+    $('#set_translate_llm_key_eye').on('click', function () {
+        const $input = $('#set_translate_llm_key');
+        const show = $input.attr('type') === 'password';
+        $input.attr('type', show ? 'text' : 'password');
+        $(this).text(show ? '🙈' : '👁️');
+    });
+    // LLM 连通性测试：拿当前表单值（未保存也能测）走后端 /translate 探测模式
+    // （prefer=probe：只走 LLM 单通道、不 failover、不缓存），按错误分类回显
+    const LLM_TEST_ERR_LABEL = {
+        auth: '鉴权失败（API Key 无效）', bad_request: '配置不完整（需 Base URL 与模型）',
+        rate_limit: '频率受限（429）', server: '服务端错误', bad_response: '响应格式异常',
+        network: '网络不可达',
+    };
+    $('#set_translate_llm_test').on('click', async function () {
+        const $r = $('#set_translate_llm_test_result');
+        const cfg = {
+            base: $('#set_translate_llm_base').val().trim(),
+            key: $('#set_translate_llm_key').val().trim(),
+            model: $('#set_translate_llm_model').val().trim(),
+        };
+        if (!cfg.base || !cfg.model) {
+            $r.prop('hidden', false).text('请先填写 Base URL 与模型').css('color', 'var(--md-error)');
+            return;
+        }
+        const btn = this;
+        btn.disabled = true;
+        // 结果行初始 hidden：必须显式揭掉（text/css 不会改 display，曾致「点了没反应」）
+        $r.prop('hidden', false).text('测试中…').css('color', 'var(--md-on-surface-variant)');
+        try {
+            const rsp = await fetch(apiUrl('/translate'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: 'hi', to: $('#set_translate_target').val() || 'zh-CN', prefer: 'probe', llm: cfg }),
+                signal: AbortSignal.timeout(45000),
+            });
+            const data = await rsp.json().catch(() => null);
+            if (data && data.code === 0) {
+                $r.text(`✓ 连通 · ${data.provider === 'llm' ? 'LLM' : data.provider} · ${data.ms || 0}ms · 译文「${String(data.text || '').slice(0, 24)}」`).css('color', 'var(--md-primary)');
+            } else {
+                const label = LLM_TEST_ERR_LABEL[(data && data.err) || ''] || (data && data.msg) || `HTTP ${rsp.status}`;
+                $r.text(`✗ ${label}`).css('color', 'var(--md-error)');
+            }
+        } catch (e) {
+            $r.text('✗ 后端不可达（Python 服务未就绪？）').css('color', 'var(--md-error)');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+    // 跳过片头片尾：持久化（play() 起播读取；登记/自动跳过/清除入口同源守卫）
+    $('#set_oped_skip').on('change', function () {
+        window.yuki.settingsSet('opEdSkip', this.checked);
+        // 热同步播放器缓存（对齐下方 opEdSave 回调）：本地文件播放已触发过 null
+        // 哨兵现场回读时，若不同步，登记/清除入口在下次 play() 前仍按旧缓存放行/拦截
+        if (Player && Player.setOpEdSkipEnabled) Player.setOpEdSkipEnabled(this.checked);
+        $('#oped_save_fields').toggle(this.checked); // 跳过关闭时收起「保存登记记录」子开关
+        warnToast(this.checked ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
+    });
     // m3u8 广告过滤：仅持久化，addHls 时主进程读取（下一个任务生效）
     $('#set_hls_adfilter').on('change', function () {
         window.yuki.settingsSet('hlsAdFilter', this.checked);
         warnToast(this.checked ? '已开启 m3u8 广告过滤（实验性）' : '已关闭 m3u8 广告过滤');
+    });
+    // 保存片头/片尾登记记录（opEdSave）：持久化到主进程白名单；关闭时立即
+    // 清空全部已登记记录（AdSkip 存储是用户手工校准数据，不随「清理缓存」删除，
+    // 关闭开关即视为放弃校准数据），同时播放器登记入口按该开关停用（player.js）。
+    $('#set_oped_save').on('change', async function () {
+        const save = this.checked;
+        await window.yuki.settingsSet('opEdSave', save);
+        if (Player && Player.setOpEdSaveEnabled) Player.setOpEdSaveEnabled(save);
+        if (!save && typeof AdSkip !== 'undefined' && AdSkip.clearAllOpEd) {
+            const n = AdSkip.clearAllOpEd();
+            warnToast(save ? '已开启保存片头/片尾记录' : (n > 0 ? `已关闭并清除 ${n} 条片头/片尾记录` : '已关闭保存片头/片尾记录'));
+        } else {
+            warnToast(save ? '已开启保存片头/片尾记录' : '已关闭保存片头/片尾记录');
+        }
     });
     $('#set_pan_fast_path').on('change', async function () {
         const enabled = this.checked;
@@ -1883,6 +1997,7 @@ function initSettingsPanel() {
     // 开启时按资产状态提示真实可用性（着色器未下载/不完整则本次不注入）
     $('#set_anime4k').on('change', function () {
         window.yuki.settingsSet('anime4k', this.checked);
+        $('#anime4k_fields').toggle(this.checked); // 超分关闭时收起档位选择
         if (window.yuki.updatePlayerPrefs) window.yuki.updatePlayerPrefs();
         if (this.checked) {
             const a4k = _assetStatus && _assetStatus.anime4k;
@@ -1907,6 +2022,7 @@ function initSettingsPanel() {
     if (window.yuki && window.yuki.onA4kChanged) {
         window.yuki.onA4kChanged(({ enabled, mode, ready }) => {
             $('#set_anime4k').prop('checked', !!enabled);
+            $('#anime4k_fields').toggle(!!enabled);
             if (mode === 'a' || mode === 'aa' || mode === 'restore') $('#set_anime4k_mode').val(mode);
             if (enabled && ready === false) {
                 warnToast('Anime4K 着色器尚未就绪（自动下载中或下载失败），本次未生效');
@@ -1933,14 +2049,15 @@ function initSettingsPanel() {
         window.yuki.settingsSet('glass', on);
         applySkin({ glass: on });
     });
-    // 每页影片数量（T39：首页/搜索/收藏/历史各自持久化，作废渲染层缓存，下次进列表页生效）
+    // 每页影片数量（T39：首页/搜索/收藏/历史/直播/推荐各自持久化，作废渲染层缓存；
+    // 各页回到视图时比对条数变更立即重载/重渲，见各页 onViewShown/enter 与 My.enter）
     [['#set_pagesize_home', 'pageSizeHome'], ['#set_pagesize_search', 'pageSizeSearch'],
      ['#set_pagesize_fav', 'pageSizeFavorites'], ['#set_pagesize_history', 'pageSizeHistory'],
      ['#set_pagesize_live', 'pageSizeLive'], ['#set_pagesize_popular', 'pageSizePopular']].forEach(([sel, key]) => {
         $(sel).on('change', function () {
             window.yuki.settingsSet(key, this.value);
             if (typeof invalidatePageSizeCache === 'function') invalidatePageSizeCache();
-            warnToast('每页条数已保存，下次进入对应页面生效');
+            warnToast('每页条数已保存，回到对应页面即生效');
         });
     });
     // 关闭主窗口行为
@@ -1965,6 +2082,10 @@ function initSettingsPanel() {
     // CatVod源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
     $('#set_catvod_bgm_match').on('change', function () {
         window.yuki.settingsSet('catvodBgmMatch', this.checked);
+    });
+    // 代理开关：切换时仅收起/展开地址表单（真正启用仍由「保存代理」测试后生效）
+    $('#set_proxy_enable').on('change', function () {
+        $('#proxy_fields').toggle(this.checked);
     });
     // 网络代理：保存并应用（先连通性测试，通过才启用 —— 仿 Kazumi proxyConfigured 门；重启后端使 Python requests 生效）
     $('#set_proxy_save').on('click', async () => {
@@ -2351,6 +2472,7 @@ function initSettingsPanel() {
     // 定时清空日志开关 + 周期：立即生效并持久化
     $('#set_log_autocleanup').on('change', async function () {
         const enabled = this.checked;
+        $('#log_cleanup_fields').toggle(enabled); // 未开启时收起周期输入
         let days = parseInt($('#set_log_cleanup_days').val(), 10) || 0;
         if (enabled && days <= 0) { days = 7; $('#set_log_cleanup_days').val('7'); }
         try {

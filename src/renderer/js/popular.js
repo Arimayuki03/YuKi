@@ -6,8 +6,11 @@
  *   - 标签：POST /kazumi/action do=kazumiBangumiListByTag(tag,limit,offset) → {items,total}
  * 标签筛选仿 Kazumi PopularPage：下拉菜单选择预设标签，选定后服务端拉取该标签番剧。
  * 卡片复用 common.js bangumiCard；点击进二级详情页（Kazumi.openBangumiInfoPage）。
+ * 封面悬停徽章（对齐时间表页交互）：左下角话数徽章（趋势/榜单响应自带 eps/air_date，
+ * 整页免逐条回源详情）+ 收藏状态徽标（账号收藏六态 + 本地标记合并，默认隐藏，
+ * 悬停显形；复用 Timeline._attachFavBadges/_attachEpBadges 与 .vod-fav-row CSS 动画）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState, playCardsEnter */
+/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState, playCardsEnter, recGet, FavHub, Timeline */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const POPULAR_TAGS = [
@@ -28,6 +31,9 @@ const Popular = {
     _size: 24,
     _loadToken: 0, // 请求令牌（P3-16）：每次 load 自增，响应回来只认最新令牌
     _tag: '', // 当前选中标签（空=趋势/热门番组）
+    // 封面悬停徽章状态（收藏徽标 + 话数徽章，复用时间表页管线）
+    _badgesOn: false,     // 用户挂过徽章后置 true：后续 load 后自动补挂当前页
+    _colStateMap: new Map(), // subject id → 收藏 type（1想看 2看过 3在看 4搁置 5抛弃）
 
     init() {
         if (this._inited) return;
@@ -41,6 +47,10 @@ const Popular = {
                 Kazumi.openBangumiInfoPage(id);
             }
         });
+        // 订阅收藏变更：详情页/收藏页改状态后重读映射并刷新当前网格徽标
+        if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
+            this._unsubFav = FavHub.onChanged(() => this.refreshBadges());
+        }
         const tagSelect = $('#popular-tags');
         tagSelect.html('<option value="">热门番组</option>'
             + POPULAR_TAGS.map((t) => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join(''));
@@ -188,7 +198,7 @@ const Popular = {
         const size = await pageSizeOf('pageSizePopular');
         // 与后端单次拉取上限一致（≤120）：趋势接口单页钳制 ≤50、标签搜索单页 ≤100，
         // 超出部分由后端翻页聚合补足（页间限速防风控），过大的设置值在此钳到 120。
-        return size > 0 ? Math.min(size, 120) : 20;
+        return size > 0 ? Math.min(size, 120) : 36;
     },
 
     _setTagSelect(tag) {
@@ -200,7 +210,7 @@ const Popular = {
     _renderGrid() {
         const grid = $('#popular-grid').empty();
         if (!this._items.length) {
-            // 空态引导：多为网络无法访问 Bangumi，指引开启镜像并附隐私说明
+            // 空态引导：多为网络无法访问 Bangumi，落到网络/镜像引导空态
             grid.html(bangumiNetGuide());
             return;
         }
@@ -209,6 +219,45 @@ const Popular = {
         fitVodTitles(grid);
         // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
         playCardsEnter(grid);
+        this._attachBadges(grid);
+    },
+
+    // ---------------------------------------------------------------- 封面悬停徽章
+
+    /** 挂当前网格的封面徽章：话数徽章常驻 + 收藏徽标行（Timeline._attachFavBadges，
+     *  徽标默认塌缩隐藏、悬停显形）+ 话数徽章（_attachEpBadges itemsFull 快捷分支——趋势/榜单响应
+     *  自带 eps/air_date，整页免逐条回源）。首次进入异步重建收藏映射后补挂。 */
+    _attachBadges(grid) {
+        if (typeof Timeline === 'undefined' || !Timeline._attachFavBadges) return; // 沙箱/时间表缺席降级
+        const gridEl = grid || $('#popular-grid');
+        const items = this._items;
+        Timeline._attachFavBadges(gridEl, items, this._colStateMap);
+        Timeline._attachEpBadges(gridEl, items, true).catch(() => { /* 徽章补齐失败不外溢 */ });
+        if (!this._badgesOn) {
+            this._badgesOn = true;
+            this._ensureColState().catch(() => { /* 收藏映射重建失败静默 */ });
+        }
+    },
+
+    /** 重建收藏状态映射（账号收藏六态 + 本地收藏合并）并刷新当前网格徽标。
+     *  复用 Timeline.getColStateMap 共享缓存（内存 5min + 持久 30min + 网络）——
+     *  与时间表/搜索页共享同一份账号收藏数据，各页面间零重复请求；
+     *  本地标记随 _loadColSets 每次重读，账号态优先。 */
+    async _ensureColState() {
+        const map = (typeof Timeline !== 'undefined' && Timeline.getColStateMap)
+            ? await Timeline.getColStateMap()
+            : new Map();
+        this._colStateMap = map;
+        // 映射到手补挂当前网格的收藏徽标行（_items 已换页则 id 失配，自然零命中）
+        if (typeof Timeline !== 'undefined' && Timeline._attachFavBadges) {
+            Timeline._attachFavBadges($('#popular-grid'), this._items, map);
+        }
+    },
+
+    /** 收藏变更后刷新徽标：重读映射并补挂当前网格（FavHub 订阅与 enter 调用）。 */
+    async refreshBadges() {
+        if (!this._badgesOn) return;
+        await this._ensureColState();
     },
 
     _renderPager() {

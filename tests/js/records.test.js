@@ -50,7 +50,7 @@ function loadRecords(settings) {
     };
     context.globalThis = context;
     vm.createContext(context);
-    vm.runInContext(`${source}\n;globalThis.__Records = Records; globalThis.__recCard = recCard; globalThis.__fmtDur = fmtDur; globalThis.__tagLabel = tagLabel; globalThis.__normTag = normTag; globalThis.__makeRecordView = makeRecordView; globalThis.__genUid = genUid; globalThis.__ensureRecUids = ensureRecUids; globalThis.__mergeExtraRecords = mergeExtraRecords;`,
+    vm.runInContext(`${source}\n;globalThis.__Records = Records; globalThis.__recCard = recCard; globalThis.__fmtDur = fmtDur; globalThis.__tagLabel = tagLabel; globalThis.__normTag = normTag; globalThis.__isBangumiItem = isBangumiItem; globalThis.__makeRecordView = makeRecordView; globalThis.__genUid = genUid; globalThis.__ensureRecUids = ensureRecUids; globalThis.__mergeExtraRecords = mergeExtraRecords; globalThis.__FavoritesView = Favorites;`,
         context, { filename: 'records.js' });
     return context;
 }
@@ -359,6 +359,89 @@ test('recCard：myRate 1-10 渲染「我的 N★」徽章，缺省/越界不渲�
     assert.ok(!plain.includes('bangumi-myrate-badge'), '非 Bangumi 卡不渲染徽章');
 });
 
+test('recCard：Bangumi 收藏卡 bgmScore/bgmRank 首渲展示（评分拼日期行、排名挂封面右上）', () => {
+    const { __recCard } = loadRecords({});
+    // 远端账号收藏卡：评分拼进日期行行首
+    const fav = __recCard({ site: 'bangumi', vodId: '9', name: '番剧', tag: 'want', bangumi: true, bgmScore: 7.3, ts: 1700000000000 }, true, true, {});
+    assert.ok(fav.includes('rec-playinfo-date'), '收藏卡渲染日期行');
+    assert.ok(fav.match(/rec-playinfo-date[^>]*>⭐7\.3 · /), '评分拼在日期行行首');
+    // 本地镜像卡同口径
+    const mirror = __recCard({ site: 'bangumi', vodId: '11', name: '番剧3', tag: 'want', bangumiId: '11', uid: 'u9', bgmScore: 6, ts: 1700000000000 }, true, true, {});
+    assert.ok(mirror.match(/rec-playinfo-date[^>]*>⭐6 · /), '镜像卡评分同样拼日期行');
+    // 排名徽章挂封面右上
+    const ranked = __recCard({ site: 'bangumi', vodId: '21', name: '番剧', tag: 'want', bangumi: true, bgmRank: 42 }, true, true, {});
+    assert.ok(ranked.includes('bangumi-rank-badge'), '有排名应渲染徽章');
+    assert.ok(ranked.includes('#42'), '徽章文案 #42');
+    // 排名存在时「我的 N★」让位（同一 right:6px 位置）
+    const both = __recCard({ site: 'bangumi', vodId: '22', name: '番剧2', tag: 'want', bangumi: true, bgmRank: 5, myRate: 8 }, true, true, {});
+    assert.ok(both.includes('bangumi-rank-badge'), '排名优先渲染');
+    assert.ok(!both.includes('bangumi-myrate-badge'), '排名与我的评分互斥');
+    // rank=0/缺失不渲染
+    for (const bad of [undefined, 0]) {
+        const html = __recCard({ site: 'bangumi', vodId: '23', name: '番剧3', tag: 'want', bangumi: true, bgmRank: bad }, true, true, {});
+        assert.ok(!html.includes('bangumi-rank-badge'), `bgmRank=${bad} 不渲染徽章`);
+    }
+    // 无评分不出 ⭐；非 Bangumi 卡带 bgmScore 也不渲染
+    const noScore = __recCard({ site: 'bangumi', vodId: '13', name: '番剧4', tag: 'want', bangumi: true, ts: 1700000000000 }, true, true, {});
+    assert.ok(!noScore.includes('⭐'), '无评分不渲染评分');
+    const plain = __recCard({ site: 'cspby', vodId: 'v2', name: '普通收藏', tag: 'want', uid: 'u3', bgmScore: 5, ts: 1700000000000 }, true, true, {});
+    assert.ok(!plain.includes('⭐5'), '非 Bangumi 卡不渲染评分');
+});
+
+test('评分/排名补齐：镜像条目（site=bangumi 无 bangumi 标志）也补拉，且缺哪个补哪个', async () => {
+    // makeRecordView render 的补齐链路需要 DOM/jQuery；此处直接验证过滤口径与回填语义
+    // 的等价逻辑（pending filter + 回填条件）与 records.js 内联实现同构，防回归口径漂移。
+    const { loadRecords: _l } = {};
+    const ctx = loadRecords({});
+    const isBangumiItem = ctx.__isBangumiItem;
+    assert.ok(isBangumiItem, '应导出 isBangumiItem');
+    // ① 镜像条目（详情页收藏写入形态）按 Bangumi 托管判定通过——修复点①
+    const mirror = { site: 'bangumi', vodId: '123', name: '某番', bangumiId: '123', tag: 'want', ts: 1 };
+    assert.ok(isBangumiItem(mirror), '镜像条目（无 bangumi 标志）判定为 Bangumi 托管');
+    // ② 逐字段判定：只缺 rank / 只缺 score 的条目均应进入补拉集合——修复点②
+    const hasScore = (x) => (x.bgmScore === 0 || x.bgmScore);
+    const hasRank = (x) => (x.bgmRank === 0 || x.bgmRank);
+    const needFetch = (v) => isBangumiItem(v) && (!hasScore(v) || !hasRank(v)) && /^\d+$/.test(String(v.vodId || ''));
+    assert.ok(needFetch({ ...mirror }), '两字段全缺：需补拉');
+    assert.ok(needFetch({ ...mirror, bgmScore: 7 }), '只有 rank 缺：需补拉（旧逻辑跳过）');
+    assert.ok(needFetch({ ...mirror, bgmRank: 42 }), '只有 score 缺：需补拉（旧逻辑跳过）');
+    assert.ok(!needFetch({ ...mirror, bgmScore: 7, bgmRank: 42 }), '两字段全有：不补拉');
+    assert.ok(!needFetch({ ...mirror, vodId: 'kazumi-x' }), '非数字 vodId：不补拉');
+    assert.ok(!needFetch({ site: 'cspby', vodId: '1', name: '普通收藏' }), '非 Bangumi 条目：不补拉');
+});
+
+test('已看话数徽章补齐：tag 不再过滤（want/hold 也查询），bgmEpStatus 兜底负缓存瞬时失败', async () => {
+    const ctx = loadRecords({});
+    const isBangumiItem = ctx.__isBangumiItem;
+    const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/records.js'), 'utf8');
+    // 与 records.js 内联实现同构的过滤与兜底逻辑（防口径漂移）：
+    const epNeedFetch = (v) => v && isBangumiItem(v) && /^\d+$/.test(String(v.vodId || ''));
+    // 修复点①：tag 只是本地记号，不决定徽章有无——所有状态都查询（旧逻辑仅 watching/seen）
+    for (const tag of ['want', 'watching', 'seen', 'hold', 'dropped']) {
+        const item = { site: 'bangumi', vodId: '9', name: '番', tag, bangumi: true, ts: 1 };
+        assert.ok(epNeedFetch(item), `tag=${tag} 的 Bangumi 卡应进入已看话数补拉（tag 过滤已放开）`);
+    }
+    // 修复点②：回源 col=null（60s 负缓存吞掉的瞬时失败/未回写打点的 6h 正缓存）时，
+    // 带 bgmEpStatus 的条目仍用记录值兜底出徽章；无记录值保持无徽章
+    const watchedOf = (col, item) => {
+        let watched = col ? (Number(col.ep_status) || 0) : 0;
+        if (watched <= 0 && Number(item.bgmEpStatus) > 0) watched = Number(item.bgmEpStatus);
+        return watched;
+    };
+    assert.equal(watchedOf({ ep_status: 5 }, {}), 5, '正常回源：用远端 ep_status');
+    assert.equal(watchedOf(null, { bgmEpStatus: 7 }), 7, 'null 回源 + bgmEpStatus 记录：兜底 7');
+    assert.equal(watchedOf(null, {}), 0, 'null 回源无记录：不出徽章');
+    assert.equal(watchedOf({ ep_status: 0 }, { bgmEpStatus: 3 }), 3, 'ep_status=0 且有记录：兜底 3');
+    assert.equal(watchedOf({ ep_status: 2 }, { bgmEpStatus: 9 }), 2, '回源有值优先于记录值（远端为准）');
+    // 源码级契约断言：bgmEpStatus 兜底分支必须仍存在于 records.js 源码中（防源码删除后
+    // 本用例的同构复制品静默失去对应物）；当前该分支无写入方，属预留兜底（打点回写走
+    // kazumi.js 乐观缓存路径），删除前需先在本文件同步更新契约。
+    assert.ok(
+        source.includes('bgmEpStatus') && source.includes('watched = Number(item.bgmEpStatus)'),
+        'records.js 源码应保留 bgmEpStatus 兜底分支（预留，无写入方）'
+    );
+});
+
 test('recCard：带评分按钮时仍无 rec-del/rec-edit，按钮 title 转义安全', () => {
     const { __recCard } = loadRecords({});
     const bgm = __recCard({ site: 'bangumi', vodId: '5', name: '<img src=x onerror=1>', tag: 'want', bangumi: true, myRate: 7 }, true, true, {});
@@ -424,4 +507,70 @@ test('makeRecordView：来源筛选 _src 仅在收藏视图生效，历史视图
     // 收藏视图：_src 挂在视图上，catvod=非 Bangumi、bangumi=Bangumi 托管（与 recCard isBgm 同口径）
     const favView = ctx.__makeRecordView('view-favorites', 'favorites', 'x', true, true, 'pageSizeFavorites');
     assert.equal(String(favView._src), '', '收藏视图 _src 默认全部');
+});
+
+// ---------------------------------------------------------------- 通用观看进度表（watchProgress，不依赖收藏）
+
+test('setWatchProgress/getWatchProgress：通用表写入与读取（未收藏影片也有进度）', async () => {
+    const settings = {};
+    const ctx = loadRecords(settings);
+    await ctx.__Records.setWatchProgress('site-a', 'v1', { currentEp: 3, totalEps: 12, percent: 25 });
+    const p = await ctx.__Records.getWatchProgress('site-a', 'v1');
+    assert.equal(p.currentEp, 3);
+    assert.equal(p.totalEps, 12);
+    assert.ok(p.ts > 0, '缺省 ts 自动补 Date.now()');
+    assert.equal(await ctx.__Records.getWatchProgress('site-a', 'v-none'), null, '无记录返回 null');
+});
+
+test('setWatchProgress：非法入参（缺 site/vodId/progress 非对象）静默拒绝', async () => {
+    const settings = {};
+    const ctx = loadRecords(settings);
+    await ctx.__Records.setWatchProgress('', 'v1', { currentEp: 1 });
+    await ctx.__Records.setWatchProgress('site-a', '', { currentEp: 1 });
+    await ctx.__Records.setWatchProgress('site-a', 'v1', null);
+    await ctx.__Records.setWatchProgress('site-a', 'v1', 'bad');
+    assert.equal(settings.watchProgress, undefined, '全部拒绝，不建表');
+});
+
+test('setWatchProgress：LRU 上限 500 条，超出按 ts 淘汰最旧', async () => {
+    const settings = {};
+    const ctx = loadRecords(settings);
+    for (let i = 0; i < 505; i++) {
+        await ctx.__Records.setWatchProgress('s', `v${i}`, { currentEp: 1, ts: 1000 + i });
+    }
+    const map = settings.watchProgress;
+    assert.equal(Object.keys(map).length, 500);
+    assert.equal(map['s|v0'], undefined, '最旧的 v0 被淘汰');
+    assert.ok(map['s|v504'], '最新的 v504 保留');
+});
+
+test('updateProgress：未收藏条目进度写入通用表（核心语义：不依赖收藏）', async () => {
+    const settings = { favorites: [] }; // 空收藏
+    const ctx = loadRecords(settings);
+    await ctx.__FavoritesView.updateProgress('site-a', 'v1', { currentEp: 2, totalEps: 10, percent: 20 });
+    const p = await ctx.__Records.getWatchProgress('site-a', 'v1');
+    assert.ok(p && p.currentEp === 2, '未收藏也写入通用表');
+});
+
+test('updateProgress：已收藏条目双写（通用表 + 收藏条目 progress 字段向后兼容）', async () => {
+    const settings = { favorites: [{ uid: 'u1', site: 'site-a', vodId: 'v1', name: '片 A', tag: 'watching', ts: 1 }] };
+    const ctx = loadRecords(settings);
+    await ctx.__FavoritesView.updateProgress('site-a', 'v1', { currentEp: 4, totalEps: 12, percent: 33 });
+    const wp = await ctx.__Records.getWatchProgress('site-a', 'v1');
+    assert.ok(wp && wp.currentEp === 4, '通用表已写');
+    assert.equal(settings.favorites[0].progress.currentEp, 4, '收藏条目 progress 字段镜像保留（旧版收藏页徽章兼容）');
+});
+
+test('getProgress：优先读通用表；未命中回退收藏条目 progress 字段（旧数据升级兼容）', async () => {
+    const settings = {
+        watchProgress: { 'site-a|v1': { currentEp: 9, totalEps: 12, percent: 75, ts: 2 } },
+        favorites: [{ uid: 'u1', site: 'site-a', vodId: 'v2', name: '旧数据片', tag: 'watching', ts: 1, progress: { currentEp: 3, totalEps: 12, percent: 25 } }],
+    };
+    const ctx = loadRecords(settings);
+    const favView = ctx.__makeRecordView('view-favorites', 'favorites', 'x', true, true, 'pageSizeFavorites');
+    const hit = await favView.getProgress('site-a', 'v1');
+    assert.equal(hit.currentEp, 9, '通用表优先');
+    const legacy = await favView.getProgress('site-a', 'v2');
+    assert.equal(legacy.currentEp, 3, '通用表未命中回退收藏条目字段');
+    assert.equal(await favView.getProgress('site-a', 'v-none'), null);
 });

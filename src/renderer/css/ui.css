@@ -91,6 +91,10 @@
     /* ── 噪点纹理（feTurbulence，克制使用；html::before 固定层承载） ── */
     --noise-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
     --noise-opacity:               0.03;
+
+    /* ── 滚动条（可见滚动区的主题化样式；浅色：深灰半透明，悬停加深） ── */
+    --scrollbar-thumb:             rgba(17,17,20,0.22);
+    --scrollbar-thumb-hover:       rgba(17,17,20,0.40);
 }
 
 /* 深色变量：由 JS 按明暗模式挂 html.dark（支持强制深/浅色，见 common.js applySkin） */
@@ -136,6 +140,10 @@ html.dark {
         radial-gradient(1100px 500px at 85% -10%, color-mix(in srgb, var(--md-primary) 6%, transparent), transparent 60%),
         linear-gradient(180deg, #101116 0%, #0B0C0F 100%);
     --noise-opacity:               0.05;
+
+    /* 滚动条（深色：浅白半透明，悬停加深） */
+    --scrollbar-thumb:             rgba(235,236,240,0.22);
+    --scrollbar-thumb-hover:       rgba(235,236,240,0.40);
 }
 
 /* 界面缩放与字体大小改为数值自定义（设置 → 外观，带上下限）：
@@ -199,6 +207,27 @@ body.has-wallpaper::after { display:none; }
 
 /* 文字选区高亮随主题 */
 ::selection { background:color-mix(in srgb, var(--md-primary) 30%, transparent); }
+
+/* ===== 滚动条主题化（仅作用于「可见滚动区」——主视图/弹窗体等刻意隐藏滚动条的
+   区域已在下方各自规则中置 0/none，按源码顺序/特异性覆盖此处全局规则）：
+   8px 细条 + 圆角 + 半透明滑块（浅色深灰/深色浅白，随 html.dark 切换），
+   悬停加深给出可拖拽反馈；轨道透明不占视觉。只用 ::-webkit-scrollbar 一套机制
+   ——Chromium 121+ 起标准属性 scrollbar-width/color 非 auto 时会整体禁用
+   webkit 伪元素样式，二者混用会让圆角/hover 失效；本应用为纯 Electron 无
+   Firefox 目标。html 上声明 color-scheme 令原生滚动区（select 弹层等）同步
+   深浅色，避免深色模式下白条突兀。 ===== */
+html { color-scheme: light; }
+html.dark { color-scheme: dark; }
+::-webkit-scrollbar { width:8px; height:8px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb {
+    background:var(--scrollbar-thumb);
+    border-radius:var(--radius-pill);
+    border:2px solid transparent;
+    background-clip:padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color:var(--scrollbar-thumb-hover); }
+::-webkit-scrollbar-corner { background:transparent; }
 
 /* Content body */
 .app-body {
@@ -752,7 +781,7 @@ body.frameless #top-drag-strip {
     transition:left var(--dur-base) var(--ease), right var(--dur-base) var(--ease);
 }
 /* 展开态：从侧栏右边缘开始到右侧边缘 */
-body.frameless #top-drag-strip { left:190px; right:0; }
+body.frameless #top-drag-strip { left:160px; right:0; }
 /* 收缩态：侧栏 64px */
 body.frameless.nav-collapsed #top-drag-strip { left:64px; }
 /* 系统标题栏模式：全宽覆盖 */
@@ -789,7 +818,7 @@ body:not(.frameless) #top-drag-strip { display:none; }
 body.frameless .view { padding-top:48px; }
 
 #main-nav {
-    flex:0 0 190px;
+    flex:0 0 160px;
     display:flex; flex-direction:column; gap:4px;
     padding:48px 12px 16px; /* 顶部内边距与右侧 .view 同步，确保首项与右侧内容顶部对齐 */
     background:transparent;
@@ -1261,17 +1290,22 @@ body.frameless #view-detail { padding-top:0 !important; }
    不能落到 #detail-body——否则会叠进按钮与封面的既有间距 */
 #view-detail > .back-btn { margin-top:48px; }
 .back-btn { margin-bottom:18px; }
-.detail-head { display:grid; grid-template-columns:minmax(260px, 360px) minmax(0, 1fr); gap:28px; margin-bottom:20px; align-items:stretch; }
-/* .detail-cover 与 .detail-hero-cover 是同一元素（grid 左列）。aspect-ratio 锚定
-   容器高度与列宽的比例、不依赖 img 加载：此前容器高度可被加载完成的封面原图
-   （large ~600px+）撑高，行高跳变把右栏「开始观看」操作行（margin-top:auto）
-   随封面加载时机整体下移。容器高度确定后 img height:100% 只是填充，不再回流。 */
-.detail-cover { min-width:0; aspect-ratio:3 / 4; }
-.detail-hero-cover { position:relative; min-height:360px; border-radius:var(--radius-lg); overflow:hidden; background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); box-shadow:var(--shadow-md); }
+.detail-head { display:grid; grid-template-columns:minmax(200px, 360px) minmax(0, 1fr); gap:28px; margin-bottom:20px; align-items:stretch; }
+/* .detail-cover 与 .detail-hero-cover 是同一元素（grid 左列）。aspect-ratio:3/4
+   锚定封面比例，但左列必须排除出行高拉伸（align-self:start）：网格行高由右栏
+   内容（文字换行/统计区）确定后，stretch 会让 aspect-ratio 把「行高 × 3/4」反推
+   成横向 transferred size——盖过 minmax(200px,360px) 轨道宽度，封面越界压住
+   右侧信息卡（窗口拉伸再压缩后必现）。start 对齐后封面高度只由自身轨道宽按
+   3:4 推导，比例恒定且永不越界；右栏（.detail-hero-info）保持 stretch 独占行高。 */
+.detail-cover { min-width:0; aspect-ratio:3 / 4; align-self:start; }
+/* min-height 不再设置（含各断点）：任何 min-height 都会被 aspect-ratio 反推成
+   横向越界宽度（360px 高 → 270px 宽 > 200px 轨道）；封面高一律 = 轨道宽 × 4/3，
+   宽轨（360px）下 480px 高不小于旧 min-height 观感 */
+.detail-hero-cover { position:relative; border-radius:var(--radius-lg); overflow:hidden; background:var(--md-surface-container-high); border:1px solid var(--md-outline-variant); box-shadow:var(--shadow-md); }
 .detail-cover img { width:100%; height:100%; min-height:0; object-fit:cover; border-radius:inherit; display:block; opacity:0; transition:opacity var(--dur-slow) var(--ease); }
 .detail-cover img.landscape { object-fit:contain; background:var(--md-surface-container-high); }
 .detail-info { flex:1; min-width:0; }
-.detail-hero-info { display:flex; flex-direction:column; padding:26px 30px; gap:4px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg); background:var(--md-surface-container); box-shadow:var(--shadow-sm); }
+.detail-hero-info { display:flex; flex-direction:column; padding:26px 30px; gap:4px; min-width:0; border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg); background:var(--md-surface-container); box-shadow:var(--shadow-sm); }
 .detail-kicker, .detail-section-kicker { color:var(--md-primary); font-size:11px; font-weight:700; letter-spacing:1.2px; line-height:16px; }
 .detail-title { font-size:clamp(26px, 3vw, 40px); line-height:1.18; letter-spacing:-.5px; font-weight:700; margin:6px 0 10px; overflow-wrap:anywhere; text-wrap:balance; }
 .detail-meta { font-size:14px; line-height:22px; color:var(--md-on-surface-variant); margin-bottom:8px; }
@@ -1297,6 +1331,14 @@ body.frameless #view-detail { padding-top:0 !important; }
 /* 收藏人数行（想看/在看/看过）：hero 统计区底部整行 */
 .detail-stat-collections { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px 16px; font-size:12px; color:var(--md-on-surface-variant); }
 .detail-col-item { display:inline-flex; align-items:center; gap:4px; }
+/* 观看进度条（方案 C）：统计区底部整行（Bangumi）或播放信息下方独立行（CatVod，
+   .detail-local-progress 非 grid 子项，grid-column 声明对普通流无副作用）。
+   行布局与 .detail-stat-collections（想看/在看/看过）一致：行内流式、行宽即内容宽——
+   track 不再 flex:1 占满整行，改为固定 260px（与收藏人数行视觉宽度一致），文案紧随其后 */
+.detail-watch-progress { grid-column:1 / -1; display:flex; align-items:center; gap:8px; min-width:0; margin-top:2px; width:fit-content; max-width:100%; }
+.detail-watch-progress-track { width:260px; max-width:60vw; height:4px; border-radius:2px; background:color-mix(in srgb, var(--md-on-surface) 10%, transparent); overflow:hidden; }
+.detail-watch-progress-fill { height:100%; width:0%; border-radius:2px; background:var(--md-primary); transition:width var(--dur-slow) var(--ease); }
+.detail-watch-progress-text { font-size:12px; color:var(--md-on-surface-variant); white-space:nowrap; }
 /* 封面左下角进度徽章（综合排名徽章的对角）：看到 N/M 或 已完结 */
 .detail-progress-badge { position:absolute; left:6px; bottom:6px; z-index:2; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; color:#F2F1EB; background:rgba(0,0,0,.62); backdrop-filter:blur(2px); }
 .detail-score-empty { color:var(--md-on-surface-variant); font-size:12px; }
@@ -1311,27 +1353,57 @@ body.frameless #view-detail { padding-top:0 !important; }
    不再溢出右缘把最后一个按钮裁掉 */
 .detail-hero-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:auto; padding-top:2px; }
 .detail-hero-actions .md-btn { flex:0 0 auto; }
-/* 收藏单按钮（内置于操作行）：状态文案 + ▾ 箭头同一按钮，六态菜单向上展开——
-   菜单落在 hero 卡片内部区域，不跨卡片边界，不会被下方吸顶页签栏遮挡 */
+/* 收藏单按钮（内置于操作行）：状态图标 + 状态文案同一按钮（图标在文字左侧），
+   六态菜单向上展开——菜单落在 hero 卡片内部区域，不跨卡片边界，不会被下方吸顶页签栏遮挡 */
 .detail-col-wrap { position:relative; display:inline-flex; align-items:center; gap:8px; }
-/* 箭头与文案同字号（不再是 10px 小角标）；按钮加宽 padding 保证「未收藏 ▾」完整显示 */
+/* 按钮加宽 padding 保证「[图标]未收藏」完整显示 */
 #detail-col-current { padding:0 16px; gap:7px; }
-#detail-col-current .detail-col-caret { font-size:16px; line-height:1; opacity:.9; transform:translateY(-1px); margin-left:2px; }
+/* 状态图标（SVG，currentColor 随按钮着色）：DOM 序在文字之前（文字左侧），
+   14px 与 13px 文字视觉同高；六态菜单按钮内 13px 更紧凑 */
+.detail-col-state-svg { width:14px; height:14px; flex:none; fill:currentColor; }
+/* 评分/吐槽按钮批注笔图标：与收藏状态图标同规格（文字左侧 14px，currentColor） */
+.detail-rate-svg { width:14px; height:14px; flex:none; fill:currentColor; }
 #detail-col-current.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
 /* width:max-content：绝对定位菜单默认 shrink-to-fit 会被包含块（按钮自身宽度）
    压窄，三列按钮挤到裁字——显式按内容取宽，按钮完整展示 */
 .detail-col-menu { position:absolute; left:0; bottom:calc(100% + 8px); z-index:80; width:max-content; padding:8px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); background:var(--md-surface-container-high); box-shadow:var(--shadow-lg); white-space:nowrap; }
 .detail-col-menu .kazumi-col-btns { display:grid; grid-template-columns:repeat(3, auto); gap:6px; }
 .detail-col-menu .kazumi-col-btn { white-space:nowrap; height:32px; font-size:12.5px; padding:0 12px; }
+.detail-col-menu .detail-col-state-svg, .detail-col-menu .kazumi-col-btn .detail-col-state-svg { width:13px; height:13px; }
 /* 本地收藏单按钮（CatVod 源，Bangumi 同款交互）：复用上方 wrap/menu/菜单按钮全套样式，
-   仅扩宽 padding 让「未收藏 ▾」完整显示（同 #detail-col-current 口径） */
+   仅扩宽 padding 让「[图标]未收藏」完整显示（同 #detail-col-current 口径） */
 #detail-local-col-current { padding:0 16px; gap:7px; }
-#detail-local-col-current .detail-col-caret { font-size:16px; line-height:1; opacity:.9; transform:translateY(-1px); margin-left:2px; }
 #detail-local-col-current.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
-.detail-col-progress { flex:none; }
-/* 时间表卡片封面左下角话数徽章：复用 .detail-progress-badge（absolute 定位），
-   .vod-cover 本身已 position:relative（2505 行既有规则），此处仅微调内边距观感 */
-.vod-cover .timeline-ep-badge { left:6px; bottom:6px; }
+/* 时间表/推荐卡片封面左下角话数徽章：复用 .detail-progress-badge 的绝对定位
+   （.vod-cover 本身已 position:relative，2505 行既有规则），仅在本作用域覆盖大小——
+   对齐「我的」收藏卡集数徽章 .rec-eps（紧凑内边距 1px 7px + 7px 小圆角 + 10.5px），
+   字体不加粗（用户要求；详情页封面的 .detail-progress-badge 原样不受影响） */
+.vod-cover .timeline-ep-badge { left:6px; bottom:6px; padding:1px 7px; border-radius:7px; font-size:10.5px; font-weight:400; }
+/* 时间表/推荐卡片封面左下角徽标行：话数徽章常驻 + 收藏徽标悬停显形。
+   · 行容器绝对定位于左下角（bangumi-rank-badge 对角），只做横向 flex 收纳；
+     话数徽章在行内改走静态流式布局（.vod-fav-row 内解除 .detail-progress-badge
+     的 absolute 定位），行内顺序 = DOM 顺序 = [话数徽章][收藏徽标]，
+     收藏徽标天然出现在话数徽章右侧；
+   · 行本体常驻可见（pointer-events:none 不拦卡片点击）；只有收藏徽标默认
+     宽度塌缩 + 左移 8px「藏」进话数徽章背后，悬停卡片时展开滑出——
+     「从话数徽章右边钻出来」。只动 transform/opacity/max-width，不触发布局。 */
+.vod-fav-row { position:absolute; left:6px; bottom:6px; z-index:2; display:flex; align-items:center; gap:4px; max-width:calc(100% - 12px); pointer-events:none; }
+.vod-fav-row .timeline-ep-badge { position:static; left:auto; bottom:auto; flex:none; }
+/* 容器 none 让徽章行与间隙不拦截卡片点击；但行内徽章自带悬停 title（话数/收藏
+   状态说明），必须显式恢复 auto——pointer-events 可继承，否则命中测试穿透到
+   下层封面 img（无 title），悬停徽章时气泡永不出现。徽章本身无点击行为，auto
+   不影响「点卡片进详情」（事件仍冒泡到卡片）。 */
+.vod-fav-row .rec-eps, .vod-fav-row .vod-fav-badge, .vod-fav-row .kazumi-badge, .vod-fav-row .timeline-ep-badge { pointer-events:auto; }
+/* 收藏徽标视觉对齐「我的」收藏卡 .rec-tag：radius-sm 小圆角、10.5px 不加粗、
+   半透明黑底米白字+磨砂（显形态 padding:1px 8px 同款）；塌缩态 padding
+   一并归零避免空胶囊占位。 */
+.vod-fav-badge { overflow:hidden; white-space:nowrap; max-width:0; padding:0; border-radius:var(--radius-sm); font-size:10.5px; font-weight:400; color:#F2F1EB; background:rgba(0,0,0,.55); backdrop-filter:blur(2px); transform:translateX(-8px); opacity:0; transition:transform var(--dur-base) var(--ease), max-width var(--dur-base) var(--ease), opacity var(--dur-base) var(--ease), padding var(--dur-base) var(--ease); }
+.bangumi-card:hover .vod-fav-badge, .bangumi-card:focus-visible .vod-fav-badge, .bangumi-card:focus-within .vod-fav-badge { transform:translateX(0); opacity:1; max-width:110px; padding:1px 8px; }
+/* 六态同款观感：看过不单独高亮（用户要求，去掉此前对齐 .rec-tag.seen 的
+   主色实底），全部状态统一半透明黑底米白字，仅靠文案区分 */
+@media (prefers-reduced-motion:reduce) {
+    .vod-fav-badge { transition:none; transform:none; }
+}
 /* 详情页签内的筛选条（角色/制作共用）：复用 class-tabs 视觉口径的轻量胶囊 */
 .detail-filter-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
 .detail-filter-item { padding:4px 12px; border-radius:var(--radius-pill); font-size:12px; cursor:pointer; color:var(--md-on-surface-variant); border:1px solid var(--md-outline-variant); transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
@@ -1508,21 +1580,74 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-comment-text a:hover { text-decoration:underline; }
 
 /* ===== 选集讨论（detail.js _renderEpComments；对齐 Kazumi EpisodeCommentsView） ===== */
-.ep-comments-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-.ep-comments-title { font-size:15px; font-weight:600; color:var(--md-on-surface); display:flex; align-items:baseline; gap:8px; min-width:0; }
+/* head 提为堆叠上下文（position+z-index:2）：下方评论卡因 content-visibility:auto
+   隐式 contain:paint 各自成独立绘制层、按 DOM 序后绘制，会把 z-index 更高的弹层
+   盖住（实测「点开后弹层被评论遮挡」）——把弹层的公共祖先 .ep-comments-head 提到
+   评论卡之上，弹层随祖先整体置顶。 */
+.ep-comments-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; position:relative; z-index:2; }
+.ep-comments-title { font-size:15px; font-weight:600; color:var(--md-on-surface); display:flex; align-items:baseline; gap:8px; min-width:0; flex:1; }
 .ep-comments-sub { font-size:12px; font-weight:400; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.ep-comments-head #ep-comments-order { margin-left:auto; flex:none; }
-/* 集数选择器：横排滚动 chips（全集含 SP/OP/ED），当前集主色填充 */
-.ep-comments-chips { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:10px; scrollbar-width:thin; }
-.ep-comments-chip {
-    flex:none; min-width:34px; padding:4px 10px; border-radius:var(--radius-pill);
+/* 集数选择器（统一形态，不分集数多少）：head 内「第 N 集 / 共 M」按钮
+   （切正序左侧，与切正序完全同规格同字号，按钮内不再有小号「共 M」差标）
+   + 向下悬浮网格弹层。向下展开盖在评论列表上方，永不越过吸顶页签栏——
+   #detail-tab-content 因入场动画 fill:both 形成层叠上下文，弹层 z-index 出不去，
+   向上展开必被页签栏截断（实测遮挡 bug）。限高滚轮滚动（仿颜文字面板
+   bgm-rate-kamoji-panel 的 max-height+overflow-y），右缘对齐按钮防右溢出。
+   弹层内 flex 纵排：顶栏（计数 + 排序切换小图标）固定、格片区内部滚动。 */
+.ep-comments-picker { position:relative; display:inline-flex; flex:none; }
+.ep-comments-picker .md-btn { white-space:nowrap; }
+.ep-comments-grid {
+    position:absolute; right:0; top:calc(100% + 8px); z-index:80;
+    display:flex; flex-direction:column;
+    width:max-content; min-width:240px; max-width:min(420px, 72vw);
+    max-height:208px; padding:8px 10px 10px; box-sizing:border-box;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    background:var(--md-surface-container-high); box-shadow:var(--shadow-lg);
+}
+/* 顶栏：集数总数提示 + 排序切换小图标（与 head 的切正序按钮同状态源，双向同步） */
+.ep-comments-grid-bar { display:flex; align-items:center; gap:8px; padding-bottom:6px; margin-bottom:6px; border-bottom:1px solid var(--md-outline-variant); }
+.ep-comments-grid-hint { font-size:11px; color:var(--md-on-surface-variant); }
+.ep-comments-grid-order {
+    margin-left:auto; border:none; background:transparent; cursor:pointer;
+    padding:2px 6px; border-radius:var(--radius-sm); font-size:11px; line-height:1.5;
+    color:var(--md-on-surface-variant);
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.ep-comments-grid-order:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+/* 集号跳转行：输入框 + 跳转按钮 + 行内错误提示。长番（几百集）滚动翻找低效，
+   输集号直达；inputmode=numeric 唤起数字键盘，回车即跳 */
+.ep-comments-grid-jump { display:flex; align-items:center; gap:6px; padding-bottom:6px; margin-bottom:6px; border-bottom:1px solid var(--md-outline-variant); }
+.ep-comments-jump-input {
+    flex:1; min-width:0; height:26px; padding:0 8px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-sm);
+    background:var(--md-surface-container); color:var(--md-on-surface);
+    font-size:12px; font-family:inherit; outline:none;
+    transition:border-color var(--dur-fast) var(--ease);
+}
+.ep-comments-jump-input:focus { border-color:var(--md-primary); }
+.ep-comments-jump-input::placeholder { color:var(--md-outline); }
+.ep-comments-jump-go {
+    flex:none; height:26px; padding:0 10px; border:none; cursor:pointer;
+    border-radius:var(--radius-sm); font-size:12px; font-family:inherit;
+    color:var(--md-on-primary); background:var(--md-primary);
+    transition:opacity var(--dur-fast) var(--ease);
+}
+.ep-comments-jump-go:hover { opacity:.88; }
+.ep-comments-jump-err { flex:none; font-size:11px; color:var(--md-error); max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 格片区：弹层限高的滚动承载者（顶栏/跳转行恒可见，滚动只发生在格子区） */
+.ep-comments-grid-cells {
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px;
+    overflow-y:auto; min-height:0;
+}
+.ep-comments-cell {
+    height:32px; padding:0 6px; border-radius:var(--radius-sm);
     border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
-    font-size:12.5px; color:var(--md-on-surface-variant);
+    font-size:12.5px; color:var(--md-on-surface-variant); white-space:nowrap;
     transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.ep-comments-chip:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
-.ep-comments-chip.active { background:var(--md-primary-container); color:var(--md-on-primary-container); border-color:var(--md-primary-container); font-weight:600; }
-.ep-comments-chip i { font-style:normal; font-size:10px; margin-left:3px; opacity:.75; }
+.ep-comments-cell:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+.ep-comments-cell.active { background:var(--md-primary-container); color:var(--md-on-primary-container); border-color:var(--md-primary-container); font-weight:600; }
+.ep-comments-cell i { font-style:normal; font-size:10px; margin-left:2px; opacity:.75; }
 .ep-comments-count { display:inline-block; font-size:12px; font-weight:600; color:var(--md-on-secondary-container); background:var(--md-secondary-container); padding:3px 10px; border-radius:999px; margin-bottom:10px; }
 .ep-comments-empty { text-align:center; padding:24px 0; }
 
@@ -1642,11 +1767,23 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 }
 
 @media (max-width:1100px) {
-    .detail-head { grid-template-columns:180px minmax(0, 1fr); gap:18px; }
-    .detail-cover { min-height:300px; }
-    .detail-hero-info { padding:22px 24px; }
+    /* 封面列 minmax(150px, 200px) 可收缩：hero 基础规则的下限 260px 在「中等窗口 +
+       界面缩放」（CSS 视口 700-1100px，Electron webFrame 缩放把 CSS 视口压窄到
+       断点区间内）会把右列挤到两三百像素——hero 内容整体溢出，视觉上封面盖住
+       文字/按钮。下限降到 150px 让宽度优先让给信息列。 */
+    .detail-head { grid-template-columns:minmax(150px, 200px) minmax(0, 1fr); gap:18px; }
+    /* min-height 已随 aspect-ratio 时代移除：封面高 = 轨道宽 × 4/3（比例由
+       aspect-ratio:3/4 全权锚定），此处旧 min-height:300px 会把 200px 轨道里的
+       封面强行抬到 300 高、再经比例反推成 225 宽越界压住信息卡 */
+    .detail-hero-info { padding:22px 24px; min-width:0; }
     .detail-bgm-stats { grid-template-columns:1fr 1fr; }
     .detail-bgm-stats .bi-hist { grid-column:1 / -1; }
+}
+
+@media (max-width:800px) and (min-width:701px) {
+    /* 701-800px 过渡带（960 窗口 @125-150% 缩放命中）：hero 右列仅 ~240-320px，
+       评分/排名两列并排仍挤，压成单列纵排保可读；直方图随 1100 断点整行铺。 */
+    .detail-bgm-stats { grid-template-columns:1fr; }
 }
 
 @media (max-width:700px) {
@@ -1654,7 +1791,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
     #view-detail { --view-pad-x:14px; padding:0 var(--view-pad-x) 32px; }
     body.frameless #view-detail { padding-top:0 !important; }
     .detail-head { grid-template-columns:104px minmax(0, 1fr); gap:14px; }
-    .detail-cover { min-height:156px; }
+    /* 同上：旧 min-height:156px 会把 104px 轨道封面顶到 117 宽，缝隙只剩 1px */
     .detail-hero-info { padding:16px; border-radius:14px; }
     .detail-kicker { font-size:10px; }
     .detail-title { font-size:22px; line-height:1.25; margin-top:4px; }
@@ -1777,16 +1914,20 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
     color:var(--md-on-surface-variant); }
 /* Kazumi 搜索结果卡片徽章 */
 .kazumi-card .vod-cover { position:relative; }
-.kazumi-badge { position:absolute; top:6px; left:6px; z-index:2;
-    padding:2px 8px; border-radius:var(--radius-sm); font-size:10.5px; color:#F2F1EB;
-    background:rgba(0,0,0,.55); backdrop-filter:blur(2px); }
-/* 搜索页验证码源提示分组行（T73） */
-.kazumi-captcha-line {
-    padding:10px 12px; font-size:12px; color:var(--md-error); cursor:pointer;
-    border:1px dashed var(--md-error); border-radius:var(--radius-sm); margin:0 2px 12px;
-    transition:background var(--dur-fast) var(--ease); user-select:none var(--ease);
+/* 源徽章：入封面左下 .vod-fav-row 徽标行（对齐时间表/推荐卡布局，话数徽章行首、
+   源徽章在其右侧并排），不再是左上角独立徽章；观感对齐 .rec-site 源徽章 */
+.kazumi-badge { position:static; flex:0 1 auto; min-width:0;
+    padding:1px 7px; border-radius:7px; font-size:10.5px; color:#F2F1EB;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(2px);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 搜索页验证码源 tab（进来源筛选分类区，与普通 class-tab 同形但警示配色） */
+.kazumi-captcha-tab {
+    border-color:color-mix(in srgb, var(--md-error) 55%, transparent);
+    color:var(--md-error);
+    background:color-mix(in srgb, var(--md-error) 7%, transparent);
 }
-.kazumi-captcha-line:hover { background:var(--md-error-container); }
+.kazumi-captcha-tab:hover { color:var(--md-error); background:var(--md-error-container); }
+.kazumi-captcha-tab.solving { opacity:.6; pointer-events:none; }
 
 /* ===== 番剧时间表（季节索引 / 排序 / 收藏过滤 / 排名角标） ===== */
 /* 排名角标：封面右上角，金色描边突出 Bangumi 排名（推荐/时间表共用，T62） */
@@ -1977,7 +2118,7 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 
 /* ===== Bangumi 评分/吐槽（bgm-rate.js；对齐 Kazumi 评分能力） ===== */
 /* 搜索结果卡与收藏卡的「★ 评分」悬浮按钮均已移除：评分入口统一在详情页 hero
- * 的「★ 评分 / 吐槽」按钮（T80 起挪入 hero；搜索卡按钮随入口收敛删除）。 */
+ * 的「评分 / 吐槽」按钮（T80 起挪入 hero；搜索卡按钮随入口收敛删除）。 */
 .bangumi-card { position:relative; }
 /* 「我的评分」徽章（bangumiCard my_rate 字段渲染，封面左上角） */
 .bangumi-myrate-badge { position:absolute; top:6px; left:6px; z-index:2;
@@ -2015,8 +2156,63 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 #bgmRateDialog:has(.bgm-rate-star.active) .bgm-rate-label {
     color:var(--md-on-primary-container); background:var(--md-primary-container);
 }
-/* 吐槽输入框（操作条已有下边距，抵消 .md-dialog-body .md-input 的通用 margin-top） */
-#bgm-rate-comment { width:100%; resize:vertical; min-height:84px; margin-top:0; }
+/* 吐槽输入框（操作条已有下边距，抵消 .md-dialog-body .md-input 的通用 margin-top）。
+   纵向可拉伸、封顶 240px（防拉伸到盖过标签区/挤爆弹窗），超高内容内部滚动
+   （走全局 8px 主题化滚动条）。原生 resize 把手在 Windows Chromium 上是
+   右下角斜纹三角，与滚动条重叠难看且挡滑块——改为 wrap 内右下角自定义
+   拉伸条（2px 高亮条，hover/拖拽时变主色），JS 按指针位移改 textarea 高度。 */
+.bgm-rate-comment-wrap { position:relative; margin-top:8px; }
+#bgm-rate-comment {
+    display:block; width:100%; resize:none; min-height:84px; max-height:240px;
+    height:84px; overflow-y:auto; margin-top:0;
+}
+.bgm-rate-resize {
+    position:absolute; right:4px; bottom:4px; z-index:2;
+    width:36px; height:12px; cursor:ns-resize;
+    display:flex; align-items:center; justify-content:center;
+    touch-action:none;
+}
+.bgm-rate-resize i {
+    display:block; width:24px; height:3px; border-radius:2px;
+    background:var(--md-outline-variant); transition:background var(--dur-fast) var(--ease);
+}
+.bgm-rate-resize:hover i, .bgm-rate-resize.dragging i { background:var(--md-primary); }
+/* 颜文字：吐槽框下方单个「颜文字 ▾」按钮 + 悬停/点击展开的悬浮面板（网格布局）。
+   面板绝对定位于 wrap（与按钮行同流），向上展开覆盖吐槽框，不挤动下方标签区；
+   显隐走 .open class（JS 状态机），默认 visibility:hidden 保位移过渡不闪烁 */
+.bgm-rate-kamoji-wrap { position:relative; display:flex; margin-top:6px; margin-bottom:2px; }
+.bgm-rate-kamoji-btn {
+    border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
+    padding:3px 12px; border-radius:var(--radius-pill); font-size:12px; line-height:1.6;
+    color:var(--md-on-surface-variant);
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.bgm-rate-kamoji-btn:hover, .bgm-rate-kamoji-btn.active {
+    background:var(--accent-hover-bg); color:var(--md-on-surface); border-color:var(--md-primary);
+}
+.bgm-rate-kamoji-panel {
+    position:absolute; left:0; bottom:calc(100% + 6px); z-index:5;
+    width:312px; max-width:100%;
+    max-height:240px; overflow-y:auto;
+    display:grid; grid-template-columns:repeat(3, 1fr); gap:4px;
+    padding:8px; box-sizing:border-box;
+    background:var(--md-surface-container-high);
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    box-shadow:var(--shadow-lg);
+    opacity:0; visibility:hidden; transform:translateY(4px);
+    transition:opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), visibility 0s var(--dur-fast);
+}
+.bgm-rate-kamoji-panel.open {
+    opacity:1; visibility:visible; transform:translateY(0);
+    transition:opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.bgm-rate-kamoji {
+    border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
+    padding:4px 6px; border-radius:var(--radius-sm); font-size:12px; line-height:1.5;
+    color:var(--md-on-surface-variant); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.bgm-rate-kamoji:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); border-color:var(--md-primary); }
 /* 标签编辑区（对齐 Kazumi rating_review_dialog：已选 chips + 热门建议 + 自定义输入）：
    卡片化容器 + 内部分隔线，与吐槽正文视觉分区 */
 .bgm-rate-tags-block {
@@ -2042,7 +2238,6 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 }
 .bgm-rate-tag-remove:hover { background:var(--md-error-container); color:var(--md-on-error-container); }
 .bgm-rate-tags-popular { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
-.bgm-rate-tags-pop-title { font-size:12px; color:var(--md-on-surface-variant); margin-right:2px; }
 .bgm-rate-tag-pop {
     border:1px solid var(--md-outline-variant); background:transparent; cursor:pointer;
     padding:3px 10px; border-radius:var(--radius-pill); font-size:12px;
@@ -2058,8 +2253,11 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
     transition:background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .bgm-rate-tag-more:hover { background:var(--accent-hover-bg); border-color:var(--md-primary); }
-.bgm-rate-tags-input-row { display:flex; gap:8px; align-items:center; }
-.bgm-rate-tags-input-row .md-input { flex:1; height:36px; border-radius:var(--radius-md); }
+/* 自定义标签输入行：输入框压到与「添加」按钮同高（md-btn-sm 32px），flex 基线
+   对齐后两端等高平齐（基类 .md-input 56px 在此行过高压过按钮） */
+.bgm-rate-tags-input-row { display:flex; gap:8px; align-items:stretch; }
+.bgm-rate-tags-input-row .md-input { flex:1; height:32px; min-height:32px; padding-top:0; padding-bottom:0; border-radius:var(--radius-sm); font-size:13px; margin-top:0; }
+.bgm-rate-tags-input-row .md-btn { flex:none; white-space:nowrap; }
 .bgm-rate-tag-error { font-size:12px; color:var(--md-error); margin-top:6px; }
 /* 毛玻璃模式：标签卡片与弹窗面板同口径半透明，避免实色块浮在毛玻璃上 */
 html.glass-on .bgm-rate-tags-block {
@@ -2136,18 +2334,10 @@ html.glass-on .bgm-rate-tags-block {
 /* 直播频道卡片入场动画：进页首渲/切源/刷新/切分组/翻页等全量重渲染时由 JS 加
    .anim-cards 启用（T30 同 vod-card 惯例），后台探测分批重渲染不加该类，
    避免列表反复重播闪烁。
+   错峰延迟不在此写 nth-child 上限：renderList 按「可见序号」给每张卡内联
+   animation-delay（30ms/张），全部频道逐张跃入（CSP style-src 允许内联 style）。
    fill 用 backwards（非 both）：结束后释放 transform，保住 hover 上浮不被 fill 锁死。 */
 .live-list.anim-cards .live-item { animation:liveIn var(--dur-base) var(--ease) backwards; }
-/* 卡片错峰入场：前 10 张逐张出现，延迟封顶 */
-.live-list.anim-cards .live-item:nth-child(2)  { animation-delay:.03s; }
-.live-list.anim-cards .live-item:nth-child(3)  { animation-delay:.06s; }
-.live-list.anim-cards .live-item:nth-child(4)  { animation-delay:.09s; }
-.live-list.anim-cards .live-item:nth-child(5)  { animation-delay:.12s; }
-.live-list.anim-cards .live-item:nth-child(6)  { animation-delay:.15s; }
-.live-list.anim-cards .live-item:nth-child(7)  { animation-delay:.18s; }
-.live-list.anim-cards .live-item:nth-child(8)  { animation-delay:.21s; }
-.live-list.anim-cards .live-item:nth-child(9)  { animation-delay:.24s; }
-.live-list.anim-cards .live-item:nth-child(10) { animation-delay:.27s; }
 
 /* ===== 收藏 / 历史视图 ===== */
 .view-title { font-size:16px; font-weight:700; }
@@ -2189,10 +2379,6 @@ html.glass-on .bgm-rate-tags-block {
     content:''; position:absolute; left:5px; top:1.5px; width:4px; height:9px;
     border:solid var(--md-on-primary); border-width:0 2px 2px 0; transform:rotate(45deg);
 }
-/* 观看进度条（收藏卡片内容区底部，避免被卡片圆角裁切） */
-.rec-progress { height:3px; margin:0 10px 8px;
-    background:color-mix(in srgb, var(--md-on-surface) 8%, transparent); border-radius:3px; overflow:hidden; }
-.rec-progress-bar { height:100%; background:var(--md-primary); border-radius:3px; transition:width var(--dur-slow) var(--ease); }
 .vod-card { position:relative; }
 .rec-checkall { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); cursor:pointer; }
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
@@ -2548,11 +2734,15 @@ html.dark[data-color="cyan"] {
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 /* 集数徽章（如 2/12，用户要求）：排在源徽章右侧，配色对齐时间表集数徽章
-   （.detail-progress-badge：半透明黑底 + 米白字 + 磨砂），同款观感 */
+   （.detail-progress-badge：半透明黑底 + 米白字 + 磨砂），同款观感；
+   字体常规字重（用户要求：集数徽章一律不加粗，与时间表/推荐卡对齐） */
 .rec-eps {
-    flex:none; padding:1px 7px; border-radius:7px; font-size:10.5px; font-weight:700;
+    flex:none; padding:1px 7px; border-radius:7px; font-size:10.5px; font-weight:400;
     color:#F2F1EB; background:rgba(0,0,0,.62); backdrop-filter:blur(2px); white-space:nowrap;
 }
+/* 搜索卡（CatVod 源）集数徽章直挂 .vod-cover（无 .rec-cover-badges 行容器）：
+   绝对定位左下角，与时间表/推荐卡话数徽章同位同款 */
+.vod-cover > .rec-eps { position:absolute; left:6px; bottom:6px; z-index:2; }
 
 /* 历史卡播放信息（T73：按次记录），位于片名下方；播放时长与日期拆双行（用户要求），
    各自单行省略。rec-playinfo-tight 用于「播放 X 分钟」行：去上距/底距，与集名行、
@@ -2596,8 +2786,8 @@ body.frameless #view-direct { padding-top:48px !important; }
 .nav-collapse-btn:hover { background:var(--md-surface-container-high); }
 .nav-collapse-btn svg { width:22px; height:22px; fill:currentColor; transition:transform var(--dur-base) var(--ease); }
 #main-nav {
-    width:190px;
-    flex:0 0 190px;
+    width:160px;
+    flex:0 0 160px;
     transition:width var(--dur-base) var(--ease), flex-basis var(--dur-base) var(--ease), padding var(--dur-base) var(--ease);
     overflow-x:hidden;
     overflow-y:auto;
@@ -2719,7 +2909,8 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
 @media (min-width:2000px) {
     /* 详情页 */
     .detail-head { grid-template-columns:340px minmax(0, 1fr); gap:32px; margin-bottom:24px; }
-    .detail-cover { min-height:460px; }
+    /* 同 1100/700 断点：min-height 与 aspect-ratio 冲突，封面高一律由轨道宽 × 4/3 推导
+       （340px 轨道 → 453px 高，与旧 min-height:460px 观感几乎一致） */
     .detail-hero-cover { border-radius:16px; }
     .detail-hero-info { padding:32px 36px; gap:6px; }
     .detail-catvod-facts { margin-top:6px; margin-bottom:4px; padding:10px 18px; font-size:16px; }
@@ -2756,6 +2947,9 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .rec-playinfo { font-size:14.5px; line-height:20px; padding:0 10px 8px; }
     .rec-site { font-size:13px; }
     .rec-eps { font-size:13px; }
+    /* 时间表/推荐卡徽标随大屏同步放大（对齐 .rec-eps/.rec-site 的 13px 档） */
+    .vod-cover .timeline-ep-badge { font-size:13px; }
+    .vod-fav-badge { font-size:13px; }
     /* 通用控件 */
     .md-input { height:64px; font-size:19px; border-radius:var(--radius-md); }
     .search-bar .md-input { border-radius:var(--radius-md); }
@@ -2864,4 +3058,92 @@ html.dark .asset-missing { border-left-color:#ff8a80; }
         transition-duration: 0.01ms !important;
         scroll-behavior: auto !important;
     }
+}
+
+/* ===== 划词翻译气泡（translate-bubble.js）=====
+   Material 3 卡片语言（同 .char-float-panel / .tool-card）：surface-container 底
+   + outline-variant 描边 + radius-lg 圆角 + shadow-lg 浮起；全部走 --md-* token，
+   亮/暗色与自定义主题色自动联动。z-index 1400 压过对话框 scrim（1300）。
+   气泡与「译」触发钮挂 documentElement 下（placeFixedInViewport 防 transform 漂移）。 */
+.yuki-tr-bubble {
+    position: fixed; left: 0; top: 0; z-index: 1400;
+    width: min(360px, calc(100vw - 16px));
+    padding: 12px 14px;
+    background: var(--md-surface-container);
+    border: 1px solid var(--md-outline-variant);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    /* fill-mode 用 backwards 而非 both：结束态与默认样式一致（opacity:1/无位移），
+       回退后让位给普通声明——触发钮 :hover 的 transform 放大 otherwise 会被
+       动画级联（fill both 持续占用 transform）永久压住 */
+    animation: yukiTrIn var(--dur-fast) var(--ease) backwards;
+}
+@keyframes yukiTrIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.yuki-tr-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.yuki-tr-badge {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 2px 10px; border-radius: var(--radius-pill);
+    font-size: 11px; font-weight: 700;
+    color: var(--md-primary); background: var(--accent-soft);
+}
+.yuki-tr-close {
+    flex: none; width: 26px; height: 26px; border: none;
+    border-radius: var(--radius-sm); background: var(--md-surface-container-high);
+    color: var(--md-on-surface-variant); cursor: pointer; font-size: 12px; line-height: 1;
+}
+.yuki-tr-close:hover { background: var(--md-error); color: #fff; }
+.yuki-tr-body {
+    color: var(--md-on-surface); font-size: 13px; line-height: 22px;
+    white-space: pre-line; overflow-wrap: anywhere;
+    max-height: 40vh; overflow-y: auto;
+    user-select: text; cursor: text;
+    /* 滚动条仿吐槽页颜文字悬浮窗（.bgm-rate-kamoji-panel）：该面板对滚动条
+       零覆写、直接继承全局主题化 8px 细滚条（::-webkit-scrollbar + 
+       --scrollbar-thumb 主题色/圆角/hover 加深），此处同样不写任何滚动条
+       规则即得其观感。不可设 scrollbar-width:none/thin——Chromium 121+ 标准
+       属性非 auto 时会整体禁用 webkit 伪元素样式（实测退化原生灰条） */
+}
+.yuki-tr-body.yuki-tr-error {
+    color: var(--md-on-error-container); background: var(--md-error-container);
+    border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.yuki-tr-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.yuki-tr-mini { padding: 4px 14px; font-size: 12px; }
+/* 加载 spinner（同应用内细节环风格，stroke 用当前色） */
+.yuki-tr-spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+    border: 2px solid var(--md-outline-variant); border-top-color: var(--md-primary);
+    border-radius: 50%; vertical-align: -2px;
+    animation: yukiTrSpin 0.8s linear infinite;
+}
+@keyframes yukiTrSpin { to { transform: rotate(360deg); } }
+/* 「译」触发钮（button 模式）：主色小圆钮浮在选区旁 */
+.yuki-tr-trigger {
+    position: fixed; left: 0; top: 0; z-index: 1400;
+    width: 28px; height: 28px; border: none; border-radius: 50%;
+    background: var(--md-primary); color: var(--md-on-primary);
+    font-size: 13px; font-weight: 700; cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+    /* backwards 同气泡容器：动画结束释放 transform，:hover 放大才能生效 */
+    animation: yukiTrIn var(--dur-fast) var(--ease) backwards;
+}
+.yuki-tr-trigger:hover {
+    transform: scale(1.12); box-shadow: var(--shadow-md);
+    background: var(--md-primary); color: var(--md-on-primary);
+}
+/* 毛玻璃：气泡同 tool-card 半透明 + 模糊（静态容器，无动画扰动顾虑） */
+html.glass-on .yuki-tr-bubble {
+    background: color-mix(in srgb, var(--md-surface-container) var(--glass-veil, 72%), transparent);
+}
+html.glass-on.glass-blur .yuki-tr-bubble { backdrop-filter: blur(var(--glass-blur, 14px)); }
+/* 验证通过的源搜索无结果时的收尾 tab（灰绿=已验证成功，非验证问题） */
+.verified-empty {
+    border-color:color-mix(in srgb, var(--md-success, #43a047) 55%, transparent);
+    color:var(--md-success, #43a047);
+    background:color-mix(in srgb, var(--md-success, #43a047) 7%, transparent);
+    pointer-events:none;
 }

@@ -18,7 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # electron@44 的 npm 包 engines 要求 node >= 22.12（CI 随宿主升级同步上调）
+          node-version: 22
           cache: npm
       - uses: actions/setup-python@v5
         with:

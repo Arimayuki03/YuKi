@@ -564,6 +564,19 @@ function bangumiMirrorUrl(url) {
     return String(url || '').replace(/^https?:\/\/lain\.(bgm|bangumi)\.tv\//i, `https://lain.${bangumiMirrorRoot}/`);
 }
 
+/** 「↗ Bangumi 页」条目页跳转是否跟随镜像（默认关=始终官方 bgm.tv；开=镜像站主域）。
+ *  设置页「Bangumi 条目页跳转跟随镜像」开关读写（kazumi.js _prefillMirror 回填 +
+ *  change 保存），kazumi.js 镜像根域名变更后同一全局即时生效。 */
+let bangumiWebFollowMirror = false;
+
+/** Bangumi 条目页 URL（sid 必须已由调用方做数字白名单校验）：跟随镜像开启时走
+ *  镜像站主域 {镜像根域名}（bgm.tv 无子域名，镜像侧对应根域名本身——实测
+ *  https://bangumi.vip/subject/N 可达，bgm.bangumi.vip 不存在），否则官方 bgm.tv。 */
+function bangumiWebUrl(sid) {
+    const host = bangumiWebFollowMirror ? bangumiMirrorRoot : 'bgm.tv';
+    return `https://${host}/subject/${sid}`;
+}
+
 /** Bangumi 官方/镜像封面域名：官方 lain.bgm.tv / lain.bangumi.tv、历史镜像
  *  lain.bangumi.pro、当前默认 lain.bangumi.vip 及自定义 lain.{镜像根域名}。
  *  历史记录持久化的 pic 可能是任一域名，渲染与补拉重渲染共用同一判定，
@@ -632,11 +645,38 @@ function errorTextOf(e, maxLen = 120) {
     return maxLen > 0 && text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
 }
 
-/** Bangumi 卡片（推荐/时间表共用，T62）：封面 + 排名角标 + 片名 + 评分/播出日期。
+/** 话数徽章（时间表/推荐/搜索卡共用，bangumiEpBadge）：完结态分两式——已完结
+ *  文本为「N话」、title「放送已完结 · 共 N 话」；连载中文本为「N/总话数」、
+ *  title「已播出 N 话 / 共 N 话」（N=已播话数，放送日 + 每周一话推算，clamp 到
+ *  [0, 总话数]）。完结判定：放送日 + 总话数周数 + 3 天余量（与详情页/时间表口径
+ *  一致）；放送日缺失时无法推算进度，回落「N话」（仅展示总话数）。
+ *  eps<=0 返回空串（调用方不渲染）。 */
+function bangumiEpBadge(eps, airDate) {
+    const total = Number(eps) || 0;
+    if (total <= 0) return '';
+    const m = String(airDate || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    let aired = null;
+    let finished = false;
+    if (m) {
+        const start = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+        if (!Number.isNaN(start.getTime())) {
+            // 已播话数：与时间表同款推算（首播日当天为第 1 话，clamp 到 [0, total]）
+            aired = Math.min(total, Math.max(0, Math.floor((Date.now() - start.getTime()) / (7 * 86400000)) + 1));
+            finished = Date.now() > start.getTime() + total * 7 * 86400000 + 3 * 86400000;
+        }
+    }
+    if (finished) return `<span class="rec-eps" title="放送已完结 · 共 ${total} 话">${total}话</span>`;
+    // 无放送日：无法推算已播进度，只展示总话数（有日期才出 N/总 进度式）
+    if (aired === null) return `<span class="rec-eps" title="共 ${total} 话">${total}话</span>`;
+    return `<span class="rec-eps" title="已播出 ${Math.max(aired, 0)} 话 / 共 ${total} 话">${Math.max(aired, 0)}/${total}</span>`;
+}
+
+/** Bangumi 卡片（推荐/时间表/搜索共用，T62）：封面 + 排名角标 + 话数徽章 + 片名 + 评分/播出日期。
+ *  item.eps / item.total_episodes（可选，总话数）：封面左下角 .rec-eps 话数徽章
+ *  （搜索页响应自带；无值时不渲染，由各页 _attachEpBadges 回源补齐）；
  *  item.my_rate（可选，用户 Bangumi 评分 1-10）：封面左上角加「我的评分」徽章；
- *  缺省字段不渲染（推荐/时间表等无账号数据路径完全不受影响）。
- *  现有调用方暂不传 my_rate（预留字段）：「我的」收藏网格的徽章由 records.js
- *  recCard 直接渲染（不经过本函数）；本处保留供搜索/时间表未来接入账号评分数据。 */
+ *  缺省字段不渲染（无账号数据路径完全不受影响）。
+ *  「我的」收藏网格的徽章由 records.js recCard 直接渲染（不经过本函数）。 */
 function bangumiCard(item) {
     const name = item.name_cn || item.name || '';
     const cover = bangumiCover(item.images, 'card');
@@ -650,12 +690,16 @@ function bangumiCard(item) {
     const myRate = (item.my_rate === 0 || item.my_rate) ? Number(item.my_rate) : 0;
     const myBadge = (myRate >= 1 && myRate <= 10)
         ? `<span class="bangumi-myrate-badge" title="我的评分 ${myRate} 分">我的 ${myRate}★</span>` : '';
+    // 话数徽章（对齐时间表卡）：总话数有值时渲染「N话」（完结态 title 标注
+    // 「放送已完结」，bangumiEpBadge 共享完结推算），常驻封面左下角；
+    // 藏在 .vod-fav-row 徽标行行首——收藏徽标悬停时从其右侧滑入（两页同款布局）
+    const epBadge = bangumiEpBadge(item.eps || item.total_episodes, item.air_date);
     const air = item.air_date || '';
     // 条目公共标签（tagNames）：BgmRate 对话框热门标签建议实际取自详情接口
     // （detail.js _bgmInfo.tags），搜索卡不消费 tags——不再输出序列化属性，
     // 免得每张卡背一份冗余数据、注释误导维护者以为存在该链路
     return `<div class="vod-card bangumi-card" data-id="${escHtml(String(item.id))}" data-name="${escHtml(name)}" tabindex="0">
-        <div class="vod-cover">${vodCoverImg(cover)}${rank}${myBadge}</div>
+        <div class="vod-cover">${vodCoverImg(cover)}${rank}${myBadge}${epBadge ? `<div class="vod-fav-row">${epBadge}</div>` : ''}</div>
         <div class="vod-name" title="${escHtml(name)}">${escHtml(truncateTitle(name))}</div>
         <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · '))}</div>
     </div>`;
@@ -899,16 +943,19 @@ async function _coverFillOne(pool, item) {
         ? bangumiCoverImg(pic, true)
         : vodCoverImg(pic, true);
     el.find('.vod-cover').html(html);
-    // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内绝对定位的源徽章，需重插（T73）；
+    // Kazumi 卡封面补上后 .html() 会覆盖 .vod-cover 内的徽章/徽标行，需重插（T73）；
     // 同批把 #N 排名角标（对齐 Bangumi 搜索卡）与评分/日期备注行一并按缓存刷新——
-    // 首渲为占位图时无匹配数据，这两处停在「Kazumi 规则源」兜底文案，补拉即补齐
+    // 首渲为占位图时无匹配数据，这两处停在「Kazumi 规则源」兜底文案，补拉即补齐。
+    // 源徽章 + 话数徽章入左下 .vod-fav-row 徽标行（对齐时间表/推荐卡布局），
+    // 与 search.js _paintGrp 的卡片标记同构。
     if (isKazumi) {
-        el.find('.vod-cover').prepend(`<div class="kazumi-badge">${escHtml(String(site).slice(7))}</div>`);
         const m = (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiMatch)
             ? Kazumi.getCachedBangumiMatch(name) : null;
         if (m && m.rank) {
             el.find('.vod-cover').prepend(`<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(m.rank))}">#${escHtml(String(m.rank))}</span>`);
         }
+        const epBadge = bangumiEpBadge(m && m.eps, m && m.air_date);
+        el.find('.vod-cover').append(`<div class="vod-fav-row"><span class="kazumi-badge">${escHtml(String(site).slice(7))}</span>${epBadge}</div>`);
         const score = (m && m.score) ? `⭐${escHtml(String(m.score))}` : '';
         const air = (m && m.air_date) ? escHtml(String(m.air_date)) : '';
         if (score || air) {
@@ -938,13 +985,23 @@ function fmtSize(n) {
 
 let _pageSizeCache = {}; // 每页条数设置缓存（key → 值；变更后由 invalidatePageSizeCache 整体作废）
 const PAGE_SIZE_OPTIONS = [10, 16, 20, 24, 36, 60, 120];
+// 各页默认值（未设置/非法值时的兜底）：首页 24、搜索 24、收藏 10、历史 24、直播 120、推荐 36
+const PAGE_SIZE_DEFAULTS = {
+    pageSizeHome: 24,
+    pageSizeSearch: 24,
+    pageSizeFavorites: 10,
+    pageSizeHistory: 24,
+    pageSizeLive: 120,
+    pageSizePopular: 36,
+};
 
 /**
  * 分页面每页条数设置（T39：首页/搜索/收藏/历史可单独设置）。
  * key：pageSizeHome / pageSizeSearch / pageSizeFavorites / pageSizeHistory / pageSizeLive / pageSizePopular；
- * 返回 20/24/36/60/120，空/非法默认 20；首页额外回退旧键 listPageSize（兼容升级前设置）。
+ * 返回该页设置值，空/非法回退各页独立默认值（PAGE_SIZE_DEFAULTS）；首页额外回退旧键 listPageSize（兼容升级前设置）。
  */
 async function pageSizeOf(key) {
+    const fallback = PAGE_SIZE_DEFAULTS[key] || 20;
     if (_pageSizeCache[key]) return _pageSizeCache[key];
     try {
         const s = (await window.yuki.settingsGet()) || {};
@@ -952,8 +1009,8 @@ async function pageSizeOf(key) {
         if (!(PAGE_SIZE_OPTIONS.indexOf(n) >= 0) && key === 'pageSizeHome') {
             n = parseInt(s.listPageSize, 10); // 旧版单一设置迁移
         }
-        _pageSizeCache[key] = PAGE_SIZE_OPTIONS.indexOf(n) >= 0 ? n : 20;
-    } catch (e) { _pageSizeCache[key] = 20; }
+        _pageSizeCache[key] = PAGE_SIZE_OPTIONS.indexOf(n) >= 0 ? n : fallback;
+    } catch (e) { _pageSizeCache[key] = fallback; }
     return _pageSizeCache[key];
 }
 

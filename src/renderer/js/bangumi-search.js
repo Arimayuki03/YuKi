@@ -8,7 +8,7 @@
  *   详情页点 Bangumi 标签 → BangumiSearch.openWithTag(tag) → 切到本页签并以 tag: 过滤搜索。
  * 后端走 POST /kazumi/action do=kazumiBangumiSearchFilter（对齐 Kazumi buildBangumiSearchParams）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App */
+/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, FavHub, Timeline */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const BANGUMI_SEARCH_TAGS = [
@@ -201,7 +201,7 @@ function bgmFmtNum(v) {
 
 const BANGUMI_SORT_LABELS = { heat: '热度', rank: '排名', score: '评分', match: '匹配' };
 const BANGUMI_SEASON_LABELS = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
-const BANGUMI_SEARCH_PAGE_SIZE = 20;
+const BANGUMI_SEARCH_PAGE_SIZE = 24; // 兜底值；实际取「搜索页每页条数」设置（默认 24）
 
 // ============================================================
 // BangumiSearch — 搜索页「Bangumi」页签模块
@@ -243,6 +243,10 @@ const BangumiSearch = {
                 Kazumi.openBangumiInfoPage(id);
             }
         });
+        // 订阅收藏变更：详情页改收藏后回搜索页，重读映射并补挂徽标（对齐时间表/推荐页）
+        if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
+            this._unsubFav = FavHub.onChanged(() => this.refreshBadges());
+        }
         this._initWorkbench();
     },
 
@@ -261,6 +265,17 @@ const BangumiSearch = {
     /** 把当前状态序列化回搜索框（规范化显示）。 */
     _setInputFromState() {
         $('#bgm-search-keyword').val(BangumiSearchParser.fromFilterState(this._state));
+    },
+
+    /** 进入搜索视图（Search.onViewShown 转发，T39 补遗）：重读「每页影片数量-搜索」
+     *  设置，条数变化且已有结果时按新条数重拉当前页（Bangumi 搜索是服务端分页，
+     *  切片重绘不适用，必须重新请求）。无结果时不动作，避免进页就发网络请求。 */
+    async onViewShown() {
+        if (!this._items.length || !this._state) return;
+        const size = (await pageSizeOf('pageSizeSearch')) || BANGUMI_SEARCH_PAGE_SIZE;
+        if (this._size && size === this._size) return;
+        this._size = size;
+        this.load(this._page || 1);
     },
 
     /** 详情页标签跳转入口：切到 Bangumi 页签并以 tag: 过滤搜索（功能联动核心）。 */
@@ -343,8 +358,38 @@ const BangumiSearch = {
             return;
         }
         box.html(`<div class="vod-grid bangumi-search-grid">${this._items.map((it) => bangumiCard(it)).join('')}</div>`);
-        // 搜索结果卡不再追加「评分」操作条（评分入口统一在详情页 hero 的「★ 评分 / 吐槽」按钮）
+        // 搜索结果卡不再追加「评分」操作条（评分入口统一在详情页 hero 的「评分 / 吐槽」按钮（批注笔图标））
         if (typeof fitVodTitles === 'function') fitVodTitles(box.find('.bangumi-search-grid'));
+        // 封面徽标管线（对齐时间表/推荐卡）：收藏徽标行（映射内存即得）+ 话数徽章
+        // 补齐（响应缺 eps 的条目回源 bangumiInfo，30 分钟缓存；同 id 跨页复用）
+        this._attachBadges(box.find('.bangumi-search-grid'));
+    },
+
+    /** 挂当前网格的封面徽章：复用 Timeline._attachFavBadges/_attachEpBadges 与
+     *  Timeline.getColStateMap 共享收藏映射（时间表/推荐/搜索三页共享，零重复请求）。
+     *  Timeline 缺席（沙箱/脚本降级）时静默跳过，不影响卡片渲染。 */
+    _attachBadges(grid) {
+        if (typeof Timeline === 'undefined' || !Timeline._attachFavBadges) return;
+        const gridEl = grid || $('#bgm-search-results .bangumi-search-grid');
+        const items = this._items;
+        Timeline._attachFavBadges(gridEl, items, this._colStateMap);
+        Timeline._attachEpBadges(gridEl, items).catch(() => { /* 徽章补齐失败不外溢 */ });
+        if (this._badgesLoaded) return; // 映射已就绪：无需再拉
+        this._badgesLoaded = true;
+        Timeline.getColStateMap().then((map) => {
+            this._colStateMap = map;
+            // 异步期间已翻页/重渲则 items id 失配，自然零命中
+            Timeline._attachFavBadges($('#bgm-search-results .bangumi-search-grid'), items, map);
+        }).catch(() => { /* 收藏映射重建失败静默 */ });
+    },
+
+    /** 收藏变更后刷新徽标：重读映射并补挂当前网格（FavHub 订阅调用）。 */
+    async refreshBadges() {
+        if (typeof Timeline === 'undefined' || !Timeline.getColStateMap) return;
+        this._colStateMap = await Timeline.getColStateMap();
+        if (typeof Timeline._attachFavBadges === 'function') {
+            Timeline._attachFavBadges($('#bgm-search-results .bangumi-search-grid'), this._items, this._colStateMap);
+        }
     },
 
     _renderPager() {

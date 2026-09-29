@@ -84,7 +84,15 @@ function makeJQueryStub() {
         }
         append(h) { rec(this.sel).ops.push(['append', h]); noteGroups(this.sel, h); return this; }
         appendTo() { return this; }
-        find(sel) { return new W(`${this.sel}>>${sel}`); }
+        find(sel) {
+            // 结构化查找钩子（默认未设置，走通用 W 桩）：真实 _attachFavBadges 回归锁
+            // 用例据此把 .vod-cover 节点解析交给结构感知迷你 DOM（makeKazumiMiniGrid）
+            if (typeof $.findResolver === 'function') {
+                const r = $.findResolver(this.sel, sel);
+                if (r) return r;
+            }
+            return new W(`${this.sel}>>${sel}`);
+        }
         children() { const w = new W(`${this.sel}>>children`); w.length = 0; return w; }
         last() { return this; }
         each(cb) { (rec(this.sel).eachItems || []).forEach((it, i) => cb.call(it, i, it)); return this; }
@@ -202,13 +210,28 @@ function loadSearch(opts) {
         localCacheSet: (k, v) => { state.cacheSets.push({ key: k, value: v }); },
     };
     if (kazumi) context.Kazumi = kazumi;
+    if (o.Timeline) context.Timeline = o.Timeline; // 徽章管线桩（收藏映射/补挂直调）
+    if (o.FavHub) context.FavHub = o.FavHub;
     vm.createContext(context);
-    vm.runInContext(`${fs.readFileSync(SEARCH_SRC, 'utf8')}\n;globalThis.__create = createSearchPage; globalThis.__Search = Search;`,
+    // bangumiEpBadge 取自真实 common.js 源码片段（话数徽章完结推算，卡内联调用）
+    const commonSrc = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/common.js'), 'utf8');
+    const epBadgeFn = commonSrc.slice(commonSrc.indexOf('function bangumiEpBadge'), commonSrc.indexOf('/** Bangumi 卡片'));
+    vm.runInContext(`${epBadgeFn}\n${fs.readFileSync(SEARCH_SRC, 'utf8')}\n;globalThis.__create = createSearchPage; globalThis.__Search = Search;`,
         context, { filename: 'search.js' });
     state.create = context.__create;
     state.Search = context.__Search;
     state.uiStore = uiStore;
     state.kazumiDeferred = kazumiDeferred;
+    if (kazumi) state.Kazumi = context.Kazumi; // 暴露桩供用例改写（如 getCachedBangumiMatch）
+    if (o.realTimeline) {
+        // 真实 timeline.js 源码载入同一 VM 上下文（真实 _attachFavBadges 徽章管线，
+        // 不 stub——回归锁：Kazumi 卡重挂徽标行时 .kazumi-badge 不许被连带删除）。
+        // search.js 沙箱未挂 globalThis，这里先补上供 timeline.js 尾部 IIFE 挂载
+        vm.runInContext('globalThis.__origGT = globalThis;', context);
+        const timelineSrc = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/timeline.js'), 'utf8');
+        vm.runInContext(`${timelineSrc}\n;globalThis.__Timeline = Timeline;`, context, { filename: 'timeline.js' });
+        state.Timeline = context.__Timeline;
+    }
     return state;
 }
 
@@ -458,6 +481,63 @@ test('重复搜索：旧搜索在途的 Kazumi 结果被令牌丢弃，不混入
     assert.ok(!grid.includes('旧词结果'));
 });
 
+test('Kazumi 卡片标记对齐时间表/推荐卡：源徽章入 .vod-fav-row 徽标行 + 匹配缓存带 eps 时出话数徽章', async () => {
+    const h = loadSearch({ kazumi: true });
+    const page = aggPage(h, '甲');
+    // 预置 Bangumi 匹配缓存（含总话数）：卡片渲染即带 eps 徽章
+    h.Kazumi.getCachedBangumiMatch = (name) => (
+        name === '有话数' ? { id: 42, cover: '', score: 7.5, rank: 0, air_date: '2026-07-01', eps: 12 } : null
+    );
+    page.renderGroup({ source: 'kazumi:demo', name: '演示源' }, [
+        { name: '有话数', src: 'u1' },
+        { name: '无话数', src: 'u2' },
+    ]);
+    const grid = h.$.allHtml('#ag-sg0-grid');
+    // 源徽章不再左上角独立，而是入左下徽标行
+    assert.match(grid, /<div class="vod-fav-row"><span class="kazumi-badge">demo<\/span>/, '源徽章入徽标行行首');
+    assert.ok(!grid.includes('kazumi-badge" style'), '无残留行内定位');
+    // 匹配缓存带 eps → 渲染 .rec-eps 话数徽章（徽标行内、源徽章右侧）。
+    // 2026-07-01 放送 + 12 话：放送日 + 12 周 + 3 天 < 今日（2026-09 之后）→
+    // 已完结，title 标注「放送已完结 · 共 N 话」（bangumiEpBadge 共享推算）
+    assert.match(grid, /kazumi-badge">demo<\/span><span class="rec-eps" title="放送已完结 · 共 12 话">12话<\/span>/);
+    // 无 eps 数据不渲染徽章；排名角标仍为右上角独立徽章
+    assert.ok(!grid.includes('rec-eps" title="共 0'), 'eps=0 不出徽章');
+});
+
+test('聚合搜索：收藏徽标管线接入——映射在手时按 data-id/subject id 反查挂徽标', async () => {
+    const favCalls = [];
+    const h = loadSearch({
+        kazumi: true,
+        Timeline: {
+            getColStateMap: async () => new Map([['300', 3]]),
+            _attachFavBadges: (g, items, map) => favCalls.push({ items: items.map((it) => it.id), map: new Map(map || []) }),
+        },
+        FavHub: { onChanged: () => () => {} },
+    });
+    const page = aggPage(h, '甲');
+    // Kazumi 匹配缓存：「收藏过的片」已匹配 subject 300（映射含 300）、「未匹配片」无缓存
+    h.Kazumi.getCachedBangumiMatch = (name) => (
+        name === '收藏过的片' ? { id: 300, cover: '', eps: 12 } : null
+    );
+    page.renderGroup({ source: 'srcA', name: '源A' }, [
+        { vod_id: '100', vod_name: 'CatVod 片', vod_remarks: '完结' },
+    ]);
+    page.renderGroup({ source: 'kazumi:demo', name: '演示源' }, [
+        { name: '收藏过的片', src: 'u1' },
+        { name: '未匹配片', src: 'u2' },
+    ]);
+    await flush();
+    // 两组各挂一次（首渲 _paintGrpFavBadges + 映射到手补挂）
+    const catvod = favCalls.filter((c) => c.items.includes('100'));
+    const kazumiMatched = favCalls.filter((c) => c.items.includes('300'));
+    assert.ok(catvod.length >= 1, 'CatVod 组按 vod_id 反查（映射无 100 不出徽标）');
+    assert.ok(kazumiMatched.length >= 1, 'Kazumi 组按片名匹配缓存反查 subject id（bug 回归锁）');
+    assert.equal(catvod[0].map.get('300'), 3, '共享映射透传');
+    // 未匹配片：id 置空串，不落在映射任何键上（映射无空键）→ 不误标
+    const kazumiGroup = favCalls.find((c) => c.items.includes(''));
+    if (kazumiGroup) assert.equal(kazumiGroup.map.get(''), undefined, '空 id 不命中映射');
+});
+
 test('再次搜索：来源筛选栏与分组状态整体复位（_curSrc/分组表/筛选标签/序号）', async () => {
     const h = loadSearch();
     const page = aggPage(h, '甲');
@@ -553,4 +633,144 @@ test('Kazumi 页签：未启用规则时提示「Kazumi 引擎不可用」且不
     // 现已改为 done 分支带 warnText 时走 warnToast，这里断言用户能看到提示。
     assert.deepEqual(h.toasts, ['Kazumi 引擎不可用'],
         '_statusShown=false 时 done 分支也应通过 warnToast 让用户看到提示');
+});
+
+// ---------------------------------------------------------------- Kazumi 卡收藏徽标（真实 _attachFavBadges 回归锁）
+
+/**
+ * 结构感知迷你 DOM：模拟 `#gid-grid` 下 Kazumi 卡的两级结构
+ *   .vod-card.kazumi-card[data-name] → .vod-cover → .vod-fav-row（行内含 .kazumi-badge / .rec-eps）
+ * 与通用 W 桩不同，这里 append/html/find/prepend/remove 真实生效于结构树，
+ * 供真实 Timeline._attachFavBadges 重挂路径断言行内徽章的存续。
+ */
+function makeKazumiMiniGrid($) {
+    const grid = { covers: [] };
+    // .vod-cover 节点：children 数组保存行/直挂徽章（字符串形式），嵌套顺序可表达
+    const makeCover = () => {
+        const children = []; // [{ tag, html }] 或纯字符串节点
+        const idxOf = (cls) => children.findIndex((c) => typeof c === 'string' && c.includes(cls));
+        const cover = {
+            length: 1,
+            append(inner) { children.push(String(inner)); return cover; },
+            prepend(inner) { children.unshift(String(inner)); return cover; },
+            find(sel) {
+                if (sel === '.vod-fav-row') {
+                    const i = idxOf('vod-fav-row');
+                    if (i < 0) return { length: 0, remove() {}, prepend() {} };
+                    return {
+                        length: 1,
+                        // jQuery .prepend(b) 语义：b 插入行元素内部、成为行内首个子节点
+                        // （而非行的前置兄弟），故插到 .vod-fav-row 开标签之后
+                        prepend(b) { children[i] = children[i].replace(/^(<div class="vod-fav-row"[^>]*>)/, '$1' + String(b)); },
+                        // jQuery 对已摘除（detach）节点的 .remove() 是无害 no-op：
+                        // 这里守卫防止 i=-1 时误删队尾（对齐 makeMiniGrid 桩语义）
+                        remove() { const j = idxOf('vod-fav-row'); if (j >= 0) children.splice(j, 1); },
+                    };
+                }
+                if (sel === '.kazumi-badge' || sel === '.rec-eps' || sel === '.timeline-ep-badge') {
+                    const cls = sel.slice(1);
+                    const i = idxOf(cls);
+                    return i >= 0 ? {
+                        length: 1,
+                        0: { outerHTML: children[i].match(new RegExp(`<span class="[^"]*${cls}[^"]*"[^>]*>.*?</span>`))[0] },
+                        // 同上：徽章已随行删除时守卫 no-op
+                        remove() { const j = idxOf(cls); if (j >= 0) children.splice(j, 1); },
+                    } : { length: 0, remove() {} };
+                }
+                return { length: 0, remove() {} };
+            },
+            get html() { return children.join(''); },
+        };
+        return cover;
+    };
+    const makeCard = (name) => {
+        const cover = makeCover();
+        grid.covers.push(cover);
+        return {
+            length: 1,
+            data: (k) => (k === 'name' ? name : undefined),
+            find: (sel) => (sel === '.vod-cover' ? cover : { length: 0, remove() {} }),
+        };
+    };
+    const cards = [];
+    grid.addCard = (name) => { cards.push(makeCard(name)); };
+    grid.coverOf = (i) => grid.covers[i];
+    // 从 W 桩记录的分组网格 HTML 里提取每张卡的 .vod-cover 内层，按渲染顺序
+    // 灌入结构树（等价真实 DOM：_paintGrp 的 html() 写入后卡片自带
+    // <div class="vod-fav-row"><span class="kazumi-badge">…</span></div> 初始行）。
+    // escHtml 为恒等桩，卡 HTML 可按 .vod-cover 边界直接切分。
+    grid.seedFromRecordedHtml = (recordedHtml) => {
+        const re = /<div class="vod-cover">([\s\S]*?)<\/div>\s*<div class="vod-name"/g;
+        let m;
+        let i = 0;
+        while ((m = re.exec(String(recordedHtml))) !== null && i < grid.covers.length) {
+            const cover = grid.covers[i];
+            const row = m[1].match(/<div class="vod-fav-row">[\s\S]*?<\/div>/);
+            if (row) cover.append(row[0]);
+            i += 1;
+        }
+    };
+    // 解析通用 W 桩的 find：只接两段式 `#gid-grid>>...` 查找，其余交给通用桩
+    $.findResolver = (hostSel, sel) => {
+        if (!/^\d+-sg\d+-grid$/.test(hostSel) && !hostSel.startsWith('#km-sg') && !hostSel.startsWith('#ag-sg')) return null;
+        // search.js：.vod-card.kazumi-card[data-name="..."] .vod-cover
+        let m = sel.match(/^\.vod-card\.kazumi-card\[data-name="((?:[^"\\]|\\.)*)"\] \.vod-cover$/);
+        if (m) {
+            const name = m[1].replace(/\\/g, ''); // 桩里 CSS.escape 为恒等，去转义即原始片名
+            const card = cards.find((c) => c.data('name') === name);
+            return card ? card.find('.vod-cover') : { length: 0 };
+        }
+        // timeline.js：.bangumi-card[data-id="..."] .vod-cover（Kazumi 卡不命中，恒空）
+        return { length: 0 };
+    };
+    return grid;
+}
+
+test('Kazumi 卡收藏徽标（真实 _attachFavBadges）：按 el 引用挂上徽标行且 .kazumi-badge 不丢（问题 1+3 回归锁）', async () => {
+    // 端到端：search.js _paintGrpFavBadges（片名反查 subject id + 自定位卡片）→
+    // 真实 timeline.js _attachFavBadges（el 双定位口径 + 重挂保活）。
+    // 旧实现的选择器 `.bangumi-card[data-id] .vod-cover` 对 Kazumi 卡双失配
+    // （类名 vod-card kazumi-card、data-id 为播放源串），徽标永远挂不上；
+    // 且重挂删行重建会连带删掉行内 .kazumi-badge 源徽章。
+    const h = loadSearch({ kazumi: true, realTimeline: true, FavHub: { onChanged: () => () => {} } });
+    h.Timeline._colStateMap = new Map([['300', 3]]); // 时间表自身映射（真实实现缺省读取）
+    h.Search.init(); // 创建 agg/kz 控制器（Search.agg 此前为 null）
+    h.$.setVal('#search-keyword', '甲');
+    const page = h.Search.agg;
+    // 映射懒加载桩：复用 Timeline.getColStateMap 返回同一映射（_ensureColStateMap 触发）
+    h.Timeline.getColStateMap = async () => h.Timeline._colStateMap;
+    // 预置匹配缓存：收藏过的片 → subject 300；未收藏片无缓存
+    h.Kazumi.getCachedBangumiMatch = (name) => (name === '收藏过的片' ? { id: 300, cover: '' } : null);
+    // 构建结构化网格 + 重定向该分组的卡片查找
+    const grid = makeKazumiMiniGrid(h.$);
+    grid.addCard('收藏过的片');
+    grid.addCard('未收藏片');
+
+    page.renderGroup({ source: 'kazumi:demo', name: '演示源' }, [
+        { name: '收藏过的片', src: 'u1' },
+        { name: '未收藏片', src: 'u2' },
+    ]);
+    // 真实 DOM 里 _paintGrp 的 html() 会写入卡片初始行（kazumi-badge 在 .vod-fav-row
+    // 行内）；W 桩只记 ops，这里把记录的网格 HTML 灌回结构树再继续
+    grid.seedFromRecordedHtml(h.$.lastHtml('#ag-sg0-grid'));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const matched = grid.coverOf(0);
+    // 问题 1 锁：收藏徽标行已挂上（data-id 选择器口径下 $card.length 恒 0，永不出现）
+    assert.match(matched.html, /vod-fav-badge vod-fav-watching/, '按 el 引用挂上收藏徽标行');
+    assert.match(matched.html, /在看/, '六态文案与 timeline.js 一致');
+    // 问题 3 锁：源徽章不因删行重建而丢失
+    assert.match(matched.html, /kazumi-badge/, '.kazumi-badge 源徽章保留');
+    assert.match(matched.html, /<span class="kazumi-badge">demo<\/span>/, '源徽章内容原样');
+    // 未收藏卡：不出徽标行（未命中映射零 DOM）
+    assert.doesNotMatch(grid.coverOf(1).html, /vod-fav-badge/, '未收藏卡不挂收藏徽标');
+
+    // 重挂场景（FavHub 广播 refreshBadges）：徽标行删行重建后源徽章仍在
+    await page.refreshBadges();
+    assert.match(matched.html, /vod-fav-badge vod-fav-watching/, '重挂后收藏徽标仍在');
+    assert.match(matched.html, /kazumi-badge/, '重挂后 .kazumi-badge 仍在（问题 3 核心回归锁）');
+    // 防重复：重挂不叠加多枚收藏徽标/源徽章
+    assert.equal((matched.html.match(/vod-fav-badge /g) || []).length, 1, '收藏徽标不重复堆积');
+    assert.equal((matched.html.match(/kazumi-badge/g) || []).length, 1, '源徽章不重复堆积');
 });

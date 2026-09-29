@@ -1,7 +1,11 @@
 {
   "name": "yuki",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "YuKi：影视聚合应用桌面端",
+  "author": {
+    "name": "Arimayuki03",
+    "url": "https://github.com/Arimayuki03/YuKi"
+  },
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -74,6 +78,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "packElevateHelper": false,
       "installerLanguages": [
         "zh_CN",
         "en_US"
@@ -100,7 +105,7 @@
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",
-    "electron": "^31.0.0",
+    "electron": "^44.4.5",
     "electron-builder": "^25.1.8",
     "eslint": "^10.8.1",
     "globals": "^17.11.0"

@@ -15,41 +15,68 @@ const vm = require('node:vm');
 const ROOT = path.join(__dirname, '../..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 
-/** 最小 jQuery 桩（对齐 detail-start-button.test.js）：链式 + html 捕获 + 委托记录。 */
+/** 最小 jQuery 桩（对齐 detail-start-button.test.js）：链式 + html 捕获 + 委托记录。
+ *  find() 同样走 makeNode 并记录链路，data() 按选择器内 data-eid="N" 解析，
+ *  add/removeClass/toggle/html 记录到 ops（按选择器前缀聚合），支撑长列表网格交互断言。 */
 function makeJqStub(captor) {
-    const makeNode = (sel) => ({
-        sel: String(sel),
-        length: 1,
-        on(ev, a, b) {
-            const fn = typeof b === 'function' ? b : a;
-            const delegated = typeof b === 'function' ? String(a) : '';
-            if (captor && typeof fn === 'function') captor.bound.push({ sel: String(sel), ev, delegated, fn });
-            return this;
-        },
-        off() { return this; },
-        html(s) { if (captor && s !== undefined) captor.htmlBySel.set(String(sel), String(s)); return this; },
-        text() { return this; },
-        val() { return ''; },
-        addClass() { return this; },
-        removeClass() { return this; },
-        toggleClass() { return this; },
-        attr() { return this; },
-        prop() { return this; },
-        trigger() { return this; },
-        find() { return makeNode(String(sel) + ' *'); },
-        each() { return this; },
-        map() { return this; },
-        get() { return []; },
-        filter() { return this; },
-        data() { return undefined; },
-    });
+    const makeNode = (sel) => {
+        const node = {
+            sel: String(sel),
+            length: 1,
+            on(ev, a, b) {
+                const fn = typeof b === 'function' ? b : a;
+                const delegated = typeof b === 'function' ? String(a) : '';
+                if (captor && typeof fn === 'function') captor.bound.push({ sel: String(sel), ev, delegated, fn });
+                return this;
+            },
+            off() { return this; },
+            html(s) {
+                if (captor && s !== undefined) captor.htmlBySel.set(String(sel), String(s));
+                if (captor && s !== undefined) captor.ops.push({ op: 'html', sel: String(sel), value: String(s) });
+                return this;
+            },
+            text(s) { if (captor && s !== undefined) captor.ops.push({ op: 'text', sel: String(sel), value: String(s) }); return this; },
+            val(s) {
+                if (s !== undefined) { if (captor) captor.ops.push({ op: 'val', sel: String(sel), value: String(s) }); return this; }
+                // 读值：按选择器尾部匹配 context.$stubValues 预置值（跳转输入框等）
+                const values = (captor && captor.stubValues) || {};
+                for (const key of Object.keys(values)) {
+                    if (String(sel) === key || String(sel).endsWith(key) || String(sel).includes(`> ${key}`)) return values[key];
+                }
+                return '';
+            },
+            addClass(c) { if (captor) captor.ops.push({ op: 'addClass', sel: String(sel), value: String(c) }); return this; },
+            removeClass(c) { if (captor) captor.ops.push({ op: 'removeClass', sel: String(sel), value: String(c) }); return this; },
+            toggleClass() { return this; },
+            toggle(v) { if (captor) captor.ops.push({ op: 'toggle', sel: String(sel), value: v === undefined ? 'toggle' : !!v }); return this; },
+            hide() { if (captor) captor.ops.push({ op: 'hide', sel: String(sel) }); return this; },
+            show() { if (captor) captor.ops.push({ op: 'show', sel: String(sel) }); return this; },
+            is() { return false; },
+            attr() { return this; },
+            prop() { return this; },
+            trigger() { return this; },
+            closest(s2) { return makeNode(`${s2} < ${String(sel)}`); },
+            find(s2) { return makeNode(`${String(sel)} > ${String(s2)}`); },
+            each() { return this; },
+            map() { return this; },
+            get() { return []; },
+            filter() { return this; },
+            data(k) {
+                // 按选择器内嵌的 data-eid="N" 解析（渲染出的 cell/chip 均带该属性）
+                const m = String(sel).match(/data-eid="(\d+)"/);
+                if (k === 'eid' && m) return Number(m[1]);
+                return undefined;
+            },
+        };
+        return node;
+    };
     return (sel) => makeNode(sel);
 }
 
 /** 在 VM 中加载 detail.js（最小桩）。extra 可覆盖 window/Kazumi 等。 */
 function loadDetail(extra) {
     const source = read('src/renderer/js/detail.js');
-    const captor = { bound: [], htmlBySel: new Map() };
+    const captor = { bound: [], htmlBySel: new Map(), ops: [], stubValues: {} };
     const toasts = [];
     const context = {
         console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, parseInt, parseFloat,
@@ -83,7 +110,7 @@ function loadDetail(extra) {
     vm.createContext(context);
     vm.runInContext(source, context, { filename: 'detail.js' });
     const Detail = vm.runInContext('Detail', context);
-    return { Detail, bound: captor.bound, htmlBySel: captor.htmlBySel, toasts, context };
+    return { Detail, bound: captor.bound, htmlBySel: captor.htmlBySel, ops: captor.ops, stubValues: captor.stubValues, toasts, context };
 }
 
 const SAMPLE_EPISODES = {
@@ -92,6 +119,11 @@ const SAMPLE_EPISODES = {
         { id: 102, sort: 2, ep: 2, type: 0, name: '第二话', name_cn: '第 2 集' },
         { id: 103, sort: 1, ep: 1, type: 1, name: 'SP', name_cn: '特别篇' },  // SP 与正片同 sort
     ],
+};
+/** 长分集列表（24 正片 + SP = 25 > EP_COMMENTS_CHIPS_MAX=20）：触发按钮+悬浮网格模式。 */
+const LONG_EPISODES = {
+    data: Array.from({ length: 24 }, (_, i) => ({ id: 200 + i, sort: i + 1, ep: i + 1, type: 0, name: `第${i + 1}话`, name_cn: `第 ${i + 1} 集` }))
+        .concat([{ id: 299, sort: 25, type: 1, name: 'SP', name_cn: '特别篇' }]),
 };
 const SAMPLE_EP_COMMENTS = [
     { user: { nickname: '甲' }, content: '一楼', createdAt: 1700000000, replies: [] },
@@ -103,7 +135,7 @@ const SAMPLE_EP_COMMENTS = [
 /** 标准夹具：Bangumi-only 详情 + 已加载分集 + 已渲染选集讨论页签。 */
 function fixtureEpComments(extra) {
     const opened = [];
-    const { Detail, htmlBySel, context } = loadDetail(Object.assign({
+    const { Detail, htmlBySel, ops, bound, stubValues, context } = loadDetail(Object.assign({
         window: {
             open: (u) => opened.push(String(u)),
             yuki: { settingsGet: async () => ({}), settingsSet: async () => ({}) },
@@ -122,7 +154,7 @@ function fixtureEpComments(extra) {
     Detail._bgmInfo = { id: 42, name: '番剧' };
     Detail.vodName = '番剧';
     Detail._activeTab = '选集讨论';
-    return { Detail, htmlBySel, context, opened };
+    return { Detail, htmlBySel, ops, bound, stubValues, context, opened };
 }
 
 // ---------------------------------------------------------------- 页签注册与派发
@@ -146,17 +178,167 @@ test('派发：_renderTabContent 对「选集讨论」调用 _renderEpComments',
 
 // ---------------------------------------------------------------- 渲染与交互
 
-test('渲染：集数 chips 全量展示（含 SP 徽标），默认选中第 1 集', async () => {
+test('渲染：集数选择器统一为按钮+悬浮网格（含 SP 徽标），默认选中第 1 集', async () => {
     const { Detail, htmlBySel } = fixtureEpComments();
     Detail._bgmEps = SAMPLE_EPISODES.data.slice();
     await Detail._renderEpComments();
     const html = String(htmlBySel.get('#detail-tab-content') || '');
-    assert.ok(html.includes('ep-comments-chips'), '应渲染集数选择器');
-    assert.ok(html.includes('data-eid="101"'), '第 1 集 chip 存在');
-    assert.ok(html.includes('data-eid="103"'), 'SP chip 存在（全部分集含 SP/OP/ED）');
-    assert.ok(/ep-comments-chip[^>]*data-eid="101"[^>]*class="[^"]*active|class="[^"]*active[^"]*"[^>]*data-eid="101"|data-eid="101"[^>]*class="ep-comments-chip active"/.test(html.replace(/\n/g, ' ')) || /active[^>]*data-eid="101"|data-eid="101"[^>]*active/.test(html), '第 1 集默认高亮');
+    assert.ok(html.includes('ep-comments-picker'), '应渲染选择器容器');
+    assert.ok(html.includes('id="ep-comments-picker-btn"'), '应渲染「第 N 集」按钮');
+    assert.ok(html.includes('共 3'), '按钮展示总集数');
+    assert.ok(html.includes('data-eid="101"'), '第 1 集格子存在');
+    assert.ok(html.includes('data-eid="103"'), 'SP 格子存在（全部分集含 SP/OP/ED）');
+    assert.ok(/ep-comments-cell[^>]*data-eid="101"[^>]*class="[^"]*active|class="[^"]*active[^"]*"[^>]*data-eid="101"|data-eid="101"[^>]*class="ep-comments-cell active"/.test(html.replace(/\n/g, ' ')), '第 1 集默认高亮');
     assert.ok(html.includes('第 1 集讨论'), '标题展示当前集');
     assert.ok(html.includes('加载评论中'), '列表骨架先展示 loading');
+    assert.ok(!html.includes('ep-comments-chips'), '不再渲染旧版横排 chips 容器');
+    assert.ok(!html.includes('ep-comments-picker-caret'), '按钮不带 ⌄ 下标');
+    assert.ok(html.includes('style="display:none;"'), '弹层默认收起');
+});
+
+// ---------------------------------------------------------------- 选集按钮布局 + 弹层形态
+
+test('选集按钮布局：head 内位于切正序左侧，两按钮同规格同字号纯文本', async () => {
+    const { Detail, htmlBySel } = fixtureEpComments();
+    Detail._bgmEps = LONG_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    const html = String(htmlBySel.get('#detail-tab-content') || '');
+    const head = html.slice(html.indexOf('ep-comments-head'), html.indexOf('ep-comments-list'));
+    assert.ok(head.indexOf('ep-comments-picker-btn') < head.indexOf('id="ep-comments-order"'), '选集按钮应位于切正序左侧');
+    assert.ok((head.match(/md-btn md-btn-tonal md-btn-sm/g) || []).length === 2, '两按钮均 md-btn-sm 同规格');
+    // 按钮内是纯文本（无小号差标 span）：字号与切正序完全一致
+    assert.ok(html.includes('id="ep-comments-picker-btn" class="md-btn md-btn-tonal md-btn-sm">第 1 集 / 共 25 集</button>'), '按钮文本纯文字「第 N 集 / 共 M 集」');
+    assert.ok(!html.includes('ep-comments-picker-total'), '不再有「/ 共 M」小号差标 span');
+});
+
+test('弹层 CSS 契约：向下展开 + 限高滚轮 + head 置顶（防遮挡回归）', () => {
+    const css = read('src/renderer/css/ui.css');
+    const block = css.slice(css.indexOf('.ep-comments-grid {'), css.indexOf('.ep-comments-cell {'));
+    assert.ok(block.includes('top:calc(100% + 8px)'), '弹层应向下展开（top 锚定按钮下方）');
+    assert.ok(!block.includes('bottom:calc(100%'), '不得再向上展开（会被吸顶页签栏截断）');
+    assert.ok(block.includes('max-height:208px'), '弹层整体限高（顶栏 + 格片区）');
+    // 滚轮只发生在格片区：顶栏（计数 + 排序切换）恒可见
+    const cellsCss = css.slice(css.indexOf('.ep-comments-grid-cells {'), css.indexOf('.ep-comments-cell {'));
+    assert.ok(cellsCss.includes('overflow-y:auto'), '格片区内部滚轮滚动（仿颜文字面板）');
+    assert.ok(block.includes('.ep-comments-grid-order') || css.includes('.ep-comments-grid-order {'), '弹层内应有排序切换图标样式');
+    // head 必须自建堆叠上下文压过评论卡：评论卡 content-visibility:auto 隐式
+    // contain:paint 各自成独立绘制层，弹层若只靠自身 z-index 会被其盖住（实测遮挡）
+    const headRule = css.slice(css.indexOf('.ep-comments-head {'), css.indexOf('.ep-comments-title {'));
+    assert.ok(headRule.includes('position:relative') && headRule.includes('z-index:2'), '.ep-comments-head 应提为堆叠上下文（置顶于评论卡）');
+    // chips 旧形态已删：CSS 不再保留 .ep-comments-chips/.ep-comments-chip 规则
+    assert.ok(!css.includes('.ep-comments-chips'), '旧版横排 chips 容器样式应删除');
+    assert.ok(!css.includes('.ep-comments-chip '), '旧版 chips 样式应删除');
+});
+
+test('弹层内排序切换：小图标只切格网方向（独立状态），不重写外层按钮、不动评论排序', async () => {
+    const { Detail, htmlBySel, ops, bound } = fixtureEpComments();
+    Detail._bgmEps = LONG_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    // 初始态：格网默认倒序 → 图标「↓ 倒序」、首格为最大集（SP）；外层按钮不受影响
+    const html = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html.includes('id="ep-comments-grid-order"'), '弹层内应渲染排序切换图标');
+    assert.ok(html.includes('↓ 倒序'), '格网默认倒序图标文案');
+    assert.ok(/class="ep-comments-grid-cells">\s*<button[^>]*data-eid="299"/.test(html.replace(/\n/g, ' ')), '倒序时网格首格为最大集（SP）');
+    assert.ok(html.includes('⇅ 切正序'), '外层按钮初始文案不受弹层影响');
+    // 点击图标：仅格网翻转 → 图标变「↑ 正序」、首格变第 1 集；
+    // 外层按钮文案不动（无 text 操作目标 ep-comments-order）、_epCommentsDesc 不变
+    const bind = bound.find((b) => /#ep-comments-grid-order$/.test(b.sel) && typeof b.fn === 'function');
+    assert.ok(bind, '应绑定弹层内排序切换');
+    bind.fn.call('#ep-comments-grid-order', { currentTarget: '#ep-comments-grid-order', stopPropagation() {} });
+    assert.equal(Detail._epGridDesc, false, '格网方向翻转');
+    assert.equal(Detail._epCommentsDesc, true, '评论排序状态不受弹层图标影响');
+    assert.ok(ops.some((o) => o.op === 'text' && String(o.value).includes('↑ 正序')), '图标文案更新为正序');
+    assert.ok(!ops.some((o) => o.sel.includes('#ep-comments-order')), '外层切正序按钮文案不被重写（两控件互不干扰）');
+    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '网格重排');
+    const cellsHtml = [...htmlBySel.entries()].filter(([k]) => k.includes('ep-comments-grid-cells')).map(([, v]) => String(v)).join('');
+    assert.ok(/data-eid="200"/.test(cellsHtml), '正序时网格首格为第 1 集');
+});
+
+test('长列表点选：网格内点集 → 收起弹层 + 标题/按钮刷新（委托绑定，重排后仍生效）', async () => {
+    const { Detail, htmlBySel, ops, bound } = fixtureEpComments();
+    Detail._bgmEps = LONG_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    // 骨架绑定：cell 点选委托挂 .ep-comments-grid-cells（重排重写 innerHTML 不掉绑定）、
+    // picker 开合按钮直挂；桩记录 find 链选择器与委托目标
+    const cellBind = bound.find((b) => /(^|>| )\.ep-comments-grid-cells$/.test(b.sel) && b.delegated === '.ep-comments-cell' && typeof b.fn === 'function');
+    const gridBind = bound.find((b) => /#ep-comments-picker-btn$/.test(b.sel) && typeof b.fn === 'function');
+    assert.ok(cellBind && gridBind, 'cell 点选应委托在 grid-cells 容器上（修复重排后点格无响应）');
+    // 模拟点击第 24 集（id=223）cell：桩 $(sel) 会 String 化入参再从中解析
+    // data-eid="N"，故 currentTarget 直接给带该属性的选择器串（同 DOM 语义）
+    const cellFn = cellBind.fn;
+    const currentTarget = 'button.ep-comments-cell[data-eid="223"]';
+    cellFn.call(currentTarget, { currentTarget });
+    assert.equal(Detail._epCommentsEpisodeId, 223, '点选后选中集切换为第 24 集（id=223）');
+    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-title') && o.value.includes('第 24 集讨论')), '标题更新为第 24 集');
+    assert.ok(ops.some((o) => o.op === 'hide'), '弹层收起');
+    // 高亮迁移：pickEp 同帧重写格网 cells（弹层 DOM 不重建，只 toggle 显隐——
+    // 不重写则下次点开仍是旧集高亮「选中格子无变化」），新集带 active、旧集无
+    const cellsHtml = [...htmlBySel.entries()].filter(([k]) => k.includes('grid-cells')).map(([, v]) => String(v)).join('');
+    const activeCells = [...cellsHtml.matchAll(/class="ep-comments-cell( active)?" data-eid="(\d+)"/g)].filter((m) => m[1]).map((m) => m[2]);
+    assert.deepEqual(activeCells, ['223'], '重写后仅新集带 active 高亮（再点开按钮能看到选中态）');
+    // 桩按 find 链记录 html（"#detail-tab-content > #ep-comments-picker-btn"），按尾部选择器取
+    const btnEntry = [...htmlBySel.entries()].find(([k]) => k.trim().endsWith('#ep-comments-picker-btn'));
+    const btnHtml = String((btnEntry && btnEntry[1]) || '');
+    assert.ok(btnHtml.includes('第 24 集'), '按钮文案更新为新集');
+    // 再点同一集：不重复拉取（pickEp 返回 false，仅剩收起动作）
+    const before = ops.length;
+    cellFn.call(currentTarget, { currentTarget });
+    assert.equal(ops.length, before + 1, '重复点选仅收起弹层，不触发重渲染');
+});
+
+test('弹层集号跳转：输入集号直达切集，无效输入行内提示（长番快速定位）', async () => {
+    const { Detail, htmlBySel, ops, bound, stubValues } = fixtureEpComments();
+    // 300 集长番：sort 跨季累计偏移 700（模拟几百集番剧，ep 季内 1..300）
+    Detail._bgmEps = Array.from({ length: 300 }, (_, i) => ({ id: 1000 + i, sort: 700 + i, ep: String(i + 1), type: 0, name: `e${i + 1}` }));
+    await Detail._renderEpComments();
+    // 结构：跳转行（输入框 + 按钮 + 错误提示）在弹层内
+    const html = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html.includes('id="ep-comments-jump-input"'), '弹层应渲染集号跳转输入框');
+    assert.ok(html.includes('id="ep-comments-jump-go"'), '应渲染跳转按钮');
+    assert.ok(html.includes('id="ep-comments-jump-err"'), '应渲染行内错误提示');
+    // 桩增强：val() 按选择器尾部匹配 stubValues 预置值（模拟真实输入）
+    stubValues['#ep-comments-jump-input'] = '250';
+    const enterBind = bound.find((b) => /#ep-comments-jump-input$/.test(b.sel) && b.ev === 'keydown' && typeof b.fn === 'function');
+    const goBind = bound.find((b) => /#ep-comments-jump-go$/.test(b.sel) && typeof b.fn === 'function');
+    assert.ok(enterBind && goBind, '应绑定输入框回车与跳转按钮');
+    // 回车跳转：250 → ep 口径匹配 id=1249（sort=949）
+    let preventDefaulted = false;
+    enterBind.fn.call('#ep-comments-jump-input', { key: 'Enter', preventDefault: () => { preventDefaulted = true; }, stopPropagation() {} });
+    assert.ok(preventDefaulted, '回车 preventDefault');
+    assert.equal(Detail._epCommentsEpisodeId, 1249, '跳转后选中集为 ep=250（id=1249）');
+    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-title') && o.value.includes('第 250 集讨论')), '标题切到第 250 集');
+    assert.ok(ops.some((o) => o.op === 'hide'), '跳转成功收起弹层');
+    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '跳转后格网重写（高亮迁到新集）');
+    // 无匹配集：行内提示，不改选中集
+    stubValues['#ep-comments-jump-input'] = '999';
+    const errBefore = Detail._epCommentsEpisodeId;
+    goBind.fn.call('#ep-comments-jump-go', { currentTarget: '#ep-comments-jump-go', stopPropagation() {} });
+    assert.equal(Detail._epCommentsEpisodeId, errBefore, '无效集号不切集');
+    assert.ok(ops.some((o) => o.op === 'text' && o.sel.includes('#ep-comments-jump-err') && String(o.value).includes('没有第 999 集')), '行内提示「没有第 999 集」');
+    // 记忆写入：跳转也被记住（跨重开恢复）。逐字段比对——对象跨 VM 上下文
+    // 原型不同，deepEqual 会误判
+    assert.equal(String(Detail._epCommentsMemory.sid), '42', '记忆归属当前番剧');
+    assert.equal(Number(Detail._epCommentsMemory.eid), 1249, '跳转写入选集记忆');
+});
+
+test('连续编号（跨季累计 sort）：显示季内集号 ep 优先，不再出现「第 78 集/共 8 集」', async () => {
+    const { Detail, htmlBySel } = fixtureEpComments();
+    // 第二季 8 集：sort 跨季累计 71..78，ep 季内重排 1..8（Bangumi /v0/episodes 真实口径）
+    Detail._bgmEps = Array.from({ length: 8 }, (_, i) => ({ id: 900 + i, sort: 71 + i, ep: String(i + 1), type: 0, name: `e${i + 1}` }));
+    Detail._epCommentsEpisodeId = 907; // 第 8 集（sort=78, ep=8）
+    await Detail._renderEpComments();
+    const html = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html.includes('第 8 集讨论'), '标题按季内集号 ep=8 显示（而非 sort=78）');
+    assert.ok(html.includes('第 8 集 / 共 8 集'), '按钮同样按 ep 显示，集数口径一致');
+    assert.ok(html.includes('data-eid="907"'), '选中集存在');
+    assert.ok(!/第 78 集/.test(html), '不再出现「第 78 集」绝对集号');
+    // ep 缺失时回退 sort，再回退位置序号（标题按当前选中集 951 展示）
+    Detail._bgmEps = [{ id: 950, sort: 12, type: 0, name: 'a' }, { id: 951, type: 0, name: 'b' }];
+    Detail._epCommentsEpisodeId = 951;
+    await Detail._renderEpComments();
+    const html2 = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html2.includes('第 2 集讨论'), '当前选中集（id=951，无 ep 无 sort）按位置序号显示第 2 集');
+    assert.ok(html2.includes('>12<i') || html2.includes('>12<'), '格子里 ep 缺失的集回退 sort=12');
 });
 
 test('加载：bangumiEpisodeComments 按选中集 episode_id 拉取并渲染（含楼中楼）', async () => {
@@ -243,6 +425,29 @@ test('跨番剧复位：_resetEpComments 清空评论与 _bgmEps（防上一部�
     assert.ok(Detail._epCommentsGen > oldGen, '世代自增（作废在途请求）');
 });
 
+test('选集跨会话记忆：重开同一番剧恢复上次选中的集；换番剧记忆作废', async () => {
+    const { Detail, htmlBySel } = fixtureEpComments();
+    // 首次：番剧 42，选第 3 集（id=103，SP）
+    Detail._bgmEps = SAMPLE_EPISODES.data.slice();
+    Detail._epCommentsEpisodeId = 103;
+    Detail._rememberEpSelection(103);
+    // 模拟重开番剧 42：reset 清实例态 + _bgmEps 缓存
+    Detail._resetEpComments();
+    Detail._bgmEps = SAMPLE_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    let html = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html.includes('data-eid="103"'), '记忆恢复：重开同番剧回到上次选中的第 3 集');
+    assert.ok(/data-eid="103"[^>]*active|active[^>]*data-eid="103"/.test(html.replace(/\n/g, ' ')), '恢复的集带高亮');
+    // 换番剧 99：记忆 sid 不匹配 → 回退第 1 集
+    Detail._bgmId = '99';
+    Detail._resetEpComments();
+    Detail._bgmEps = Array.from({ length: 4 }, (_, i) => ({ id: 500 + i, sort: i + 1, ep: String(i + 1), type: 0, name: `e${i + 1}` }));
+    await Detail._renderEpComments();
+    html = String(htmlBySel.get('#detail-tab-content') || '');
+    assert.ok(html.includes('data-eid="500"'), '换番剧不沿用旧记忆：回退第 1 集');
+    assert.ok(!/data-eid="103"/.test(html), '旧番剧的集 ID 不出现在新番剧格网');
+});
+
 // ---------------------------------------------------------------- bgm.tv 跳转按钮
 
 test('Bangumi 页按钮：hero 操作行渲染 #detail-bgm-open，点击经 window.open 跳转 bgm.tv', async () => {
@@ -279,7 +484,8 @@ test('bgm.tv 跳转守卫：非数字 subjectId 不拼 URL（toast 提示）', (
 test('源码契约：#detail-bgm-open 委托绑定存在（init 挂 #detail-body）', () => {
     const src = read('src/renderer/js/detail.js');
     assert.match(src, /on\('click', '#detail-bgm-open'/, '应绑定 #detail-bgm-open 点击委托');
-    assert.match(src, /window\.open\(`https:\/\/bgm\.tv\/subject\/\$\{sid\}`/, '应以模板串拼 bgm.tv 条目 URL');
+    // 跳转目标统一走 bangumiWebUrl（条目页跳转跟随镜像：官方 bgm.tv / 镜像 bgm.{根域名} 双形态）
+    assert.match(src, /window\.open\(bangumiWebUrl\(sid\), '_blank'\)/, '应经 bangumiWebUrl 取跳转 URL（官方/镜像双形态）');
     // 守卫正则必须锚定在委托处理器内部（上方复刻式用例只测副本不测生产代码，
     // 若 detail.js 删掉数字 ID 守卫，这里必须失败——防注入防线的源码级回归）
     assert.ok(src.includes('.test(sid)'), '跳转守卫必须存在于 detail.js（.test(sid) 数字 ID 校验）');

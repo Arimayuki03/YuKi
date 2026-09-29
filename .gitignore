@@ -7,6 +7,7 @@ python-backend/.venv/
 python-backend/__pycache__/
 python-backend/**/__pycache__/
 python-backend/.test-runtime/
+.test-runtime/
 python-backend/smoke_result.txt
 tmp/
 tmp_spiders/

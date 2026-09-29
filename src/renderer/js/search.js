@@ -11,13 +11,13 @@
  * 全部结束发 event: done。逐源流式追加渲染；结果项点击进详情。
  * 来源筛选：每收到一个源生成一枚筛选标签，点击只看该源结果。
  * 分页（T38）：「全部」视图每组限显前 20 条（无分页器，超出的点上
- * 方来源标签进单源视图）；单源视图启用统一分页器，每页 20 条翻
+ * 方来源标签进单源视图）；单源视图启用统一分页器，按设置条数翻
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  * Kazumi 源页签独立走 /search/kazumi-stream SSE（2.3，T73 边搜边加载）。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter, FavHub, Timeline, bangumiEpBadge, BangumiSearch */
 
-const SEARCH_PAGE_SIZE = 20; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39）
+const SEARCH_PAGE_SIZE = 24; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39，默认 24）
 
 // ---- 搜索结果快照（页面状态持久化：切页/重启不回初始态）----
 // 搜索结束后把本次分组结果限量落盘（cache.js TTL 层），下次进入搜索页且无在途/
@@ -48,6 +48,8 @@ function createSearchPage(cfg) {
         _statusTimer: null,     // 1s 延迟显示定时器
         _statusDoneTimer: null, // 完成态 1.5s 隐藏定时器
         _lastStatus: null,      // 最近一次进度状态（延迟显示到点后渲染用）
+        _colStateMap: null,     // 共享收藏映射（Timeline.getColStateMap 懒加载，徽标行注入用）
+        _colMapLoading: false,  // 映射在途标记（并发渲染只触发一次懒加载）
 
         /** 本控制器所属页签当前是否可见（决定进度条能否显示，T83 泛化：离开本页签一律不显示）。 */
         _stabVisible() {
@@ -63,6 +65,68 @@ function createSearchPage(cfg) {
             });
             this._bindResultCardClick();
             this._bindSrcFilterTabs();
+            // 订阅收藏变更：详情页改收藏后回搜索页，重读映射并补挂徽标（对齐时间表/推荐页）
+            if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
+                this._unsubFav = FavHub.onChanged(() => this.refreshBadges());
+            }
+        },
+
+        /** 收藏变更后刷新徽标：重读映射并补挂当前全部分组网格。 */
+        async refreshBadges() {
+            if (typeof Timeline === 'undefined' || !Timeline.getColStateMap) return;
+            this._colStateMap = await Timeline.getColStateMap();
+            Object.keys(this._grpLists).forEach((gid) => this._paintGrpFavBadges(gid));
+        },
+
+        /** 懒加载共享收藏映射（Timeline.getColStateMap：三页共享三级缓存，零重复请求）。
+         *  只在首渲触发一次；到手后补挂所有已渲染分组。 */
+        _ensureColStateMap() {
+            if (this._colMapLoading || typeof Timeline === 'undefined' || !Timeline.getColStateMap) return;
+            this._colMapLoading = true;
+            Timeline.getColStateMap().then((map) => {
+                this._colMapLoading = false;
+                this._colStateMap = map;
+                Object.keys(this._grpLists).forEach((gid) => this._paintGrpFavBadges(gid));
+            }).catch(() => { this._colMapLoading = false; /* 收藏映射重建失败静默 */ });
+        },
+
+        /** 给单个分组网格补挂收藏徽标行（Timeline 徽章管线）。
+         *  CatVod 卡 data-id 为源内 id（非 Bangumi subject id）不命中映射——
+         *  CatVod 卡不出收藏徽标。
+         *  Kazumi 卡 data-id 也是播放源串（类名 vod-card kazumi-card），Timeline
+         *  侧按 `.bangumi-card[data-id]` 定位必然失配——这里按片名反查出 subject id
+         *  后，把卡片 .vod-cover 节点引用（el）随条目传给 Timeline._attachFavBadges
+         *  （el 双定位口径）：Timeline 直接用引用挂徽标，不再依赖选择器；条目顺序
+         *  与 _paintGrp 渲染顺序一致（同为 grp.list 切片），按片名一一配对。 */
+        _paintGrpFavBadges(gid) {
+            if (typeof Timeline === 'undefined' || !Timeline._attachFavBadges) return;
+            const grp = this._grpLists[gid];
+            if (!grp || !this._colStateMap || !this._colStateMap.size) return;
+            const gridEl = $(`#${gid}-grid`);
+            const isKazumi = String(grp.src).startsWith('kazumi:');
+            const items = grp.list.map((v) => {
+                let id = v.vod_id;
+                if (isKazumi) {
+                    // 片名 → subject id（匹配缓存命中才有 id；缺缓存时不出徽标，
+                    // 由封面补拉管线建立缓存后的下一次渲染/刷新补上）
+                    id = '';
+                    const name = String(v.name || '').trim();
+                    const m = (name && typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiMatch)
+                        ? Kazumi.getCachedBangumiMatch(name) : null;
+                    if (m && m.id) id = String(m.id);
+                    if (id) {
+                        // 按片名定位本卡（_paintGrp 渲染顺序与 grp.list 一致）：
+                        // 把封面节点直接交给 Timeline，绕开 data-id 选择器双失配。
+                        // 选择器值用「原始片名 + CSS.escape」：属性选择器匹配的是 DOM
+                        // 解码后的原值，escHtml 后的串反而永不命中（对齐 _retireVerifiedTab 口径）
+                        const rawName = String(v.name || '');
+                        const $card = gridEl.find(`.vod-card.kazumi-card[data-name="${CSS.escape(rawName)}"] .vod-cover`);
+                        if ($card.length) return { id, el: $card };
+                    }
+                }
+                return { id: String(id || '') };
+            });
+            Timeline._attachFavBadges(gridEl, items, this._colStateMap);
         },
 
         /** 结果卡片点击 → 详情（Kazumi 结果先匹配 Bangumi 元数据进二级详情页）。 */
@@ -70,16 +134,19 @@ function createSearchPage(cfg) {
             $(cfg.resultsSel).on('click', '.vod-card', (e) => {
                 const el = $(e.currentTarget);
                 const src = String(el.data('source') || '');
-                // Kazumi 结果：自动匹配 Bangumi 元数据，匹配成功进 Bangumi 详情页
+                // Kazumi 结果：自动匹配 Bangumi 元数据，匹配成功进 Bangumi 详情页。
+                // kazumiOrigin（site=kazumi:规则名 + 结果 src）随详情页携带：详情页
+                // 「开始观看」默认回到该源直接解析剧集，免重新全源检索。
                 if (src.startsWith('kazumi:') && typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
                     const name = el.data('name') || '';
-                    const fallback = () => Kazumi.openSourceDialog(name, src, el.data('id') || '');
+                    const kazumiOrigin = { site: src, src: String(el.data('id') || '') };
+                    const fallback = () => Kazumi.openSourceDialog(name, src, kazumiOrigin.src);
                     // T73 优化：封面补拉时已缓存 Bangumi 匹配（含 id）→ 直接进二级详情页，
                     // 免一次重复搜索，且封面与详情保证同一部番（不因两次搜索首条不同而错位）。
                     let cachedMatch = null;
                     if (name && typeof Kazumi.getCachedBangumiMatch === 'function') cachedMatch = Kazumi.getCachedBangumiMatch(name);
                     if (cachedMatch && cachedMatch.id && typeof Kazumi.openBangumiInfoPage === 'function') {
-                        Kazumi.openBangumiInfoPage(cachedMatch.id);
+                        Kazumi.openBangumiInfoPage(cachedMatch.id, kazumiOrigin);
                         return;
                     }
                     if (name && typeof Kazumi.bangumiSearch === 'function') {
@@ -98,7 +165,7 @@ function createSearchPage(cfg) {
                                         air_date: r0.air_date || r0.date || '',
                                     });
                                 }
-                                if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(r0.id);
+                                if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(r0.id, kazumiOrigin);
                                 else fallback();
                             } else {
                                 fallback();
@@ -218,7 +285,7 @@ function createSearchPage(cfg) {
             if (!word) { warnToast('请输入关键字'); return; }
             this._saveWord(word); // 持久化本页签关键词（切页/重启回填搜索框）
             const myToken = ++this._searchToken; // M-30a：搜索令牌——旧词在途回调不作数
-            // T39：每页条数取「搜索页」单独设置（默认 20）
+            // T39：每页条数取「搜索页」单独设置（默认 24）
             this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
             if (myToken !== this._searchToken) return; // await 期间已有新搜索发起：旧词作废，不得覆盖新词状态
             this.stop();
@@ -335,6 +402,12 @@ function createSearchPage(cfg) {
                 if (payload.captcha) { this._renderKazumiCaptcha(payload); }
                 const list = payload.list || [];
                 if (list.length) { shown += 1; items += list.length; this.renderGroup(payload, list); }
+                // 已验证但无结果的源：非验证问题（该源没收录此词），把「已验证·搜索中…」
+                // tab 收尾为「已验证·无结果」，不再静默消失
+                if (payload.source && !list.length && !payload.captcha
+                    && payload.status && payload.status !== 'error') {
+                    this._retireVerifiedTab(String(payload.source.slice(7)));
+                }
                 this._setStatus('正在检索…', { recv, total, items });
             };
             es.addEventListener('done', () => {
@@ -355,29 +428,71 @@ function createSearchPage(cfg) {
             };
         },
 
-        /** 渲染验证码源提示分组（点击打开验证窗口，T73；后续 #11 弹窗验证完善）。 */
+        /** 验证码源提示：tab 进来源筛选分类区（不占影片卡区域），点击先尝试
+         *  自动识别解题，失败回落验证窗口。同源去重（SSE 重复推送不叠加）。 */
         _renderKazumiCaptcha(payload) {
-            const box = $(cfg.resultsSel);
             const src = String(payload.source || '');
             const name = String(payload.name || src.slice(7) || '验证码源');
-            const gid = cfg.gidPrefix + (this._grpSeq++);
-            this._grpLists[gid] = { src, list: [] };
-            this._grpRendered[gid] = { mode: 'all', page: 1 };
-            box.append(`<div class="src-group" data-source="${escHtml(src)}">
-                <div class="src-head">${escHtml(name)} <span class="src-count" style="color:var(--md-error)">需验证</span></div>
-                <div class="kazumi-captcha-line" data-captcha-url="${escHtml(payload.captchaUrl || '')}" title="点击打开验证窗口，完成后重新搜索" tabindex="0">该源需要验证码验证 · 点击尝试</div>
-            </div>`);
-            // P3-17：反查选择器用 CSS.escape(原始值)——DOM 属性值是 escHtml 实体解码
-            // 后的原文，选择器若拼 escHtml 后的串，源含 &/'/"/<> 时两值失配，
-            // 处理器静默绑不上；且未转义 \ 与 ] 会直接构成非法选择器。
-            box.find(`.src-group[data-source="${CSS.escape(src)}"] .kazumi-captcha-line`).on('click', (e) => {
-                const url = String($(e.currentTarget).data('captcha-url') || '');
-                if (url && typeof Kazumi !== 'undefined' && Kazumi._openCaptchaWindow) {
-                    Kazumi._openCaptchaWindow(url, () => { if (typeof this.run === 'function') this.run(); });
-                } else {
-                    warnToast('该源暂无验证链接');
+            // plugin 仅用于 HTML 插值（属性位）；选择器定位一律用「原始值 + CSS.escape」：
+            // 属性选择器匹配的是 DOM 解码后的原值，escHtml 后的串含 &/'/" 时永不命中
+            // （去重恒空 → SSE 重复推送叠加 tab；click 绑定落空）。与 _retireVerifiedTab
+            // 的原始值口径保持一致。
+            const rawPlugin = src.slice(7);
+            const plugin = escHtml(rawPlugin);
+            const $tabs = $(cfg.filtersSel);
+            if ($tabs.find(`.kazumi-captcha-tab[data-captcha-src="${CSS.escape(rawPlugin)}"]`).length) return;
+            const autoHint = payload.ocrAvailable ? ' ⚡可自动' : '';
+            $tabs.append(`<span class="class-tab kazumi-captcha-tab" data-captcha-url="${escHtml(payload.captchaUrl || '')}" data-captcha-src="${plugin}" data-captcha-name="${escHtml(name)}" title="${escHtml(name)}：点击尝试自动识别，失败后打开验证窗口手动输入" tabindex="0">${escHtml(name)} 需验证${autoHint}</span>`);
+            $tabs.find(`.kazumi-captcha-tab[data-captcha-src="${CSS.escape(rawPlugin)}"]`).on('click', (e) => {
+                const $tab = $(e.currentTarget);
+                const url = String($tab.data('captcha-url') || '');
+                const pluginName = String($tab.data('captcha-src') || '');
+                const fallback = () => this._openCaptchaFallback(url);
+                if ($tab.hasClass('solving')) return;
+                // 自动解题：后端取图→识别→提交→复验；成功后直接重搜
+                if (pluginName && typeof doAction === 'function') {
+                    $tab.addClass('solving').text(`${$tab.data('captcha-name')} 识别中…`);
+                    doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000).then((rsp) => {
+                        if (rsp && rsp.result && rsp.result.ok) {
+                            // 验证通过：tab 转为「已验证」态（成功样式），重搜后由真实结果接管；
+                            // 若该源对这个词无收录（重搜无结果），保留「已验证·无结果」提示而非消失
+                            $tab.removeClass('kazumi-captcha-tab solving').addClass('verified-empty')
+                                .text(`${$tab.data('captcha-name')} 已验证·搜索中…`);
+                            warnToast('验证码自动识别成功，正在重新搜索');
+                            if (typeof this.run === 'function') this.run();
+                        } else if (url) {
+                            $tab.removeClass('solving').text(`${$tab.data('captcha-name')} 需手动`);
+                            fallback();
+                        } else {
+                            const reason = rsp && rsp.result && rsp.result.reason;
+                            $tab.removeClass('solving')
+                                .text(`${$tab.data('captcha-name')} 失败${reason ? '（' + escHtml(String(reason)) + '）' : ''}`);
+                        }
+                    }).catch(() => {
+                        $tab.removeClass('solving').text(`${$tab.data('captcha-name')} 需手动`);
+                        fallback();
+                    });
+                    return;
                 }
+                fallback();
             });
+        },
+
+        /** 已验证源的收尾：重搜有结果 → tab 移除；仍无结果 → 变灰「已验证·无结果」。 */
+        _retireVerifiedTab(pluginName) {
+            const $tabs = $(cfg.filtersSel);
+            const $tab = $tabs.find(`.verified-empty[data-captcha-src="${CSS.escape(pluginName)}"]`);
+            if (!$tab.length) return;
+            $tab.text(`${$tab.data('captcha-name')} 已验证·无结果`);
+        },
+
+        /** 自动解题失败回落：打开人工验证窗口，完成后重新搜索。 */
+        _openCaptchaFallback(url) {
+            if (url && typeof Kazumi !== 'undefined' && Kazumi._openCaptchaWindow) {
+                Kazumi._openCaptchaWindow(url, () => { if (typeof this.run === 'function') this.run(); });
+            } else {
+                warnToast('该源暂无验证链接');
+            }
         },
 
         renderGroup(payload, list) {
@@ -426,8 +541,14 @@ function createSearchPage(cfg) {
                     const air = (meta && meta.air_date) ? escHtml(String(meta.air_date)) : '';
                     const rank = (meta && meta.rank)
                         ? `<span class="bangumi-rank-badge" title="Bangumi 排名 #${escHtml(String(meta.rank))}">#${escHtml(String(meta.rank))}</span>` : '';
+                    // 总话数徽章（对齐时间表/推荐卡）：缓存匹配带 eps 时渲染「N话」，
+                    // title 含完结判定（放送已完结 · 共 N 话，bangumiEpBadge 共享推算）；
+                    // 无数据不渲染，由补拉管线重绘时带上
+                    const epBadge = bangumiEpBadge(meta && meta.eps, meta && meta.air_date);
+                    // 源徽章入左下徽标行（对齐时间表/推荐卡布局：话数徽章行首 +
+                    // 源徽章在其右侧并排），不再是左上角独立徽章
                     return `<div class="vod-card kazumi-card" data-id="${escHtml(v.src)}" data-name="${escHtml(v.name)}" data-source="${escHtml(grp.src)}" tabindex="0">
-                        <div class="vod-cover">${rank}<div class="kazumi-badge">${escHtml(grp.src.slice(7))}</div>${coverHtml}</div>
+                        <div class="vod-cover">${rank}${coverHtml}<div class="vod-fav-row"><span class="kazumi-badge">${escHtml(grp.src.slice(7))}</span>${epBadge}</div></div>
                         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
                         <div class="vod-remarks">${escHtml([score, air].filter(Boolean).join(' · ') || 'Kazumi 规则源')}</div>
                     </div>`;
@@ -441,6 +562,9 @@ function createSearchPage(cfg) {
             $(`#${gid}-grid`).html(cards);
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(`#${gid}-grid`);
+            // 收藏徽标行（对齐时间表/推荐卡）：映射在手即挂；首渲触发懒加载
+            this._ensureColStateMap();
+            this._paintGrpFavBadges(gid);
             // 入场错峰：每个来源组各自独立错峰入场（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
             playCardsEnter(`#${gid}-grid`);
             // 记录本组渲染模式/页码，供切源时判断是否可保留 DOM（不销毁已加载图片）
@@ -632,6 +756,7 @@ const Search = {
         this._restoreShellOnce(); // 首次切入恢复页签/关键词（仅一次）
         if (this.agg) this.agg.onViewShown();
         if (this.kz) this.kz.onViewShown();
+        if (typeof BangumiSearch !== 'undefined' && BangumiSearch.onViewShown) BangumiSearch.onViewShown(); // 每页条数变更后重拉（服务端分页）
     },
 
     stop() {
