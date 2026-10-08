@@ -22,9 +22,9 @@
  *    UNKNOWN/EACCES 或更新元数据标记 isAdminRightsRequired 时才调 elevate.exe，
  *    二者对本应用都不成立，缺失时 NsisUpdater 另有 shell.openPath 兜底。
  *    packElevateHelper:false 已在源头关闭，此处兜底防御版本差异并给出可操作报错。
- * 5. LICENSES.chromium.html（产物根，约 20MB 量级，随 Electron 版本漂移）——Chromium
- *    依赖许可证汇总 HTML，非运行时组件；Electron 许可证文本 LICENSE.electron.txt 保留，
- *    删汇总 HTML 是业界通行做法（VS Code 等同样不随包分发），详见下方函数注释。
+ * 5. LICENSES.chromium.html（产物根，约 20MB 量级）——保留不剔除（2026-10-08 用户裁决）：
+ *    它是 Chromium 及其第三方依赖的许可证义务汇总，LICENSE.electron.txt 仅覆盖 Electron
+ *    自身不能替代；随包分发以完整履行第三方许可义务（体积代价 ~20MB 可接受）。
  *
  * 职责三：可执行体版本信息门禁（fail build）
  *    package.json 缺 author 字段时 electron-builder 不写 CompanyName，YuKi.exe 保留
@@ -217,22 +217,13 @@ function walkMatching(dir, re, out) {
 }
 
 /**
- * 剔除产物根的 LICENSES.chromium.html（Electron 自带，体积为 20MB 量级、随 Electron
- * 版本漂移，故注释不写死数值——实际大小以剔除日志打印为准）。
- * 许可证合规依据：这是 Chromium 依赖的汇总 HTML 许可证清单，非任何运行时组件；
- * Electron 自身的许可证在产物根 LICENSE.electron.txt 中完整保留，第三方组件的
- * 许可证义务由源码仓库的 LICENSE（GPL-3.0-only）与各上游声明承担。删除汇总 HTML
- * 是业界通行做法（VS Code、Chromium 系发行包普遍不随包分发该文件），不影响
- * Electron/Chromium 的 BSD-style 许可证合规（其要求的是随附许可证文本，即保留的
- * LICENSE.electron.txt）。
+ * 【已废除】LICENSES.chromium.html 剔除函数——2026-10-08 用户裁决保留该文件随包分发
+ * （它是 Chromium 及其第三方依赖的许可证义务汇总，LICENSE.electron.txt 不能替代；
+ * 体积代价 ~20MB 可接受）。函数体保留为 no-op 并保留导出，兼容既有测试与潜在
+ * 外部调用；产物体积门禁上限（build-python.js 180MB）按含该文件的基线校准过。
  */
 function stripLicensesHtml(appOutDir) {
-    const html = path.join(appOutDir, 'LICENSES.chromium.html');
-    if (!fs.existsSync(html)) return;
-    const size = fs.statSync(html).size;
-    fs.rmSync(html);
-    console.log(`[after-pack] 已剔除 LICENSES.chromium.html（${(size / 1024 / 1024).toFixed(1)}MB）`
-        + '——Chromium 许可证汇总 HTML，非运行时组件；许可证文本以保留的 LICENSE.electron.txt 为准');
+    void appOutDir; // 保留签名兼容；裁决后不再剔除任何许可证文件
 }
 
 /** 剔除产物中的系统自带冗余 DLL，返回 [{rel, size}]；无匹配文件时为空数组（no-op，兼容 mac/linux）。 */
@@ -317,12 +308,12 @@ module.exports = function afterPack(context) {
 
     // electron-builder 25 的 electronPlatformName 是 Platform.nodeName：win 构建
     // 传 'win32'（非 'win'）——旧判断 === 'win' 自 v0.2.7 引入起从未命中，win 分支
-    // （elevate/LICENSES 剔除）一直被静默跳过，且 C-10 落地后 else 分支还会在
+    // （elevate 剔除）一直被静默跳过，且 C-10 落地后 else 分支还会在
     // win 构建上误删 vendor/aria2c.exe。按 nodeName 取值修正，mac='darwin'/linux='linux' 不变。
     const platformName = String(context.electronPlatformName || '');
     if (platformName === 'win32' || platformName === 'win') {
         stripElevateHelper(context.appOutDir);
-        stripLicensesHtml(context.appOutDir);
+        stripLicensesHtml(context.appOutDir); // no-op：2026-10-08 裁决保留 LICENSES.chromium.html
         // 注意：可执行体版本信息校验（checkExecutableMetadata）不能在 afterPack 里做——
         // rcedit 覆写 exe 元数据发生在框架 afterPack（signApp）阶段，晚于用户钩子，
         // 在这里查永远读到 Electron 原始值（CompanyName="GitHub, Inc."）误报。

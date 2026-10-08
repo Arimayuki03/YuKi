@@ -135,16 +135,16 @@ test('stripElevateHelper：文件不存在时 no-op（packElevateHelper:false �
     }
 });
 
-test('stripLicensesHtml：剔除产物根 LICENSES.chromium.html（许可证汇总 HTML，体积剔除）', () => {
+test('stripLicensesHtml：LICENSES.chromium.html 保留不剔除（2026-10-08 用户裁决）', () => {
     const dir = tempOutDir();
     try {
         const html = path.join(dir, 'LICENSES.chromium.html');
-        writeFile(html, 9_400_000); // 任意体积即可（真实产物 20MB 量级，随 Electron 版本漂移）
-        // LICENSE.electron.txt 是合规保留对象，同目录存在时不得误删
+        writeFile(html, 9_400_000); // 真实产物 20MB 量级；裁决后随包完整保留
+        // LICENSE.electron.txt 同目录共存，互不影响
         const license = path.join(dir, 'LICENSE.electron.txt');
         writeFile(license, 1024);
         afterPack.stripLicensesHtml(dir);
-        assert.equal(fs.existsSync(html), false);
+        assert.equal(fs.existsSync(html), true, '裁决后许可证汇总必须随包保留');
         assert.equal(fs.existsSync(license), true);
     } finally {
         cleanup(dir);
@@ -160,14 +160,14 @@ test('stripLicensesHtml：文件不存在时 no-op（非 win 产物/旧版布局
     }
 });
 
-test('afterPack 钩子：win 平台联动剔除 LICENSES.chromium.html', () => {
+test('afterPack 钩子：win 平台 LICENSES.chromium.html 保留（不再联动剔除）', () => {
     const dir = tempOutDir();
     try {
         writeFile(path.join(dir, 'LICENSES.chromium.html'));
         // 无 YuKi.exe → 元数据门禁静默跳过（存在性兜底在 verify-exe-metadata.js 层），
         // 不影响本断言
         afterPack({ appOutDir: dir, electronPlatformName: 'win32' });
-        assert.equal(fs.existsSync(path.join(dir, 'LICENSES.chromium.html')), false);
+        assert.equal(fs.existsSync(path.join(dir, 'LICENSES.chromium.html')), true, 'win 产物同样保留许可证汇总');
     } finally {
         cleanup(dir);
     }
