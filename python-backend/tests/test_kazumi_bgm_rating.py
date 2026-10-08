@@ -37,7 +37,6 @@ from kazumi.utils import (  # noqa: E402
     detect_image_captcha_html,
 )
 from kazumi import captcha as captcha_mod  # noqa: E402
-from kazumi import captcha_cnn as captcha_cnn_mod  # noqa: E402
 from kazumi.rule_engine import RuleEngine  # noqa: E402
 from kazumi.plugin import Plugin  # noqa: E402
 from kazumi.utils import CaptchaRequiredException  # noqa: E402
