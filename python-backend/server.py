@@ -16,7 +16,6 @@ file-manager IPC，后端不再提供该组端点。
 import os
 import sys
 import json
-import asyncio
 import time
 import socket
 import secrets
@@ -57,6 +56,7 @@ from starlette.concurrency import run_in_threadpool
 
 from cache_store import CacheStore
 import play_cache
+import cover_cache  # B-08：封面磁盘缓存（优化.md 方案 B，键=URL sha1 与端口/token 解耦）
 import mem_cache
 from site_manager import SiteManager
 from config import ConfigManager
@@ -85,8 +85,46 @@ from runtime.errors import (
     error_from_exception,
     redact_sensitive,
 )
+# B-11 Worker 预热：配置恢复完成后对前 N 个站点发空 homeContent，提前付掉
+# Worker spawn + boot 屏障（JAR 源还有 JVM 启动）的冷启动成本（优化.md B-11）
+from runtime import warmup as worker_warmup
 
 logger = logging.getLogger('yuki.server')
+
+# B-09 冷启动瘦身：asyncio 懒加载（-X importtime 实测 80.8ms，为 server 顶部
+# import 链第二大项，仅 fastapi 的 202ms 除外）。实测 2026-09-30：fastapi/
+# starlette/anyio/pydantic/requests/urllib3 均不在模块顶层拉 asyncio，本地链上
+# 唯一另一个顶层来源是 runtime/errors.py（已同步改为函数内懒加载）；uvicorn 在
+# main() READY 行之后才 import（server.py 既有写法），asyncio 由它补拉——即
+# READY 之前的整条链真正用到 asyncio 的只有请求协程里的 asyncio.sleep/
+# create_task 等，首个触达必然晚于 READY。改成模块代理（先例
+# kazumi/captcha.py:43-46 _load_cnn 双检锁懒加载手法）：属性首触才真 import
+# 并回填模块名空间，9 个使用点（含 /runtime/cancel 与 /action 端点协程）零改动。
+class _LazyAsyncio:
+    """asyncio 模块代理：首次属性访问付 ~80ms import，双检锁防并发首触。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._mod = None
+
+    def _load(self):
+        global asyncio_loaded
+        if self._mod is None:  # 双检锁（先例 kazumi/captcha.py _load_cnn）
+            with self._lock:
+                if self._mod is None:
+                    import asyncio as _asyncio_mod
+                    self._mod = _asyncio_mod
+                    asyncio_loaded = True
+        return self._mod
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+# 供测试与诊断探针：True 表示 asyncio 已被某个协程路径真正加载（懒加载触发）
+asyncio_loaded = False
+asyncio = _LazyAsyncio()
+
 
 TOKEN_EXEMPT = ('/health', '/cache', '/proxy')
 
@@ -470,6 +508,15 @@ def _config_load_worker(text, *, allow_local_file=False, force=False, cancel_eve
             'stage': 'done',
             'requestId': request_id,
         })
+        # B-11：配置加载完成（导入/自动重载成功）即调度 Worker 预热，
+        # 失败静默，不影响加载结果上报。独立 try：schedule_warmup 若抛
+        # 异常（如线程资源耗尽 Thread.start RuntimeError），会落入外层
+        # except 用 error payload 覆盖刚上报的 done——预热失败绝不能把
+        # 实际成功的配置加载改报成失败。
+        try:
+            worker_warmup.schedule_warmup(sites)
+        except Exception:
+            logger.warning('worker warmup schedule failed (after config load done)', exc_info=True)
         logger.info('config load done: %s sites', summary.get('sites'))
     except Exception as e:
         logger.exception('config load failed')
@@ -572,6 +619,12 @@ def _config_restore_worker(source_url, *, seq=0):
             'stage': 'done',
             'requestId': 'startup-restore',
         })
+        # B-11：启动期磁盘缓存恢复完成即调度 Worker 预热（JAR 源冷启动
+        # 尤其长，见优化.md B-11）；失败静默。此处裸调是安全的：done 已在
+        # 上方 _update_config_task 落账，若 schedule_warmup 抛异常，本 worker
+        # 的外层没有 except 会兜住它改写 _config_task——异常只会令该后台
+        # 线程带 traceback 退出（done 状态不被覆盖），故不包 try 仅加注释。
+        worker_warmup.schedule_warmup(sites)
     else:
         _update_config_task(seq, {
             'status': 'idle',
@@ -722,6 +775,10 @@ def _cache_size():
     play_bytes, play_items, _ = play_cache.stats()
     total += play_bytes
     items += play_items
+    # 封面磁盘缓存（B-08）：计入总占用（cover_cache.stats 读取账目，不自建目录）
+    cover_bytes, cover_items, _ = cover_cache.stats()
+    total += cover_bytes
+    items += cover_items
     return total, items
 
 
@@ -1085,6 +1142,8 @@ def _dispatch_action_inner(form):
             except Exception:
                 repo_bytes = 0
             play_bytes, play_items, _play_expired = play_cache.stats()
+            # 封面磁盘缓存分项（B-08）
+            cover_bytes, cover_items, _cover_expired = cover_cache.stats()
             # 会话级内存缓存分项（mem_cache.stats 为唯一生产调用方）：纯内存、
             # 不占磁盘，不计入 bytes 总量，仅作明细展示口径。
             mem_ns = {}
@@ -1105,6 +1164,7 @@ def _dispatch_action_inner(form):
                     'dlCache': dl_bytes,
                     'playerCache': player_items,
                     'playerCachePersist': play_items,
+                    'covers': cover_bytes,
                     'repoCache': repo_bytes,
                     'memCacheItems': mem_items,
                     'memCacheChars': mem_chars,
@@ -1148,6 +1208,10 @@ def _dispatch_action_inner(form):
             play_removed = play_cache.clear_all()
             if play_removed:
                 extra += play_removed
+            # 封面磁盘缓存（B-08）：文件数计入 extra
+            cover_removed = cover_cache.clear_all()
+            if cover_removed:
+                extra += cover_removed
             # 网盘签名 URL 缓存（pan 模块可能未安装）
             signed_cleared = False
             try:
@@ -1172,11 +1236,12 @@ def _dispatch_action_inner(form):
                 'dlCache': dl_removed,
                 'playerCache': player_removed,
                 'playerCachePersist': play_removed,
+                'covers': cover_removed,
                 'signedUrlCache': signed_cleared,
             }
             logger.info(
-                'cache cleared: kv=%s jsLocal=%s dlCache=%s player=%s playCachePersist=%s signedUrl=%s (%s bytes freed)',
-                removed, js_removed, dl_removed, player_removed, play_removed, signed_cleared, freed)
+                'cache cleared: kv=%s jsLocal=%s dlCache=%s player=%s playCachePersist=%s covers=%s signedUrl=%s (%s bytes freed)',
+                removed, js_removed, dl_removed, player_removed, play_removed, cover_removed, signed_cleared, freed)
             return 200, json.dumps({
                 'code': 200,
                 'bytes': freed,
@@ -1801,29 +1866,96 @@ def create_app():
         return JSONResponse({'items': items, 'baseSec': round(base, 2)})
 
     @fastapi_app.get('/search/stream')
-    def search_stream(word: str = Query('')):
-        """SSE 流式聚合搜索：先发 event: meta（总源数，供前端确定进度条），每源完成推一条 data，全部结束发 event: done。"""
+    def search_stream(word: str = Query(''), refresh: str = Query('')):
+        """SSE 流式聚合搜索：先发 event: meta（总源数，供前端确定进度条），每源完成推一条 data，全部结束发 event: done。
+
+        整词缓存（B-01，照抄 kazumi-stream 先例）：单源成功/空结果（noresult）
+        payload 逐源落 mem_cache 并登记整词索引（error 不落缓存）；同词同预算
+        再次请求直接按索引重放缓存行（不发任何网络请求）。
+        error 单源结果不落缓存（瞬时故障不冻结），
+        重放对未缓存的源补发 error 终态 payload——前端卡片初始为 pending，
+        不补齐会让该卡永久停在「检索中」。refresh=1 跳过重放强制实时检索
+        （仍回写缓存）。流异常中断时整词失效，禁止残缺结果集参与重放；
+        索引在而 payload 全缺失视作未命中回退真实检索。"""
         def gen():
             site_list = [s for s in sites.sites if getattr(s, 'searchable', True)]
             if not word or not site_list:
                 yield 'event: done\ndata: {}\n\n'
                 return
+            # 与 _iter_aggregate_search 的 timeout=20 保持同一编码（缓存键含预算）
+            timeout = 20
+            # 整词已缓存：按登记顺序逐源重放 + 对缺失源补发终态，秒回不碰网络。
+            # refresh=1 显式跳过；索引存在但 payload 全部失效 → 空列表视作 miss。
+            # meta 仍按重放集合总数发出：前端进度条契约（recv 对 total）不变。
+            # 重放前先按当前 site_list 裁剪（审查3.5/L10），全被裁掉则回退检索。
+            if not _form_flag({'refresh': refresh}, 'refresh'):
+                cached_payloads = _aggsearch_cached_payloads(word, timeout)
+                if cached_payloads:
+                    # 审查3.5/L10：先按当前可检索站点集裁剪。索引登记的源
+                    # 可能在两次请求间被删除/隐藏/置不可检索，其 TTL 内的旧
+                    # payload 不得重放（否则搜索页短期出现已删源的分组）；
+                    # 索引里比当前集合「多登记」的键同样视为缺席源补终态。
+                    allowed = {s.key for s in site_list}
+                    # （原 stale 列表计算后从未被读取——裁剪掉的 payload 没有
+                    # 别的处理分支，留着会让读者误以为另有失效逻辑。已删。）
+                    cached_payloads = [p for p in cached_payloads
+                                       if _aggsearch_payload_source(p) in allowed]
+                    # 裁剪后若缓存集合已不含任何当前源，视作 miss 回退真实
+                    # 检索（配置刚换过，旧答案对当前站点集已无意义）。
+                    if cached_payloads:
+                        misses = _aggsearch_missing_keys(cached_payloads, site_list)
+                        yield 'event: meta\ndata: %s\n\n' % json.dumps(
+                            {'total': len(cached_payloads) + len(misses)})
+                        for payload in cached_payloads:
+                            yield f'data: {payload}\n\n'
+                        for miss in misses:
+                            # 缺席源只有真实异常/中断/LRU 淘汰的源：noresult（空
+                            # list）已在 put 侧照常落缓存按原状态重放（审查3.5/L9
+                            # 修复），故补发 error 终态语义准确。
+                            yield 'data: %s\n\n' % json.dumps({
+                                'source': miss['key'], 'name': miss['name'], 'list': [],
+                                'status': 'error',
+                                'msg': '上次检索该源失败未缓存，点「重试」重新查询',
+                            }, ensure_ascii=False)
+                        yield 'event: done\ndata: {}\n\n'
+                        return
             yield f'event: meta\ndata: {json.dumps({"total": len(site_list)})}\n\n'
-            for site, items, error in _iter_aggregate_search(word, timeout=20):
-                payload = json.dumps({
-                    'source': site.key,
-                    'name': site.name,
-                    'list': items,
-                    'status': 'error' if error else ('success' if items else 'noresult'),
-                }, ensure_ascii=False)
-                yield f'data: {payload}\n\n'
+            complete = False
+            produced = 0
+            try:
+                for site, items, error in _iter_aggregate_search(word, timeout=timeout):
+                    payload = json.dumps({
+                        'source': site.key,
+                        'name': site.name,
+                        'list': items,
+                        'status': 'error' if error else ('success' if items else 'noresult'),
+                    }, ensure_ascii=False)
+                    # 单源结果落缓存 + 登记索引；error 不落缓存（口径同
+                    # _spider_body_cacheable 的「失败不缓存」：瞬时故障不该
+                    # 被冻结进重放）。写缓存绝不影响推送主链路。
+                    if not error:
+                        _aggsearch_cache_put_source(word, timeout, site.key, payload)
+                    yield f'data: {payload}\n\n'
+                    produced += 1  # error 源也计入：已正常产出 error 终态，不算缺源
+                # 完整性按产出源数判定（M12）：deadline 收敛属正常返回，for 无
+                # 异常结束但可能只产出了部分源——残缺结果集不得当完整答案落缓存
+                # （与 finally 的失效语义同一口径）。产满全部可检索源才算完整。
+                complete = produced == len(site_list)
+            finally:
+                # 未正常跑完（超时/异常/客户端断连令生成器中途关闭）：整词
+                # 失效，中断前完成的源已落缓存但结果集残缺且无标记，留着会
+                # 让下次同词请求把「只搜出来几个源」重放成完整答案。
+                if not complete:
+                    _aggsearch_cache_invalidate_word(word, timeout)
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
     @fastapi_app.get('/search/kazumi-stream')
     def kazumi_search_stream(word: str = Query(''), tag: str = Query(''),
                              year: str = Query(''), sort: str = Query(''),
-                             refresh: str = Query('')):
+                             refresh: str = Query(''),
+                             captchaLLMBase: str = Query(''),
+                             captchaLLMModel: str = Query('')):
         """SSE 流式 Kazumi 规则源搜索（T73）：每个规则源完成即推一条 data，全部结束发 event: done。
         结果项与 kazumiSearch 一致（{pluginName, data}）；验证码源带 captcha/captchaUrl。
         已判定失效的规则源（validity == 'invalid'）不参与检索、不推送。
@@ -1843,6 +1975,15 @@ def create_app():
         避免空重放假「无结果」。"""
         filters = {'tag': tag, 'year': year, 'sort': sort}
         fkey = _kazumi_stream_filters_key(tag, year, sort)
+        # 验证码视觉 LLM 凭据（按次传入不落盘；验证码与翻译两套独立配置）。
+        # 只用于 ocr_available 探测与 solve 动作，检索本身零 LLM 请求。
+        # 安全：EventSource 只能走 GET，完整查询串会被 uvicorn 访问日志记录，
+        # 故本路由不接受 captchaLLMKey——探测只需 base+model（见
+        # captcha.ocr_available），真正识别的 key 走 /kazumi/action 的 POST 表单。
+        captcha_llm = _captcha_llm_cfg_from_form({
+            'captchaLLMBase': captchaLLMBase,
+            'captchaLLMModel': captchaLLMModel,
+        })
         def gen():
             if not word:
                 yield 'event: done\ndata: {}\n\n'
@@ -1871,7 +2012,8 @@ def create_app():
 
             def _search_one(plugin):
                 try:
-                    trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), word, filters=filters)
+                    trace = kazumi_engine.search_with_captcha_retry(
+                        plugin.execution_config(), word, filters=filters, llm_cfg=captcha_llm)
                     if isinstance(trace, dict) and trace.get('captcha_required'):
                         return {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', ''),
                                 'ocrAvailable': bool(trace.get('ocr_available'))}
@@ -2143,18 +2285,20 @@ def create_app():
     # 被墙/慢时封面拉不出（历史/搜索页 kazumi 卡全是该图床），改经本地后端转发
     # （http_client 走应用代理/系统代理配置），官方域名失败自动换镜像 lain.{镜像根域名}
     # 重试。响应带长缓存头，重复渲染由浏览器缓存兜住不再回源。
-    # 官方 + 历史镜像域名固定放行（存量记录持久化过 lain.bangumi.pro），镜像根域名
-    # 可在设置中手动替换，故 lain.{root} 在请求时动态并入白名单。
     # UA：镜像 lain.bangumi.vip 在 Cloudflare 后，http_client 默认 okhttp UA 被 403，
     # 统一带浏览器前缀 UA（与渲染层 <img> 的浏览器请求同形态）。
+    # B-08（优化.md 方案 B）：代理 URL 含随机端口+token，Chromium 以完整 URL 为
+    # HTTP 缓存键 → 跨重启一次都不命中，上面的长缓存头结构性落空。故后端再加
+    # 一层磁盘缓存（cover_cache，键=归一化 URL 的 sha1，与端口/token 解耦，
+    # TTL 7 天）：命中直接回字节不再回源图床，重启后依旧命中。
     _bangumi_cover_hosts = frozenset(('lain.bgm.tv', 'lain.bangumi.tv', 'lain.bangumi.pro'))
 
     @fastapi_app.get('/kazumi/cover')
-    async def kazumi_cover(url: str = ''):
+    async def kazumi_cover(request: Request, url: str = ''):
         import http_client
 
         def _fetch(target):
-            rsp = http_client.get(target, timeout=(5, 20), verify=True,
+            rsp = http_client.get(target, timeout=(4, 10), verify=True,
                                   headers={'User-Agent': BANGUMI_UA})
             if rsp.status_code != 200:
                 raise RuntimeError(f'HTTP {rsp.status_code}')
@@ -2176,20 +2320,60 @@ def create_app():
             parts = urllib.parse.urlsplit(url)
             if parts.scheme not in ('http', 'https') or parts.hostname not in (_bangumi_cover_hosts | {mirror_host}):
                 return JSONResponse({'code': 403, 'msg': 'host not allowed'}, status_code=403)
+            # B-08 磁盘缓存查询：键取归一化后的 URL（r 段自愈前后同图同键）。
+            # 白名单 403 先行——非白名单 host 即使有历史条目也不服务。
+            ckey = cover_cache.key_for(url)
+            # ETag 弱校验器复用键 sha1 前缀：回源与命中两条路径都带，浏览器
+            # 缓存过期重验证时 If-None-Match 命中回 304，连字节都不用重发
+            headers = {'Cache-Control': 'private, max-age=604800',
+                       'ETag': 'W/"%s"' % ckey[:32]}
+            cached = await run_in_threadpool(cover_cache.get, ckey)
+            if cached is not None:
+                body, ctype = cached
+                inm = (request.headers.get('if-none-match') or '').strip() if request is not None else ''
+                if inm and inm == headers['ETag']:
+                    return Response(status_code=304, headers=headers)
+                return Response(content=body, media_type=ctype, headers=headers)
             candidates = [url]
             if parts.hostname != mirror_host:
                 candidates.append(urllib.parse.urlunsplit(
                     parts._replace(scheme='https', netloc=mirror_host)))
-            last_err = None
-            for target in candidates:
+            # 官方/镜像并行竞速（原文串行 for 循环：官方被墙时先干等满 25s 超时
+            # 才轮到镜像——详情页 Bangumi 封面「比以前还慢」的主因之一）。两路
+            # 同时发，取先成功者；全败取最后一个错误落 502。单路超时同步收紧
+            # （连接 4s + 读 10s：封面小图，20s 读超时是给被墙链路白留的）。
+            def _race():
+                import concurrent.futures as _cf
+                if len(candidates) == 1:
+                    return _fetch(candidates[0]), None
+                # 不能用 with + 块内 return：as_completed 虽在先成功路径立即拿到
+                # 结果，但容器退出会 shutdown(wait=True) 等另一路（被墙镜像）跑完
+                # 或读超时(10s)才真正返回，外层 run_in_threadpool 的工作线程也跟着
+                # 多被占用 ——「官方被墙仍要干等慢方」的原问题没解决，最坏延迟与
+                # 串行实现相同。拿到首个成功结果后立即 shutdown(wait=False)，让
+                # 慢/失败线程在后台自行结束。
+                pool = _cf.ThreadPoolExecutor(max_workers=len(candidates),
+                                              thread_name_prefix='cover-race')
                 try:
-                    body, ctype = await run_in_threadpool(_fetch, target)
-                    return Response(content=body, media_type=ctype,
-                                    headers={'Cache-Control': 'private, max-age=604800'})
-                except Exception as e:
-                    last_err = e
-            logger.warning('[kazumi] cover proxy failed for %s: %s', url, last_err)
-            return JSONResponse({'code': 502, 'msg': 'cover fetch failed'}, status_code=502)
+                    futs = {pool.submit(_fetch, t): t for t in candidates}
+                    last_err = None
+                    for fut in _cf.as_completed(futs):
+                        try:
+                            return fut.result(), None
+                        except Exception as exc:
+                            last_err = exc
+                    raise last_err if last_err else RuntimeError('cover race failed')
+                finally:
+                    pool.shutdown(wait=False)
+            try:
+                (body, ctype), _ = await run_in_threadpool(_race)
+                # B-08：_fetch 已保证 200 + image/* + 非空 ≤8MB，只缓存成功
+                # 响应（404/超时/HTML 错误页不留任何文件）；put 失败静默
+                await run_in_threadpool(cover_cache.put, ckey, body, ctype)
+                return Response(content=body, media_type=ctype, headers=headers)
+            except Exception as e:
+                logger.warning('[kazumi] cover proxy failed for %s: %s', url, e)
+                return JSONResponse({'code': 502, 'msg': 'cover fetch failed'}, status_code=502)
         except Exception as e:
             logger.warning('[kazumi] cover proxy bad request: %s', e)
             return JSONResponse({'code': 400, 'msg': 'bad url'}, status_code=400)
@@ -2224,7 +2408,11 @@ def _bangumi_cache_key(do, form):
             'tags', 'sort', 'dateStart', 'dateEnd',
             'rankMin', 'rankMax', 'scoreMin', 'scoreMax', 'weekdays')
     parts = [do] + ['%s=%s' % (k, form.get(k, '')) for k in keys]
-    raw = '|'.join(parts)
+    # 用 \x1f（ASCII unit separator）而非 '|' 裸拼：字段值含 '|' 时可构造
+    # 跨参数键碰撞（如 id='A|ids=' + ids='B' 与 id='A' + ids='|ids=B' 同串），
+    # 控制字符 \x1f 在正常 URL/表单值中不会出现。键格式变更使旧磁盘条目
+    # 失配——仅损一次缓存命中，随 TTL 过期/重启自愈，无需迁移。
+    raw = '\x1f'.join(parts)
     return 'bgm:' + hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
 
@@ -2284,9 +2472,11 @@ def _bangumi_body_ok(do, body):
 # ---- Kazumi 规则源缓存（mem_cache 会话级提速） ----
 # 读写全部 try 包裹：mem_cache 预期无异常路径，这里再兜一层，保证缓存层
 # 任何意外都不会影响搜索/章节主链路。
-_KAZUMI_SEARCH_NS = 'kazumi:search'
-_KAZUMI_STREAM_NS = 'kazumi:stream'
-_KAZUMI_CHAPTERS_NS = 'kazumi:chapters'
+# 常量提到 mem_cache：config.py 的站点热替换失效与 server.py 的读写/失效
+# 必须共用单点定义（见 mem_cache.NS_KAZUMI_* 注释）。
+_KAZUMI_SEARCH_NS = mem_cache.NS_KAZUMI_SEARCH
+_KAZUMI_STREAM_NS = mem_cache.NS_KAZUMI_STREAM
+_KAZUMI_CHAPTERS_NS = mem_cache.NS_KAZUMI_CHAPTERS
 
 
 def _kazumi_invalidate_caches(chapters=False):
@@ -2305,8 +2495,11 @@ def _kazumi_invalidate_caches(chapters=False):
 
 
 def _kazumi_search_cache_key(keyword, plugin_filter):
-    """搜索缓存键：关键词 + 可选单源过滤（单源重查与全量检索分开缓存）。"""
-    return keyword + ('|p:' + plugin_filter if plugin_filter else '')
+    """搜索缓存键：关键词 + 可选单源过滤（单源重查与全量检索分开缓存）。
+
+    过滤值用 \x1f 定界而非 '|' 裸拼：关键词/过滤值含 '|' 时可构造碰撞
+    （内存缓存键，格式变更使旧条目失配，随重启自愈）。"""
+    return keyword + ('\x1fp:' + plugin_filter if plugin_filter else '')
 
 
 def _kazumi_search_body_cacheable(body):
@@ -2356,16 +2549,20 @@ def _cached_kazumi_search(form, builder):
 
 def _kazumi_stream_filters_key(tag, year, sort):
     """SSE 流缓存的筛选指纹：tag/year/sort 会真实注入规则搜索，必须参与缓存键，
-    否则同 word 不同筛选会互相串结果（重放出未筛选/别筛选的数据）。"""
-    return '|'.join([str(tag or ''), str(year or ''), str(sort or '')])
+    否则同 word 不同筛选会互相串结果（重放出未筛选/别筛选的数据）。
+
+    用 \x1f 而非 '|' 裸拼：筛选值含 '|' 时可构造跨参数键碰撞（键格式变更使
+    旧会话条目失配，mem_cache 随重启/TTL 自愈）。"""
+    return '\x1f'.join([str(tag or ''), str(year or ''), str(sort or '')])
 
 
 def _kazumi_stream_index_key(word, fkey):
-    return 'stream-index|%s|%s' % (word, fkey)
+    # \x1f 定界（审查3.5 同族）：word/fkey 含 '|' 时防跨参数键碰撞
+    return 'stream-index\x1f%s\x1f%s' % (word, fkey)
 
 
 def _kazumi_stream_payload_key(word, fkey, plugin_name):
-    return 'stream|%s|%s|%s' % (word, fkey, plugin_name)
+    return 'stream\x1f%s\x1f%s\x1f%s' % (word, fkey, plugin_name)
 
 
 def _kazumi_stream_cache_put_source(word, fkey, plugin_name, payload_json):
@@ -2406,7 +2603,8 @@ def _kazumi_stream_cache_invalidate_word(word, fkey):
     流超时/异常中断时调用：中断前完成的源已落缓存但结果集残缺且无标记，
     留着会让下次同词请求把「只搜出来几个源」当完整答案重放整个 TTL。"""
     try:
-        mem_cache.invalidate_prefix(_KAZUMI_STREAM_NS, 'stream|%s|%s|' % (word, fkey))
+        # 前缀与 _kazumi_stream_payload_key 的 \x1f 定界格式保持同步
+        mem_cache.invalidate_prefix(_KAZUMI_STREAM_NS, 'stream\x1f%s\x1f%s\x1f' % (word, fkey))
         mem_cache.delete_value(_KAZUMI_STREAM_NS, _kazumi_stream_index_key(word, fkey))
     except Exception:
         pass
@@ -2455,8 +2653,11 @@ def _kazumi_stream_cached_payloads(word, fkey):
 
 
 def _kazumi_chapters_cache_key(plugin_name, src):
-    """章节缓存键：插件名 + 源地址（同插件不同源互不影响）。"""
-    return '%s|%s' % (plugin_name, src)
+    """章节缓存键：插件名 + 源地址（同插件不同源互不影响）。
+
+    用 \x1f 定界：插件名/源地址含 '|' 时可构造碰撞（内存缓存键，格式变更
+    使旧条目失配，随重启自愈）。"""
+    return '%s\x1f%s' % (plugin_name, src)
 
 
 def _cached_kazumi_chapters(form, plugin_name, src, builder):
@@ -2482,7 +2683,147 @@ def _cached_kazumi_chapters(form, plugin_name, src, builder):
     return status, body
 
 
-# ---- Spider 内容 API 会话级内存缓存（home/category/detail/search）----
+# ---- 聚合搜索 SSE 流整词缓存（B-01，mem_cache 会话级提速）----
+# 照抄 _kazumi_stream_* 的索引+payload 双仓手法：/search/stream
+# 每源直调 spider_app.searchContent（:1431），20s 预算下同词二次聚合搜索要全量
+# 重拉；整词缓存后命中即按原事件顺序重放，不再碰网络。error 单源不落缓存
+#（瞬时故障不冻结）、noresult（空 list）照常落缓存按原状态重放（审查3.5/L9）、
+# refresh 旁路、中断整词失效，语义与 Kazumi 流先例逐条对齐。
+_AGGSEARCH_NS = mem_cache.NS_SPIDER_AGGSEARCH  # ns 单点定义（L15，与 config.py 共用）
+
+
+def _aggsearch_cache_key(word, timeout):
+    """整词缓存键：词 + 超时预算。timeout 决定单源 deadline 与结果集大小
+    （短预算下部分源会被掐掉），不同预算的结果集不可互相重放，故并入键。
+
+    word 段用 \x1f 定界而非 '|' 裸拼：word 含 '|' 时可构造跨词/跨源键碰撞
+    （如 word='x|timeout=20|a' + site='b' 与 word='x' + site='a|timeout=20|b'
+    同一 payload 键），invalidate_prefix 也会误伤其他词（review01 L11）。
+    键格式变更使旧会话条目失配——mem_cache 随重启/TTL 自愈。"""
+    return '%s\x1ftimeout=%s' % (word, timeout)
+
+
+def _aggsearch_index_key(word, timeout):
+    return 'aggsearch-index\x1f%s' % _aggsearch_cache_key(word, timeout)
+
+
+def _aggsearch_payload_key(word, timeout, site_key):
+    return 'aggsearch\x1f%s\x1f%s' % (_aggsearch_cache_key(word, timeout), site_key)
+
+
+def _aggsearch_cache_put_source(word, timeout, site_key, payload_json):
+    """单源成功/空结果（noresult）payload 写 payload 仓 + mem_cache.mutate
+    锁内原子登记整词索引；error payload 由调用方过滤不传入。
+
+    noresult 照常落缓存（审查3.5/L9 修复，对齐 kazumi 流先例——put 只按
+    error 过滤）：空结果是该源对当前词的真实答案，按 noresult 原状态重放；
+    若把空列表排除在缓存外，重放时该源进入 misses 只能补发 error 占位，
+    「无结果」会被误报成「查询失败」且 TTL 内拿不到缓存。
+
+    索引原子追加的原因见 _kazumi_stream_cache_put_source：
+    两个同词并发流各自 get→append→set 交错时后写者会覆盖丢登记。调用方
+    已按 error 过滤，这里再守一层（瞬时故障不冻结进重放）；但不再按
+    「list 非空」过滤——空结果（noresult）是该源对当前词的真实答案，照
+    kazumi 流先例落缓存按原状态重放，重放时不会被误补发成 error
+    （审查3.5/L9 修复口径）。"""
+    try:
+        body = json.loads(payload_json)
+        if not (isinstance(body, dict) and body.get('status') != 'error'):
+            return
+    except Exception:
+        return
+    # 长度护栏（M11）：超 mem_cache 单值上限的 payload 会被 set_value 静默
+    # 丢弃（返回 False 不抛错），若索引仍登记，重放时该成功源会因 payload
+    # 缺失被补发 error——写入前先拒绝，索引与 payload 保持一致。
+    if len(payload_json) > mem_cache.MAX_VALUE_CHARS:
+        logger.info('[server] aggsearch payload too large (%d chars), skip cache: word=%s site=%s',
+                    len(payload_json), word, site_key)
+        return
+    try:
+        mem_cache.set_value(_AGGSEARCH_NS, _aggsearch_payload_key(word, timeout, site_key),
+                            payload_json)
+
+        def _append_index(old_raw):
+            keys = []
+            if old_raw:
+                try:
+                    loaded = json.loads(old_raw)
+                    if isinstance(loaded, list):
+                        keys = [k for k in loaded if isinstance(k, str)]
+                except ValueError:
+                    keys = []
+            if site_key not in keys:
+                keys.append(site_key)
+            return json.dumps(keys, ensure_ascii=False)
+
+        mem_cache.mutate(_AGGSEARCH_NS, _aggsearch_index_key(word, timeout), _append_index)
+    except Exception:
+        pass
+
+
+def _aggsearch_cache_invalidate_word(word, timeout):
+    """清除整词流缓存（payload + 索引）。流异常中断时调用：残缺结果集
+    不得在 TTL 内被重放成完整答案（口径同 _kazumi_stream_cache_invalidate_word）。"""
+    try:
+        # 前缀与 _aggsearch_payload_key 的 \x1f 定界格式保持同步
+        mem_cache.invalidate_prefix(_AGGSEARCH_NS,
+                                    'aggsearch\x1f%s\x1f' % _aggsearch_cache_key(word, timeout))
+        mem_cache.delete_value(_AGGSEARCH_NS, _aggsearch_index_key(word, timeout))
+    except Exception:
+        pass
+
+
+def _aggsearch_cached_payloads(word, timeout):
+    """整词缓存重放：索引存在则按登记顺序取各单源 payload，缺失的跳过。
+
+    返回 None 表示索引不存在（走正常并发搜索）；索引在而 payload 全部
+    失效时返回空列表，调用方必须视作 miss 回退网络（口径同
+    _kazumi_stream_cached_payloads，:2431-2454），绝不能只发 done 假「无结果」。"""
+    try:
+        raw = mem_cache.get_value(_AGGSEARCH_NS, _aggsearch_index_key(word, timeout))
+        if not raw:
+            return None
+        keys = json.loads(raw)
+        if not isinstance(keys, list):
+            return None
+        payloads = []
+        for site_key in keys:
+            if not isinstance(site_key, str):
+                continue
+            cached = mem_cache.get_value(_AGGSEARCH_NS,
+                                         _aggsearch_payload_key(word, timeout, site_key))
+            if cached:
+                payloads.append(cached)
+        return payloads
+    except Exception:
+        return None
+
+
+def _aggsearch_payload_source(payload):
+    """从单源 payload JSON 串取 source 字段；坏 payload / 非 source 返回 None。"""
+    try:
+        key = json.loads(payload).get('source')
+    except (ValueError, AttributeError):
+        return None
+    return key if isinstance(key, str) else None
+
+
+def _aggsearch_missing_keys(cached_payloads, site_list):
+    """重放集合相对当前可检索站点集还缺哪些源（key+name）。
+
+    上次检索中 error/超时/被中断的源不落缓存，重放若不补齐，前端对应卡片
+    （初始 pending）永远收不到 payload、永久停在「检索中」（口径同
+    _kazumi_stream_missing_names）。返回 [{key, name}] 保序。
+
+    注意 noresult（空 list）源自审查3.5/L9 修复后照常落缓存按原状态重放，
+    不会进入本函数的返回集——缺席者只有真实异常/中断/淘汰的源，重放侧
+    对其补发 'error' 终态语义才是准确的。"""
+    seen = set()
+    for payload in cached_payloads or []:
+        key = _aggsearch_payload_source(payload)
+        if key:
+            seen.add(key)
+    return [{'key': s.key, 'name': s.name} for s in site_list if s.key not in seen]# ---- Spider 内容 API 会话级内存缓存（home/category/detail/search）----
 # 与 _cached_bangumi 同一套思路：切源往返、翻页重访、重复搜索是高频重复调用，
 # 会话内命中即回，省一次实时查源。TTL 走 mem_cache.DEFAULT_TTL 的 spider:* 表；
 # homeVideoContent 故意不缓存——首页 feed 翻页高频且渲染层已有冷启动缓存，
@@ -2517,7 +2858,9 @@ def _spider_cache_key(do, site_key, form):
             'detailContent': ('ids',),
         }.get(do, ())
         parts = ['%s=%s' % (k, form.get(k, '')) for k in relevant]
-    return '%s|%s' % (site_key, '|'.join([do] + parts))
+    # 用 \x1f 而非 '|' 裸拼：参数值含 '|' 时可构造跨参数键碰撞（内存缓存键，
+    # 格式变更使旧条目失配，随 TTL/重启自愈）。
+    return '%s\x1f%s' % (site_key, '\x1f'.join([do] + parts))
 
 
 def _spider_body_cacheable(do, body):
@@ -2584,6 +2927,29 @@ def _cached_spider_content(do, site, form, builder):
     except Exception:
         pass
     return status, body
+
+
+def _captcha_llm_cfg_from_form(form):
+    """从 kazumi/action 表单解析验证码视觉 LLM 凭据（按次传入，不落盘）。
+
+    渲染层从独立设置键 captchaLLM{Enable,Base,Key,Model} 读取后随请求传
+    （验证码与划词翻译是两套独立 LLM 配置——翻译走文本模型、验证码需要
+    视觉模型，服务商可不同）。base/model 任一缺失 → None（识别链跳过该级）。"""
+    base = str(form.get('captchaLLMBase', '') or '').strip()
+    key = str(form.get('captchaLLMKey', '') or '').strip()
+    model = str(form.get('captchaLLMModel', '') or '').strip()
+    if not base or not model:
+        return None
+    return {'base': base, 'key': key, 'model': model}
+
+
+def _captcha_prefer_llm(form):
+    """是否「优先使用视觉 LLM」而非内置小模型（设置开关，默认关闭）。
+
+    独立于凭据解析：开关本身没有凭据也可以存在，但只有 LLM 配置齐全时才有
+    实际效果（识别链在该级缺配置时会跳过落到下一级）。默认关闭（缺键即关，
+    复用 _form_flag 的显式真值口径）。"""
+    return _form_flag(form, 'captchaLLMPrefer')
 
 
 def dispatch_kazumi_action(form):
@@ -2656,6 +3022,7 @@ def dispatch_kazumi_action(form):
             plugin_filter = form.get('plugin', '').strip()
             if not keyword:
                 return 200, json.dumps({'code': 200, 'results': []}, ensure_ascii=False)
+            captcha_llm = _captcha_llm_cfg_from_form(form)
 
             def _build_search():
                 if plugin_filter:
@@ -2671,7 +3038,8 @@ def dispatch_kazumi_action(form):
                 results = [None] * len(plugins)
                 def _search_one(idx, plugin):
                     try:
-                        trace = kazumi_engine.search_with_captcha_retry(plugin.execution_config(), keyword)
+                        trace = kazumi_engine.search_with_captcha_retry(
+                            plugin.execution_config(), keyword, llm_cfg=captcha_llm)
                         if isinstance(trace, dict) and trace.get('captcha_required'):
                             results[idx] = {'pluginName': plugin.name, 'captcha': True, 'captchaUrl': trace.get('captcha_url', ''),
                                             'ocrAvailable': bool(trace.get('ocr_available'))}
@@ -2710,7 +3078,8 @@ def dispatch_kazumi_action(form):
                     return 200, json.dumps({
                         'code': 200, 'captcha': True, 'roads': [],
                         'captchaUrl': (cfg.search_url or '').replace('@keyword', ''),
-                        'ocrAvailable': kazumi_engine.captcha_ocr_available(),
+                        'ocrAvailable': kazumi_engine.captcha_ocr_available(
+                            _captcha_llm_cfg_from_form(form)),
                         'msg': '剧集页需要验证码验证',
                     }, ensure_ascii=False)
                 return 200, json.dumps({'code': 200, 'roads': [
@@ -2809,19 +3178,40 @@ def dispatch_kazumi_action(form):
             return 200, json.dumps({'code': 200, 'ok': True}, ensure_ascii=False)
 
         # ---- 图片验证码自动解题（独立动作端点，不在搜索主链路上） ----
-        # 取图 → 小模型/ddddocr 识别 → MacCMS verify_check 提交 → 复验搜索页
+        # 取图 → tiny-CNN/视觉 LLM 识别 → MacCMS verify_check 提交 → 复验搜索页
         # （≤3 轮）。成功后验证会话 Cookie 已落盘，前端直接重搜即可；失败返回
         # result.ok=false，前端回落人工验证窗口。result 整体嵌套：solve 结果里
         # 的 code 是 OCR 识别出的验证码答案（字符串），若平铺展开会覆盖信封的
         # code==200 成功标记，违反本 dispatcher「code==200 表示成功」契约。
+        # llm 凭据按次随表单传入（captchaLLMBase/Key/Model，与 /translate 的
+        # llm 同策略不落盘；验证码与翻译是两套独立配置）。
         if do == 'kazumiCaptchaSolve':
             plugin = kazumi_mgr.get(form.get('plugin', '').strip())
             if not plugin:
                 return 404, json.dumps({'code': 404, 'msg': 'plugin not found'}, ensure_ascii=False)
-            result = kazumi_engine.solve_captcha(plugin.execution_config())
+            llm_cfg = _captcha_llm_cfg_from_form(form)
+            # 「优先使用 LLM」开关：开启时内置小模型退居次席（默认关闭，
+            # 见 kazumi/captcha.py recognize_captcha_bytes 的次序说明）。
+            result = kazumi_engine.solve_captcha(plugin.execution_config(), llm_cfg=llm_cfg,
+                                                 prefer_llm=_captcha_prefer_llm(form))
             if result.get('ok'):
                 # 会话状态已变（验证通过），清缓存让重搜拿到真实结果
                 _kazumi_invalidate_caches(chapters=True)
+            return 200, json.dumps({'code': 200, 'result': result}, ensure_ascii=False)
+
+        # ---- 验证码识别链「设置页测试」（kazumi/captcha_probe.py） ----
+        # 与 kazumiCaptchaSolve 的区别：Solve 是解题（拿结果），Probe 是诊断
+        # （回答「我配的能用吗」）——探测图内置、不碰任何站点，故不需要 plugin
+        # 参数，也不需要清缓存。信封同样恒 200：探测失败是**结论**而非传输
+        # 错误，成败由 result 内的 ok/err 表达（对齐 translate 端点 probe 口径）。
+        # llm 凭据按次随表单传入（与 solve 同一套 captchaLLM* 键）。
+        if do == 'kazumiCaptchaProbe':
+            # 函数内懒加载：captcha_probe 只在用户点「测试」时才需要，顶部
+            # import 会把它（及后续触达的 PIL）拖进冷启动链（B-09 同口径，
+            # 先例 kazumi/captcha.py _load_cnn）。
+            from kazumi import captcha_probe as kazumi_probe
+            llm_cfg = _captcha_llm_cfg_from_form(form)
+            result = kazumi_probe.probe(llm_cfg=llm_cfg)
             return 200, json.dumps({'code': 200, 'result': result}, ensure_ascii=False)
 
         # ---- Bangumi 元数据 ----
@@ -2989,7 +3379,11 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBangumiMe':
             token = form.get('token', '')
             me = kazumi_mgr.bangumi_me(token)
-            return 200, json.dumps({'code': 200, 'me': me, 'valid': bool(me)}, ensure_ascii=False)
+            # valid 仅表示 token 鉴权有效；reason 区分 auth（token 无效）/ network（网络·镜像故障），
+            # 前端据此给准确提示（旧版把网络超时也报成「Token 无效」误导用户）
+            reason = kazumi_mgr._bangumi_me_failure_reason() if not me else None
+            return 200, json.dumps({'code': 200, 'me': me, 'valid': bool(me), 'reason': reason},
+                                   ensure_ascii=False)
 
         if do == 'kazumiBangumiCollections':
             token = form.get('token', '')

@@ -211,7 +211,8 @@ describe('cache.js · 容量上限与淘汰', () => {
         const { api } = boot();
         api.set('warm', { a: 1 }, 60000);
         const big = 'x'.repeat(Math.ceil(1.6 * 1024 * 1024));
-        assert.equal(api.set('huge', big, 60000), false);
+        // B-10 双池：≥256KB 无 opts 会自动路由大池，本用例验证的是小池 1.5MB 上限语义，显式钉 small
+        assert.equal(api.set('huge', big, 60000, { pool: 'small' }), false);
         assert.equal(api.get('huge'), null);
         assert.deepEqual(api.get('warm'), { a: 1 }, '不把已有条目淘汰掉');
     });
@@ -219,9 +220,10 @@ describe('cache.js · 容量上限与淘汰', () => {
     test('累积超限 → 按最旧写入时间(t)淘汰，直到可容纳新条目', () => {
         const { api } = boot();
         const chunk = 'y'.repeat(560 * 1024); // 约 0.56MB/条：写第 3 条时必然超限
-        api.set('k0', chunk, 60000);
-        api.set('k1', chunk, 60000);
-        api.set('k2', chunk, 60000);
+        // B-10 双池：该体积无 opts 会自动路由大池，本用例验证小池淘汰语义，显式钉 small
+        api.set('k0', chunk, 60000, { pool: 'small' });
+        api.set('k1', chunk, 60000, { pool: 'small' });
+        api.set('k2', chunk, 60000, { pool: 'small' });
         assert.equal(api.get('k0'), null, '最旧 k0 被淘汰');
         assert.equal(api.get('k1').length, chunk.length, '较新的 k1 保留');
         assert.equal(api.get('k2').length, chunk.length, '最新 k2 保留');
@@ -230,10 +232,11 @@ describe('cache.js · 容量上限与淘汰', () => {
     test('淘汰按 t 升序：手动把新条的 t 调到最旧，被淘汰的是它而非先写的', () => {
         const { api, store } = boot();
         const chunk = 'z'.repeat(560 * 1024);
-        api.set('old', chunk, 60000);
-        api.set('new', chunk, 60000);
+        // B-10 双池：显式钉 small（理由同上）
+        api.set('old', chunk, 60000, { pool: 'small' });
+        api.set('new', chunk, 60000, { pool: 'small' });
         patchExpiry(store, 'new', { t: 1 }); // 新条 t 被改成最早
-        api.set('third', chunk, 60000);
+        api.set('third', chunk, 60000, { pool: 'small' });
         assert.equal(api.get('new'), null, 't 最小者先被淘汰');
         assert.equal(api.get('old').length, chunk.length, '写入更早但 t 更大的条目保留');
         assert.equal(api.get('third').length, chunk.length);

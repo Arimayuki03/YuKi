@@ -5,10 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('node:vm');
 
-/** 在 VM 中加载 records.js，注入最小全局桩；settings 由调用方持有并读取变更。 */
-function loadRecords(settings) {
+/** 在 VM 中加载 records.js，注入最小全局桩；settings 由调用方持有并读取变更。
+ *  opts.onCardsEnter / opts.onGridHtml：可选探针（入场错峰 / 网格 html 写入观测）。 */
+function loadRecords(settings, opts = {}) {
     const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/js/records.js'), 'utf8');
     // 链式 jQuery 桩：任何方法返回自身，length/data 返回中性值；供 makeRecordView 内部调用不报错。
+    // html(str) 带参写入时回调 opts.onGridHtml（render 路径观测用）。
     const makeJq = () => {
         const jq = new Proxy(function () { return jq; }, {
             get(_t, prop) {
@@ -16,12 +18,31 @@ function loadRecords(settings) {
                 if (prop === 'data' || prop === 'val' || prop === 'text' || prop === 'prop') return () => '';
                 if (prop === 'hasClass') return () => false;
                 if (prop === 'each') return () => jq;
-                if (prop === 'html') return () => jq;
+                if (prop === 'html') return (...args) => { if (args.length && opts.onGridHtml) opts.onGridHtml(String(args[0])); return jq; };
                 return () => jq;
             },
         });
         return jq;
     };
+    // L54（反 mock 漂移）：escHtml / fmtCommentTimeFull 属被测契约（A-14 下沉），
+    // 不再在桩里手工复刻 common.js 语义，而是先在独立 VM 装载真实 common.js，
+    // 再把 YUKI.common 的真实现注入 records 沙箱——common.js 语义演进时本文件
+    // 自动跟随，消除 mock 与生产漂移（做法参照 home-detail.test.js）。
+    const commonCtx = { console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number, Boolean,
+        parseInt, parseFloat, isNaN, setTimeout, clearTimeout, URL, URLSearchParams, Error, RegExp,
+        Symbol, WeakMap, WeakSet, Function,
+        document: { addEventListener() {}, documentElement: { classList: { contains: () => false, toggle() {} } } },
+        $: () => ({ on() { return this; } }),
+        AbortController,
+    };
+    commonCtx.window = commonCtx;
+    commonCtx.globalThis = commonCtx;
+    vm.createContext(commonCtx);
+    vm.runInContext(
+        fs.readFileSync(path.join(__dirname, '../../src/renderer/js/common.js'), 'utf8'),
+        commonCtx, { filename: 'common.js' }
+    );
+    const realCommon = commonCtx.YUKI.common;
     const context = {
         console, Map, Set, Promise, Date, Math, JSON, String, Array, parseInt, parseFloat,
         setTimeout, clearTimeout,
@@ -32,11 +53,14 @@ function loadRecords(settings) {
                 settingsSet: async (key, value) => { settings[key] = JSON.parse(JSON.stringify(value)); },
             },
         },
-        escHtml: (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'),
-        truncateTitle: (s) => String(s || '').slice(0, 30),
+        // 真实现：转义（含 H-6 单引号）/时间格式化随 common.js 演进
+        escHtml: realCommon.escHtml,
+        fmtCommentTimeFull: realCommon.fmtCommentTimeFull,
+        // common.js 声明（未导出进 YUKI.common）的真实现直取 VM 全局
+        truncateTitle: commonCtx.truncateTitle,
+        normalizePic: commonCtx.normalizePic,
         vodCoverImg: (pic) => `<img src="${pic || ''}">`,
         warnToast: () => {},
-        normalizePic: (p) => p || '',
         Detail: {},
         renderPagerBox: () => {},
         pageSizeOf: async () => 20,
@@ -46,7 +70,8 @@ function loadRecords(settings) {
         closeDialog: () => {},
         fillMissingCovers: () => {},
         fitVodTitles: () => {},
-        playCardsEnter: () => {},
+        // 入场错峰探针：记录 render 是否以网格容器调用了 playCardsEnter（common.js 契约）
+        playCardsEnter: (box) => { if (opts.onCardsEnter) opts.onCardsEnter(box); },
     };
     context.globalThis = context;
     vm.createContext(context);
@@ -573,4 +598,44 @@ test('getProgress：优先读通用表；未命中回退收藏条目 progress �
     const legacy = await favView.getProgress('site-a', 'v2');
     assert.equal(legacy.currentEp, 3, '通用表未命中回退收藏条目字段');
     assert.equal(await favView.getProgress('site-a', 'v-none'), null);
+});
+
+// ---------------------------------------------------------------- 入场错峰覆盖（A-6）
+
+test('render：收藏网格整格重写后调用 playCardsEnter（「我的」页收藏网格同源，common.js 契约）', async () => {
+    // my.js 收藏页签 = makeRecordView('my-favorites', ...) 工厂产物，render 即 records.js
+    // 同一实现；本用例直接驱动真实 render，锁「整格重写 → 错峰入场」不被回归移除。
+    const settings = {
+        favorites: [
+            { uid: 'u1', site: 'site-a', vodId: 'v1', name: '番剧甲', tag: 'want', ts: 1 },
+            { uid: 'u2', site: 'site-b', vodId: 'v2', name: '番剧乙', tag: 'watching', ts: 2 },
+            { uid: 'u3', site: 'site-c', vodId: 'v3', name: '番剧丙', tag: 'seen', ts: 3 },
+        ],
+    };
+    const calls = [];
+    const htmls = [];
+    const ctx = loadRecords(settings, {
+        onCardsEnter: (box) => calls.push(box),
+        onGridHtml: (s) => htmls.push(s),
+    });
+    const view = ctx.__makeRecordView('my-favorites', 'favorites', '空', true, true, 'pageSizeFavorites', '#my-panel-favorites');
+    await view.render();
+    // 整格确实写入 3 张 .vod-card（错峰入场的前提是有卡片，而非走了空态分支）
+    const gridHtml = htmls.join('');
+    assert.equal((gridHtml.match(/class="vod-card"/g) || []).length, 3, '网格写入 3 张卡');
+    assert.equal(calls.length, 1, 'render 恰好触发一次错峰入场');
+    assert.ok(calls[0], 'playCardsEnter 以网格容器为入参');
+});
+
+test('render：空收藏走空态分支，不触发错峰入场（与首页空网格口径一致）', async () => {
+    const calls = [];
+    const htmls = [];
+    const ctx = loadRecords({ favorites: [] }, {
+        onCardsEnter: (box) => calls.push(box),
+        onGridHtml: (s) => htmls.push(s),
+    });
+    const view = ctx.__makeRecordView('my-favorites', 'favorites', '暂无收藏', true, true, 'pageSizeFavorites', '#my-panel-favorites');
+    await view.render();
+    assert.ok(htmls.join('').includes('tip-line'), '写入空态占位');
+    assert.equal(calls.length, 0, '空网格不触发 playCardsEnter');
 });

@@ -433,3 +433,57 @@ function makeMiniGrid(cards, ids = []) {
         },
     };
 }
+
+// ---------------------------------------------------------------- 网格渲染（A-6 入场错峰覆盖）
+
+test('_renderGrid：整格重写后调用 playCardsEnter 错峰入场（common.js 契约）', async () => {
+    // _renderGrid 依赖 $ 选择器与多项全局桩：#timeline-grid 用 makeMiniGrid 产物，
+    // 其余（weekday/pager/season 等）给通用链式空桩；pageSizeOf 走 pageSizeHome。
+    const cards = {};
+    const grid = makeMiniGrid(cards, ['11', '22']);
+    const seen = [];
+    const t = loadTimelineWith({
+        $: (sel) => {
+            if (sel === '#timeline-grid') {
+                return {
+                    empty() { return this; },
+                    html(s) { seen.push({ kind: 'html', cards: (String(s).match(/bangumi-card/g) || []).length }); return this; },
+                    find(sel2) { return grid.find(sel2); },
+                    on() { return this; },
+                };
+            }
+            return { empty() { return this; }, html() { return this; }, on() { return this; }, val() { return ''; }, text() { return this; }, append() { return this; }, find() { return { length: 0, on() {} }; } };
+        },
+        pageSizeOf: async () => 20,
+        renderPagerBox: () => { seen.push({ kind: 'pager' }); },
+        bangumiCard: (item) => `<div class="vod-card bangumi-card" data-id="${item.id}"></div>`,
+        bangumiNetGuide: () => '<div class="tip-line">guide</div>',
+        fitVodTitles: () => {},
+        playCardsEnter: (box) => { seen.push({ kind: 'enter', box }); },
+        escHtml: (s) => String(s),
+        warnToast: () => {},
+        showLoading: () => {},
+        hideLoading: () => {},
+        Kazumi: {},
+        FavHub: { onChanged: () => () => {} },
+        UIState: { get: () => null, set: () => {} },
+        localCacheGet: () => null,
+        localCacheSet: () => {},
+        localCacheDel: () => {},
+        recGet: async () => [],
+        doAction: async () => ({ items: [] }),
+    });
+    t._calendar = [{ weekday: { id: 1 }, items: [{ id: 11 }, { id: 22 }] }];
+    t._weekday = 1;
+    t._page = 1;
+    t._colStateMap = new Map(); // 收藏映射为空：_attachFavBadges 零 DOM，不干扰断言
+    await t._renderGrid();
+    const htmlCall = seen.find((s) => s.kind === 'html');
+    assert.ok(htmlCall && htmlCall.cards === 2, '整格写入 2 张卡');
+    const enter = seen.find((s) => s.kind === 'enter');
+    assert.ok(enter, '整格重写后应调用 playCardsEnter（错峰入场）');
+    assert.ok(enter.box && typeof enter.box.find === 'function', 'playCardsEnter 入参为网格容器');
+    // 调用顺序契约：先写网格再触发入场（与 home.js/popular.js 同序）
+    assert.ok(seen.findIndex((s) => s.kind === 'html') < seen.findIndex((s) => s.kind === 'enter'),
+        'html 写入先于 playCardsEnter');
+});

@@ -157,6 +157,10 @@ function loadLive(opts) {
         box.getBoundingClientRect = () => ({ top: box.rectTop });
     }
     vm.createContext(context);
+    // A-04：live.js 引用 common.js 顶部错峰常量（生产端 <script> 先加载 common.js），
+    // 桩环境补注入同一组值（45/7），与 common-utils/replay-motion 单测断言的常量一致。
+    context.STAGGER_STEP_MS = 45;
+    context.STAGGER_MAX_IDX = 7;
     vm.runInContext(`${fs.readFileSync(LIVE_SRC, 'utf8')}\n;globalThis.__Live = Live; globalThis.__fit = liveFitPageSize;`,
         context, { filename: 'live.js' });
     state.Live = context.__Live;
@@ -496,7 +500,7 @@ test('renderList：切分组/翻页传 animate 时挂 .anim-cards，不传则摘
     assert.equal(h.$.lastAnim(), true, '再次全量重渲染重新挂回');
 });
 
-test('renderList：错峰延迟覆盖全部频道（内联 animation-delay 按可见序号 30ms 递增，无前 N 张上限）', () => {
+test('renderList：错峰延迟覆盖全部频道（内联 animation-delay 按可见序号 45ms 递增，第 8 张起封顶 315ms）', () => {
     const h = loadLive();
     const L = h.Live;
     L.channels = Array.from({ length: 25 }, (_, i) => ({ group: 'G', name: `台${i}`, url: `http://a/${i}` }));
@@ -505,8 +509,11 @@ test('renderList：错峰延迟覆盖全部频道（内联 animation-delay 按�
     const html = h.$.lastHtml('#live-list');
     const delays = [...html.matchAll(/style="animation-delay:(\d+)ms"/g)].map((m) => Number(m[1]));
     assert.equal(delays.length, 25, '全部 25 张卡都带内联延迟（不再限于前 10 张）');
-    delays.forEach((d, i) => assert.equal(d, i * 30, `第 ${i + 1} 张延迟 ${i * 30}ms（可见序号 × 30ms）`));
-    assert.equal(delays[24], 720, '末张 24×30=720ms，无封顶截断');
+    // A-04 错峰参数归一：与卡片网格同一组常量（STEP=45ms / MAX_IDX=7），
+    // 原 30ms/无上限改为 45ms/封顶 315ms——统一入场节奏，长列表尾卡不再久等
+    delays.forEach((d, i) => assert.equal(d, Math.min(i, 7) * 45, `第 ${i + 1} 张延迟 ${Math.min(i, 7) * 45}ms（可见序号 × 45ms，封顶 7×45）`));
+    assert.equal(delays[7], 315, '第 8 张起封顶 7×45=315ms');
+    assert.equal(delays[24], 315, '末张同为 315ms 封顶');
 
     // 不播动画（探测分批刷新）时不带内联延迟：原地重写不重启动画
     L.renderList();

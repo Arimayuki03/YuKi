@@ -19,6 +19,8 @@ const RENDERER_LEGACY_GLOBALS = [
     'confirmDialog', 'localCacheClearAll', 'setErrorToastEnabled', 'invalidatePageSizeCache',
     // 其他文件提供的跨页函数（按需补充）
     'localCacheGet', 'localCacheSet', 'localCacheDel', 'localCacheStats', 'localCachePrune',
+    // settings-snapshot.js 提供的设置快照层（A-27；search.js/kazumi.js 消费）
+    'SettingsSnapshot',
 ].reduce((acc, name) => ({ ...acc, [name]: 'readonly' }), {});
 
 module.exports = [

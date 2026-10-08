@@ -1,6 +1,6 @@
 # YuKi — 当前开发状态
 
-> 更新时间：2026-09-28
+> 更新时间：2026-10-08
 > 许可证：GPLv3（`LICENSE`，`package.json` `GPL-3.0-only`）
 >
 > 本文件是跨会话续作的首要入口，只记录当前有效状态、约束与下一步。完整历史流水见 [开发历史](docs/DEVELOPMENT_HISTORY.md)。
@@ -9,15 +9,15 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 应用版本 | `0.2.6` |
-| 桌面宿主 | Electron 31，JavaScript |
+| 应用版本 | `0.3.0` |
+| 桌面宿主 | Electron 44，JavaScript |
 | 后端 | FastAPI，Python 3.14 独立进程 |
 | 内容引擎 | CatVod + Kazumi 双引擎 |
 | 播放 | mpv 独立窗口 |
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；2026-09-26 Kazumi 对齐批次（评分对话框打标签 / 详情页选集讨论板块 / bgm.tv 跳转按钮，未定版）完成；2026-09-28 未暂存区全量代码审查修复批次完成（OCR delegate + 13 审查子代理，47 文件全覆盖：4 critical/high + 12 medium + 一批 low 修复，新增 test_dextools_on_demand 10 例，明细见 docs/CODE_REVIEW_2026-09-28.md）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；2026-09-30~10-08 v0.3.0 功能批次（详情页快照体系 A 系列、全局屏蔽词、设置快照层、缓存池/singleflight/guardedLoad、后端预热与聚合搜索缓存一致性、Bangumi 鉴权归因修正、验证码训练工具健壮化）与全仓代码审查修复批次（OCR 83 条发现 → 77 条落地，deepseek-v4.1-flash 交叉验证 + 主流程仲裁）完成；2026-09-26 Kazumi 对齐批次（评分对话框打标签 / 详情页选集讨论板块 / bgm.tv 跳转按钮，未定版）完成；2026-09-28 未暂存区全量代码审查修复批次完成（OCR delegate + 13 审查子代理，47 文件全覆盖：4 critical/high + 12 medium + 一批 low 修复，新增 test_dextools_on_demand 10 例，明细见 docs/CODE_REVIEW_2026-09-28.md）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -179,6 +179,67 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-09-30 优化.md 执行批次一（glm 子代理并发实现，宿主逐项验收；执行计划见 [优化.md](优化.md)）：
+
+- **批次 0 决策项 C-01（方案 b）**：ddddocr 整体移除——`requirements.txt`/`requirements.in` 删除 ddddocr 及专属传递依赖块（onnxruntime/opencv-python/flatbuffers/protobuf/packaging，逐块核实唯一依赖方，numpy/pillow 保留）；`build-python.js` 删 hidden-import 并新增**体积门禁**（python-dist 上限 80MB 十进制，超限 fail build + 子目录 top-10 定位输出，`YUKI_SIZE_GATE=0` 紧急绕过；release CI 经 build:py 自动生效）；`kazumi/captcha.py` 识别链单级化（tiny-CNN → 人工验证窗口，`recognize_captcha_bytes` 失败返回 None 契约不变）。代价（拍板接受）：花体艺术字验证码识别率回退。测试改写：test_kazumi_utils 97 例、test_kazumi_bgm_rating 65 例、test_kazumi 105 例全绿。
+- **C-P1 体积批次 C-02~C-07**：package.json 加 `electronLanguages:["zh-CN","en-US"]`（-38.7MB 磁盘）+ `compression:"maximum"` + files 排除 `!**/*.js.map`；after-pack.js 剔除 `LICENSES.chromium.html`（9.4MB，保留 LICENSE.electron.txt，合规注释在案）；build-python.js 排除 `PIL.AvifImagePlugin`（-7.9MB）；icon.png oxipng 无损压缩 1,215,803→1,007,883B（1024×1024 完好）。after-pack 测试 15/15。
+- **B-03**：视图级缓存 TTL 60s→5min（app.js `_cacheableViews`，home/popular/timeline 三视图）；手动刷新走视图自身 load 不经 showView，零影响（代理核实）；新增 tests/js/app-view-ttl.test.js 3 例。
+- **A-13/15/17**：detailTabIn 补 translateY(2px) 上浮（glass 门控选择器层未动）；`LOADING_MASK_DELAY_MS=160` 常量化 + ui.css 互指注释（160 = CSS 150ms 淡出 + 10ms 余量耦合）；`epBtnTitle()` 统一三处集按钮 title 为集名/「第 N 集」（消灭悬浮提示暴露原始 URL）。相关测试 397 pass。
+- **A-32 关闭闪烁二轮修复（宿主）**：A-09/A-10 落地的浮层退场仍有关闭闪烁——初版 A-32 两步定时器（先摘 .show 再摘 .float-out）存在帧偏移竞态：CSS 过渡/动画比类变更晚一帧起播，第二档定时器按语句时刻计可能抢在遮罩淡出收尾前摘类，`floatOut both` 末态随类丢失、面板在遮罩淡出半途闪回不透明。终版对齐 `.dlg-out` 手法：末态 `opacity:0` 显式固化在 ui.css `#cover-float.float-out`/`#char-float.float-out` 规则上，关闭链路只摘 `.show`、绝不摘 `.float-out`（复位统一收口 `_showDetailFloat` 重开时）。detail-float-close.test.js 重写 6 例锁定新结构。
+- **A-07/08**：新增 `popIn` keyframes（scale .96→1 + fade，`--dur-fast`/`--ease`），挂 `.detail-col-menu`（origin center bottom）与 `.ep-comments-grid`（origin center top），JS 零改动（inline display 切换自动重触发动画）；54 测试全绿。
+- **A-20**：`_downloadEps` 批量下载逐集刷新遮罩文案「解析下载地址 N/M…」，`seq` 独立计数器（idxs 原始索引不连续，防错误进度）。
+- **A-21**：评分按钮 pending 态——禁点（首个 await 前同步置位）+ aria-busy + 复用 translate-bubble spinner（零新增 CSS），失败 toast 不静默；bgm-rate 23 测试全绿。
+- **B-07**：`bangumiEpisodes` 补 30min localStorage 缓存（key `kazumi_bgm_eps::id`，对齐 bangumiInfo 口径；形态校验、失败/空不落盘、resolve 契约不变）；新增 tests/js/bgm-eps-cache.test.js 7 例 + 回归 66 例全绿。
+- **A-05/06**：`sslide` 由 margin-left（全 CSS 唯一逐帧 layout 循环动画）改 `translateX` + `calc((1/0.38)*100%)` 精确换算（margin 与 transform 百分比基准不同，滑块宽度恒定保证视觉等价）；timeline.js 补 `playCardsEnter` 错峰入场。**纠偏**：my.js 收藏网格实际复用 records.js 工厂（渲染点 records.js:866）且调用已存在，无需改动（优化.md 计划的 my.js 描述与实际结构不符）。timeline/records 测试 +6 例，61 pass。
+- **A-16**：集网格「看到第 N 集」高亮——`Records.getWatchProgress` 数据就绪，`_applyEpHighlight` 挂 renderEpisodes 尾部，新增 `.ep-btn.ep-hi`（复用 `--accent-soft/--accent-border` 派生令牌，只动背景/边框/文字色），title 补「上次看到第 N 集」；越界/无进度渲染零变化。**Bangumi 分集侧不做**（本地 watchProgress 表因 player.js 准入门禁无 Bangumi 行，标必空标，源码锚点测试固化口径）。ep-highlight.test.js 9 例全绿。
+- **A-12**：简介展开/收起改 class toggle + 按钮文案局部更新（`_renderOverview` 初次渲染保留），不再全量重建 `#detail-tab-content`——**滚动跳变 bug 根治**（DOM 不重建，滚动锚定保持）；CSS 线夹联动既有零新增。detail-desc-toggle.test.js 3 例（含「重建调用数为 0」行为锁）。
+- **A-04**：动效工程收敛——`replayClass(el, cls)` 收口三段式重触发（common/detail/panels 三处）、`motionAllowed()` 三合一谓词（`_skin.animEnabled` + reduced-motion + glass-on，后续 JS 动画统一入口）、错峰常量 `STAGGER_STEP_MS=45`/`STAGGER_MAX_IDX=7` 归一（live.js 30ms/∞ → 45ms/封顶 7，优化.md 记载的第三处实际在 live.js）。replay-motion.test.js 10 例。
+- **A-14**：`fmtCommentTimeFull`/`commentTsMs` 下沉 common.js（detail.js 保留方法壳转发 16 处调用点零改动；records.js `fmtTime` 改委托；my.js 盘点无重复实现不动）。
+- **B-06**：`doAction` single-flight——`_stableKvString` 键排序稳定序列化、命中共享 + 响应即删、`_shareSafe` 顶层浅拷贝防串台、**带 AbortSignal 的调用旁路去重**（世代取消不传染）、getJson 经论证不去重（唯一调用面 /sites 无双击路径）。singleflight.test.js 11 例 + 495 回归。
+- **A-11**：`staggerEnter(container, selector, firstN)` 泛化（容器模式/限量模式），角色/制作/关联三网格 + 吐槽首屏前 8 条错峰（评论限量模式防续拉行误入场）；复用 vodCardIn + glass/reduced-motion/no-anim 三重门控。
+- **A-22**：键盘可达性——页签/筛选条/标签补 tabindex + `_kbdActivate` 统一 Enter/Space keydown 委托（Space preventDefault 防滚动），已有 tabindex 的 3 点补 keydown；Esc 链零回归（VM 断言钉住）。detail-keyboard.test.js 7 例。
+- **A-28**：收藏双查降频——`_reconcileBangumiCol` 按需 force（5min 窗口或 FavHub 写操作置脏），缓存回填快速上屏路径不动；写路径乐观更新 + 脏标记兜底保证写后立即一致。detail-col-reconcile.test.js 6 例。
+- **B-01**：聚合搜索接入缓存（`spider:aggsearch` ns、整词 key `word|timeout=N`、索引+payload 双仓照抄 Kazumi 先例）——同词二次聚合搜索 20s 级 → <100ms；error 双层防线不落缓存、未缓存源重放补发终态、refresh=1 旁路、配置热替换联动失效。test_aggsearch_cache.py 16 例 + 254 回归。
+- **A-23**：选集弹层 `syncGridCells` 节点重排（脏格移除/缺格补建/appendChild 归位）——排序切换/切集不再整片 innerHTML 重写，active 与滚动天然保留；shell 首建是唯一合法重建点。bgm-episode-comments 重写为节点级断言 23 例全绿。
+- **A-24**：吐槽排序就地重排——`_reorderCommentRows` 按 `_commentKeys` 稳定键归位（排序纯前端，后端无排序参数），头像不闪（节点引用不变，img 身份断言钉住）；重排失败回退整表渲染兜底。detail-comment-reorder.test.js 10 例。
+- **A-25/A-26**：嵌套返回体验修复——`_snapshot` 补 scrollTop（**验证结论：`App._scrollPos` 对 detail 固定回顶（app.js:98），嵌套返回滚动确实丢失，优化.md 疑虑成立**），`_restore` 走 `render({skipPageAnim:true, scrollTop})` 跳过三级入场只播页签淡入，回写先于吸顶测量安全。detail-restore-scroll.test.js 6 例。
+- **A-18/A-19**：换线路交叉淡入（`epGridIn` 纯 opacity + replayClass，specificity 压过 tab-enter 通配）+ 勾选保护（toast「已切换线路，原勾选 N 集已清空」+ 弹窗切线路同步清页签残留勾选修一致性漏洞）。detail-source-switch.test.js 7 例。
+- **A-02 一阶段**：`skeletonHtml(kind, opts)` 三形态（hero/card/comment）+ `.sk-*` 静态灰块样式（零硬编码、三重门控、无 shimmer，单测锁定）——**骨架形态裁决遵守 §1.1：静态灰块 + 一次性淡入**。skeleton.test.js 5 例。
+- **A-01 一阶段**：`DetailSnap` 快照模块（`detail::snap::v1::`、TTL 2h、字段白名单+键一致性校验）+ 5 处调用方写入（home/search/records CatVod 路径 + timeline/popular Bangumi 路径；kazumi 分支身份不匹配正确排除）。detail-snap.test.js 19 例。
+- **A-27**：设置快照层——`settings-snapshot.js`（长驻内存 + change 委托失效 + 90s 兜底 + getFresh 强刷，in-flight 合并），detail.js 2 处 + playSelected + player.js 起播 3 处改内存读（起播 3 次串行 IPC → 0-1 次），`_saveLastSource` 300ms 防抖。**A-29 按 §5.1 口径自动免做**。settings-snapshot.test.js 17 例 + 250 回归。
+- **A-30**：Bangumi 匹配「先渲染后补」——`_bgmDefer` 状态机 + `_applyDeferredBgm` hero 定点局部替换（render 主体零改动），开关开启时首屏省 1-3s 两段网络往返；世代守卫双层核验、`_restore` 嵌套返回重发防语义回归。detail-bgm-defer.test.js 9 例。
+- **B-10**：cache.js 双池治理（小池 1.5MB + 大池 3MB 独立 LRU、`opts.pool` 显式路由 + 256KB 自动兜底）——大 payload 不再挤掉高频小条目；API 向后兼容，旧条目 TTL 自然过期。cache-pool.test.js 22 例。
+- **C-10**：after-pack 钩子 mac/linux 剔除 vendor 内 win 二进制（`.exe/.dll` 后缀精确判定，基于 electron-builder 25.1.8 源码调研确认 filter 无平台字段、平台段是追加语义）。after-pack 测试 19 例。
+- **宿主修复**：A-11 `staggerEnter` 落地晚于 A-03/A-24 测试编写，两个测试文件 vm 桩补 no-op stub（4 例红 → 全绿）。
+- **A-31**：`guardedLoad(host, opts)` 收口 common.js——四处守卫语义差异逐处核对（home/timeline abort+世代双轨、popular/detail 纯世代、比较全为令牌相等判定），抽象只管「取新令牌 + isLive() 存活判定」不吞请求/遮罩；home/timeline/popular 三处接线（净减约 20 行/处），**detail.js 保留手写守卫**（`_loadGen` 自增点散布在 `_restore`/重试路径且与 A-30 状态机交织，接线回归风险 > 去重收益，宿主裁决）。guarded-load.test.js 7 例。
+- **B-09**：Python 冷启动瘦身——`-X importtime` 实测推翻优化.md 猜想（lxml/bs4/quickjs/curl_cffi 均不在冷启动链），真正可动项仅 asyncio（80.8ms cum）：`_LazyAsyncio` 模块代理（`__getattr__` 首触 + 双检锁，9 个使用点零改动）+ `runtime/errors.py` 同步懒加载（启动链另一 asyncio 来源）。实测墙钟中位 -49ms（dev），打包版预期 0.05-0.1s。test_server_lazy_imports.py 7 例。
+- **C-08/C-09**：ffmpeg/mpv 移出安装包（vendor filter 双排除 + findFfmpeg/findMpv 补旧安装包只读候选）+ **首启后台预下载**（ensureFfmpeg → ensureMpvBackground 严格串行节流、失败静默、单飞幂等、不覆盖用户 mpvPath）+ installer.nsh 勾选页改纯说明页 + asset-status mpv.downloading 状态可见 + 三处 mpv-missing 文案指向设置页补装。**实测：Setup.exe 187.3MB→151.0MB（-19%）、win-unpacked 581→413MB、vendor 262→5MB**。vendor-unbundle/mpv-predownload 测试 9 例。弱网首启需下载 ffmpeg(~190MB zip)+mpv(~100MB 7z) 串行，见交付说明。
+- **B-08**：封面磁盘缓存层（`cover_cache.py`，方案 B 后端侧）——`<cache>/covers/<sha1>.bin` 单文件自描述（exp 头+原始字节），键与端口/token 解耦（跨重启命中）、TTL 7 天、200MB 配额 LRU、ETag 304 重验证、统计/清理并入后端 cacheSize/clearCache（前端面板自动覆盖、无双计）；「只缓存成功且非空」毒面约定。test_cover_cache.py 12 例。
+- **B-12**：loadSites 与首页 feed 解耦——「预发 + 让位 + 接管」设计（`_bootPrefetchHome/Yield/TakeOver` 三方法），冷启动 feed 先于 `/sites` 发出、接管时按令牌+源双校验跳过重复 loadHome；换源/换代/恢复路径字节级回退原行为；app.js 骨架先行禁改区零触碰。home-boot-prefetch.test.js 9 例。
+- **A-02/A-01 第二阶段**：8 个 `.tip-line` 占位接 `skeletonHtml`（hero/card/comment，`_detailSkeleton` 带降级兜底）+ `DetailSnap` 快照消费（`open()` 命中即 `render({snapHero:true})` 半渲染 hero，实例态零污染 `_vod` 渲染后还原、结果整页覆盖「详情优先」）；skeletonHtml 补 count 通用钳制。优先级：错误态 > 真实数据 > 快照 > 骨架。detail-skeleton-wiring.test.js 16 例。
+- **详情页刷新按钮（B-13 调研衍生）**：hero 操作行容器级 `#detail-refresh`（CatVod/Bangumi 两版面共用锚点），清 `detail::vod`/`detail::bgminfo` 缓存 + `load(true)` 带 refresh=1 双层旁路（后端 `_cached_spider_content` 本就支持，未改后端）；防抖 disabled+spinner；`_applyDeferredBgm` 局部替换同步补挂。detail-refresh.test.js 5 例。
+- **B-11**：worker 预热（`runtime/warmup.py`）——配置恢复后延迟 2.5s 对前 N=3 个健康站点发空 homeContent（串行逐源 0.5s 间隔、12s 专用短预算、失败静默、`YUKI_WARMUP_SITES` 可覆盖）。**内存实测：N=3 +117MiB（38.9/worker）、N=8 +308MiB、destroy 后全回收**。test_worker_warmup.py 14 例。
+- **B-13 调研落定**（不改代码）：详情页是全应用唯一无 force 旁路的内容页（已由刷新按钮补齐）；remarks 短路单独做缩不掉 40min 窗口（old-vs-old 需 ts 方向守卫 + 排除收藏毒源）；c+b 组合方案维持待议、触发条件具体化（详见优化.md B-13 行）。
+- **⚠️ 宿主修复：win32 平台判断缺陷（构建链级）**——after-pack.js 的 `electronPlatformName === 'win'` 自 v0.2.7 引入起**从未命中**（electron-builder 25 传 `'win32'`）：win 分支（elevate/LICENSES 剔除）静默失效，且 C-10 else 分支会在 win 构建上**误删 vendor/aria2c.exe**（下载功能二进制丢失）。修复为双值兼容 + exe 元数据门禁迁新建 `afterAllArtifactBuild` 钩子（`scripts/verify-exe-metadata.js`——rcedit 在框架 afterPack 晚于用户钩子，原位置查 exe 元数据必然读到 Electron 原始值误报）。修复后复验构建：**CompanyName="Arimayuki03"/ProductName="YuKi" 正确、aria2c 在包、LICENSES 已剔除（19.5MB）**。测试夹具同步（after-pack.test.js 平台值 win32、迁移后断言更新）。
+- **体积门禁校准**：python-dist 实测 94.6MB（基线 65MB 系构建环境缺依赖的侥幸产物；numpy 2.5 的 openblas DLL 21MB 为合法传递依赖，已确认无 onnx/opencv 残留）→ 门禁上限 80→100MB（实测基线+余量，注释在案）。
+- **终验（2026-09-30）**：JS 单测 **2174/2174**、Python run_all **ALL PASS**（572 py 文件编译 0 错）、check-js 53 文件 0 错、ESLint 0 error（82 warning 与基线一致）、Ruff 全过、smoke **18/18**、`build:win` 完整冒烟通过（Setup 152.2MB、after-pack 全部剔除/校验生效）。终验期间修复两例并发落地测试夹具失配（A-11 staggerEnter 桩缺失 ×2 文件、G40/G42 签名锚点漂移），均非源码缺陷。
+- 执行方式：48 个 glm 子代理分三波并发（峰值 10 并发），detail.js/common.js 等热点文件按分区锚定编辑（禁 Write 全文件重写），每项宿主逐条验证（源码核对 + 测试复跑）后回写本节。
+
+**🔄 2026-09-30 晚间用户验收后调整批次**（用户验收后推翻当日早些时候两项决策，以下为终态；文档口径已回写 [优化.md](优化.md)）：
+
+- **【已落地】ddddocr 恢复（C-01 方案 b 作废）**：用户实测仅 ddddocr 能识别真实站花体验证码，识别率优先——识别链回两级（ddddocr 主识别 + tiny-CNN 兜底），requirements 与 build-python hidden-import 恢复，captcha 测试桩还原（`_FakeOcr`/双检锁竞态用例），268 passed；体积门禁 SIZE_LIMIT_MB 100→300，定位改为「防异常膨胀的粗防线」。
+- **【已落地】ffmpeg/mpv 回归内置（C-08/C-09 移出方案作废）**：弱网首启需下载 10-20 分钟不可接受，恢复 HEAD 原设计（vendor 随包分发）+ mpv 恢复安装时用户勾选（默认勾选）；首启后台预下载链撤销。
+- **【已落地】骨架高度匹配修复**：三处占位跳动根因——分集区骨架误用 card 形态（高度数倍于真实 44px 行格）、吐槽/选集讨论骨架缺工具条头部（≈42px 突然插入）。修复走结构对齐：`skeletonHtml` 新增 `episode` 形态（复刻 `.kazumi-episode-grid` 列模板）+ `comment` 形态 `header/header:'chip'` 选项（垫计数胶囊+排序按钮行），`.sk-comment-text` 行高对齐真实值；未用 min-height 兜底（结构对齐后反而制造空白）。skeleton/wiring 测试 26 pass。
+- **【已落地】刷新按钮 v2 + 返回栈修复**：刷新按钮改图标钮（复用工具栏三处 `md-btn-icon` + 同款 Material refresh SVG，`aria-label` 补齐），静态化到 `#detail-back` 旁新 `.detail-topbar` 容器（index.html，绑定从委托改直绑，`_applyDeferredBgm` 补挂逻辑删除）；**返回栈 bug 根因**——刷新重入 `openBangumi()` 被「`currentView==='detail'` 即嵌套跳转」误判压栈当前页旧快照，`back()` 恢复同一影片刷新前状态导致回不到上级；修复为 `_reloadInProgress` 标志守卫压栈分支（刷新在途的真实嵌套跳转仍正常压栈，有测试覆盖）。detail-refresh 测试重写 13 pass。
+- **【已落地】体积门禁校准 300→360MB**：ddddocr 实测回归后 python-dist 338.8MB（ddddocr 包内自带 ONNX 模型 85MB + cv2 全量 112MB，比预估 250MB 高），门禁在 build:win 中正确拦截首次构建后按实测基线+6% 余量校准——门禁拦截行为本身即其设计功能的验证。
+- **【终验】build:win 完整构建通过**：Setup.exe **342.0MB**（内置 ffmpeg/mpv/aria2/misans/jar + ddddocr 链；LICENSES 19.5MB 与 48 个系统 DLL 剔除生效、`CompanyName="Arimayuki03"` 元数据校验通过、win-unpacked 883MB）。全量回归结果见下方补记。
+
+**🔄 2026-09-30 详情页封面提速 + Bangumi 分集占位错位修复批次**（用户反馈两问题）：
+
+- **详情页封面显示慢**：详情 hero 封面此前恒走 `vodCoverImg` 直连源图床——列表页 T73/T76 已改走 `/kazumi/cover` 本地代理（host 白名单 + 官方/镜像双路重试），后端 B-08 又加了磁盘缓存（键=URL sha1，跨重启命中 + ETag 304），详情页漏改，lain 图床被墙/慢时 hero 封面长时间空白。修复：`bangumiCoverImg` 增 `size` 第三参（缺省 'card' 既有口径不变；'large' 保持详情大图口径，API 形式 URL 摘 `/r/{n}/` 前缀），detail.js render() Bangumi 封面（`_bgmInfo.images` 有值时）改走 `bangumiCoverImg(cover, true, 'large')` 进代理+磁盘缓存+镜像兜底链；CatVod 源封面（任意图床，代理无白名单）保持 `vodCoverImg` 直连。detail-refresh 测试补行为锁（代理链调用 + size=large + CatVod 分支不回归），common-utils 测试补 size=large URL 变体断言。
+- **Bangumi 详情页分集占位错位**：episode 骨架（A-02）写入 `#bgm-ep-list`，而宿主自身就是真实分集网格（`.ep-grid.kazumi-episode-grid`，`minmax(220px,1fr)` 列）——骨架根 `.sk-eps`（自身也是同模板网格）作为唯一子项被压进第一列轨道（≈220px 窄条，内部 auto-fill 塌成单列竖排），数据到达后真实集格铺满整幅，占位与结果明显错位跳变。修复：ui.css 新增 `.ep-grid > .sk-eps { grid-column:1 / -1; }` 跨全列占满宿主行宽，内部列模板与真实网格同口径，占位与结果零位差（纯 CSS，动画仍只挂 sk-root 一次性淡入，三重门控不变）。detail-skeleton-wiring 测试补 CSS 锚点断言。
+- **验证**：JS 单测 **2209/2210**（唯一失败 `ffmpeg.test.js` downloadFile 3xx 重定向为网络下载类偶发超时，两次复跑一过一不过，与本次改动无关）、check-js 53 文件 0 错、ESLint 0 error（改动文件 warning 与既有基线一致）。
 
 2026-09-28 未暂存区全量代码审查修复批次（OCR delegate 文件选择 + 13 个审查子代理并发审查，宿主逐条验证后修复）：
 

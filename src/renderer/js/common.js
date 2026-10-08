@@ -6,9 +6,19 @@
  * 依赖：jQuery（先于本文件加载）。主 UI 各视图（home/search/detail）与
  * 辅助面板（panels.js）共用本文件的全局函数。
  */
-/* global $, doAction */
+/* global $, doAction, localCacheGet, localCachePeek, localCacheSet */
 
 let backend = { base: '', token: '' };
+
+/**
+ * 错峰参数全仓唯一来源（A-04 归一）：所有 stagger 入场统一 STEP=45ms、
+ * 可见序号第 8 张（idx≥7）起封顶 7×45=315ms，避免长网格尾卡等待过久。
+ * 基准取 playCardsEnter 既有现值（优化.md 附录 STEP=45ms/MAX_IDX=7）；
+ * 此前各处各写各的（设置页 45/7 内联、直播频道 30ms/无上限），归一即统一到本组值。
+ * 新代码禁止再写错峰魔法数，一律引用本常量。
+ */
+const STAGGER_STEP_MS = 45;
+const STAGGER_MAX_IDX = 7;
 
 /** 控制面统一追踪 ID；不包含用户数据，可跨 /action、解析和播放器传递。 */
 function createRuntimeId(prefix = 'req') {
@@ -44,10 +54,126 @@ async function waitBackend() {
     return false;
 }
 
+// ---------------------------------------------------------------- single-flight 并发去重（B-06）
+
+/**
+ * singleFlight —— 泛化并发去重：同 (fn, key) 的并发调用只执行一次，其余共享同一
+ * Promise；settle（成功或失败）后立即从 Map 摘除——失败不缓存，下次同 key 重新
+ * 发起。手法对齐 src/main/async-session.js 的 AsyncSingleFlight.run（主进程同形态
+ * 先例）与 kazumi.js getBangumiMatch 的 _bgmMatchInflight（渲染层 Map<key, Promise>
+ * 先例）。map 缺省时按 fn 分桶（不同请求函数的同名 key 互不串台）；doAction 传显式 Map。
+ * 分桶容器用 WeakMap（L26）：fn 作键不阻止回收，fn 不可达后其桶随 GC 摘除；
+ * Map 会因条目持有 fn 强引用而泄漏（fn 本身从不显式删除）。
+ */
+const _singleFlightMaps = new WeakMap();
+function singleFlight(fn, key, map) {
+    let inflight = map;
+    if (!inflight) {
+        inflight = _singleFlightMaps.get(fn);
+        if (!inflight) { inflight = new Map(); _singleFlightMaps.set(fn, inflight); }
+    }
+    const k = String(key);
+    if (inflight.has(k)) return inflight.get(k);
+    const p = Promise.resolve().then(fn);
+    inflight.set(k, p);
+    // 响应即删：成功失败两条路都摘链（对齐 AsyncSingleFlight），失败绝不缓存
+    p.then(() => inflight.delete(k), () => inflight.delete(k));
+    return p;
+}
+
+/** doAction 去重键的 kv 稳定序列化：键排序后再编码，键序不同的对象字面量仍命中
+ *  同一 key。值经 String()——已核查全部调用方（98 处）kv 值均为字符串/数字或
+ *  调用侧已 JSON.stringify/join 的字符串（如 kazumiAdd 的 json、SearchFilter 的
+ *  tags），不存在对象/数组值直传，String() 序列化无损。
+ *  L27 防碰撞：若真有对象/数组值混入，String() 会塌成 '[object Object]' 使不同
+ *  对象同键——对非原始值改走递归稳定序列化（排序键 + 类型标记前缀），string/
+ *  number/boolean/null 的输出格式与旧实现完全一致（既有测试断言不受影响）。 */
+function _stableKvString(kv) {
+    if (!kv || typeof kv !== 'object') return '';
+    const enc = (v) => {
+        if (v === null) return 'null';
+        const t = typeof v;
+        if (t === 'string' || t === 'number' || t === 'boolean') return String(v);
+        if (t !== 'object') return String(v); // function/symbol 等按旧行为 String()
+        if (Array.isArray(v)) return 'a:' + JSON.stringify(v.map(enc));
+        const keys = Object.keys(v).sort();
+        return 'o:' + JSON.stringify(keys.map((k) => [k, enc(v[k])]));
+    };
+    const keys = Object.keys(kv).sort();
+    return JSON.stringify(keys.map((k) => [k, enc(kv[k])]));
+}
+
+/** 共享响应的独立拷贝：维持「每次调用拿到独立对象」的既有直发语义，防共享后
+ *  调用方原地写字段串台。L28：浅拷贝只隔离顶层，嵌套对象（list 数组、vod 对象
+ *  等）仍是共享引用——调用方改嵌套字段会污染所有同 key 调用方与后续语义，故
+ *  出口做一次 JSON 深拷贝（doAction 响应为 JSON.parse 产物、量级为 KB 级页面
+ *  数据，深拷贝开销可忽略；响应含 undefined/函数等不可序列化值的场景不存在——
+ *  JSON.parse 不会产出这类值）。数组与原始值（JSON 解析失败回落的原文文本）
+ *  原样透传（数组本身是 JSON.parse 新建对象，共享无害）。 */
+function _shareSafe(rsp) {
+    return (rsp && typeof rsp === 'object' && !Array.isArray(rsp)) ? JSON.parse(JSON.stringify(rsp)) : rsp;
+}
+
+const _doActionInflight = new Map(); // doAction 去重层：key -> 在途 Promise（settle 即删）
+
+// ---------------------------------------------------------------- 详情意图预取（悬停/触摸提前拉 detailContent）
+
+// 「简介/播放信息不秒出」的根治：详情页简介（vod_content）与线路选集
+// （vod_play_url）只存在于 detailContent 响应，列表卡片数据没有这些字段，
+// 首次打开必须等一次网络。用户点击前几乎必有悬停/长按/触摸开始——那时把
+// detailContent 提前发出，点击到达时详情多半已回来（写入 detail::vod 缓存，
+// Detail.load 走既有缓存命中路径秒出整页），等待窗口从「点击后」前移到
+// 「意图时」，感知为零等待。
+const _detailPrefetch = {
+    inflight: new Map(),   // key -> Promise（悬停/触摸/点击三入口去重）
+};
+// 预取并发护栏：快速扫过一列卡片会连续触发 mouseenter，不设上限会瞬间
+// 打出一片 detailContent 把后端 spider 池占满（16 线程），挤掉真实请求。
+const DETAIL_PREFETCH_LIMIT = 3;
+
+/** 详情预取：发一次 detailContent 并把结果写入 detail::vod 缓存（与
+ *  Detail.load 同前缀同 TTL，命中路径零改动）。已缓存/已在途/超限静默跳过。
+ *  @param {string} site 站点 key
+ *  @param {string} vodId 影片 id
+ *  @returns {Promise|undefined} 在途 Promise（测试/诊断用；跳过时 undefined） */
+function prefetchDetail(site, vodId) {
+    try {
+        const key = String(site == null ? '' : site) + '|' + String(vodId == null ? '' : vodId);
+        if (!vodId || !key || key.endsWith('|')) return;
+        if (_detailPrefetch.inflight.has(key)) return _detailPrefetch.inflight.get(key);
+        // 已有新鲜缓存：无需预取（Detail.load 命中即秒开）。L17：用非破坏性的
+        // localCachePeek（localCacheGet 过期即删，会破坏 Detail.load SWR 依赖的
+        // 过期垫场条目），且仅未过期时短路；已过期条目照常预取重写。
+        if (typeof localCachePeek === 'function') {
+            const peeked = localCachePeek('detail::vod::v1::' + key);
+            if (peeked && !peeked.expired) return;
+        }
+        if (_detailPrefetch.inflight.size >= DETAIL_PREFETCH_LIMIT) return;
+        // M19：补 refresh:'' 与 Detail.load 的 kv 对齐——否则 single-flight 去重键
+        // 不同，悬停预取与点击后的正式请求无法合并为同一次在途 HTTP。
+        const p = doAction('detailContent', { site: String(site), ids: JSON.stringify([String(vodId)]), refresh: '' })
+            .then((rsp) => {
+                const vod = (rsp && rsp.list && rsp.list[0]) || null;
+                // 缓存写入走 Detail 侧同一前缀/TTL；detail.js 未加载（理论上不可能，
+                // 页面脚本 defer 顺序固定）则静默放弃——预取是纯优化。
+                if (vod && typeof localCacheSet === 'function') {
+                    try { localCacheSet('detail::vod::v1::' + key, vod, 30 * 60 * 1000, { pool: 'big' }); } catch (e) { /* ignore */ }
+                }
+                return vod;
+            })
+            .catch(() => { /* 预取失败静默：点击后 Detail.load 自会正式请求 */ })
+            .finally(() => { _detailPrefetch.inflight.delete(key); });
+        _detailPrefetch.inflight.set(key, p);
+        return p;
+    } catch (e) { /* 预取永不影响主流程 */ }
+}
+
 /** POST /action（表单编码），自动 JSON 解析返回；默认 30s 超时防永久挂起。
  *  path 默认 '/action'，Kazumi 引擎调用传 '/kazumi/action'；
- *  timeoutMs 可覆盖超时（源探测等慢操作传 60000）。 */
-async function doAction(action, kv, path, timeoutMs) {
+ *  timeoutMs 可覆盖超时（源探测等慢操作传 60000）。
+ *  请求体为普通表单 POST、rsp.text() 一次读完后解析，无流式/SSE 接口，
+ *  参与 single-flight 去重不涉及流式消费。 */
+async function _doActionSend(action, kv, path, timeoutMs) {
     const options = (timeoutMs && typeof timeoutMs === 'object') ? timeoutMs : {};
     const limit = (typeof timeoutMs === 'number' ? timeoutMs : options.timeoutMs) || 30000;
     const requestId = String(options.requestId || (kv && kv.requestId) || createRuntimeId());
@@ -84,6 +210,39 @@ async function doAction(action, kv, path, timeoutMs) {
         }
         throw error;
     }
+}
+
+/**
+ * doAction 对外入口（B-06 渲染层 single-flight）：同 (action + path + 稳定 kv) 的
+ * 并发调用共享同一次在途 HTTP（快速双击卡片/多入口并发不再发重复请求），settle
+ * 即摘链——失败不缓存，重试会重新发起。
+ * 边界约定：
+ * - 传了 options.signal 的调用方（home 首屏/翻页、player 播放链、timeline、
+ *   playerContent 重连等）走原样直发不去重——这些 signal 与调用方世代绑定（切源
+ *   abort 在途请求），若共享，后发请求会加入一个即将被 abort 的在途 Promise，
+ *   把上一代的取消传染给新请求；不同 key 天然不命中，同 key 并发在这条链路上
+ *   本就由调用方世代守卫（_loadToken/_playContext）控制。
+ * - options.requestId/playSessionId 只用于追踪与取消（后端 runtimeAborts 按
+ *   requestId 记取消标记），不参与去重键——requestId 每次生成必不同，纳入键会
+ *   彻底杀死去重语义，共享响应不改变追踪语义。
+ * - 显式数字 timeoutMs 参与去重键（L29）：超时上限是请求语义的一部分，同参不同
+ *   超时的并发调用若共享，短超时请求会拿到长超时请求的结果（先到者为胜——
+ *   实际等待被拉长、失败集合不一致），故 key 数组纳入归一后的 timeoutMs；
+ *   options.signal 调用方已在上方旁路，不经过本键。
+ */
+async function doAction(action, kv, path, timeoutMs) {
+    const options = (timeoutMs && typeof timeoutMs === 'object') ? timeoutMs : {};
+    if (options.signal) return _doActionSend(action, kv, path, timeoutMs);
+    // 归一与 _doActionSend 同口径：数字直传优先，对象取 timeoutMs 字段，缺省 30000
+    const tLimit = (typeof timeoutMs === 'number' ? timeoutMs : options.timeoutMs) || 30000;
+    const key = JSON.stringify([action, path || '/action', _stableKvString(kv), tLimit]);
+    // 只在「真正命中已有在途请求」时才深拷贝：未命中时 _doActionSend 返回的是
+    // 本次新解析的对象，无人共享，再 JSON.parse(JSON.stringify(...)) 纯属多余
+    // 开销——详情整包/首页 feed/bgmextra 等响应可达数十~数百 KB，同步深拷贝
+    // 会给主线程增加 CPU/内存与 GC 压力（列表滑动/详情页打开掉帧）。
+    const shared = _doActionInflight && _doActionInflight.has(key);
+    const rsp = await singleFlight(() => _doActionSend(action, kv, path, timeoutMs), key, _doActionInflight);
+    return shared ? _shareSafe(rsp) : rsp;
 }
 
 /** GET 请求并尽量解析 JSON；30s 超时。 */
@@ -171,15 +330,49 @@ function fitVodTitles(container) {
     $box.find('.vod-name').each(function () { fitVodTitle(this); });
 }
 
-/* ---------------- 卡片网格入场错峰动画（ui.css @keyframes vodCardIn / .cards-enter） ---------------- */
+/* ---------------- 动效公共工具（A-04：三段式重触发 / 门控谓词收口） ---------------- */
 
-/** 错峰延迟上限：第 9 张起统一压在 7×45ms，避免长网格尾卡等待过久（同设置页 set-enter 语义）。 */
-const CARDS_ENTER_MAX_IDX = 7;
-const CARDS_ENTER_STEP_MS = 45;
+// 皮肤状态容器（审查 L2：声明从文件尾「换肤」段前移到首个引用点 motionAllowed 之前，
+// 消除 let/const TDZ 窗口——applySkin 在文件尾定义、运行时才调用，但门控谓词
+// motionAllowed 在加载序更早的位置引用 _skin，声明后置属 TDZ 潜伏风险）。
+const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true, glass: false, adjust: null };
+
+/**
+ * 三段式 class 重触发（A-04 收口：remove → 强制 reflow → add）。
+ * 借读 offsetWidth 打断浏览器的同类动画合并，使重新挂上的 class 携带的
+ * CSS animation 从头起播。此前同型代码重复三处（common.js playCardsEnter /
+ * detail.js _swapTabContent 的 tab-enter / panels.js showSetCat 的 set-enter），
+ * 本函数为唯一实现。纯重构：不判空不门控，调用点各自保证传入真实元素；
+ * 动画门控在 CSS 端（html:not(.glass-on) 等）+ motionAllowed 谓词（JS 驱动时）。
+ */
+function replayClass(el, className) {
+    el.classList.remove(className);
+    void el.offsetWidth; // 强制 reflow 后重挂，重启动画
+    el.classList.add(className);
+}
+
+/**
+ * JS 动画统一门控谓词（A-04，§1.1 门控契约）：三条件任一为真即禁动：
+ * - 应用内「界面动画」开关关闭（_skin.animEnabled === false，applySkin 同步落 html.no-anim）；
+ * - 系统声明减少动态效果（prefers-reduced-motion: reduce）；
+ * - 毛玻璃进行中（html.glass-on：backdrop-filter 模糊采样层与 opacity/transform
+ *   动画叠加会撕裂闪烁，T54 同因——与 ui.css 各入场动画的 html:not(.glass-on)
+ *   选择器门控同一口径）。
+ * 供后续所有 JS 驱动动画（内联 animation-delay、JS 侧重触发等）统一查询；
+ * 现存三处重触发动画本体在 CSS 端门控（JS 不判断），本批只落谓词不改调用点。
+ */
+function motionAllowed() {
+    if (_skin.animEnabled === false) return false;
+    try {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+    } catch (e) { /* 无 matchMedia 环境（老内核/桩）按可动处理 */ }
+    if (document.documentElement.classList.contains('glass-on')) return false;
+    return true;
+}
 
 /**
  * 全量重渲染后的入场触发：按「可见序号」给子卡内联写 animationDelay，
- * 移除→reflow→重挂 .cards-enter 强制重启动画（同 panels.js showSetCat 手法）。
+ * 移除→reflow→重挂 .cards-enter 强制重启动画（统一走 replayClass，A-04）。
  * 仅适用于整格重写（grid.html(...)）的渲染点；渐进追加批次用 stageAppendedCards。
  */
 function playCardsEnter(container) {
@@ -188,10 +381,9 @@ function playCardsEnter(container) {
     $box.removeClass('cards-enter');
     let visIdx = 0;
     $box.children('.vod-card').each(function () {
-        this.style.animationDelay = `${Math.min(visIdx++, CARDS_ENTER_MAX_IDX) * CARDS_ENTER_STEP_MS}ms`;
+        this.style.animationDelay = `${Math.min(visIdx++, STAGGER_MAX_IDX) * STAGGER_STEP_MS}ms`;
     });
-    void $box[0].offsetWidth; // 强制 reflow 后重挂，重启动画
-    $box.addClass('cards-enter');
+    replayClass($box[0], 'cards-enter');
 }
 
 /**
@@ -205,8 +397,61 @@ function stageAppendedCards(container, countBefore) {
     const cards = $box.children('.vod-card').get().slice(countBefore);
     if (!cards.length) return;
     let visIdx = 0;
-    cards.forEach((card) => { card.style.animationDelay = `${Math.min(visIdx++, CARDS_ENTER_MAX_IDX) * CARDS_ENTER_STEP_MS}ms`; });
+    cards.forEach((card) => { card.style.animationDelay = `${Math.min(visIdx++, STAGGER_MAX_IDX) * STAGGER_STEP_MS}ms`; });
     if (!$box.hasClass('cards-enter')) { void $box[0].offsetWidth; $box.addClass('cards-enter'); }
+}
+
+/**
+ * A-11 详情网格/评论行错峰入场：与 .cards-enter（playCardsEnter）同一机制的泛化——
+ * 「JS 按可见序号内联写 animationDelay + 挂 stagger-in 标记，CSS 端按标记起播」；
+ * 动画本体与 glass / prefers-reduced-motion / no-anim 门控全在 CSS（ui.css
+ * html:not(.glass-on) 选择器，与 .cards-enter 同口径），JS 只负责布置。
+ * - 容器模式（不传 firstN）：stagger-in 挂在 container 上，子项全部入场；
+ *   适用于整格重写（box.html(...)）的渲染点（角色/制作/关联三网格）。容器类经
+ *   replayClass 三段式重挂（A-04 收口），筛选条重渲染时重播入场。
+ * - 限量模式（firstN=n）：stagger-in 逐个挂到前 n 个子项上，容器不带类——
+ *   后续渐进追加的子项无标记、永不入场（A-11 评论首屏前 N 条：续拉增量行经
+ *   _appendCommentRows 插入时不重播，语义同 stageAppendedCards「旧卡不重播」）。
+ * n 封顶 STAGGER_MAX_IDX+1=8 条：第 8 条延迟已是上限 315ms，再多视觉无差。
+ * M5 自清理：子项挂的 .stagger-in 与内联 animation-delay 在各自 animationend
+ * （{ once: true } 一次性监听）后摘除——CSS 端 vodCardIn 为 'both' 填充，动画
+ * 前延迟期靠内联 delay + 标记类隐藏，动画播完标记若留存，节点被 DOM 移动/重排
+ * （排序切换就地重排等）会再次满足选择器而重播错峰动画（闪烁）。摘除后动画态
+ * 只存在于播放窗口内，重排零重播。no-anim / reduced-motion / glass 门控下动画
+ * 根本不起播、animationend 不触发，标记残留无副作用（同节点下次布置时本就会
+ * remove→add 重触发）。容器模式的容器类同样在末位子项收尾时摘除。
+ * @param {Element|jQuery} container 已渲染完成的容器
+ * @param {string} selector 子项选择器（如 '.detail-char-card'）
+ * @param {number} [firstN] 限量模式的条数（缺省走容器模式）
+ */
+function staggerEnter(container, selector, firstN) {
+    const $box = $(container);
+    if (!$box.length) return;
+    const kids = $box.children(selector).get();
+    if (!kids.length) return;
+    const capped = (firstN == null) ? kids.length : Math.min(firstN, kids.length, STAGGER_MAX_IDX + 1);
+    let pending = capped; // 容器模式：未收尾的子项计数（末位收尾时顺带摘容器类）
+    const cleanup = (el) => {
+        el.classList.remove('stagger-in');
+        el.style.animationDelay = ''; // 置空即摘内联延迟（与逐项布置字段一致）
+    };
+    const onEnd = (el) => () => {
+        cleanup(el);
+        if (firstN == null && $box[0]) {
+            pending -= 1;
+            if (pending <= 0) cleanup($box[0]); // 全部子项播完再摘容器类，避免半途截断后续子项
+        }
+    };
+    for (let i = 0; i < capped; i++) {
+        const el = kids[i];
+        el.style.animationDelay = `${Math.min(i, STAGGER_MAX_IDX) * STAGGER_STEP_MS}ms`;
+        el.classList.add('stagger-in');
+        // 一次性监听：动画结束即自摘标记与内联延迟（延迟期不触发，无提前摘除风险）
+        if (typeof el.addEventListener === 'function') {
+            el.addEventListener('animationend', onEnd(el), { once: true });
+        }
+    }
+    if (firstN == null) replayClass($box[0], 'stagger-in');
 }
 
 /**
@@ -228,6 +473,143 @@ $(window).on('resize', () => {
     clearTimeout(_refitT);
     _refitT = setTimeout(refitVodTitles, 300);
 });
+
+/* ---------------- 统一 skeleton 骨架（A-02 第一阶段：只落工具与样式，不接线） ---------------- */
+
+/**
+ * 统一骨架占位 HTML（A-02，§1.1 裁决：静态灰块 + 一次性淡入）。
+ * 四种形态（与接线点的占位一一对应，见优化.md A-02）：
+ * - hero：详情主体骨架（封面大块 3:4 + 右侧标题条 + meta 行），对齐 .detail-head 双列；
+ * - card：卡片骨架（图块 + 两行文字条），对齐 .vod-card（封面 160/220 + 标题区），
+ *   供角色/制作/关联网格复用，count 可配；
+ * - comment：评论行骨架（头像圆块 28px + 名字条 + 两行文字条），对齐 .detail-comment；
+ *   opts.header 垫页签头部工具条（骨架高度匹配：不垫则数据到达时头部行突然插入，
+ *   整列被推下去跳位）——true = 计数胶囊 + 按钮（对齐吐槽 .detail-comment-toolbar、
+ *   选集讨论 .ep-comments-head 的 32px 控件行），'chip' = 仅计数胶囊（对齐选集
+ *   讨论列表首行 .ep-comments-count，页签头部已是真实 DOM 时只缺这一行）；
+ * - episode：集格骨架（集号条 + 名称条），对齐 .kazumi-episode-grid /
+ *   .kazumi-detail-ep（min-height 44px 行格），供 bgm 分集区占位——分集区真实
+ *   内容是 44px 集格网格而非卡片，旧接线误用 card 形态产生数倍高度差。
+ *
+ * 设计约束：
+ * - 返回纯静态 HTML 字符串（与仓库拼串渲染习惯一致），不含任何 JS/动画属性；
+ *   一次性淡入动画在 CSS 端（.sk-root 挂 skFadeIn，html:not(.glass-on) 门控 +
+ *   prefers-reduced-motion 全局兜底 + html.no-anim 全局关闭，三重覆盖）——骨架
+ *   HTML 本身不判断 motionAllowed（A-04 谓词供 JS 驱动动画用，CSS 门控已覆盖）；
+ * - 无 shimmer/脉冲（DESIGN.md §6/§7：空态不做脉冲，骨架仅是「加载中」形态）；
+ * - 尺寸近似真实内容防跳动：比例/头像/行高取自 ui.css 实测值（.detail-cover
+ *   aspect-ratio 3/4、.vod-cover 160/220、.detail-comment-avatar 28px 圆、
+ *   .detail-comment-text 22px 行高、.kazumi-detail-ep 44px 行格）。
+ *
+ * @param {string} kind 'hero' | 'card' | 'comment' | 'episode'
+ * @param {{count?:number, header?:boolean|'chip'}} [opts] card/comment/episode
+ *   形态的骨架数量（1~12，越界/非法回落各自缺省——card 缺省 6（vod-grid 常见
+ *   列数 × 两行的填充量级），comment 缺省 1（单卡，保持第一阶段结构；多条占位
+ *   由调用方显式传 count），episode 缺省 8（常见 4 列 × 两行量级），hero 忽略）；
+ *   comment 形态另有 header（头部工具条，见上）
+ * @returns {string} HTML 字符串；kind 无效回落 'card'（骨架是过渡态视觉，
+ *   静默兜底比抛错更符合占位语义——调用点只是渲染占位，不应因 kind 拼写
+ *   失误中断数据加载主流程；单测锁定该行为）
+ */
+function skeletonHtml(kind, opts) {
+    // 块底色/圆角统一在 CSS 端走令牌（--md-surface-container-high 等），HTML 只管结构
+    const line = (cls, style) => `<div class="sk-line ${cls}"${style ? ` style="${style}"` : ''}></div>`;
+    const k = (kind === 'hero' || kind === 'comment' || kind === 'episode' || kind === 'desc') ? kind : 'card';
+    // count 缺省按形态分：card 6（网格填充量级）、comment 1（单卡，第一阶段口径
+    // 不变）、episode 8（常见 4 列 × 两行量级）、desc 6（简介行数）。
+    // A-02 第二阶段扩展：comment 形态支持 count>1 吐槽/选集讨论多条占位
+    let count = 6;
+    if (k === 'comment') count = 1;
+    else if (k === 'episode') count = 8;
+    if (opts && opts.count != null) {
+        const n = Number(opts.count);
+        if (Number.isFinite(n)) count = Math.max(1, Math.min(12, Math.round(n)));
+    }
+    if (k === 'hero') {
+        // 结构对齐 .detail-head（grid：minmax(200px,360px) + 1fr）：左列封面块 3:4，
+        // 右列信息卡内标题条两行 + meta 三行（近似 .detail-hero-info 的内容高度）
+        return `<div class="sk-root sk-hero" aria-hidden="true">`
+            + `<div class="sk-block sk-hero-cover"></div>`
+            + `<div class="sk-hero-info">`
+            + line('sk-hero-title')
+            + line('sk-hero-title sk-hero-title-short')
+            + line('sk-hero-meta')
+            + line('sk-hero-meta sk-hero-meta-short')
+            + line('sk-hero-meta')
+            + `</div></div>`;
+    }
+    if (k === 'desc') {
+        // 概览简介占位（快照半渲染态）：对齐 .detail-overview-card（内边距卡 +
+        // 「简介」小标题 + 多行正文），行宽递减模拟自然段落，替代此前误用的
+        // card 网格形态（概览页签没有卡片网格，占位与结果形态完全对不上）。
+        let rows = '';
+        const widths = ['100%', '96%', '92%', '98%', '88%', '64%'];
+        for (let i = 0; i < Math.max(2, Math.min(count, widths.length)); i++) {
+            rows += line('sk-desc-line', `width:${widths[i]}`);
+        }
+        return `<div class="sk-root sk-desc" aria-hidden="true">`
+            + `<div class="sk-line sk-desc-heading"></div>${rows}</div>`;
+    }
+    if (k === 'episode') {
+        // 结构对齐 .kazumi-episode-grid / .kazumi-detail-ep（min-height 44px 行格，
+        // 13px 名称文字 ≈18px 行高 + 20px 上下内边距）：每格「集号条 + 名称条」
+        // 两块同排近似真实格的单行文本高度；外层 .sk-eps 复用真实列模板
+        // （minmax(220px,1fr) / gap 8px），列宽与间距同口径不跳。
+        // （骨架高度匹配修复：旧接线误用 card 形态，160/220 封面块与 44px 集格
+        // 差数倍高度，数据到达时整页签上提跳位。）
+        let cells = '';
+        for (let i = 0; i < count; i++) {
+            cells += `<div class="sk-ep" aria-hidden="true">`
+                + line('sk-ep-no')
+                + line('sk-ep-name')
+                + `</div>`;
+        }
+        return `<div class="sk-root sk-eps" aria-hidden="true">${cells}</div>`;
+    }
+    if (k === 'comment') {
+        // 骨架高度匹配：header 垫页签首行工具条——真实渲染固定有这行（吐槽 =
+        // .detail-comment-toolbar 计数胶囊 + 32px 排序按钮，下距 10px；选集讨论 =
+        // .ep-comments-head 32px 控件行），不垫则数据到达时突然插入把整列推下去。
+        // 'chip' 变体 = 仅计数胶囊一行（.ep-comments-count，页签头部已是真实 DOM、
+        // 只缺列表首行计数时用），下距同 10px。
+        const header = opts && opts.header;
+        let head = '';
+        if (header === 'chip') head = `<div class="sk-head-line"><div class="sk-line sk-chip"></div></div>`;
+        else if (header) head = `<div class="sk-head-line"><div class="sk-line sk-chip"></div><div class="sk-line sk-btn"></div></div>`;
+        // 结构对齐 .detail-comment：head 行（28px 圆头像 + 名字条）+ 两行正文条
+        // （22px 高对齐真实 .detail-comment-text 13px/22px 行高）。
+        // count>1 时整组包进单一 .sk-root（sk-comments 容器类，ui.css 仅 spacing 用途）：
+        // 淡入动画挂在唯一的 sk-root 上（整组一次淡入），避免外层拼 N 个单卡时
+        // .sk-comment 根类重复、各行 skFadeIn 各自独立的结构脏。
+        const one = `<div class="sk-comment-head">`
+            + `<div class="sk-block sk-comment-avatar"></div>`
+            + line('sk-comment-name')
+            + `</div>`
+            + line('sk-comment-text')
+            + line('sk-comment-text sk-comment-text-short');
+        // 无头部：保持第一阶段口径（sk-root 直接挂列表体根，单卡 sk-comment /
+        // 多卡 sk-comments）；带头部：sk-root 移到外层 sk-tab 组合根（头部行 +
+        // 列表体整组一次淡入），列表体根降级为纯容器避免 sk-root 重复。
+        const rootless = !!head;
+        const body = (count <= 1)
+            ? `<div class="${rootless ? '' : 'sk-root '}sk-comment" aria-hidden="true">${one}</div>`
+            : `<div class="${rootless ? '' : 'sk-root '}sk-comments" aria-hidden="true">${`<div class="sk-comment" aria-hidden="true">${one}</div>`.repeat(count)}</div>`;
+        if (!head) return body;
+        // 带头部的整组也要唯一 sk-root：外层再包一层 sk-root（sk-tab 组合根），
+        // 头部行 + 列表体都挂其下，动画整组一次淡入
+        return `<div class="sk-root sk-tab" aria-hidden="true">${head}${body}</div>`;
+    }
+    // card（含 kind 兜底）：图块 + 两行文字条，对齐 .vod-card 结构
+    let cards = '';
+    for (let i = 0; i < count; i++) {
+        cards += `<div class="sk-card" aria-hidden="true">`
+            + `<div class="sk-block sk-card-cover"></div>`
+            + line('sk-card-name')
+            + line('sk-card-name sk-card-name-short')
+            + `</div>`;
+    }
+    return `<div class="sk-root sk-cards">${cards}</div>`;
+}
 
 /* ---------------- 封面图统一渲染（T31 可维护性：三处渲染点收口于此，避免参数漂移） ---------------- */
 
@@ -590,9 +972,11 @@ function isBangumiCoverUrl(pic) {
 
 /** 生成 Bangumi 封面 img：优先经本地后端代理（/kazumi/cover，host 白名单 + 镜像重试），
  *  后端不可达/代理失败再退直连官方 lain.bgm.tv → 直连镜像 lain.{镜像根域名} → 占位图。
- *  （渲染层 <img> 直连 lain.bgm.tv 被墙/慢时历史页 kazumi 封面整页拉不出，T73/T76。） */
-function bangumiCoverImg(pic, eager) {
-    const first = normalizePic(bangumiResizeUrl(pic, 'card') || pic);
+ *  （渲染层 <img> 直连 lain.bgm.tv 被墙/慢时历史页 kazumi 封面整页拉不出，T73/T76。）
+ *  size：封面变体，缺省 'card'（common 400px，列表卡）；'large' 保持大图（详情页
+ *  hero，T75 口径——API 形式 URL 摘掉 /r/{n}/ 前缀，裸路径原样保留 l 段）。 */
+function bangumiCoverImg(pic, eager, size) {
+    const first = normalizePic(bangumiResizeUrl(pic, size || 'card') || pic);
     if (!first) return vodCoverImg('', eager);
     const chain = [];
     if (backend.base) {
@@ -769,10 +1153,74 @@ const _coverFillPools = new Map(); // poolKey → {queue,busy,limit,seen,ios}；
 let _coverFillGlobalBusy = 0;  // 全局最多 10 个详情补拉，避免多个页面同时压垮后端
 const COVER_FILL_GLOBAL_LIMIT = 10;
 const _coverCache = new Map(); // 'site|id' → pic：补拉成功的封面 URL 缓存，重绘/切源复用，避免重复 detailContent
+const COVER_PERSIST_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 封面补拉落盘 TTL 7 天（对齐 kazumi_bgm_cover 先例）
+const COVER_PERSIST_KEY_PREFIX = 'cover::'; // 独立 localStorage 键前缀（先例 kazumi_bgm_cover；B-10 另行治理 cache.js 容量）
 
-/** 命中已补拉过的封面 URL（无则返回 ''）。供列表重绘时直接使用，省一次详情请求与占位闪烁。 */
+/**
+ * 封面补拉结果落盘键：cover::site|id。只存封面 URL 字符串（约 100-200B/条），
+ * 不存字节/大 payload。实际落 yuki_cache 小池（未显式传 opts.pool、体积远低于
+ * 256KB 自动路由阈值），与高频小条目共同 LRU 淘汰——单条百字节级、总量级
+ * ~300KB/2000 条，可接受；挤占严重时再考虑独立前缀或显式池。
+ */
+function _coverPersistKey(site, id) {
+    return COVER_PERSIST_KEY_PREFIX + String(site) + '|' + String(id);
+}
+
+/**
+ * 落盘值形态校验：必须是合法 URL 字符串（http/https/data 协议），畸形丢弃。
+ * 与 normalizePic 同口径——旧版本脏数据/被改写的值宁可不用，走网络重拉自愈。
+ */
+function _isValidCoverPersistValue(pic) {
+    return /^(https?:|data:)/i.test(String(pic || ''));
+}
+
+/** 补拉成功封面写穿 localStorage（内存 _coverCache 照旧先写，落盘是叠加层不是替代；失败静默）。 */
+function _coverPersistSet(site, id, pic) {
+    if (!_isValidCoverPersistValue(pic)) return;
+    try {
+        if (typeof localCacheSet !== 'function') return;
+        localCacheSet(_coverPersistKey(site, id), String(pic), COVER_PERSIST_TTL_MS);
+    } catch (e) { /* 落盘失败不影响本次会话（内存缓存仍有效） */ }
+}
+
+// 内存 _coverCache 容量上限（L30）：与 _coverFillOne 写路径的 2000 条淘汰同口径，
+// 读穿回填（_coverPersistGet）必须遵守同一不变量——重启后大网格批量回填也不超限。
+const COVER_CACHE_CAP = 2000;
+
+/**
+ * 写入内存封面缓存并按插入序淘汰最旧（Map 迭代序 = 插入序，先例 _coverFillOne）。
+ * 写路径与读穿回填共用本入口，保证两条路径遵守同一容量不变量。
+ */
+function _coverCachePut(key, pic) {
+    _coverCache.set(key, pic);
+    if (_coverCache.size > COVER_CACHE_CAP) {
+        const oldest = _coverCache.keys().next().value;
+        _coverCache.delete(oldest);
+    }
+}
+
+/**
+ * 补拉结果落盘读取：命中合法 URL 返回并回填内存缓存（下次同步直取）；
+ * 未命中/畸形/TTL 过期（localCacheGet 已惰性删）返回 ''（由调用方走网络补拉）。
+ * 落盘池本身有 cache.js 容量上限、本函数回填走 _coverCachePut 封顶 2000 条
+ * （L30）：重启后首次渲染大网格批量回填不会使内存缓存超过写路径同款上限。
+ */
+function _coverPersistGet(site, id) {
+    if (typeof localCacheGet !== 'function') return '';
+    let pic = '';
+    try { pic = localCacheGet(_coverPersistKey(site, id)); } catch (e) { return ''; }
+    if (!_isValidCoverPersistValue(pic)) return '';
+    pic = String(pic);
+    _coverCachePut(String(site) + '|' + String(id), pic);
+    return pic;
+}
+
+/** 命中已补拉过的封面 URL（无则返回 ''）。供列表重绘时直接使用，省一次详情请求与占位闪烁。
+ *  内存未命中时读穿 localStorage（B-02：重启后内存缓存丢失，首页/搜索卡片不再逐卡重补拉）。 */
 function getCachedCover(site, id) {
-    return _coverCache.get(String(site) + '|' + String(id)) || '';
+    const s = String(site);
+    const i = String(id);
+    return _coverCache.get(s + '|' + i) || _coverPersistGet(s, i);
 }
 
 /** 中止后台封面补拉（用户点开详情等高优操作时调用，给详情请求让路）。 */
@@ -931,11 +1379,11 @@ async function _coverFillOne(pool, item) {
     }
     // 缓存补拉结果：列表重绘（如搜索切源）可直接复用，避免重复 detailContent
     const ckey = String(site) + '|' + String(id || name);
-    _coverCache.set(ckey, pic);
-    if (_coverCache.size > 2000) { // 防无限增长，淘汰最旧
-        const oldest = _coverCache.keys().next().value;
-        _coverCache.delete(oldest);
-    }
+    _coverCachePut(ckey, pic); // L30：与读穿回填共用同一容量不变量（封顶 2000 条）
+    // B-02 写穿落盘：补拉成功即持久化 URL（TTL 7 天），重启后内存缓存丢失
+    // 仍可由 getCachedCover 读穿命中，首页/搜索卡片不再每会话重新补拉。
+    // 只落「补拉」路径；kazumi/bangumi 卡走 Kazumi 自身的 kazumi_bgm_cover 持久化，不重复落。
+    if (!isBgmCard) _coverPersistSet(site, id, pic);
     el.removeAttr('data-cover-missing');
     // eager：补上的封面立即加载（此前 lazy 在隐藏/折叠区不触发，切源后看着「加载不出」）
     // Bangumi 封面（lain 三域名，含镜像）走代理/镜像兜底链；其余源普通 img
@@ -979,6 +1427,219 @@ function fmtSize(n) {
     let i = 0; let v = n;
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
     return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
+// ---------------------------------------------------------------- 全局番剧屏蔽（屏蔽词）
+
+/** 屏蔽词列表的持久化键（settings.json；数组，元素为字符串）。 */
+const BLOCK_WORDS_KEY = 'blockWords';
+
+/** 屏蔽引擎的内存快照：词列表 + 开关。settings 只在这里读一次并缓存。
+ *  M13：normWords 缓存词表的归一化形态（与 words 同步在 loadBlockWords 内重建），
+ *  isTitleBlocked 按「归一化词命中子串」判定，不再对每条目标题逐词重归一化。 */
+const _blockState = { words: [], normWords: [], on: true, loaded: false, loading: null, dirty: true, listeners: [] };
+
+/**
+ * 屏蔽词归一化：比较双方都过这一层，消除「大小写/全半角/空格/常见标点」差异。
+ * 归一后仍为空的词（如纯符号）不具备匹配意义，调用方应丢弃。
+ * 只做轻量折叠（不做 NFKC 全角转半角之外的变形），避免误伤正常标题。
+ */
+function normalizeBlockText(s) {
+    return String(s == null ? '' : s)
+        .normalize('NFKC')          // 全角→半角（ＭＹ ＨＥＲＯ → MY HERO）
+        .toLowerCase()
+        .replace(/[\s]+/g, '')      // 去掉所有空白（含全角空格，NFKC 后已转半角）
+        .replace(/[·・.,!！?？:：;；'"“”‘’()（）\[\]【】\-_—~～]/g, '');
+}
+
+/**
+ * 把设置里的屏蔽词原始值整理成可用列表：去重、去空、去纯符号。
+ * 大小写不同视为同一词（归一后比较），保留用户首次书写的形态用于展示。
+ */
+function normalizeBlockWords(list) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((w) => {
+        const raw = String(w == null ? '' : w).trim();
+        if (!raw) return;
+        const key = normalizeBlockText(raw);
+        if (!key || seen.has(key)) return; // 纯符号词无匹配意义；重复词丢弃
+        seen.add(key);
+        out.push(raw);
+    });
+    return out;
+}
+
+/** 屏蔽生效判定：开关未显式关闭（undefined 视为开）且词列表非空。 */
+function blockWordsEnabled() {
+    return _blockState.on !== false && _blockState.words.length > 0;
+}
+
+/** 取当前生效的屏蔽词（展示用原始形态）。 */
+function getBlockWords() {
+    return _blockState.words.slice();
+}
+
+/**
+ * 载入屏蔽设置（幂等 + 并发合并）：首读穿透一次 settingsGet，之后走内存快照。
+ * 返回已解析的 { on, words }。settings 读取失败不抛错，按「未启用」降级——
+ * 屏蔽是体验增强，读失败让内容正常显示比整个列表空白要好。
+ */
+async function loadBlockWords() {
+    if (_blockState.loaded && !_blockState.dirty) return { on: _blockState.on, words: _blockState.words };
+    if (_blockState.loading) return _blockState.loading;
+    const p = (async () => {
+        try {
+            let s = null;
+            if (typeof SettingsSnapshot !== 'undefined' && SettingsSnapshot && typeof SettingsSnapshot.get === 'function') {
+                s = await SettingsSnapshot.get();
+            } else if (typeof window !== 'undefined' && window.yuki && window.yuki.settingsGet) {
+                s = await window.yuki.settingsGet();
+            }
+            _blockState.on = !s || s.blockWordsEnable !== false;
+            _blockState.words = normalizeBlockWords(s ? s[BLOCK_WORDS_KEY] : null);
+            // M13：预归一化缓存——isTitleBlocked 每条目只做一次自身归一化，
+            // 词匹配直接用本缓存，O(条目×词数×归一化) 降为 O(条目×词数)
+            _blockState.normWords = _blockState.words.map(normalizeBlockText).filter(Boolean);
+            _blockState.loaded = true;
+            _blockState.dirty = false;
+        } catch (e) {
+            // M14：读取失败保留既有快照（可能是上一轮的），并保持 dirty=true——
+            // 首次失败按「未启用」降级，但不置 loaded=true 干净态，允许下次
+            // loadBlockWords 重试穿透，瞬时读失败不会让屏蔽静默停用至手动失效。
+            _blockState.loaded = true;
+            _blockState.dirty = true;
+        }
+        return { on: _blockState.on, words: _blockState.words };
+    })().finally(() => { _blockState.loading = null; });
+    _blockState.loading = p;
+    return p;
+}
+
+/** 屏蔽词变更后的失效点：下一次 loadBlockWords 重新穿透，并通知订阅者重渲染。 */
+function invalidateBlockWords(notify) {
+    _blockState.dirty = true;
+    if (notify === false) return;
+    const fns = _blockState.listeners.slice();
+    fns.forEach((fn) => { try { fn(); } catch (e) { /* 单个订阅者失败不影响其余 */ } });
+}
+
+/** 订阅屏蔽词变更（各列表页注册自己的重渲染）；返回取消订阅函数。 */
+function onBlockWordsChange(fn) {
+    if (typeof fn !== 'function') return () => {};
+    _blockState.listeners.push(fn);
+    return () => {
+        const i = _blockState.listeners.indexOf(fn);
+        if (i >= 0) _blockState.listeners.splice(i, 1);
+    };
+}
+
+/** 单条目标题命中屏蔽词 → true（未启用/无词时恒 false，零开销快路径）。
+ *  M13：词匹配直接用 loadBlockWords 预归一化的 normWords 缓存（与 words 同步
+ *  重建，恒同步），标题自身只归一化一次。 */
+function isTitleBlocked(title) {
+    if (!blockWordsEnabled()) return false;
+    const t = normalizeBlockText(title);
+    if (!t) return false; // 空标题不参与屏蔽（无从判定）
+    return _blockState.normWords.some((k) => k && t.includes(k));
+}
+
+/**
+ * 过滤列表：按条目标题剔除命中屏蔽词的条目。
+ * @param list 条目数组
+ * @param nameOf 取标题的函数；缺省按常见字段（vod_name/name/name_cn）依次取
+ * @returns 新数组（无屏蔽命中且原数组非数组时按原样返回）
+ */
+function filterBlocked(list, nameOf) {
+    if (!Array.isArray(list) || !blockWordsEnabled()) return list;
+    const pick = typeof nameOf === 'function' ? nameOf : (it) => {
+        const v = it && typeof it === 'object' ? it : {};
+        return v.vod_name || v.name || v.name_cn || '';
+    };
+    return list.filter((it) => !isTitleBlocked(pick(it)));
+}
+
+/** 评论时间（完整版）：YYYY-MM-DD HH:mm（用户要求：年月日 + 具体时间）。
+ *  A-14 自 detail.js 下沉：兼容 Unix 秒/毫秒与数字串；非数字字符串原样透传（Bangumi
+ *  偶发直接给日期串）；空值/解析失败返回 ''。detail.js 评论时间行与 records.js 收藏/历史卡共用。 */
+function fmtCommentTimeFull(ts) {
+    if (!ts) return '';
+    if (typeof ts === 'string' && !/^\d+$/.test(ts)) return ts;
+    let n = Number(ts);
+    if (!n) return '';
+    if (n < 1e12) n *= 1000; // 秒 → 毫秒
+    const d = new Date(n);
+    if (isNaN(d.getTime())) return '';
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 评论时间 → 毫秒时间戳（排序用）：兼容 Unix 秒/毫秒、数字串与日期字符串，解析失败返回 0。
+ *  A-14 自 detail.js 下沉，逻辑零变化。 */
+function commentTsMs(ts) {
+    if (!ts) return 0;
+    if (typeof ts === 'string' && !/^\d+$/.test(ts)) {
+        const d = new Date(ts);
+        return isNaN(d.getTime()) ? 0 : d.getTime();
+    }
+    let n = Number(ts);
+    if (!n) return 0;
+    if (n < 1e12) n *= 1000; // 秒 → 毫秒
+    return n;
+}
+
+// ---------------------------------------------------------------- 世代守卫加载骨架（A-31）
+
+/**
+ * guardedLoad —— 加载入口的世代守卫/AbortController 公共抽象（A-31）。
+ *
+ * 收口四处手写守卫（先例，语义各有差异，经 opts 参数化吸收）：
+ *  - home.js  _nextLoadToken()：令牌自增 + 同代 AbortController 重建（abort 旧请求）；
+ *  - timeline.js _nextLoadToken()：同 home；
+ *  - popular.js load()：纯世代令牌（无 abort，响应回来只认最新令牌）；
+ *  - detail.js load()/openBangumi()：纯世代 gen（open() 只改引用不重置世代，
+ *    _restore() 也自增作废在途旧响应；重试路径重入 load() 时 `++gen` 作废上一轮
+ *    ——这些宿主侧自增点必须保留，抽象不代管令牌自增以外的世代变化）。
+ *
+ * 语义骨架（以 home/timeline 先例为准）：
+ *  1. 发起前：abort 旧代的 AbortController（若启用 abort 型），再重建新一代；
+ *  2. `++token` 作废旧世代并取新令牌；
+ *  3. 宿主拿 `{ token, signal, isLive }` 执行真正加载（signal 仅 abort 型提供）；
+ *  4. 回调里 `isLive()` 仅当令牌仍最新时为真（旧响应/旧 toast 据此丢弃）；
+ *  5. `token` 原样返回，供掩码/补拉等周边逻辑做同代校验。
+ *
+ * 不强吞的差异（留在宿主侧）：loading 遮罩的延迟弹出/归属校验（timeline
+ * _showLoadMask 的 token 语义）、缓存命中即上屏、请求本体（多条 doAction 组合）。
+ */
+function guardedLoad(host, opts) {
+    const o = opts || {};
+    if (o.abortable && typeof AbortController === 'function') {
+        // abort 型（home/timeline 先例）：切源/切季度真正中止在途请求，不再
+        // 打满站点 worker 的串行队列（请求风暴 → 上游限流/超时）
+        if (host._loadAbort) {
+            try { host._loadAbort.abort('superseded'); } catch (e) { /* ignore */ }
+        }
+        host._loadAbort = new AbortController();
+    }
+    // L31：令牌自增对未初始化宿主兜底——裸 ++host._loadToken 遇 undefined 会得到
+    // NaN，isLive() 恒为假（NaN !== NaN），该宿主所有响应被静默丢弃。当前三宿主
+    // （home.js/timeline.js/popular.js）虽均声明 _loadToken: 0，公共抽象仍按
+    // (x || 0) + 1 自防御，未初始化/被外部置 null 的宿主从 1 起步而非永久失效。
+    const token = (host._loadToken || 0) + 1; // 纯世代型（popular/detail 先例）只走这一步
+    host._loadToken = token;
+    // M15：闭包捕获**本代**控制器。原先 signal getter 每次访问才读 host._loadAbort，
+    // 旧代返回对象在换代后取到的是新控制器未 abort 的 signal（切源 abort 传染失效）；
+    // 纯世代型 / AbortController 缺失降级时捕获 null，getter 保持 undefined 行为。
+    const ac = o.abortable ? (host._loadAbort || null) : null;
+    return {
+        token,
+        /** 请求同代 AbortController（abort 型才有；供 doAction 的 signal 使用）。 */
+        get signal() {
+            return ac ? ac.signal : undefined;
+        },
+        /** 过期判定：令牌相等 → 存活。popular/detail 比较方式与此同构（`===`）。 */
+        isLive: () => token === host._loadToken,
+    };
 }
 
 // ---------------------------------------------------------------- 分页
@@ -1188,6 +1849,10 @@ function errToast(msg) { if (!_errorToastOn) return; warnToast(msg); }
 // T30：loading 淡入（CSS ldIn）+ 淡出（.out 过渡）；隐藏延迟与过渡时长对齐。
 // 全局遮罩改造：默认被动指示器（无 scrim、不挡点击），日常载入不再冻结界面；
 // 必须挡输入的关键路径（后端启动、播放链路）传 {blocking:true} 恢复全屏遮罩。
+// 遮罩隐藏延迟（ms）：等 .out 淡出过渡播完再摘节点，防闪烁的最小时长。
+// 单一来源：与 src/renderer/css/ui.css 中 #loadingToast.out（~681 行，
+// var(--dur-fast)=150ms 淡出 + 10ms 余量）同步维护，CSS 侧有互指注释。
+const LOADING_MASK_DELAY_MS = 160;
 let _loadingHideT = null;
 function showLoading(text, opts) {
     clearTimeout(_loadingHideT);
@@ -1207,7 +1872,7 @@ function hideLoading() {
     _loadingHideT = setTimeout(() => {
         el.hide().removeClass('out blocking');
         el.find('.md-progress-text').text('载入中…');
-    }, 160);
+    }, LOADING_MASK_DELAY_MS);
 }
 
 /**
@@ -1260,7 +1925,6 @@ function toFileUrl(p) {
  *   dim 控制内容遮罩强度。
  * 传入部分字段即可，未传字段沿用上次值。
  */
-const _skin = { theme: '', customColor: '', wallpaperUrl: '', colorMode: 'auto', fontSize: '', textSize: '', textColor: '', dim: '', animEnabled: true, glass: false, adjust: null };
 
 // ---- 自定义主题色：由单个基色推导 Material 浅色/深色两套变量 ----
 
@@ -1516,5 +2180,10 @@ $(document).on('click', '.info-dot', function () {
         escHtml, normalizePic, vodCoverImg, vodCoverChain, coverChainNext,
         coverFadeIn, confirmDialog, showLoading, hideLoading,
         playCardsEnter, stageAppendedCards,
+        replayClass, motionAllowed, // A-04 三段式重触发收口 + JS 动画门控谓词
+        staggerEnter, // A-11 详情网格/评论行错峰入场（cards-enter 机制泛化）
+        skeletonHtml, // A-02 统一骨架占位（第一阶段：工具+样式，接线在 detail.js 8 处替换点）
+        fmtCommentTimeFull, commentTsMs, // A-14 时间格式化下沉
+        guardedLoad, // A-31 加载守卫抽象（home/timeline abort 型；popular/detail 纯世代型）
     };
 }(typeof window !== 'undefined' ? window : globalThis));

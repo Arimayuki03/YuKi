@@ -678,6 +678,8 @@ html.dark { color-scheme: dark; }
     background: var(--md-scrim);
 }
 #loadingToast.blocking .md-progress-wrap { background: transparent; box-shadow: none; }
+/* .out 淡出时长与 common.js 的 LOADING_MASK_DELAY_MS（160ms，遮罩隐藏延迟）
+   同步维护：CSS 淡出 150ms（--dur-fast）+ 约 10ms 余量 = JS 侧延迟，改一处需同步另一处 */
 #loadingToast.out { opacity:0; transition:opacity var(--dur-fast) var(--ease); }
 
 /* centering wrapper 钬� separates position from rotation */
@@ -733,7 +735,12 @@ html.dark { color-scheme: dark; }
 /* 网格加载/空态（纯 CSS 骨架替代：数据渲染前容器只剩提示行，跨全列居中成占位卡；
    卡片渲染后自然被挤出 only-child 条件，无需 JS 参与。静态呈现——空态文案
    与加载文案共用该组件，不做呼吸动画避免「暂无内容」闪烁误导） */
-.vod-grid > .tip-line:only-child {
+.vod-grid > .tip-line:only-child,
+/* A-02 第二阶段（优化.md A-02「空态规则扩展到 .detail-content」）：详情页签内容区
+   同样会出现「只剩一行加载/空态提示」的过渡瞬间（骨架替换后仅剩错误态/空态文案），
+   虚线占位卡样式与 vod-grid 空态同口径联动；骨架根 .sk-root 不命中（非 .tip-line），
+   真实内容渲染后自然挤出 only-child 条件，无需 JS 参与 */
+.detail-content > .tip-line:only-child {
     grid-column:1 / -1;
     text-align:center; padding:56px 24px;
     border:1px dashed var(--md-outline-variant);
@@ -759,6 +766,132 @@ html.dark { color-scheme: dark; }
     border-top:1px dashed var(--md-outline-variant);
     text-align:left;
 }
+
+/* ===== 统一 skeleton 骨架（A-02 第一阶段：common.js skeletonHtml 产出，8 处占位接线在 detail.js）=====
+   §1.1 裁决：静态灰块 + 一次性淡入（Linear/Vercel 气质），不做循环 shimmer——
+   骨架是「加载中」形态，与空态（上方 .vod-grid > .tip-line:only-child 虚线占位卡）
+   语义不同，但同样不引入呼吸/脉冲动画。
+   底色走令牌 --md-surface-container-high（中性灰阶，亮/暗色自动联动；玻璃下
+   backdrop-filter 叠加仍可辨，与 .detail-hero-cover / .detail-char-avatar-wrap
+   空底同源口径），圆角取既有 --radius-* 阶梯。
+   一次性淡入只动 opacity：.sk-root 挂 skFadeIn，仅在非毛玻璃启用（T54 同因，
+   先例同 .cards-enter / .tab-enter 的 html:not(.glass-on) 门控）；
+   prefers-reduced-motion 全局兜底（ui.css 尾部通配 animation-duration:0.01ms）
+   与 html.no-anim 全局关闭（animation:none !important）自动覆盖。 */
+.sk-root { min-width:0; }
+html:not(.glass-on) .sk-root { animation:skFadeIn var(--dur-fast) var(--ease) both; }
+
+/* 骨架块基类：等宽灰块（aria-hidden 由 HTML 承担，无内容语义） */
+.sk-block, .sk-line {
+    background:var(--md-surface-container-high);
+    border-radius:var(--radius-sm);
+}
+.sk-line { height:14px; }
+
+/* hero 形态：对齐 .detail-head 双列网格（左列 minmax(200px,360px) + 1fr，gap 28px）
+   与 .detail-cover aspect-ratio:3/4、.detail-hero-info 卡片（radius-lg + surface-container 底）。
+   标题条近似 .detail-title 字高、meta 行 14px 弱化块，整体高度随右列内容自然撑起 */
+.sk-hero { display:grid; grid-template-columns:minmax(200px,360px) minmax(0,1fr); gap:28px; }
+.sk-hero-cover { width:100%; aspect-ratio:3/4; border-radius:var(--radius-lg); }
+.sk-hero-info {
+    display:flex; flex-direction:column; gap:12px;
+    padding:26px 30px; min-width:0;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg);
+    background:var(--md-surface-container);
+}
+.sk-hero-title { height:26px; width:72%; border-radius:var(--radius-md); }
+.sk-hero-title-short { width:46%; }
+.sk-hero-meta { height:14px; width:88%; }
+.sk-hero-meta-short { width:60%; }
+
+/* card 形态：对齐 .vod-card（surface-container 底 + radius-lg + outline-variant 描边）
+   与 .vod-cover 160/220 图块、两行标题区（min-height 44px）；
+   外层 .sk-cards 消费方为详情页角色/制作/关联三处骨架（M30：非首页 vod-card 列表）。
+   列模板独立声明、按断点近似跟随 vod-grid 数值——但真实网格三处各用
+   .detail-char-grid / .detail-staff-grid / .detail-relation-grid 列模板（列宽互不相同），
+   骨架无法同时逐一匹配，故为近似对齐而非「完全一致」 */
+.sk-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(172px,1fr)); gap:16px; }
+.sk-card {
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg);
+    background:var(--md-surface-container); overflow:hidden;
+    padding-bottom:8px;
+}
+.sk-card-cover { width:100%; aspect-ratio:160/220; border-radius:0; }
+.sk-card-name { margin:8px 10px 0; height:18px; }
+.sk-card-name + .sk-card-name { margin-top:4px; }
+.sk-card-name-short { width:55%; }
+@media (min-width:1800px) {
+    .sk-cards { grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:20px; }
+    .sk-card-name { height:20px; }
+}
+@media (max-width:1000px) {
+    .sk-cards { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:14px; }
+    .sk-card-name { height:18px; }
+}
+
+/* desc 形态（概览简介占位）：对齐 .detail-overview-card（20/22 内边距卡 +
+   outline-variant 描边 + radius-lg + surface-container 底，同 :1609 真实卡片）。
+   标题条对齐 .detail-section-heading（13px/600 小节标题），正文条 22px 对齐
+   .detail-desc 的 14px/22px 行高，行宽递减模拟自然段落收尾 */
+.sk-desc {
+    padding:20px 22px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg);
+    background:var(--md-surface-container);
+}
+.sk-desc-heading { height:13px; width:52px; margin-bottom:12px; border-radius:var(--radius-md); }
+.sk-desc-line { height:22px; margin-top:8px; }
+/* 紧随标题条之后的第一行正文不额外加距（:first-of-type 会命中 heading 永不生效） */
+.sk-desc-heading + .sk-desc-line { margin-top:0; }
+
+/* comment 形态：对齐 .detail-comment（surface-container 卡 + radius-md + 14/16 内边距）、
+   .detail-comment-head（头像 28px 圆 + 名字 13px/600）、.detail-comment-text（13px/22px 两行） */
+.sk-comment {
+    padding:14px 16px; margin-bottom:8px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    background:var(--md-surface-container);
+}
+.sk-comment-head { display:flex; align-items:center; gap:10px; }
+.sk-comment-avatar { flex:none; width:28px; height:28px; border-radius:50%; }
+.sk-comment-name { height:13px; width:96px; }
+/* 骨架高度匹配：正文条 22px 对齐真实 .detail-comment-text（13px/22px），上距 6px 同口径 */
+.sk-comment-text { margin-top:6px; height:22px; width:94%; }
+.sk-comment-text-short { width:62%; }
+/* A-02 第二阶段：comment 多条占位容器（skeletonHtml('comment',{count:N}) 的唯一
+   sk-root——淡入动画整组一次，组内行间距与 .detail-comment 列表一致 */
+.sk-comments { min-width:0; }
+
+/* 骨架高度匹配：页签头部工具条占位——对齐吐槽 .detail-comment-toolbar（计数胶囊
+   12px/3px10px 胶囊 ≈21px 高 + md-btn-sm 32px 按钮，下距 10px）与选集讨论
+   .ep-comments-head（32px 控件行 + 下距 10px）。数据到达时这行已由骨架垫住，
+   不再「头部行突然插入整列下推」。 */
+.sk-head-line { display:flex; align-items:center; gap:10px; margin-bottom:10px; min-height:32px; }
+.sk-chip { width:72px; height:21px; border-radius:999px; }
+.sk-btn { width:88px; height:32px; border-radius:var(--radius-sm); margin-left:auto; }
+
+/* episode 形态：对齐 .kazumi-episode-grid / .kazumi-detail-ep——列模板
+   minmax(220px,1fr) / gap 8px 与真实网格同口径，集格 min-height 44px、
+   内边距 10px 12px、内条 18px ≈ 13px 名称文字行高（骨架高度匹配修复：
+   旧接线误用 card 形态产生数倍高度差跳位） */
+.sk-eps { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; min-width:0; }
+.sk-ep {
+    display:flex; align-items:center; gap:2px;
+    min-height:44px; padding:10px 12px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-sm);
+    background:var(--md-surface-container);
+}
+.sk-ep-no { flex:none; width:18px; margin-right:4px; height:14px; }
+.sk-ep-name { flex:1; height:14px; }
+/* 骨架宿主即真实网格（#bgm-ep-list 自带 .ep-grid.kazumi-episode-grid 列模板）：骨架根
+   作为其唯一子项会被压进第一列轨道（≈220px 窄条，内部 auto-fill 塌成单列竖排），
+   数据到达后集格铺满整幅 → 占位错位跳变。跨全列占满宿主行宽，内部列模板与真实
+   网格同口径，占位与结果零位差。 */
+.ep-grid > .sk-eps { grid-column:1 / -1; }
+@media (max-width:700px) {
+    .sk-eps { grid-template-columns:1fr; }
+}
+
+@keyframes skFadeIn { from { opacity:0; } to { opacity:1; } }
+
 /* 直播状态指示：右侧对齐（margin-left:auto）、单行不换行、padding 归零（原 inline 样式移入 CSS） */
 #live-status{margin-left:auto;padding:0;flex:none;white-space:nowrap}
 
@@ -1258,7 +1391,11 @@ html:not(.glass-on) .vod-grid.cards-enter > .vod-card { animation:vodCardIn var(
 .search-status .ss-fill { display:block; height:100%; width:0; border-radius:3px;
     background:var(--md-primary); transition:width var(--dur-slow) var(--ease); }
 .search-status .ss-bar.indeterminate .ss-fill { width:38%; animation:sslide 1.1s ease-in-out infinite; }
-@keyframes sslide { 0% { margin-left:-38%; } 100% { margin-left:100%; } }
+/* sslide 契约 §6：只动 transform（原 margin-left 逐帧改布局，是最贵的 layout 动画）。
+   translateX 百分比基准是自身宽度（38% 容器宽），换算：自身 -100% ≡ 包含块 -38%；
+   出画右侧 1/0.38 ≈ 263.16% ≡ 包含块 100%。calc((1/0.38)*100%) 由浏览器精确求解，
+   视觉轨迹与原 margin-left 方案逐帧等价（宽度恒定，无布局参与）。 */
+@keyframes sslide { 0% { transform:translateX(-100%); } 100% { transform:translateX(calc((1 / 0.38) * 100%)); } }
 .search-status .ss-count { flex:none; font-size:12px; color:var(--md-on-surface-variant); white-space:nowrap; }
 .search-status.done .ss-spinner { display:none; }
 .search-status.done .ss-fill { width:100% !important; background:var(--md-primary); }
@@ -1283,13 +1420,24 @@ html:not(.glass-on) .vod-grid.cards-enter > .vod-card { animation:vodCardIn var(
    顶部留白改由返回按钮的 margin-top 承担（见下），scrollport 顶边与容器盒子重合 */
 #view-detail { --view-pad-x:24px; padding:0 var(--view-pad-x) 40px; overflow-anchor:none; }
 body.frameless #view-detail { padding-top:0 !important; }
+/* 刷新按钮 v2：返回按钮 + 刷新图标钮同排（.detail-topbar 包裹，flex 同排）。
+   topbar 不加垂直边距，不影响吸顶数学——topbar 在滚动流内、页签栏 sticky
+   约束框不涉及它 */
+.detail-topbar { display:flex; align-items:center; gap:8px; margin-bottom:18px; }
+/* 刷新钮在返回钮右侧：方形图标钮与 40px 高的 .md-btn 基准一致（md-btn-icon
+   默认 38px，这里对齐返回按钮视觉高度） */
+#detail-refresh.md-btn-icon { width:40px; height:40px; min-width:40px; max-width:40px; flex:0 0 40px; }
 #detail-body { width:100%; max-width:1560px; margin:0 auto; }
 /* 顶部对齐：返回按钮在 #detail-body 之外，顶距需单独补（原由 #view-detail
    padding-top 承担，现移入 #detail-body 供吸顶数学使用）；overflow:auto 的
    滚动根为 BFC，按钮 margin-top 不会塌陷出容器。注意顶距只加在按钮上方，
-   不能落到 #detail-body——否则会叠进按钮与封面的既有间距 */
-#view-detail > .back-btn { margin-top:48px; }
-.back-btn { margin-bottom:18px; }
+   不能落到 #detail-body——否则会叠进按钮与封面的既有间距。
+   刷新按钮 v2 后顶距落在 .detail-topbar（包裹返回+刷新钮的 flex 行）上 */
+#view-detail > .detail-topbar { margin-top:48px; }
+/* back-btn 的 18px 下距是「按钮行 → 详情头」的既有间距；topbar 化后 margin 落在
+   .back-btn 自身会在 align-items:center 的 flex 行里把它上推 9px（margin 参与
+   center 计算），与刷新钮错位——间距职责转移到 topbar 的 margin-bottom（L24：并入上条 .detail-topbar） */
+.detail-topbar .back-btn { margin-bottom:0; }
 .detail-head { display:grid; grid-template-columns:minmax(200px, 360px) minmax(0, 1fr); gap:28px; margin-bottom:20px; align-items:stretch; }
 /* .detail-cover 与 .detail-hero-cover 是同一元素（grid 左列）。aspect-ratio:3/4
    锚定封面比例，但左列必须排除出行高拉伸（align-self:start）：网格行高由右栏
@@ -1365,8 +1513,10 @@ body.frameless #view-detail { padding-top:0 !important; }
 .detail-rate-svg { width:14px; height:14px; flex:none; fill:currentColor; }
 #detail-col-current.active { background:var(--md-primary); border-color:var(--md-primary); color:var(--md-on-primary); }
 /* width:max-content：绝对定位菜单默认 shrink-to-fit 会被包含块（按钮自身宽度）
-   压窄，三列按钮挤到裁字——显式按内容取宽，按钮完整展示 */
-.detail-col-menu { position:absolute; left:0; bottom:calc(100% + 8px); z-index:80; width:max-content; padding:8px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); background:var(--md-surface-container-high); box-shadow:var(--shadow-lg); white-space:nowrap; }
+   压窄，三列按钮挤到裁字——显式按内容取宽，按钮完整展示。
+   popIn 开合入场（A-07）：菜单 bottom 锚定在按钮上方，origin 取底缘（贴近触发按钮）
+   缩放淡入；JS 仍以 inline display 显隐，display:none→渲染时动画自动重触发 */
+.detail-col-menu { position:absolute; left:0; bottom:calc(100% + 8px); z-index:80; width:max-content; padding:8px; border:1px solid var(--md-outline-variant); border-radius:var(--radius-md); background:var(--md-surface-container-high); box-shadow:var(--shadow-lg); white-space:nowrap; animation:popIn var(--dur-fast) var(--ease); transform-origin:center bottom; }
 .detail-col-menu .kazumi-col-btns { display:grid; grid-template-columns:repeat(3, auto); gap:6px; }
 .detail-col-menu .kazumi-col-btn { white-space:nowrap; height:32px; font-size:12.5px; padding:0 12px; }
 .detail-col-menu .detail-col-state-svg, .detail-col-menu .kazumi-col-btn .detail-col-state-svg { width:13px; height:13px; }
@@ -1531,6 +1681,10 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .ep-dl-one { flex:none; font-size:12px; color:var(--md-on-surface-variant); cursor:pointer; opacity:0; transition:opacity var(--dur-fast) var(--ease); padding:0 2px; }
 .ep-btn:hover .ep-dl-one { opacity:1; }
 .ep-dl-one:hover { color:var(--md-primary); }
+/* A-16「看到第 N 集」：上次观看进度的当前集徽标（只改背景/边框/文字色，
+ * 不动尺寸与 transform；色值复用 --md-primary 派生令牌，随自定义主题联动） */
+.ep-btn.ep-hi { background:var(--accent-soft); border-color:var(--accent-border); color:var(--md-primary); }
+.ep-btn.ep-hi:hover { background:color-mix(in srgb, var(--md-primary) 16%, transparent); border-color:var(--md-primary); }
 
 /* Bangumi-only 分集 */
 .kazumi-episode-grid { grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); }
@@ -1568,14 +1722,13 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-comment { padding:14px 16px; border-radius:var(--radius-md); background:var(--md-surface-container); margin-bottom:8px; border:1px solid var(--md-outline-variant); box-shadow:var(--shadow-xs); }
 .detail-comment-head { display:flex; align-items:center; gap:10px; }
 .detail-comment-user { font-weight:600; font-size:13px; color:var(--md-on-surface); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.detail-comment-rate { font-size:12px; color:#FFC107; flex:none; }
 .detail-comment-time { font-size:12px; color:var(--md-on-surface-variant); margin-left:auto; flex:none; }
 .detail-comment-text { color:var(--md-on-surface); font-size:13px; line-height:22px; margin-top:6px; overflow-wrap:anywhere; }
 /* 吐槽正文 BBCode 渲染：引用块（回复某人）、遮罩、行内图 */
 .detail-comment-quote { display:block; margin:2px 0 6px; padding:8px 12px; border-left:3px solid var(--md-primary); background:var(--md-surface-container-low); border-radius:0 8px 8px 0; color:var(--md-on-surface-variant); font-size:12.5px; }
 .detail-comment-mask { background:var(--md-on-surface); color:transparent; border-radius:3px; transition:color var(--dur-fast) var(--ease); cursor:pointer; }
 .detail-comment-mask:hover { color:var(--md-surface); }
-.detail-comment-inline-img { max-width:100%; max-height:120px; vertical-align:middle; border-radius:4px; }
+.detail-comment-inline-img { max-width:100%; max-height:120px; vertical-align:middle; border-radius:4px; cursor:zoom-in; }
 .detail-comment-text a { color:var(--md-primary); text-decoration:none; }
 .detail-comment-text a:hover { text-decoration:underline; }
 
@@ -1603,6 +1756,9 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
     max-height:208px; padding:8px 10px 10px; box-sizing:border-box;
     border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
     background:var(--md-surface-container-high); box-shadow:var(--shadow-lg);
+    /* popIn 开合入场（A-08）：与收藏六态菜单同款缩放淡入；弹层 top 锚定在按钮下方，
+       origin 取顶缘（贴近触发按钮）。JS 仍以 inline display 显隐，重开自动重触发 */
+    animation:popIn var(--dur-fast) var(--ease); transform-origin:center top;
 }
 /* 顶栏：集数总数提示 + 排序切换小图标（与 head 的切正序按钮同状态源，双向同步） */
 .ep-comments-grid-bar { display:flex; align-items:center; gap:8px; padding-bottom:6px; margin-bottom:6px; border-bottom:1px solid var(--md-outline-variant); }
@@ -1687,6 +1843,30 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-staff-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; overflow:hidden; }
 .detail-staff-subname { font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
+/* ===== 详情网格/评论错峰入场（A-11）=====
+   common.js staggerEnter 布置（playCardsEnter 的 cards-enter 机制泛化）：容器模式
+   （角色/制作/关联三网格，整格 box.html 重写后容器挂 .stagger-in）与限量模式
+   （吐槽首屏前 N 条，.stagger-in 逐行挂在前 N=STAGGER_MAX_IDX+1=8 行上，容器不带类，
+   续拉/重排追加的行无标记不重播）。延迟由 JS 按可见序号内联写 animationDelay
+   （STEP=45ms、idx≥7 封顶 315ms，STAGGER_STEP_MS/STAGGER_MAX_IDX 常量），
+   keyframes 复用 vodCardIn（只动 transform/opacity，§6 契约）。
+   M5 自清理约定：'both' 填充下延迟期靠标记+内联 delay 隐藏，动画播完后 staggerEnter
+   的一次性 animationend 监听会摘除 .stagger-in 与内联 delay——标记不在 DOM 常驻，
+   节点被就地重排/移动时不再满足选择器、零重播；no-anim/reduced-motion/glass 下
+   动画不起播、监听不触发，残留标记无副作用。
+   门控与 .cards-enter 同口径（T54）：仅非毛玻璃启用；html.no-anim 由全局
+   animation:none !important 覆盖；prefers-reduced-motion 在下方媒体查询关闭。 */
+html:not(.glass-on) .detail-char-grid.stagger-in > .detail-char-card,
+html:not(.glass-on) .detail-staff-grid.stagger-in > .detail-staff,
+html:not(.glass-on) .detail-relation-grid.stagger-in > .detail-relation,
+html:not(.glass-on) .detail-comment-list > .detail-comment.stagger-in { animation:vodCardIn var(--dur-slow) var(--ease) both; }
+@media (prefers-reduced-motion: reduce) {
+    html:not(.glass-on) .detail-char-grid.stagger-in > .detail-char-card,
+    html:not(.glass-on) .detail-staff-grid.stagger-in > .detail-staff,
+    html:not(.glass-on) .detail-relation-grid.stagger-in > .detail-relation,
+    html:not(.glass-on) .detail-comment-list > .detail-comment.stagger-in { animation:none; }
+}
+
 /* 关联番剧封面 + 占位（T75）：竖版封面，无图时显示占位图标（加大以突出关联作品） */
 .detail-relation-poster { flex:none; width:60px; height:84px; border-radius:8px; overflow:hidden; background:var(--md-surface-container-high); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .detail-relation-poster img { width:100%; height:100%; object-fit:cover; display:block; }
@@ -1718,7 +1898,7 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .detail-char-cv { padding:0 10px 6px; font-size:11px; color:var(--md-on-surface-variant); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* 评论头像 + 回复区（T75）：圆形小头像，回复缩进展示 */
-.detail-comment-avatar { flex:none; width:28px; height:28px; border-radius:50%; object-fit:cover; background:var(--md-surface-container-high); flex-shrink:0; }
+.detail-comment-avatar { flex:none; width:28px; height:28px; border-radius:50%; object-fit:cover; background:var(--md-surface-container-high); flex-shrink:0; cursor:zoom-in; }
 .detail-comment-reply { margin-top:8px; padding:10px 12px; border-left:2px solid var(--md-outline-variant); background:var(--md-surface-container-low); border-radius:0 8px 8px 0; }
 
 /* 卡片标题溢出加固（单行省略下 nowrap+ellipsis 已保证不溢出，保留低优先级兜底无副作用） */
@@ -1740,9 +1920,29 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 .kazumi-watch-row #detail-bgm-open:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
 
 /* 人物详情浮层（仿 Kazumi CharacterPage：资料 / 吐槽） */
-#char-float { position:fixed; inset:0; z-index:1200; display:none; align-items:center; justify-content:center; background:color-mix(in srgb, #000 52%, transparent); padding:24px; }
-#char-float.show { display:flex; }
+/* A-09：遮罩显隐从 display 瞬切改 opacity+visibility 过渡（只动 opacity，§6 契约）：
+   隐藏态 visibility:hidden 不参与命中测试——点遮罩关闭的 JS 绑定不变，隐藏后点击
+   穿透回底层界面；visibility 随过渡翻转，半途点击由 pointer-events:none 兜住。
+   Esc 直摘 .show 的路径走基态过渡同样淡出（common.js dispatchEsc 无需改动） */
+#char-float { position:fixed; inset:0; z-index:1200; display:flex; align-items:center; justify-content:center; background:color-mix(in srgb, #000 52%, transparent); padding:24px; opacity:0; visibility:hidden; pointer-events:none; transition:opacity var(--dur-fast) var(--ease), visibility var(--dur-fast) var(--ease); }
+#char-float.show { opacity:1; visibility:visible; pointer-events:auto; }
+/* A-32：退场末态固化在 .float-out 类上（对齐 closeDialog 的 .dlg-out 手法）：
+   靠定时器摘类复位末态存在帧偏移竞态——CSS 过渡/动画比类变更晚一帧起播，
+   定时器按语句时刻计，可能抢在遮罩淡出收尾前摘类，floatOut both 末态丢失、
+   面板在近乎全黑的遮罩上闪回不透明再二次淡出（即关闭闪烁）。改为关闭链路
+   绝不摘 .float-out（复位统一收口在 detail.js _showDetailFloat 重开时），
+   末态 opacity:0 显式写在类上，不依赖动画填充保活 */
+#char-float.float-out { opacity:0; visibility:hidden; pointer-events:none; }
+/* A-09：面板入场 floatIn（对齐 #cover-float img 的既有手法：同 keyframes/令牌，
+   scale(.94) 淡入）。门控在 .show 上而非裸挂面板：遮罩改 opacity/visibility 后
+   元素常驻渲染，无 display 切换可借力，摘 .show 即取消动画、重开复配自动重播 */
 .char-float-panel { display:flex; flex-direction:column; width:min(560px, 96vw); max-height:86vh; background:var(--md-surface-container); border:1px solid var(--md-outline-variant); border-radius:var(--radius-xl); box-shadow:var(--shadow-lg); overflow:hidden; }
+#char-float.show .char-float-panel { animation:floatIn var(--dur-fast) var(--ease); }
+/* A-10：面板退场（对齐 closeDialog 的 .dlg-out 手法：淡出缩小，JS 挂 .float-out
+   延迟摘 .show）；animation both 保留末态，遮罩淡出期间面板保持透明。
+   A-32：摘 .show 后遮罩淡出由 #char-float.float-out 的显式 opacity:0 承接，
+   .float-out 在关闭链路不摘除（复位见 _showDetailFloat），末态不随类丢失 */
+#char-float.float-out .char-float-panel { animation:floatOut var(--dur-fast) var(--ease) both; }
 .char-float-head { display:flex; align-items:center; gap:12px; padding:16px 20px; border-bottom:1px solid var(--md-outline-variant); }
 .char-float-title { flex:1; min-width:0; font-size:17px; font-weight:700; color:var(--md-on-surface); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .char-float-close { flex:none; width:32px; height:32px; border:none; border-radius:8px; background:var(--md-surface-container-high); color:var(--md-on-surface-variant); cursor:pointer; font-size:15px; }
@@ -1772,6 +1972,9 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
        断点区间内）会把右列挤到两三百像素——hero 内容整体溢出，视觉上封面盖住
        文字/按钮。下限降到 150px 让宽度优先让给信息列。 */
     .detail-head { grid-template-columns:minmax(150px, 200px) minmax(0, 1fr); gap:18px; }
+    /* 骨架跟随（L21）：.sk-hero 镜像 .detail-head 三断点，占位与真实卡片同步变宽 */
+    .sk-hero { grid-template-columns:minmax(150px, 200px) minmax(0, 1fr); gap:18px; }
+    .sk-hero-info { padding:22px 24px; }
     /* min-height 已随 aspect-ratio 时代移除：封面高 = 轨道宽 × 4/3（比例由
        aspect-ratio:3/4 全权锚定），此处旧 min-height:300px 会把 200px 轨道里的
        封面强行抬到 300 高、再经比例反推成 225 宽越界压住信息卡 */
@@ -1791,6 +1994,9 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
     #view-detail { --view-pad-x:14px; padding:0 var(--view-pad-x) 32px; }
     body.frameless #view-detail { padding-top:0 !important; }
     .detail-head { grid-template-columns:104px minmax(0, 1fr); gap:14px; }
+    /* 骨架跟随（L21）：与上方 .detail-head 同步收窄到 104px 轨道 */
+    .sk-hero { grid-template-columns:104px minmax(0, 1fr); gap:14px; }
+    .sk-hero-info { padding:16px; border-radius:14px; }
     /* 同上：旧 min-height:156px 会把 104px 轨道封面顶到 117 宽，缝隙只剩 1px */
     .detail-hero-info { padding:16px; border-radius:14px; }
     .detail-kicker { font-size:10px; }
@@ -1832,19 +2038,39 @@ body.has-wallpaper .detail-tabs::before { background:var(--md-surface-container)
 /* ===== 详情页动画：页签内容淡入 + 页面入场分级上浮 =====
    切页签不做高度补间：高度过渡会让页面其余板块随内容伸缩位移，且毛玻璃下带
    backdrop-filter 的卡片逐帧改尺寸会反复重建模糊采样层（撕裂闪烁，同 T54 成因）。
-   切页签动画为纯透明度淡入——不带任何 translate 位移，保证点击页签后
-   任何板块的位置零变化；上浮位移只用于打开详情页的入场（detailRiseIn）。
-   T54 约束下这些动画仅在非毛玻璃模式启用。 */
+   切页签动画为淡入 + 2px 轻微上浮（只动 transform/opacity）——位移量级极小，
+   页签后板块几乎无感；更大的上浮位移只用于打开详情页的入场（detailRiseIn，14px）。
+   T54 约束下这些动画仅在非毛玻璃模式启用（门控在选择器 html:not(.glass-on)
+   上，改 keyframes 自然继承，不影响门控）。 */
 @keyframes detailTabIn {
-    from { opacity:0; }
-    to { opacity:1; }
+    from { opacity:0; transform:translateY(2px); }
+    to { opacity:1; transform:none; }
 }
 @keyframes detailRiseIn {
     from { opacity:0; transform:translateY(14px); }
     to { opacity:1; transform:none; }
 }
-/* 页签内容切换纯淡入（_swapTabContent 以 .tab-enter 重触发；无位移） */
+/* 详情页弹出小面板开合入场（A-07 收藏六态菜单 / A-08 选集讨论弹层共用）：
+   96% 缩放淡入，令牌时长/缓动（§6 契约只动 transform/opacity）。仅入场，
+   退场归 A-10；JS 以 inline display 显隐，display:none→渲染时动画自动重触发，
+   缩放锚点由各挂载规则的 transform-origin 决定（菜单底缘/弹层顶缘贴触发按钮） */
+@keyframes popIn {
+    from { opacity:0; transform:scale(0.96); }
+    to { opacity:1; transform:none; }
+}
+/* 页签内容切换淡入上浮（_swapTabContent 以 .tab-enter 重触发；2px 轻位移） */
 html:not(.glass-on) #detail-tab-content.tab-enter > * { animation:detailTabIn var(--dur-base) var(--ease) both; }
+/* 换线路集网格交叉淡入（A-18）：selectSource/_catvodDialogSelectSource 重绘集网格后
+   以 replayClass 挂 .ep-grid-in 重触发纯 opacity 淡入，换线路不再硬切；2px 轻位移
+   会让复用节点看起来「跳位」，故只动 opacity。#detail-tab-content 前缀 + 双类
+   .ep-grid.ep-grid-in 的 specificity 压过上方 .tab-enter > * 通配（同一元素同帧两个
+   动画名竞争时按级联取高者，避免淡入被页签入场通配抢占）。毛玻璃门控同 detailTabIn */
+@keyframes epGridIn {
+    from { opacity:0; }
+    to { opacity:1; }
+}
+html:not(.glass-on) #detail-tab-content .ep-grid.ep-grid-in { animation:epGridIn var(--dur-fast) var(--ease) both; }
+html:not(.glass-on) .catvod-play-sheet .ep-grid.ep-grid-in { animation:epGridIn var(--dur-fast) var(--ease) both; }
 /* 打开详情页入场：hero → 页签栏 → 内容依次上浮（render() 挂 detail-page-anim，
    每次 innerHTML 重建自动重播） */
 html:not(.glass-on) #detail-body.detail-page-anim .detail-hero { animation:detailRiseIn var(--dur-slow) var(--ease) both; }
@@ -2500,17 +2726,76 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
 
 /* ===== 封面点击放大：原图保留在原位，另开全屏浮层（滚轮缩放，点击关闭） ===== */
 .detail-cover img { cursor:zoom-in; }
+/* A-09：遮罩显隐从 display 瞬切改 opacity+visibility 过渡（与 #char-float 同款，
+   只动 opacity，§6 契约）：隐藏态 visibility:hidden 不拦截点击，点图关闭的 JS
+   绑定不变；Esc 直摘 .show 的路径走基态过渡同样淡出（dispatchEsc 无需改动） */
 #cover-float {
     position:fixed; inset:0; z-index:1300;
-    display:none; align-items:center; justify-content:center;
+    display:flex; align-items:center; justify-content:center;
     background:rgba(0,0,0,.5); cursor:zoom-out;
+    opacity:0; visibility:hidden; pointer-events:none;
+    transition:opacity var(--dur-fast) var(--ease), visibility var(--dur-fast) var(--ease);
 }
-#cover-float.show { display:flex; }
+#cover-float.show { opacity:1; visibility:visible; pointer-events:auto; }
+/* A-32：退场末态固化在 .float-out 类上（同 #char-float 的修复，对齐 .dlg-out 手法）：
+   关闭链路绝不摘 .float-out，定时器与过渡起播的帧偏移不再能丢 floatOut 末态——
+   摘 .show 后遮罩淡出由这里显式的 opacity:0 承接，面板/工具栏随遮罩同步淡出，
+   不会在遮罩淡出半途闪回（复位统一收口在 detail.js _showDetailFloat 重开时） */
+#cover-float.float-out { opacity:0; visibility:hidden; pointer-events:none; }
+/* A-09：入场动画门控在 .show 上（遮罩改 opacity/visibility 后元素常驻渲染，
+   无 display 切换可借力重播，见 #char-float 处的同款注释） */
+#cover-float.show .cover-float-stage { animation:floatIn var(--dur-fast) var(--ease); }
+/* 图包装进 .cover-float-stage：floatIn 的 transform 动画作用于 stage，
+   与 img 自身的旋转/缩放 transform 分层，互不覆盖 */
+.cover-float-stage {
+    transition:opacity var(--dur-fast) var(--ease);
+    max-width:92vw; max-height:92vh;
+    display:flex; align-items:center; justify-content:center;
+}
 #cover-float img {
     width:min(520px, 90vw); max-height:92vh; border-radius:var(--radius-lg);
     object-fit:contain;
     box-shadow:var(--shadow-lg);
+    /* 换图防串影：基态 opacity:0，load 后挂 .loaded 淡入（对齐 .vod-cover img.loaded
+       手法）。基态 transition 不含 opacity——src 换图摘 .loaded 时旧图立即隐没，
+       不等淡出；缩放/旋转仍走 transform 过渡 */
+    opacity:0;
+    transition:transform var(--dur-fast) var(--ease);
+    /* 大图放大后超出视口可拖动查看：层内禁选防拖出幽灵图 */
+    user-select:none; -webkit-user-drag:none;
 }
+#cover-float img.loaded {
+    opacity:1;
+    transition:opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+/* A-10：封面图片退场（floatOut 同款；遮罩淡出由 #cover-float.float-out 显式
+   opacity:0 承接——A-32 修复：.float-out 在关闭链路不摘除，末态不随类丢失，
+   详见 detail.js _hideDetailFloat 与 #char-float.float-out 处注释） */
+#cover-float.float-out .cover-float-stage { animation:floatOut var(--dur-fast) var(--ease) both; }
+
+/* 封面放大浮层功能工具栏：底部居中悬浮胶囊，毛玻璃面板底 + 图标钮。
+   cursor 重置回可点（遮罩基态是 zoom-out），点击由 detail.js 按钮分支处理 */
+.cover-float-toolbar {
+    position:absolute; bottom:24px; left:50%; transform:translateX(-50%);
+    display:flex; align-items:center; gap:4px;
+    padding:6px 10px; border-radius:999px;
+    background:var(--md-surface-container-high);
+    border:1px solid var(--md-outline-variant);
+    box-shadow:var(--shadow-lg);
+    cursor:default;
+    max-width:92vw; overflow-x:auto;
+}
+.cover-float-toolbar button {
+    flex:none; height:34px; min-width:34px; padding:0 10px;
+    display:inline-flex; align-items:center; justify-content:center; gap:4px;
+    border:none; border-radius:999px; cursor:pointer;
+    background:transparent; color:var(--md-on-surface);
+    font-size:15px; line-height:1; white-space:nowrap;
+    transition:background var(--dur-fast) var(--ease);
+}
+.cover-float-toolbar button:hover { background:var(--md-surface-container-highest); }
+.cover-float-toolbar button:active { background:var(--md-surface-container); }
+.cover-float-sep { flex:none; width:1px; height:20px; background:var(--md-outline-variant); margin:0 4px; }
 
 /* ===== 壁纸模式：独立固定层铺图 + 各层半透明遮罩（--wall-veil 由 body[data-dim] 调节） =====
  * 壁纸不再由 body 背景 + background-attachment:fixed 承载（快速滚动撕裂根因）：
@@ -2828,6 +3113,8 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 @keyframes liveIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 @keyframes dlgIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
 @keyframes floatIn { from { opacity:0; transform:scale(.94); } to { opacity:1; transform:none; } }
+/* A-10：浮层面板退场（floatIn 镜像）：缩到 .96 淡出，时长对齐遮罩 --dur-fast */
+@keyframes floatOut { from { opacity:1; transform:none; } to { opacity:0; transform:scale(.96); } }
 /* Snackbar 入场动画：末态保留水平居中位移（T23：viewIn 的 transform:none 会在动画结束后
    覆盖 translateX(-50%) 导致 toast 弹出后向右跳移，改用专用 keyframes） */
 @keyframes snackIn { from { opacity:0; transform:translate(-50%, 10px); } to { opacity:1; transform:translate(-50%, 0); } }
@@ -2858,7 +3145,6 @@ body.nav-collapsed .nav-collapse-btn svg { transform:rotate(180deg); }
 .vod-card:nth-child(10) { animation-delay:.27s; }
 .md-dialog { animation:dlgIn var(--dur-fast) var(--ease); }
 .md-dialog-overlay { animation:ldIn var(--dur-fast) var(--ease); }
-#cover-float img { animation:floatIn var(--dur-fast) var(--ease); }
 #warnToast .md-snackbar { animation:snackIn var(--dur-base) var(--ease); }
 
 /* 禁用动画（设置页开关）：全局关掉过渡与动画 */
@@ -2909,6 +3195,9 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
 @media (min-width:2000px) {
     /* 详情页 */
     .detail-head { grid-template-columns:340px minmax(0, 1fr); gap:32px; margin-bottom:24px; }
+    /* 骨架跟随（L21）：大屏与 .detail-head 同步放大到 340px 轨道 */
+    .sk-hero { grid-template-columns:340px minmax(0, 1fr); gap:32px; }
+    .sk-hero-info { padding:32px 36px; gap:6px; }
     /* 同 1100/700 断点：min-height 与 aspect-ratio 冲突，封面高一律由轨道宽 × 4/3 推导
        （340px 轨道 → 453px 高，与旧 min-height:460px 观感几乎一致） */
     .detail-hero-cover { border-radius:16px; }
@@ -2929,6 +3218,8 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .class-tab, .play-src { padding:10px 22px; border-radius:999px; font-size:17px; }
     /* 选集 */
     .ep-grid { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
+    /* 骨架跟随（L23）：与上方 .ep-grid 大屏断点同口径，避免骨架与真实集网格列数不一 */
+    .sk-eps { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
     .ep-btn { height:54px; font-size:17px; border-radius:var(--radius-sm); gap:8px; }
     .ep-check { width:20px; height:20px; border-radius:6px; }
     .ep-check.checked::after { left:6px; top:2px; width:5px; height:10px; }
@@ -2957,6 +3248,8 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     .md-btn-sm { height:40px; font-size:15px; border-radius:var(--radius-sm); }
     .md-btn-icon { width:48px; height:48px; min-width:48px; max-width:48px; flex:0 0 48px; border-radius:var(--radius-md); }
     .md-btn-icon svg { width:22px; height:22px; }
+    /* 刷新按钮 v2：媒体查询里类选择器 specificity 高于基准 ID 规则，需同口径跟随放大 */
+    #detail-refresh.md-btn-icon { width:48px; height:48px; min-width:48px; max-width:48px; flex:0 0 48px; }
     .md-select { height:52px; padding-right:50px; background-position:right 16px center; background-size:18px 18px; font-size:16px; border-radius:12px; }
     /* 下载管理卡片同步放宽：控件放大后工具栏一行放不下会折行（筛选框与「打开下载目录」分家），
        按 settings-wrap 先例放大 max-width 保证单行 */

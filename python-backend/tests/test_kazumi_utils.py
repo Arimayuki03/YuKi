@@ -88,12 +88,22 @@ def _cfg(**kwargs):
 
 
 class _FakeOcr:
-    """ddddocr 桩：classification 返回值/异常可注入，并记录调用入参。"""
+    """ddddocr 桩：classification 返回值/异常可注入，并记录调用入参。
+
+    ddddocr 已随体积决策移除（2026-10-01），本桩仅保留给历史用例的形状参考；
+    现行识别链第一级是 _FakeCnn（见下）。"""
+
+
+class _FakeCnn:
+    """tiny-CNN 识别器桩：recognize 返回值/异常可注入，并记录调用入参。
+
+    对应 captcha._load_cnn() 的返回契约（一个带 recognize(bytes) 的模块替身），
+    与 _FakeOcr 同<｜hy_place▁holder▁no▁813｜>但走新一级接口。"""
     def __init__(self, result):
         self.result = result
         self.seen = []
 
-    def classification(self, data):
+    def recognize(self, data):
         self.seen.append(data)
         if isinstance(self.result, BaseException):
             raise self.result
@@ -1119,36 +1129,43 @@ def test_validate_search_config_paths():
 
 # ================================================================ captcha
 
-def test_ocr_available_reflects_module_state_without_crashing():
-    """无 ddddocr 时 ocr_available() 返回 False 且 tried 置位（不会每次重复 import）。
+def test_cnn_available_reflects_module_state_without_crashing():
+    """权重不可用时 ocr_available() 返回 False 且 tried 置位（不重复探测）。
 
-    两级识别链（2026-09-28）：小模型可用会短路 ddddocr 探测——屏蔽小模型
-    后本用例测的才是 ddddocr 路径。"""
+    现行一级是 tiny-CNN（captcha._cnn_holder，ddddocr 已按体积决策移除），
+    契约不变：None=未尝试 / False=不可用 / 真值=可用，失败永久标记。"""
     captcha_mod.reset_ocr_cache()
-    prior = captcha_mod._ocr_holder['tried']
+    prior = captcha_mod._cnn_holder['tried']
     with mock.patch.object(captcha_mod, '_load_cnn',
                            return_value=mock.MagicMock(model_available=lambda: False)):
         available = captcha_mod.ocr_available()
-    assert isinstance(available, bool)
-    assert captcha_mod._ocr_holder['tried'] is True
+    assert available is False
+    assert captcha_mod._cnn_holder['tried'] is True
     assert prior is False  # reset 后确实清空过（cache 语义）
-    assert captcha_mod._ocr_holder['ocr'] is (False if not available else captcha_mod._ocr_holder['ocr'])
+    assert captcha_mod._cnn_holder['ok'] is False
 
 
-def test_load_ocr_double_checked_locking_constructs_once():
-    """双检锁：并发下重模型构造只发生一次；失败后 tried 永久置位，不再重试 import。"""
+def test_load_cnn_double_checked_locking_constructs_once():
+    """双检锁：并发下 model_available 只被真正探测一次；失败后 tried 永久置位。
+
+    构造体是 numpy np.load 的 3MB 权重（跨 print 语句级成本），并发重复构造
+    等价于重复付加载成本——dummy gate 卡住构造以放大竞态窗口，验证串行化。"""
     import threading
     captcha_mod.reset_ocr_cache()
-    construct_calls = []
+    probe_calls = []
     gate = threading.Event()
 
-    def fake_cls(show_ad=False):
-        construct_calls.append(show_ad)
-        gate.wait(timeout=5)
-        return _FakeOcr('ab12')
+    def fake_load_cnn():
+        m = mock.MagicMock()
 
-    fake_module = mock.MagicMock()
-    fake_module.DdddOcr = fake_cls
+        def model_available():
+            probe_calls.append(1)
+            gate.wait(timeout=5)
+            return True
+
+        m.model_available = model_available
+        return m
+
     barrier = threading.Barrier(8)
     results = []
 
@@ -1156,43 +1173,31 @@ def test_load_ocr_double_checked_locking_constructs_once():
         barrier.wait(timeout=5)
         results.append(captcha_mod.ocr_available())
 
-    # 两级识别链：小模型可用会短路 ddddocr 探测，必须先屏蔽（测 ddddocr 路径）
-    with mock.patch.object(captcha_mod, '_load_cnn',
-                           return_value=mock.MagicMock(model_available=lambda: False)), \
-            mock.patch.dict(sys.modules, {'ddddocr': fake_module}):
+    with mock.patch.object(captcha_mod, '_load_cnn', side_effect=fake_load_cnn):
         threads = [threading.Thread(target=probe) for _ in range(8)]
         for t in threads:
             t.start()
         gate.set()
         for t in threads:
             t.join(timeout=5)
-    assert len(construct_calls) == 1, '并发下必须只构造一次'
+    assert len(probe_calls) == 1, '并发下必须只构造一次'
     assert results == [True] * 8
 
 
-def test_load_ocr_failure_is_permanently_cached():
-    """import 失败/构造异常 → tried=True 且 ocr=False，后续调用直接返回 None（不反复失败）。"""
+def test_load_cnn_failure_is_permanently_cached():
+    """import/探测异常 → tried=True 且 ok=False，后续调用直接回落（不反复失败）。"""
     captcha_mod.reset_ocr_cache()
-    with mock.patch.dict(sys.modules, {}):
-        real_import = __builtins__['__import__'] if isinstance(__builtins__, dict) else __builtins__.__import__
-        attempts = []
+    attempts = []
 
-        def failing_import(name, *a, **k):
-            if name == 'ddddocr':
-                attempts.append(name)
-                raise ImportError('no ddddocr here')
-            return real_import(name, *a, **k)
+    def boom():
+        attempts.append(1)
+        raise ImportError('no numpy here')
 
-        builtins_dict = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
-        old = builtins_dict['__import__']
-        builtins_dict['__import__'] = failing_import
-        try:
-            assert captcha_mod._load_ocr() is None
-            assert captcha_mod._load_ocr() is None
-        finally:
-            builtins_dict['__import__'] = old
-    assert len(attempts) == 1, 'tried 置位后不应重复 import'
-    assert captcha_mod._ocr_holder == {'ocr': False, 'tried': True}
+    with mock.patch.object(captcha_mod, '_load_cnn', side_effect=boom):
+        assert captcha_mod._cnn_available() is False
+        assert captcha_mod._cnn_available() is False
+    assert len(attempts) == 1, 'tried 置位后不应重复探测'
+    assert captcha_mod._cnn_holder == {'ok': False, 'tried': True}
 
 
 def test_is_plausible_captcha_text_boundaries():
@@ -1205,51 +1210,58 @@ def test_is_plausible_captcha_text_boundaries():
 
 
 def test_recognize_success_returns_text_and_raw_bytes_passthrough():
-    """成功路径：classification 收到原始 bytes，strip 后返回文本。"""
-    fake = _FakeOcr('  w2x9  ')
-    with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake):
+    """成功路径：小模型 recognize 收到原始 bytes，strip 后返回文本。"""
+    fake = _FakeCnn('  w2x9  ')
+    with mock.patch.object(captcha_mod, '_load_cnn', return_value=fake):
+        captcha_mod._cnn_holder.update({'ok': True, 'tried': True})
         assert captcha_mod.recognize_captcha_bytes(b'image-bytes') == 'w2x9'
     assert fake.seen == [b'image-bytes']
 
 
 def test_recognize_degrades_on_implausible_result():
-    """结果不可信（过短/过长/含控制字符）→ 返回 None，不把噪声透给调用方。"""
+    """结果不可信（过长/过短/空）→ 回落下一级，不把噪声透给调用方。
+
+    现行链一级不可信时继续走视觉 LLM（未配置则返回 None）。"""
+    captcha_mod._cnn_holder.update({'ok': True, 'tried': True})
     for bad in ['x' * 30, 'ab', '']:
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=_FakeOcr(bad)):
+        with mock.patch.object(captcha_mod, '_load_cnn', return_value=_FakeCnn(bad)):
             assert captcha_mod.recognize_captcha_bytes(b'img') is None, bad
 
 
 def test_recognize_degrades_without_recognizer():
-    """无识别器（可选依赖缺席）→ 直接 None，绝不抛异常打断搜索/登录主链路。"""
+    """无识别器（权重缺失/可选依赖缺席）→ 直接 None，绝不抛异常打断主链路。"""
+    captcha_mod._cnn_holder.update({'ok': False, 'tried': True})
     for payload in (b'', b'\x00', None, [], {}):
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=None):
-            assert captcha_mod.recognize_captcha_bytes(payload) is None
+        assert captcha_mod.recognize_captcha_bytes(payload) is None
     # 空 bytes 是 falsy，连识别器都不会去取
     assert captcha_mod.recognize_captcha_bytes(b'') is None
     assert captcha_mod.recognize_captcha_bytes(None) is None
 
 
 def test_recognize_swallows_classification_exception():
-    """classification 抛任何异常都被吞掉并降级 None（模型损坏/图片非法不应冒泡）。"""
+    """recognize 抛任何异常都被吞掉并降级（模型损坏/图片非法不应冒泡）。"""
+    captcha_mod._cnn_holder.update({'ok': True, 'tried': True})
     for boom in (RuntimeError('model broken'), ValueError('bad image'), TypeError('x')):
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=_FakeOcr(boom)):
+        with mock.patch.object(captcha_mod, '_load_cnn', return_value=_FakeCnn(boom)):
             assert captcha_mod.recognize_captcha_bytes(b'img') is None
 
 
 def test_recognize_non_string_result_is_coerced():
     """识别器返回非字符串（如 int）时按 str() 处理，仍受合法性门槛约束。"""
-    with mock.patch.object(captcha_mod, '_load_ocr', return_value=_FakeOcr(12345)):
+    captcha_mod._cnn_holder.update({'ok': True, 'tried': True})
+    with mock.patch.object(captcha_mod, '_load_cnn', return_value=_FakeCnn(12345)):
         assert captcha_mod.recognize_captcha_bytes(b'img') == '12345'
-    with mock.patch.object(captcha_mod, '_load_ocr', return_value=_FakeOcr(7)):
+    with mock.patch.object(captcha_mod, '_load_cnn', return_value=_FakeCnn(7)):
+        # '7' 长度 1 < _CAPTCHA_LEN_MIN(3) → 不可信 → 回落下一级 → None
         assert captcha_mod.recognize_captcha_bytes(b'img') is None
 
 
 def test_reset_ocr_cache_clears_state():
-    """reset_ocr_cache：测试钩子，清掉 ocr/tried 两个槽位便于注入桩。"""
-    captcha_mod._ocr_holder['ocr'] = _FakeOcr('abcd')
-    captcha_mod._ocr_holder['tried'] = True
+    """reset_ocr_cache：测试钩子，清掉 ok/tried 两个槽位便于注入桩。"""
+    captcha_mod._cnn_holder['ok'] = True
+    captcha_mod._cnn_holder['tried'] = True
     captcha_mod.reset_ocr_cache()
-    assert captcha_mod._ocr_holder == {'ocr': None, 'tried': False}
+    assert captcha_mod._cnn_holder == {'ok': None, 'tried': False}
 
 
 # ================================================================ 汇总 runner

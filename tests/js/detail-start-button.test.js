@@ -139,12 +139,55 @@ test('catvod 详情渲染：无线路/选集时不渲染「开始播放」按钮
     Detail.render();
     const html = String(htmlBySel.get('#detail-body') || '');
     assert.ok(!html.includes('id="detail-catvod-start"'), '无线路时不应渲染开始播放按钮');
-    // 渲染器层面同样返回空
+    // 渲染器层面同样返回空（pending=false 的默认口径：确认无数据才不渲染）
     const { Detail: D2 } = loadDetail();
     assert.equal(D2._catvodStartHtml(), '');
     D2.sources = [{ from: 'A', episodes: [] }];
     D2.activeSource = 0;
     assert.equal(D2._catvodStartHtml(), '');
+});
+
+// ============================================================ A-35 播放按钮占位
+// 背景：详情页半渲染（快照 hero）期间 sources 尚未解析，旧逻辑按 !hasPlay 直接不
+// 渲染按钮——用户看到的是「先铺开一排文字，detailContent 返回后才凭空长出播放按
+// 钮」的布局跳动。改为半渲染期渲染**禁用占位按钮**占好位，数据到达时原地可用。
+
+test('A-35：详情结果在途（pending）时渲染可点击的「开始播放」占位按钮（aria-busy 标记加载中）', () => {
+    const { Detail } = loadDetail();
+    Detail.sources = [];
+    Detail.activeSource = 0;
+    const html = Detail._catvodStartHtml('', true);
+    assert.ok(html.includes('id="detail-catvod-start"'), '占位期即渲染播放按钮（防布局跳动）');
+    // review M21：占位按钮不得带 disabled——disabled 元素不派发 click，
+    // _catvodStartPlay 的「正在加载线路信息」提示分支将永不可达
+    assert.ok(!/id="detail-catvod-start"[^>]*disabled/.test(html), '占位按钮不得为禁用态');
+    assert.ok(/id="detail-catvod-start"[^>]*aria-busy="true"/.test(html), '占位按钮带 aria-busy');
+    assert.ok(html.includes('开始播放'), '文案与真实按钮一致（尺寸/位置同款，不是后来插入）');
+});
+
+test('A-35：pending 为假且确无数据时仍不渲染按钮（与旧口径一致，非无条件占位）', () => {
+    const { Detail } = loadDetail();
+    Detail.sources = [];
+    Detail.activeSource = 0;
+    const html = Detail._catvodStartHtml('', false);
+    assert.ok(!html.includes('id="detail-catvod-start"'), '确认无播放线路时才不渲染');
+});
+
+test('A-35：占位按钮点击提示「稍候」而非误报「暂无播放线路」', () => {
+    const { Detail, toasts } = loadDetail();
+    Detail.sources = [];
+    Detail.activeSource = 0;
+    Detail._detailDataPending = true;
+    Detail._catvodStartPlay();
+    assert.ok(toasts.some((t) => /正在加载线路信息，请稍候/.test(String(t))),
+        '数据确实在途时应说「稍候」，不能说「暂无」——后者会被随后到达的数据推翻');
+    // 请求已终态（非在途）时回到原口径
+    const { Detail: D2, toasts: t2 } = loadDetail();
+    D2.sources = [];
+    D2.activeSource = 0;
+    D2._detailDataPending = false;
+    D2._catvodStartPlay();
+    assert.ok(t2.some((t) => /暂无可播放的线路或选集/.test(String(t))), '真无线路仍提示「暂无」');
 });
 
 test('catvod 详情渲染：匹配到 Bangumi ID 但详情拉取失败（bgm=null）时回退渲染「开始播放」按钮', () => {

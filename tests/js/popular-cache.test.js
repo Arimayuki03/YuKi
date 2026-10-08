@@ -23,6 +23,12 @@ function loadPopular() {
             show() { return this; }, hide() { return this; }, find() { return { on() {} }; },
         }),
         doAction: async () => ({ trends: [], total: 0 }),
+        // A-31：本沙箱不装载 common.js，注入 guardedLoad 真实语义的最小桩
+        // （纯世代型：++_loadToken + isLive 比对；本页无 abort 需求）
+        guardedLoad: (host) => {
+            const token = ++host._loadToken;
+            return { token, isLive: () => token === host._loadToken, signal: undefined };
+        },
         warnToast: () => {},
         showLoading: () => {},
         hideLoading: () => {},

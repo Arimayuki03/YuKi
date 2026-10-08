@@ -23,10 +23,34 @@ if BASE not in sys.path:
 
 import hoststate  # noqa: E402
 import http_client  # noqa: E402
+import cover_cache  # noqa: E402
 import go_proxy  # noqa: E402
 import server  # noqa: E402
 
 TOKEN = 'kazumi-cover-token'
+
+
+def _isolate_cover_cache():
+    """B-08：/kazumi/cover 现在带磁盘缓存持久态——同一 URL 在测试间会命中
+    上一个用例落盘的字节，破坏「每用例独立 mock」假设。把 cover_cache 单例
+    指到本进程独立临时目录并全程隔离（不触真实 ~/.yuki 缓存）。返回还原函数。
+
+    L14：TemporaryDirectory + weakref.finalize 保证目录随测试结束自动清理，
+    不再往系统 Temp 留 yuki-cover-proxy-test-* 残留（旧的 mkdtemp 从不清理）。"""
+    import tempfile
+
+    import cover_cache
+    saved = (cover_cache._store_instance, cover_cache._store_dir)
+    tmpdir_obj = tempfile.TemporaryDirectory(prefix='yuki-cover-proxy-test-')
+    cover_cache.set_dir_for_tests(tmpdir_obj.name)
+    cover_cache._store_instance = None
+
+    def restore():
+        # 还原单例后顺带清理临时目录（L14：不留 yuki-cover-proxy-test-* 残留）
+        cover_cache._store_instance, cover_cache._store_dir = saved
+        tmpdir_obj.cleanup()
+
+    return restore
 
 
 def _stub_go_proxy_listeners():
@@ -88,6 +112,7 @@ class TestKazumiCoverProxy(unittest.TestCase):
         import uvicorn  # noqa: PLC0415
 
         cls.restore_go_proxy = _stub_go_proxy_listeners()
+        cls.restore_cover_cache = _isolate_cover_cache()
         cls.old_state = {
             'port': hoststate.get_port(),
             'token': hoststate.get_token(),
@@ -115,12 +140,16 @@ class TestKazumiCoverProxy(unittest.TestCase):
         if getattr(cls, 'thread', None) is not None:
             cls.uvicorn and cls.thread.join(timeout=5)
         cls.restore_go_proxy()
+        cls.restore_cover_cache()
         hoststate.configure(**cls.old_state)
 
     def setUp(self):
         self._old_get = http_client.get
         self.fetched = []
         self.ua_seen = []
+        # B-08：磁盘缓存跨用例持久——各用例共用同一 URL 且 mock 内容不同，
+        # 清空隔离目录保证每个用例从 miss 起步（与原「无状态代理」假设等价）
+        cover_cache.clear_all()
         self._token_q = 'token=' + urllib.parse.quote(TOKEN)
 
     def tearDown(self):
@@ -150,7 +179,9 @@ class TestKazumiCoverProxy(unittest.TestCase):
         self.assertEqual(body, b'\xff\xd8fakejpg')
         self.assertTrue(headers.get('Content-Type', '').startswith('image/'))
         self.assertIn('max-age', headers.get('Cache-Control', ''))
-        self.assertEqual(self.fetched, ['lain.bgm.tv'])
+        # 官方+镜像并行竞速（被墙不再串行干等满超时）：两路各发一次，
+        # 先成功者胜出——官方 host 必在请求列表
+        self.assertIn('lain.bgm.tv', self.fetched)
         # 镜像 lain.bangumi.vip 在 Cloudflare 后拦程序化 UA（okhttp 默认 UA 实测 403）：
         # 代理转发必须带浏览器前缀 UA（与渲染层 <img> 同形态）
         self.assertTrue(self.ua_seen[0].startswith('Mozilla/5.0'), self.ua_seen[0])

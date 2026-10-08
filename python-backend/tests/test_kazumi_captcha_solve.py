@@ -15,6 +15,8 @@ import time
 import unittest
 from unittest import mock
 
+import requests  # noqa: E402  ProxyError 回退测试用
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import kazumi.rule_engine as rule_engine_mod  # noqa: E402
@@ -91,6 +93,19 @@ class _PatchedSession:
                 return outer.responses[idx]
             return handler
 
+        # solve_captcha 现统一走 sess.request(method, ...)（代理回退包装），
+        # 直接桩 request 本体；calls 记录与 get/post 桩同口径（'GET <url>'）。
+        # responses 序列里既可以是 _Rsp 也可以是 BaseException 实例——抛出即
+        # 模拟网络层故障（ProxyError 等），不计入回放索引（异常步可重入）。
+        def _request_dispatch(method, url, **kw):
+            idx = min(len(outer.calls), len(outer.responses) - 1)
+            step = outer.responses[idx]
+            outer.calls.append(f'{method} {url}')
+            if isinstance(step, BaseException):
+                raise step
+            return step
+
+        cls.return_value.request = _request_dispatch
         cls.return_value.get = _fake('GET')
         cls.return_value.post = _fake('POST')
         return self
@@ -210,7 +225,8 @@ class TestSolveCaptcha(unittest.TestCase):
             result = self.engine.solve_captcha(_Cfg())
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['code'], '4321')
-        m_rec.assert_called_once_with(gif)
+        # prefer_llm=False 是未开开关时的显式透传值（2026-10-08 新增参数）
+        m_rec.assert_called_once_with(gif, llm_cfg=None, prefer_llm=False)
 
     def test_looks_like_image_magic_whitelist(self):
         # _looks_like_image 单元口径：四格式白名单 + WebP RIFF 容器 +
@@ -261,6 +277,34 @@ class TestSolveCaptcha(unittest.TestCase):
                 mock.patch.object(RuleEngine, '_persist_session_cookies'):
             self.engine.solve_captcha(_Cfg())
         self.assertGreaterEqual(m_hop.call_count, 4)
+
+    def test_proxy_error_falls_back_to_direct(self):
+        # C2（2026-10-01）：代理软件退出但系统代理设置残留（127.0.0.1:7897
+        # 拒连）时，主搜索链路靠「ProxyError→直连重试」兜底能成功，solve
+        # 独立会话同样要回退直连——否则自动解题白丢给人工窗口。
+        # 步骤：建会话(带代理→ProxyError→直连成功) → 取图 → 提交 → 复验。
+        rsp = [requests.exceptions.ProxyError('refused 127.0.0.1:7897'),
+               _Rsp(200, b'page'), _Rsp(200, _png()),
+               _Rsp(200, b'{"code":1}', text='{"code":1}'), _Rsp(200, b'normal')]
+        with _PatchedSession(rsp) as sess, \
+                mock.patch('http_client.system_proxies',
+                           return_value={'https': 'http://127.0.0.1:7897'}), \
+                mock.patch('kazumi.rule_engine._captcha_mod.recognize_captcha_bytes',
+                           return_value='3456'), \
+                mock.patch.object(RuleEngine, '_persist_session_cookies') as m_persist:
+            result = self.engine.solve_captcha(_Cfg())
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['code'], '3456')
+        m_persist.assert_called_once()
+
+    def test_proxy_error_without_proxy_config_propagates(self):
+        # 未配置代理时 ProxyError（非代理链路故障）原样上抛 → session_init_failed，
+        # 不做无意义的直连重试（直连本来就是无代理，重试等于双倍烧超时）。
+        with _PatchedSession([requests.exceptions.ProxyError('refused')]), \
+                mock.patch('http_client.system_proxies', return_value={}):
+            result = self.engine.solve_captcha(_Cfg())
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'session_init_failed')
 
     def test_maccms_endpoints_used(self):
         self.test_success_first_attempt()  # 端点断言已并入 success 用例
@@ -477,6 +521,130 @@ class TestPersistSessionCookies(unittest.TestCase):
     def test_no_jar_is_noop(self):
         engine = RuleEngine(log_failures=False)
         engine._persist_session_cookies('https://example.com')  # 不抛异常即可
+
+
+class TestPreferLlmOrdering(unittest.TestCase):
+    """「优先使用 LLM」开关：识别链两级次序（2026-10-08）。
+
+    背景（实测）：tiny-CNN 在真实站点样本上永远返回 4 位数字（500 张实测
+    返回 None 0 次），而 4 位数字恒能通过 is_plausible_captcha_text 的格式
+    闸门，故默认次序下 LLM 这一级几乎永不上场——同批样本 all4 仅 0.37，即
+    多数错读被直接提交。开关把次序倒过来，让要识别率的用户绕开小模型。
+
+    契约：prefer_llm=True 时先 LLM；LLM 不可用/结果不可信时仍回落小模型
+    （不是「跳过小模型」），最后才 None（人工窗口）。
+    """
+
+    def setUp(self):
+        from kazumi import captcha as captcha_mod
+        self.mod = captcha_mod
+        # 本类整体替换 _load_cnn / _recognize_with_llm / _cnn_holder，必须整体
+        # 还原：这些是模块级缓存与函数引用，泄漏会污染后续用例（实测曾把
+        # TestSolveCaptcha 的识别桩换成假 CNN，致 HTML 解析路径报错）。
+        self._saved = (captcha_mod._load_cnn, captcha_mod._recognize_with_llm,
+                       dict(captcha_mod._cnn_holder))
+
+    def tearDown(self):
+        load_cnn, rec_llm, holder = self._saved
+        self.mod._load_cnn = load_cnn
+        self.mod._recognize_with_llm = rec_llm
+        self.mod._cnn_holder.update(holder)
+        self.mod.reset_ocr_cache()
+
+    def _run(self, prefer, llm_result, cnn_result='1111'):
+        """按给定两级返回值跑一次识别，返回 (结果, 调用次序)。"""
+        order = []
+        self.mod._recognize_with_llm = lambda b, c: (order.append('llm'), llm_result)[1]
+        cnn = mock.MagicMock()
+        cnn.recognize.side_effect = lambda b: (order.append('cnn'), cnn_result)[1]
+        self.mod._load_cnn = lambda: cnn
+        self.mod._cnn_holder['ok'] = True
+        self.mod._cnn_holder['tried'] = True
+        out = self.mod.recognize_captcha_bytes(b'\x89PNG-fake', llm_cfg={'base': 'x', 'model': 'm'},
+                                               prefer_llm=prefer)
+        return out, order
+
+    def test_default_order_is_cnn_first(self):
+        out, order = self._run(False, '2222')
+        self.assertEqual(out, '1111')
+        self.assertEqual(order, ['cnn'], '默认只调小模型即返回，不碰 LLM')
+
+    def test_prefer_llm_calls_llm_first(self):
+        out, order = self._run(True, '2222')
+        self.assertEqual(out, '2222')
+        self.assertEqual(order, ['llm'], '开关开启时 LLM 先跑且直接采用其结果')
+
+    def test_prefer_llm_falls_back_to_cnn(self):
+        """LLM 返回 None（未配置/失败/不可信）→ 回落小模型，不是直接失败。"""
+        out, order = self._run(True, None)
+        self.assertEqual(out, '1111')
+        self.assertEqual(order, ['llm', 'cnn'])
+
+    def test_prefer_llm_without_config_still_uses_cnn(self):
+        """开关开了但没配 LLM：识别链该级跳过，回到小模型——不能变成无解。"""
+        order = []
+        self.mod._recognize_with_llm = lambda b, c: (order.append('llm'), None)[1]
+        cnn = mock.MagicMock()
+        cnn.recognize.side_effect = lambda b: (order.append('cnn'), '4321')[1]
+        self.mod._load_cnn = lambda: cnn
+        self.mod._cnn_holder['ok'] = True
+        self.mod._cnn_holder['tried'] = True
+        out = self.mod.recognize_captcha_bytes(b'\x89PNG-fake', llm_cfg=None, prefer_llm=True)
+        self.assertEqual(out, '4321')
+        self.assertEqual(order, ['llm', 'cnn'])
+
+    def test_both_unavailable_returns_none(self):
+        """两级都不可用 → None（调用方回落人工窗口）。"""
+        out, order = self._run(True, None, cnn_result=None)
+        self.assertIsNone(out)
+        self.assertEqual(order, ['llm', 'cnn'])
+
+    def test_solve_passes_prefer_llm_through(self):
+        """solve_captcha 必须把开关透传到识别调用（否则前端开关形同虚设）。"""
+        engine = RuleEngine(log_failures=False)
+        # 复验步要走 xpath 检测：与 TestSolveCaptcha.setUp 同口径桩掉，
+        # 否则 'normal' 这种非 HTML 正文会让 _document_element 抛解析异常。
+        engine._xpath_strategy = mock.MagicMock()
+        engine._xpath_strategy._document_element.side_effect = lambda html: mock.MagicMock()
+        engine._xpath_strategy._detects_captcha.return_value = False
+        rec = mock.patch('kazumi.rule_engine._captcha_mod.recognize_captcha_bytes',
+                         return_value='1234')
+        png = _Rsp(200, _png())
+        rsp = [_Rsp(200, b'page'), png,
+               _Rsp(200, b'{"code":1}', text='{"code":1}'), _Rsp(200, b'normal')]
+        with _PatchedSession(rsp), rec as m_rec, \
+                mock.patch.object(RuleEngine, '_persist_session_cookies'):
+            engine.solve_captcha(_Cfg(), prefer_llm=True)
+        self.assertEqual(m_rec.call_args.kwargs.get('prefer_llm'), True)
+
+    def test_server_flag_parsed_from_form(self):
+        """端点解析：只有显式真值才算开，缺键/0/false 一律关（默认关闭）。"""
+        import server as server_mod
+        for val, expected in (('1', True), ('true', True), ('yes', True), ('on', True),
+                              ('0', False), ('false', False), ('', False), (None, False)):
+            form = {} if val is None else {'captchaLLMPrefer': val}
+            self.assertEqual(server_mod._captcha_prefer_llm(form), expected, f'val={val!r}')
+
+    def test_solve_endpoint_forwards_prefer_flag(self):
+        """kazumiCaptchaSolve 端点把开关传给 engine.solve_captcha。"""
+        import json as json_mod
+        import server as server_mod
+
+        class _Plugin:
+            def execution_config(self):
+                return _Cfg()
+
+        mgr = mock.MagicMock()
+        mgr.get.return_value = _Plugin()
+        engine = mock.MagicMock()
+        engine.solve_captcha.return_value = {'ok': True, 'code': '1234', 'attempts': 1}
+        with mock.patch.object(server_mod, 'kazumi_mgr', mgr), \
+                mock.patch.object(server_mod, 'kazumi_engine', engine):
+            status, body = server_mod.dispatch_kazumi_action(
+                {'do': 'kazumiCaptchaSolve', 'plugin': 'p', 'captchaLLMPrefer': '1'})
+        self.assertEqual(status, 200)
+        self.assertEqual(engine.solve_captcha.call_args.kwargs.get('prefer_llm'), True)
+        json_mod.loads(body)
 
 
 if __name__ == '__main__':

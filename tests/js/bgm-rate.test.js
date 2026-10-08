@@ -610,6 +610,8 @@ test('_insertKamoji：光标处插入/文末追加/选区替换/空串忽略', a
                     return api;
                 }
                 return {
+                    // input 监听（打字置 _touched）在模块绑定期也会挂到本选择器
+                    on: () => ({}),
                     val: (nv) => (nv === undefined ? state.value : (state.value = nv, state.set = nv, {})),
                     prop: (k) => (k === 'selectionStart' ? selStart : k === 'selectionEnd' ? selEnd : undefined),
                     trigger: (ev) => { if (ev === 'focus') state.focused = true; },
@@ -683,9 +685,21 @@ test('标签编辑 UI：index.html 对话框结构 + detail/bangumi-search 入�
     for (const id of ['bgm-rate-tags-selected', 'bgm-rate-tags-popular', 'bgm-rate-tag-input', 'bgm-rate-tag-add', 'bgm-rate-tags-count', 'bgm-rate-tag-error']) {
         assert.ok(html.includes(`id="${id}"`), `index.html 应包含 #${id}`);
     }
-    // detail.js：入口透传 tags + popularTags（条目公共标签做热门建议）
+    // detail.js：点击转圈等待补查（Promise.race 超时保险丝），正常返回带预填开窗；
+    // 超时先无预填开窗 + 晚到结果经 mergeFetched 合并（不重发请求）
     const detailSrc = read('src/renderer/js/detail.js');
-    assert.match(detailSrc, /tags: cur\.tags/, 'detail.js 评分入口应透传当前个人标签');
+    assert.match(detailSrc, /Promise\.race\(\[\s*fetching,\s*new Promise[\s\S]*?RATE_FETCH_TIMEOUT_MS/, '评分入口应转圈等待补查并以 RATE_FETCH_TIMEOUT_MS 竞速');
+    assert.match(detailSrc, /openRateDialog\(\{[\s\S]*?\}\);/, '竞速结束后应开窗（带预填或无预填）');
+    // 2026-10-02：合并必须带本次会话号（BgmRate._lastFetchId）——只按 subjectId
+    // 判归属时，同一条目关掉重开后第一次的迟到响应会覆盖第二次会话的内容。
+    assert.match(detailSrc, /const fetchId = BgmRate\._lastFetchId;/,
+        '应取本次对话框会话号用于归属校验');
+    assert.match(detailSrc, /BgmRate\.mergeFetched\(sid, late, fetchId\)/,
+        '超时开窗后晚到补查结果应经 mergeFetched 合并（带会话号，复用同一次在途请求）');
+    assert.match(read('src/renderer/js/bgm-rate.js'), /c\.fetchId !== fetchId\) return false/,
+        'mergeFetched 应校验会话号（同条目两次对话框不串台）');
+    assert.match(read('src/renderer/js/bgm-rate.js'), /c\.tagsInit = c\.tags\.slice\(\)/,
+        'mergeFetched 合并 tags 时应同步初始快照（否则脏检查误判已修改并覆盖并发标签变更）');
     assert.match(detailSrc, /popularTags:/, 'detail.js 评分入口应透传热门标签建议');
     // bangumi-search.js：搜索卡评分入口已移除（评分统一在详情页 hero），不应再有 .bgm-card-rate 逻辑
     const bsSrc = read('src/renderer/js/bangumi-search.js');
@@ -754,3 +768,148 @@ test('fetchCurrent：收藏 GET 回传 tags 归一化进上下文', async () => 
     assert.deepEqual(JSON.parse(JSON.stringify(cur.tags)), ['神作', 'TV']);
 });
 
+// ---------------------------------------------------------------- 即时开窗：mergeFetched 合并与 _touched 守卫
+
+/**
+ * mergeFetched 行为 VM 加载：自反 $ 桩记录 text/html/val 调用，
+ * openRateDialog / mergeFetched 全链路可跑（对话框打开态以 _ctx 存在性模拟）。
+ */
+function loadBgmRateMerge() {
+    const source = read('src/renderer/js/bgm-rate.js');
+    const sink = { texts: [], htmls: [], vals: {}, focused: [] };
+    const context = {
+        console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+        setTimeout, clearTimeout,
+        $: (sel) => {
+            const api = {
+                on: () => api, off: () => api, show: () => api, hide: () => api,
+                text: (v) => { if (v !== undefined) sink.texts.push({ sel, v: String(v) }); return api; },
+                html: (v) => { if (v !== undefined) sink.htmls.push({ sel, v: String(v) }); return api; },
+                val: (v) => {
+                    if (v === undefined) return sink.vals[sel] === undefined ? '' : sink.vals[sel];
+                    sink.vals[sel] = v; return api;
+                },
+                trigger: (ev) => { if (ev === 'focus') sink.focused.push(sel); return api; },
+                toggleClass: () => api, attr: () => api, prop: () => api,
+                data: () => '', find: () => ({ on: () => api, length: 0 }), length: 0,
+            };
+            return api;
+        },
+        doAction: async () => ({ collection: { rate: 7, comment: '还行', tags: ['旧标签'] } }),
+        warnToast: () => {},
+        escHtml: (s) => String(s),
+        openDialog: () => {}, closeDialog: () => {},
+        FavHub: { changed: () => {} },
+        Kazumi: { _getBangumiToken: async () => 'tok' },
+    };
+    context.globalThis = context;
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+    return { R: context.__R, sink };
+}
+
+test('mergeFetched：合并进已开对话框并重渲（评分/吐槽/标签三项落进 _ctx）', async () => {
+    const { R, sink } = loadBgmRateMerge();
+    const p = R.openRateDialog({ subjectId: '42', name: 'X' });
+    assert.ok(R._ctx, '对话框已开（_ctx 就绪）');
+    const merged = R.mergeFetched('42', { rate: 7, comment: '还行', tags: ['旧标签'] });
+    assert.equal(merged, true, '条目匹配且未编辑：应合并');
+    assert.equal(R._ctx.rate, 7);
+    assert.equal(R._ctx.comment, '还行');
+    assert.deepEqual(JSON.parse(JSON.stringify(R._ctx.tags)), ['旧标签']);
+    // 重渲落地：吐槽框写入合并值，星级行重渲
+    assert.equal(sink.vals['#bgm-rate-comment'], '还行');
+    assert.ok(sink.htmls.some((h) => h.sel === '#bgm-rate-stars' && String(h.v).includes('data-rate="7"')));
+    // 开窗 Promise 挂起中：合并后仍可正常取消收尾
+    R._close(false);
+    assert.equal(await p, false);
+});
+
+test('mergeFetched：条目不匹配 / 对话框已关 一律丢弃（防串档）', async () => {
+    const { R } = loadBgmRateMerge();
+    // 对话框未开：丢弃
+    assert.equal(R.mergeFetched('42', { rate: 5 }), false);
+    // 已开但条目不同（详情页切番剧后补查才回来）：丢弃，不改上下文
+    R.openRateDialog({ subjectId: '42', name: 'X' });
+    assert.equal(R.mergeFetched('99', { rate: 5 }), false);
+    assert.equal(R._ctx.rate, null, '非本条目数据不得写进上下文');
+    // 带前后空白的 subjectId 归一后匹配（与 openRateDialog 同口径）
+    assert.equal(R.mergeFetched(' 42 ', { rate: 5 }), true);
+    assert.equal(R._ctx.rate, 5);
+    R._close(false);
+});
+
+test('mergeFetched：用户已编辑（_touched）时丢弃远端数据，不覆盖输入', async () => {
+    const { R, sink } = loadBgmRateMerge();
+    R.openRateDialog({ subjectId: '42', name: 'X' });
+    // 用户先打星（_pickRate 置 _touched）
+    R._pickRate(3);
+    const merged = R.mergeFetched('42', { rate: 7, comment: '还行', tags: ['旧标签'] });
+    assert.equal(merged, false, '已编辑：合并应被拒绝');
+    assert.equal(R._ctx.rate, 3, '用户选的 3 分不被晚到的 7 分覆盖');
+    assert.equal(R._ctx.comment, '', '吐槽框内容不被覆盖');
+    assert.deepEqual(JSON.parse(JSON.stringify(R._ctx.tags)), [], '标签不被覆盖（保持开窗时的空数组）');
+    // 手动重建 _ctx（带 tags 数组）后逐个验证交互入口置 _touched
+    R._ctx = { subjectId: '42', name: 'X', rate: null, comment: '', tags: [] };
+    R._touched = false;
+    R._clearRate();
+    assert.equal(R._touched, true, '_clearRate 应置 _touched');
+    R._ctx = { subjectId: '42', name: 'X', rate: null, comment: '', tags: [] };
+    R._touched = false;
+    R._toggleTag('科幻');
+    assert.equal(R._touched, true, '_toggleTag 应置 _touched');
+    R._touched = false;
+    sink.vals['#bgm-rate-comment'] = '好看';
+    R._insertKamoji('(￣▽￣)');
+    assert.equal(R._touched, true, '_insertKamoji 应置 _touched');
+    assert.equal(sink.vals['#bgm-rate-comment'], '好看(￣▽￣)', '颜文字插入不受影响');
+    R._close(false);
+});
+
+test('mergeFetched：缺省字段不覆盖（只带 rate 的补查结果不动吐槽与标签）', async () => {
+    const { R } = loadBgmRateMerge();
+    R.openRateDialog({ subjectId: '42', name: 'X', comment: '原有吐槽' });
+    assert.equal(R.mergeFetched('42', { rate: 9 }), true);
+    assert.equal(R._ctx.rate, 9);
+    assert.equal(R._ctx.comment, '原有吐槽', '无 comment 键时不清空');
+    // 空数据对象：合法 no-op，重渲不报错
+    assert.equal(R.mergeFetched('42', {}), true);
+    assert.equal(R.mergeFetched('42', null), true);
+    R._close(false);
+});
+
+test('openRateDialog：开窗复位 _touched，跨会话守卫不残留', async () => {
+    const { R } = loadBgmRateMerge();
+    R.openRateDialog({ subjectId: '42', name: 'X' });
+    R._pickRate(5);
+    assert.equal(R._touched, true);
+    R._close(false);
+    // 第二次开窗：_touched 必须复位，否则补查数据永远合并不进来
+    R.openRateDialog({ subjectId: '43', name: 'Y' });
+    assert.equal(R._touched, false, '重开应复位 _touched');
+    assert.equal(R.mergeFetched('43', { rate: 2 }), true, '新会话合并正常');
+    R._close(false);
+});
+
+test('input 打字置 _touched：吐槽框/标签输入框监听已绑定（防打字被合并覆盖）', () => {
+    const bgmSrc = read('src/renderer/js/bgm-rate.js');
+    assert.match(bgmSrc, /'#bgm-rate-comment'\)\.on\('input'/, '吐槽框应绑定 input 监听');
+    assert.match(bgmSrc, /'#bgm-rate-tag-input'\)\.on\('input'/, '标签输入框应绑定 input 监听');
+    assert.match(bgmSrc, /_touched = true/, 'input 路径应置 _touched');
+});
+// ---------------------------------------------------------------- 超时开窗路径的 mergeFetched（detail.js 入口 4s 保险丝的收尾）
+
+test('mergeFetched：超时无预填开窗后晚到补查合并，rate 缺省不被 clamp 成 0', async () => {
+    const { R } = loadBgmRateMerge();
+    // detail.js 超时分支传 rate:null/comment:''/tags:undefined——语义必须是
+    // 「未知」而非「已确认无评分」：clampRate(null)=null 不改星级、无 tags 键不动标签
+    R.openRateDialog({ subjectId: '42', name: 'X', rate: null, comment: '', tags: undefined });
+    assert.equal(R._ctx.rate, null, 'null 预填 = 未评分展示，非 0 清除');
+    // 晚到的远端数据补齐
+    assert.equal(R.mergeFetched('42', { rate: 8, comment: '还行' }), true);
+    assert.equal(R._ctx.rate, 8);
+    assert.equal(R._ctx.comment, '还行');
+    assert.deepEqual(JSON.parse(JSON.stringify(R._ctx.tags)), [], '无 tags 键时标签保持开窗初值');
+    R._close(false);
+});

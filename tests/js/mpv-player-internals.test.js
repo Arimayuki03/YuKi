@@ -306,7 +306,7 @@ test('play(): 冲突参数覆盖顺序 —— 原生队列用 pendingSeekSec 取
         { position: 60000 });
     assert.equal(argValue(queue.argv, 'start'), undefined, '原生队列不得下发 --start');
     assert.equal(p._activeSession.pendingSeekSec, 60);
-    assert.equal(p._activeSession.seekApplied, false);
+    // R2：seekApplied 初始化字段已无读者（file-loaded 逐集应用门已移除），不再断言
     // 非法 position（NaN/0/负）不注入
     assert.equal(argValue(playAndCapture(p, ctx, [{ url: 'x' }], { position: 0 }).argv, 'start'), undefined);
     assert.equal(argValue(playAndCapture(p, ctx, [{ url: 'x' }], { position: 'abc' }).argv, 'start'), undefined);

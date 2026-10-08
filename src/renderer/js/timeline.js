@@ -8,7 +8,7 @@
  *       封面悬停收藏状态徽标（六态，默认隐藏）。
  * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
  */
-/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, recGet, FavHub, localCacheGet, localCacheSet, localCacheDel, UIState, showLoading, hideLoading */
+/* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, playCardsEnter, recGet, FavHub, localCacheGet, localCacheSet, localCacheDel, UIState, showLoading, hideLoading, DetailSnap, Home, guardedLoad, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 const SEASON_NAMES = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const SEASON_MONTH_START = { 1: '01-01', 2: '04-01', 3: '07-01', 4: '10-01' };
@@ -62,6 +62,16 @@ const Timeline = {
                 if (this._colAvailable && this._inited) this.refreshAfterFavoriteChange();
             });
         }
+        // 全局番剧屏蔽：词表/开关变更时就地重渲染（_calendar 保留原始数据，零网络请求）。
+        // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+        // loadBlockWords() 让新词表穿透缓存，否则仍按旧词表过滤。
+        if (typeof onBlockWordsChange === 'function') {
+            onBlockWordsChange(async () => {
+                await loadBlockWords();
+                if (this._inited) this._renderGrid();
+            });
+            await loadBlockWords(); // 首渲前读入词表，避免第一帧闪现被屏蔽的番剧
+        }
         this._buildSeasonOptions();
         $('#timeline-refresh').on('click', () => this.load());
         $('#timeline-grid').on('click keydown', '.bangumi-card', (e) => {
@@ -69,6 +79,13 @@ const Timeline = {
             if (e.type === 'keydown') e.preventDefault();
             const id = String($(e.currentTarget).data('id') || '');
             if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
+                // A-01 写入侧：Bangumi 卡快照（site='' 对齐 openBangumi 的 this.site 口径）。
+                // 快照是纯优化：DetailSnap/Home 任一缺席都不得阻断下方
+                // openBangumiInfoPage 主流程（同仓其余写入点同此守卫口径）
+                if (typeof DetailSnap !== 'undefined' && DetailSnap.put
+                    && typeof Home !== 'undefined' && typeof Home._snapFieldsFromCard === 'function') {
+                    DetailSnap.put('', id, Home._snapFieldsFromCard($(e.currentTarget)));
+                }
                 Kazumi.openBangumiInfoPage(id);
             }
         });
@@ -114,6 +131,21 @@ const Timeline = {
         // 收藏过滤数据（异步，不阻塞首屏）
         this._loadColSets();
         await this.load();
+    },
+
+    /** 每次切入视图调用（对齐 live.js enter）：重读每页条数，变了就地重排。
+     *  必须活在这里而不是 init()——init() 首行 `_inited` 守卫使首次之后直接
+     *  return，而首次执行时上一行 `await this.load()` 刚用同一个 pageSizeOf
+     *  赋过 this._pageSize，比对恒等；两段合起来让「改完设置回到时间表即生效」
+     *  从未真正生效。App 切入视图时调用本方法（app.js timeline 分支）。 */
+    async enter() {
+        if (!this._inited) return; // 首次由 init() 的 load() 负责
+        if (!this._calendar || !this._calendar.length) return;
+        const size = await pageSizeOf('pageSizeHome');
+        if (size === this._pageSize) return;
+        this._pageSize = size;
+        this._page = 1;
+        this._renderGrid();
     },
 
     /** 页面选择态持久化（切页/重启不回初始态）：星期/季度/排序/收藏过滤/页码。
@@ -441,12 +473,15 @@ const Timeline = {
     },
 
     /** 按启用的收藏过滤裁剪列表（_colAvailable=false 时原样返回）。
-     *  item id 兼容顶层 id 与嵌套 subject.id（与 _buildColSets 取 id 口径一致）。 */
+     *  item id 兼容顶层 id 与嵌套 subject.id（与 _buildColSets 取 id 口径一致）。
+     *  全局番剧屏蔽在此一并生效（先屏蔽后收藏过滤）：_calendar 始终保留原始数据，
+     *  删掉屏蔽词后无需重新请求即可恢复显示。 */
     _applyFilters(list) {
-        if (!this._colAvailable) return list;
+        let out = (typeof filterBlocked === 'function')
+            ? filterBlocked(list, (it) => String((it && (it.name_cn || it.name)) || '')) : list;
+        if (!this._colAvailable) return out;
         const { dropped, watched, watching } = this._colSets;
         const idOf = (it) => String((it && (it.id || (it.subject && it.subject.id))) || '');
-        let out = list;
         if (this._filters.onlyWatching) {
             out = out.filter((it) => watching.has(idOf(it)));
         } else {
@@ -490,16 +525,11 @@ const Timeline = {
         if (this._maskShown) { this._maskShown = false; hideLoading(); }
     },
 
-    /** 新一代加载令牌（对齐 home.js）：作废旧世代并中止在途请求，快速切季度后
-     *  旧响应/旧 toast 不再覆盖新数据、新遮罩。 */
+    /** 新一代加载令牌（A-31 收口到 common.js guardedLoad，原 _nextLoadToken 先例）：
+     *  作废旧世代并中止在途请求，快速切季度后旧响应/旧 toast 不再覆盖新数据、新遮罩。 */
     _nextLoadToken() {
-        if (typeof AbortController === 'function') {
-            if (this._loadAbort) {
-                try { this._loadAbort.abort('superseded'); } catch (e) { /* ignore */ }
-            }
-            this._loadAbort = new AbortController();
-        }
-        return ++this._loadToken;
+        const g = guardedLoad(this, { abortable: true }); // abort 型（本文件/home.js 同源语义）
+        return g.token;
     },
 
     async load() {
@@ -626,6 +656,8 @@ const Timeline = {
             grid.html(slice.map((item) => this._renderCard(item)).join(''));
             // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
             fitVodTitles(grid);
+            // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
+            playCardsEnter(grid);
             // 封面徽标行（话数徽章常驻 + 收藏徽标悬停显形，样式见 .vod-fav-row）：
             // 需在 _attachEpBadges 之前挂行——话数徽章补拉回来后 prepend 进同一行。
             this._attachFavBadges(grid, slice);

@@ -8,7 +8,7 @@
  *   详情页点 Bangumi 标签 → BangumiSearch.openWithTag(tag) → 切到本页签并以 tag: 过滤搜索。
  * 后端走 POST /kazumi/action do=kazumiBangumiSearchFilter（对齐 Kazumi buildBangumiSearchParams）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, FavHub, Timeline */
+/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, FavHub, Timeline, DetailSnap, Home, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const BANGUMI_SEARCH_TAGS = [
@@ -203,6 +203,16 @@ const BANGUMI_SORT_LABELS = { heat: '热度', rank: '排名', score: '评分', m
 const BANGUMI_SEASON_LABELS = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const BANGUMI_SEARCH_PAGE_SIZE = 24; // 兜底值；实际取「搜索页每页条数」设置（默认 24）
 
+/** 详情快照写入（纯优化路径，永不抛错）：DetailSnap/Home 任一缺席时静默跳过，
+ *  不得在 openBangumiInfoPage 之前抛错把「打开详情」主流程打断。 */
+function _snapPutBgmSearch(site, id, $el) {
+    try {
+        if (typeof DetailSnap === 'undefined' || !DetailSnap.put) return false;
+        if (typeof Home === 'undefined' || typeof Home._snapFieldsFromCard !== 'function') return false;
+        return DetailSnap.put(site, id, Home._snapFieldsFromCard($el));
+    } catch (e) { return false; }
+}
+
 // ============================================================
 // BangumiSearch — 搜索页「Bangumi」页签模块
 // ============================================================
@@ -221,7 +231,16 @@ const BangumiSearch = {
         if (this._inited) return;
         this._inited = true;
         this._state = BangumiSearchParser.toFilterState('');
-
+        // 全局番剧屏蔽：词表/开关变更时就地重渲染（_items 仍为原始结果，无网络请求）。
+        // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+        // loadBlockWords() 让新词表穿透缓存，否则仍按旧词表过滤。
+        if (typeof onBlockWordsChange === 'function') {
+            onBlockWordsChange(async () => {
+                await loadBlockWords();
+                if (this._inited) this._renderGrid();
+            });
+            if (typeof loadBlockWords === 'function') loadBlockWords();
+        }
         $('#bgm-search-go').on('click', () => this._submitFromInput());
         $('#bgm-search-keyword').on('keydown', (e) => {
             if (e.key === 'Enter') { e.target.blur(); this._submitFromInput(); }
@@ -238,8 +257,14 @@ const BangumiSearch = {
         $('#bgm-search-results').on('click keydown', '.bangumi-card', (e) => {
             if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
             if (e.type === 'keydown') e.preventDefault();
-            const id = String($(e.currentTarget).data('id') || '');
+            const el = $(e.currentTarget);
+            const id = String(el.data('id') || '');
             if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
+                // A-01（Bangumi 快照写入侧）：搜索结果卡快照（site='' 对齐 openBangumi
+                // 的 this.site 口径）——详情页 bgmInfo 冷态加载期间用卡片封面/标题先出 hero
+                if (typeof DetailSnap !== 'undefined' && DetailSnap.put) {
+                    _snapPutBgmSearch('', id, el);
+                }
                 Kazumi.openBangumiInfoPage(id);
             }
         });
@@ -353,25 +378,33 @@ const BangumiSearch = {
 
     _renderGrid() {
         const box = $('#bgm-search-results');
-        if (!this._items.length) {
+        // 全局番剧屏蔽：渲染前剔除标题命中屏蔽词的条目（_items 保留原始结果，
+        // 删词/关开关后无需重新请求即可恢复显示）
+        const shown = (typeof filterBlocked === 'function')
+            ? filterBlocked(this._items, (it) => String((it && (it.name_cn || it.name)) || '')) : this._items;
+        this._shown = shown;
+        // 空态守卫：_reqToken 为 0 = 尚未发起过搜索，屏蔽词变更不得把
+        // 「什么都没有找到」写进未搜索的结果区
+        if (this._reqToken && !shown.length) {
             box.html('<div class="tip-line">什么都没有找到 (;´༎ຶД༎ຶ`)</div>');
             return;
         }
-        box.html(`<div class="vod-grid bangumi-search-grid">${this._items.map((it) => bangumiCard(it)).join('')}</div>`);
+        if (!shown.length) return;
+        box.html(`<div class="vod-grid bangumi-search-grid">${shown.map((it) => bangumiCard(it)).join('')}</div>`);
         // 搜索结果卡不再追加「评分」操作条（评分入口统一在详情页 hero 的「评分 / 吐槽」按钮（批注笔图标））
         if (typeof fitVodTitles === 'function') fitVodTitles(box.find('.bangumi-search-grid'));
         // 封面徽标管线（对齐时间表/推荐卡）：收藏徽标行（映射内存即得）+ 话数徽章
         // 补齐（响应缺 eps 的条目回源 bangumiInfo，30 分钟缓存；同 id 跨页复用）
-        this._attachBadges(box.find('.bangumi-search-grid'));
+        this._attachBadges(box.find('.bangumi-search-grid'), shown);
     },
 
     /** 挂当前网格的封面徽章：复用 Timeline._attachFavBadges/_attachEpBadges 与
      *  Timeline.getColStateMap 共享收藏映射（时间表/推荐/搜索三页共享，零重复请求）。
      *  Timeline 缺席（沙箱/脚本降级）时静默跳过，不影响卡片渲染。 */
-    _attachBadges(grid) {
+    _attachBadges(grid, itemsOverride) {
         if (typeof Timeline === 'undefined' || !Timeline._attachFavBadges) return;
         const gridEl = grid || $('#bgm-search-results .bangumi-search-grid');
-        const items = this._items;
+        const items = itemsOverride || this._shown || this._items;
         Timeline._attachFavBadges(gridEl, items, this._colStateMap);
         Timeline._attachEpBadges(gridEl, items).catch(() => { /* 徽章补齐失败不外溢 */ });
         if (this._badgesLoaded) return; // 映射已就绪：无需再拉

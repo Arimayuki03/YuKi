@@ -223,6 +223,13 @@ class RuntimeSupervisor:
         self._active_lock = threading.RLock()
         self._active_done = threading.Event()
         self._active_done.set()
+        # probe 超时「迟到帧」簿记（M2）：probe 超时不杀 worker，worker 稍后仍会
+        # 把该请求的响应写进管道。不识别的话，下一个调用会先读到这条错配 id 的
+        # 旧帧 → 协议错误 → _hard_stop + record_failure，刚保住的热 worker 被
+        # 后门杀掉，预热又反转成制造故障。FIFO 有界（16）兜底；任何 dispose
+        # （worker 替换/连接重建）都整体作废——新连接上不存在旧帧。
+        self._stale_probe_lock = threading.Lock()
+        self._stale_probe_ids = []
         self._circuit = CircuitBreaker(
             self.policy.failure_threshold,
             self.policy.circuit_open_seconds,
@@ -382,6 +389,10 @@ class RuntimeSupervisor:
         self._connection = None
         self._process = None
         self._job = None
+        # 连接作废即迟到帧簿记作废：worker 替换/连接重建后，旧连接上的帧
+        # 不可能再出现在新连接的读取循环里，账目必须清空防止跨代误吞。
+        with self._stale_probe_lock:
+            self._stale_probe_ids.clear()
         if connection is not None:
             try:
                 connection.close()
@@ -412,6 +423,22 @@ class RuntimeSupervisor:
             logger.critical('worker process tree did not terminate site=%s pid=%s',
                             self.site_key, self._unreapable_pid)
         return terminated
+
+    def _note_stale_probe(self, request_id):
+        """记录一条 probe 超时后注定迟到帧的 request_id（有界 FIFO）。"""
+        with self._stale_probe_lock:
+            self._stale_probe_ids.append(str(request_id))
+            if len(self._stale_probe_ids) > 16:
+                del self._stale_probe_ids[:-16]
+
+    def _consume_stale_probe(self, request_id):
+        """迟到帧若属于已超时的 probe 请求则吞掉，返回 True 表示已消费。"""
+        with self._stale_probe_lock:
+            try:
+                self._stale_probe_ids.remove(str(request_id))
+                return True
+            except ValueError:
+                return False
 
     def _hard_stop(self):
         with self._lifecycle_lock:
@@ -500,8 +527,18 @@ class RuntimeSupervisor:
                 try:
                     request.raise_if_cancelled()
                 except RuntimeError as error:
-                    self._hard_stop()
-                    self._circuit.record_failure(error)
+                    # raise_if_cancelled 同时把 deadline_exceeded（wall-clock，int
+                    # 截断）计入，与循环用的 monotonic deadline 在同一时刻附近，
+                    # probe 超时完全可能先走这里而非下方 601 分支。probe 走到这里
+                    # 时 worker 没被杀、probe 的 homeContent 仍在跑，稍后必写入迟到
+                    # 帧——必须照样记账，否则下一个真实请求在 mismatch 分支吞不掉
+                    # 它，走 _hard_stop() + record_failure()，正好是本次改动要避免的
+                    # 「预热反转成杀掉刚保住的 worker」。与 601 分支同语义。
+                    if request.probe:
+                        self._note_stale_probe(request.request_id)
+                    else:
+                        self._hard_stop()
+                        self._circuit.record_failure(error)
                     raise
                 if process is None or not process.is_alive():
                     self._hard_stop()
@@ -540,6 +577,11 @@ class RuntimeSupervisor:
                         self._circuit.record_failure(error)
                         raise error from exc
                     if generation != self._generation or message.get('id') != request.request_id:
+                        if message.get('id') != request.request_id and \
+                                self._consume_stale_probe(message.get('id')):
+                            # probe 超时后 worker 迟到写入的响应帧：吞掉并继续等
+                            # 本请求自己的响应（worker 未被杀，M2 语义保持完整）
+                            continue
                         self._hard_stop()
                         error = RuntimeError(
                             'L3_RUNTIME_PROTOCOL_ERROR', site_key=self.site_key,
@@ -553,12 +595,28 @@ class RuntimeSupervisor:
                         error.site_key = error.site_key or self.site_key
                         error.runtime = error.runtime or self.runtime
                         if error.code in ('L3_RUNTIME_TIMEOUT', 'L2_SITE_TIMEOUT'):
+                            if request.probe:
+                                # probe（预热/探测）在 Worker 侧真实执行超时：与
+                                # 本地预算耗尽路径同语义——保留热 worker、熔断不
+                                # 记账。差别只是超时由 Worker 自己上报而非本地
+                                # deadline 先到，不应因此额外惩罚（M2）。
+                                raise error
                             self._hard_stop()
                         self._circuit.record_failure(error)
                         raise error
                     self._circuit.record_success()
                     _touch_global(self)
                     return message.get('result'), str(message.get('lastError') or '')
+            if request.probe:
+                # probe（预热/探测）超时：不杀 worker、不记熔断。worker 可能刚
+                # spawn+boot 完成且健康，保留热 worker 供真实请求复用（预热的
+                # 核心价值）；熔断不记账——慢源 homeContent 天然 >probe 预算，
+                # 记账会让 3 次配置重载就熔断 60s、真实请求被 L3_CIRCUIT_OPEN
+                # 拒绝，预热反转成「主动制造故障」（M2）。
+                # worker 没死，稍后仍会写入该请求的响应帧：记账让 mismatch 分支
+                # 把这条迟到帧吞掉，而不是当成协议错误后门杀 worker。
+                self._note_stale_probe(request.request_id)
+                raise self._timeout_error(request)
             self._hard_stop()
             # 预算耗尽发生在「call 帧已发出、等待响应」的阶段：请求已被准入，
             # 属于真实执行超时，不加 queued 标记（熔断照常计数）。

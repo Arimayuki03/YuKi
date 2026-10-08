@@ -5,12 +5,37 @@
 原始异常只写脱敏日志；返回给界面的 message 有长度上限。
 """
 from dataclasses import dataclass, field
-import asyncio
 import concurrent.futures
 import re
+import threading
 from typing import Any, Mapping
 
 from .android_policy import ANDROID_ONLY_MESSAGE
+
+# B-09 冷启动瘦身：asyncio 不再顶层 import。server.py importtime 实测
+# （2026-09-30）：asyncio ~80.8ms，本模块是 server→config→runner 启动链上
+# 唯一另一个顶层 asyncio 来源（uvicorn 在 READY 行后才 import）——server.py
+# 侧改懒加载后，这里不改等于白做。error_from_exception 只用
+# asyncio.TimeoutError / asyncio.CancelledError 两个别名，降为函数内懒加载；
+# asyncio.CancelledError 在受支持的 Python 版本是 BaseException 子类
+# （见下方分支注释），不能用内置异常名顶替，必须真拿到模块。
+_asyncio_mod = None
+# L6（review01）：锁必须在模块导入时创建。原先锁也懒创建（双检不严），两线程
+# 可能各自造锁互相覆盖出现「各持一把锁」窗口——因 import 系统串行化模块初始化
+# 只是碰巧良性。threading 经 concurrent.futures 顶层导入已计入导入成本，
+# 这里不新增启动开销。
+_asyncio_lock = threading.Lock()
+
+
+def _get_asyncio():
+    """懒加载 asyncio 模块（B-09，双检锁，先例 kazumi/captcha.py _load_cnn）。"""
+    global _asyncio_mod
+    if _asyncio_mod is None:
+        with _asyncio_lock:
+            if _asyncio_mod is None:
+                import asyncio
+                _asyncio_mod = asyncio
+    return _asyncio_mod
 
 try:
     # ``requests`` is an optional transport dependency for the runtime
@@ -171,6 +196,8 @@ class RuntimeError(Exception):
 def error_from_exception(exc: Exception, *, stage: str = 'runtime', request=None,
                          site_key: str = '', runtime: str = '') -> RuntimeError:
     """把旧异常映射到稳定错误码；不向 UI 泄露完整原始异常。"""
+    # B-09：asyncio 首次映射异常时才加载（启动链不付 ~80ms import 成本）
+    asyncio = _get_asyncio()
     if isinstance(exc, RuntimeError):
         return exc.with_request(request)
     timeout_types = (TimeoutError, asyncio.TimeoutError,

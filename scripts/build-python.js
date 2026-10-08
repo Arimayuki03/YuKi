@@ -47,15 +47,19 @@ try {
     run(`python -m pip install -r "${BUILD_REQUIREMENTS}" -r "${RUNTIME_REQUIREMENTS}"`);
 }
 // 导入守卫：与 PyInstaller 用同一解释器，缺包在打包前就失败，而不是打进产物后
-// 在用户机器上才炸。quickjs/lxml 是 hidden-import 项，同样纳入检查。
-// curl_cffi / qrcode / PIL 是夸克扫码登录（pan_login.py）的生产依赖，且全部是**函数内
-// 惰性 import + 缺失即优雅降级**（curl_cffi 抛可读 RuntimeError、qrcode 渲染返回 None）：
-// 打包期不报错、运行时才让功能静默不可用，而本地 venv 的手装残留会完全掩盖这个缺口
-// （只有 CI 全新环境才暴露），所以必须显式纳入守卫。
+// 在用户机器上才炸。守卫与下方 --hidden-import 清单必须同源维护：凡 hidden-import
+// 声明的子模块（uvicorn.auto 三件套、lxml、quickjs、qrcode.image.pil、PIL.Image）
+// 一并纳入检查。curl_cffi / qrcode / PIL 是夸克扫码登录（pan_login.py）的生产
+// 依赖，且全部是**函数内惰性 import + 缺失即优雅降级**（curl_cffi 抛可读
+// RuntimeError、qrcode 渲染返回 None）：打包期不报错、运行时才让功能静默不可用，
+// 而本地 venv 的手装残留会完全掩盖这个缺口（只有 CI 全新环境才暴露），所以必须
+// 显式纳入守卫。注意：ddddocr/onnxruntime 已按体积决策移除（2026-10-01，省
+// ~200MB），不是 hidden-import，也不进守卫——误装回 venv 反而会撑爆体积门禁。
 // 输出保持 ASCII（run_all 同约）：release CI 无 PYTHONUTF8，中文 print 会 UnicodeEncodeError。
 run(`"${VENV_PYTHON}" -c "`
-    + 'import fastapi, uvicorn, requests, lxml, quickjs, jsonpath_ng, bs4, cachetools, multipart, '
-    + 'curl_cffi, qrcode, PIL.Image; '
+    + 'import fastapi, uvicorn, uvicorn.logging, uvicorn.loops.auto, uvicorn.protocols.http.auto, '
+    + 'requests, lxml, quickjs, jsonpath_ng, bs4, cachetools, multipart, '
+    + 'curl_cffi, qrcode, qrcode.image.pil, PIL.Image; '
     + "print('[build-python] import guard OK')\"", BACKEND);
 
 // 2. 清理旧产物
@@ -91,12 +95,13 @@ const cmd = [
     // PyInstaller 静态分析抓不到；不显式声明的话扫码二维码在打包版里渲染为空。
     '--hidden-import', 'qrcode.image.pil',
     '--hidden-import', 'PIL.Image',
-    // ddddocr（验证码识别主链）：onnxruntime C 扩展与包内 onnx 模型按平台
-    // 动态加载，静态分析抓不全；不声明的话自动识别在打包版里静默降级为
-    // 人工窗口（CI 构建机缺依赖时 PyInstaller 只告警不失败，锁文件校准兜底）。
-    '--hidden-import', 'ddddocr',
-    '--hidden-import', 'onnxruntime',
-    '--collect-all', 'ddddocr',
+    // 验证码识别链（2026-10-01 终态）：tiny-CNN（numpy 纯推理 + assets 权重随
+    // 应用打包）→ 视觉大模型（用户配置的 OpenAI 兼容多模态接口，凭据按次传入）
+    // → 人工验证窗口。ddddocr/onnxruntime/opencv 已按体积决策移除（省 ~200MB），
+    // 无需 hidden-import。
+    // AVIF 解码插件（_avif pyd 约 7.9MB）：业务只生成二维码/验证码（PIL.Image 保存），
+    // 无 AVIF 解码需求；显式排除避免 PyInstaller 把 PIL 的可选插件连带打包。
+    '--exclude-module', 'PIL.AvifImagePlugin',
     'server.py',
 ].join(' ');
 
@@ -141,9 +146,75 @@ try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { /* ign
 const specFile = path.join(BACKEND, 'yuki-backend.spec');
 try { fs.unlinkSync(specFile); } catch (e) { /* ignore */ }
 
+// 6. 体积门禁：python-dist 总大小超上限即构建失败（L5：成功日志移到门禁之后，
+// 避免「完成！」打在门禁失败之前误导读者）。
+// 上限 180MB（2026-10-01 ddddocr 移除决策：验证码识别链改为 tiny-CNN（~3MB 权重）
+// → 视觉大模型（用户配置，零打包体积）→ 人工窗口；ddddocr+onnxruntime+opencv
+// 约 200MB 全部省去，实测基线回落至 ~65MB 量级；180 = 65 + 防异常膨胀余量）。
+// 紧急绕过：YUKI_SIZE_GATE=0 跳过断言（例如临时引入大依赖且门禁上限
+// 尚未调整时，允许先出包，但必须在同一 PR 内上调 SIZE_LIMIT 或恢复门禁）。
+const SIZE_LIMIT_MB = 180;
+const sizeGateEnabled = process.env.YUKI_SIZE_GATE !== '0';
+if (sizeGateEnabled) {
+    const subdirs = [];
+    let totalBytes = 0;
+    for (const entry of fs.readdirSync(DIST, { withFileTypes: true })) {
+        const p = path.join(DIST, entry.name);
+        const bytes = entry.isDirectory() ? dirSize(p) : fileSize(p);
+        totalBytes += bytes;
+        subdirs.push({ name: entry.name, bytes });
+    }
+    const totalMB = totalBytes / (1000 * 1000);
+    console.log(`[build-python] 体积门禁：python-dist 总计 ${totalMB.toFixed(1)} MB / 上限 ${SIZE_LIMIT_MB} MB`);
+    if (totalMB > SIZE_LIMIT_MB) {
+        // 超限时按体积降序列出每子目录 top-10（含 _internal 下二级目录），
+        // 直接给出「谁吃掉了体积」的定位线索，省去再手工扫一遍。
+        subdirs.sort((a, b) => b.bytes - a.bytes);
+        console.error('[build-python] 超限！各子目录体积（降序 top-10）：');
+        for (const s of subdirs.slice(0, 10)) {
+            console.error(`  ${s.name}: ${(s.bytes / (1000 * 1000)).toFixed(1)} MB`);
+        }
+        const internalDir = path.join(DIST, 'yuki-backend', '_internal');
+        if (fs.existsSync(internalDir)) {
+            const internals = fs.readdirSync(internalDir, { withFileTypes: true })
+                .map((e) => ({ name: e.name, bytes: e.isDirectory()
+                    ? dirSize(path.join(internalDir, e.name))
+                    : fileSize(path.join(internalDir, e.name)) }))
+                .sort((a, b) => b.bytes - a.bytes)
+                .slice(0, 10);
+            console.error('[build-python] yuki-backend/_internal 下 top-10：');
+            for (const s of internals) {
+                console.error(`  ${s.name}: ${(s.bytes / (1000 * 1000)).toFixed(1)} MB`);
+            }
+        }
+        console.error(`[build-python] 产物超限：请排查依赖（如误引 onnx 类重库），`
+            + `或评估后上调 SIZE_LIMIT_MB / 以 YUKI_SIZE_GATE=0 临时绕过。`);
+        process.exit(1);
+    }
+} else {
+    // L5：跳过门禁必须显式留痕，不能静默出包
+    console.warn('[build-python] 警告：体积门禁已通过 YUKI_SIZE_GATE=0 跳过');
+}
+
 console.log('[build-python] 完成！产物在 python-dist/');
 
 // --- helpers ---
+
+function fileSize(p) {
+    try { return fs.statSync(p).size; } catch (e) { return 0; }
+}
+
+function dirSize(p) {
+    let total = 0;
+    let entries;
+    try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch (e) { return 0; }
+    for (const entry of entries) {
+        const child = path.join(p, entry.name);
+        if (entry.isDirectory()) total += dirSize(child);
+        else if (entry.isFile()) total += fileSize(child);
+    }
+    return total;
+}
 
 function copyDir(src, dst) {
     fs.mkdirSync(dst, { recursive: true });

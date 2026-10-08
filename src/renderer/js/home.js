@@ -4,8 +4,11 @@
  * 数据链路：GET /sites 取站点列表 → doAction('homeContent', {site}) 取
  * 分类(class)与推荐位(list) → 点分类走 categoryContent 分页。
  * 卡片点击交给 Detail.open()。
+ * B-12 启动路径例外：缓存预渲染成功（当前源已从本地缓存选出）时，首页 feed 先于
+ * /sites 预发（feed 的 doAction 只消费源 key，与站点列表枚举无数据依赖）；
+ * loadSites 与预发并行拉 /sites，返回后按代接管（跳过重复 loadHome）、只刷源下拉。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, errorTextOf, playCardsEnter, stageAppendedCards */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, localCacheDel, errorTextOf, playCardsEnter, stageAppendedCards, DetailSnap, vodPlaceholder, guardedLoad, prefetchDetail, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
@@ -54,6 +57,13 @@ function isDemoOnlySites(list) {
 // 网络返回后以最新覆盖，TTL 只决定「多久以内的旧内容可用于即时上屏」）
 const HOME_FEED_CACHE_PREFIX = 'home::feed::v1::';   // + site → { ts, pagecount, items[] }
 const HOME_FEED_CACHE_TTL = 2 * 60 * 60 * 1000;
+// 「全部」feed 合并窗口快照持久化（B-05）：_catWin 纯内存，重启即丢——冷启动翻
+// 第 2 页要从源页 1 全量重拉。窗口第 1 页构建完成后快照落盘（每源一条 key），
+// 冷启动/切回该源时恢复，翻页从断点源页续拉。TTL 24h：内容陈旧无害（feed 翻页/
+// 刷新会重拉覆盖），窗口进度丢了才是全量重拉的代价，故比 feed 上屏缓存（2h）长。
+const CAT_WIN_CACHE_PREFIX = 'home::catwin::v1::';   // + site → { ts, fp, sourcePg, total, perPage, items[] }
+const CAT_WIN_CACHE_TTL = 24 * 3600 * 1000;
+const CAT_WIN_CACHE_MAX_ITEMS = 300; // 快照条数护栏：正常第 1 页窗口 ≤ 一个源页边界，防异常数据撑爆 localStorage
 // 合并窗口（分类/「全部」feed）单次加载最多串行补拉的源页数：原上限 200 次串行
 // 请求，深页跳转最坏卡死数分钟；超出护栏的页直接按无数据占位（不再继续补拉）
 const CAT_WIN_MAX_FETCH = 30;
@@ -127,10 +137,30 @@ const Home = {
     _probeRound2Keys: [],   // 待补测源 key（调度时合并去重，触发时取走清空）
     _configPending: false,  // 配置恢复/导入进行中（后端还没有站点）：刷新/搜索/分类请求必然落空
     _userRefresh: false,    // 本次 loadHome 由刷新按钮触发（失败保留内容时给用户反馈）
+    // B-12 启动 feed 预发：缓存预渲染成功后不等 /sites，先发首页 feed（自分配令牌）。
+    // loadSites 网络就绪后按代接管（跳过重复 loadHome）或放弃；仅服务冷启动窗口，
+    // 接管/取消后即归零（_bootPrefetchPromise 由 finally 自清，null = 无预发在途）。
+    _bootPrefetchToken: 0,      // 预发令牌快照：接管点校验世代，取消/接管后置 0
+    _bootPrefetchSite: '',      // 预发目标源快照：/sites 换源后接管必须放弃
+    _bootPrefetchPromise: null, // 预发 loadHome 的 Promise（在途期间 loadSites 让位）
+    _bootPrefetchOk: false,     // 预发结算标记（M9）：true = loadHome 正常 resolve；resolve 前为 false
 
     async init() {
         if (this._inited) return;
         this._inited = true;
+        // 全局番剧屏蔽：词表/开关变更时就地重渲染当前画面（不重发网络请求）。
+        // 首页的过滤在 renderGrid/_appendGrid 内，这里只需用上次渲染的原始列表重放一遍。
+        if (typeof onBlockWordsChange === 'function') {
+            // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+            // loadBlockWords() 让新词表穿透缓存，否则仍按旧词表渲染。
+            onBlockWordsChange(async () => {
+                await loadBlockWords();
+                if (!this._inited) return;
+                this.renderGrid(this._lastList || [], this._catError);
+            });
+            // 首屏前把词表读进内存：否则首帧按「无屏蔽」渲染，用户会看到本该屏蔽的卡片闪一下
+            await loadBlockWords();
+        }
         $('#site-select').on('change', () => {
             this._cacheDropSite(this.site); // 切源时清理旧源的页缓存
             this.site = $('#site-select').val();
@@ -163,8 +193,28 @@ const Home = {
         });
         $('#home-grid').on('click', '.vod-card', (e) => {
             const el = $(e.currentTarget);
+            // A-01 写入侧：fire-and-forget。快照是纯优化——detail-snap.js 加载失败
+            // 时缺席静默跳过（对齐 records/search 同批口径），不得打断下方 Detail.open。
+            if (typeof DetailSnap !== 'undefined' && DetailSnap.put) DetailSnap.put(this.site, el.data('id'), Home._snapFieldsFromCard(el));
             Detail.open(this.site, el.data('id'), el.data('name'));
         });
+        // 详情意图预取：悬停/触摸开始时提前发 detailContent（common.js 全局去重 +
+        // 并发护栏），点击到达时详情多半已回——简介/线路秒出。mouseenter 不冒泡，
+        // 用 mouseover + 去重（同一卡片连续进入只预取一次，扫过一列只发新卡）。
+        if (typeof prefetchDetail === 'function') {
+            let prefetchLast = '';
+            $('#home-grid')
+                .on('mouseover', '.vod-card', (e) => {
+                    const id = String($(e.currentTarget).data('id') || '');
+                    if (!id || id === prefetchLast) return;
+                    prefetchLast = id;
+                    prefetchDetail(this.site, id);
+                })
+                .on('pointerdown', '.vod-card', (e) => {
+                    const id = String($(e.currentTarget).data('id') || '');
+                    if (id) prefetchDetail(this.site, id); // 触摸设备无 hover：按下即预取
+                });
+        }
         this._loadPersistedEmptyClasses(); // T60：载入持久化空分类结果，首屏即隐藏空分类（无闪现）
         await this._resetSessionEvidence(); // 连败计数只算本会话：清掉上次会话遗留的欠账
         // 预渲染前先取屏蔽列表：缓存列表是 /sites 原始输出，含已屏蔽源——不过滤
@@ -175,9 +225,98 @@ const Home = {
         const bootSettings = await this._getSourceSettings();
         const blocked = await this._getBlocked(bootSettings);
         this._prerenderFromCache(blocked, bootSettings); // 冷启动即时上屏：网络返回前先用缓存渲染源下拉 + 分类标签
+        // B-12：预渲染成功（当前源已从缓存选出）→ 不等 /sites 先发首页 feed，
+        // 与下方 loadSites 的 /sites 请求并行。loadSites 网络就绪后按代接管渲染，
+        // 预发失败/被弃则由原串行路径兜底（接口行为与旧版一致）。
+        this._bootPrefetchHome();
         // silent：启动自动首载不上全局遮罩——缓存画面保持可见，网络返回后原位覆盖
         // （开机链路上遮罩反复闪现的源头之一，与重载完成刷新同策略）。
-        await this.loadSites({ silent: true });
+        // B-12：bootPrefetch 标记本次为冷启动链路——入口与预发让位共存（见上）。
+        await this.loadSites({ silent: true, bootPrefetch: true });
+    },
+
+    /**
+     * B-12 启动 feed 预发（仅 init 调用）：缓存预渲染成功、当前源可用时，不等
+     * /sites 先发一次 loadHome。数据流依据：loadHome/_fetchHomeFeed 的 doAction
+     * 只消费「源 key」（homeContent/homeVideoContent 的 site 参数），feed 与
+     * /sites 的站点枚举无数据依赖——预渲染已从本地缓存选出 this.site。
+     * 范围收窄：上次离开时的视图是分类/搜索时不预发——那条恢复路径自会发请求，
+     * 预发只会被其令牌重建作废（还短暂闪一屏 home 内容）。
+     * 竞态防护：预发复用 loadHome 自持的一代令牌（其同步前缀 _nextLoadToken）；
+     * init 的 loadSites（opts.bootPrefetch）入口让位不重建（_bootPrefetchYield），
+     * /sites 返回后接管点按 token/site 快照校验——同代同源则跳过末尾重复 loadHome，
+     * 换源/换代/恢复期则原串行路径兜底。设置面板/配置重载触发的 loadSites 不传
+     * bootPrefetch，入口照旧重建一代（顺带作废在途预发），行为与旧版一致。
+     */
+    _bootPrefetchHome() {
+        if (!this.site || this._bootPrefetchPromise) return; // 无缓存源/已有预发在途：不预发
+        // L37：站点缓存缺失或 demo-only（恢复/导入未完成）时不预发——此时 _configPending
+        // 尚未置位（要等 /sites 网络返回），预发会对 demo 源发必然落空的请求（预取必败）。
+        // 缓存有真实站点 = 上次会话配置已就绪，恢复窗口期预发才有意义。
+        if (typeof this.hasSiteCache === 'function' && !this.hasSiteCache()) return;
+        const st = this._viewState();
+        if (st && st.mode !== 'home') return; // 分类/搜索恢复路径：不预发（避免重复请求与画面闪动）
+        // loadHome 同步前缀完成令牌自持 + 缓存 feed 即时上屏，此后才挂起在 _pageSize
+        const p = this.loadHome(undefined, { silent: true, bootPrefetch: true });
+        const token = this._loadToken; // 预发令牌快照 = loadHome 自持的那一代
+        const site = this.site;
+        this._bootPrefetchToken = token;
+        this._bootPrefetchSite = site;
+        // M9：结算标记初始 false（未结算/失败都不得接管），resolve 后置 true
+        this._bootPrefetchOk = false;
+        this._bootPrefetchPromise = p.then(() => { this._bootPrefetchOk = true; }, () => { /* 预发失败静默：接管点按结算标记走原串行路径 */ }).finally(() => {
+            this._bootPrefetchPromise = null;
+            // 旧代下结算（切源/换配置/站点校正）：快照随旧代作废，清零防残留；
+            // 同代同源结算：保留快照 + 结算标记供接管点判定（M9：仅成功完成才可接管）
+            if (token !== this._loadToken || site !== this.site) {
+                this._bootPrefetchToken = 0;
+                this._bootPrefetchSite = '';
+            }
+        });
+    },
+
+    /** B-12：init 的冷启动 loadSites 入口与预发并存时让位——不重建加载代（预发
+     *  令牌存活）。预发的 loadHome 同步前缀已经 _nextLoadToken 建好 abort 通道
+     *  （_loadAbort 与预发代同存，从未清空），无需在此补建。
+     *  返回 false = 无预发在途，调用方走原 _nextLoadToken（行为与旧版一致）。
+     *  M9：成功结算的旧快照同样走让位（接管点 await 后按 _bootPrefetchOk 判定）。 */
+    _bootPrefetchYield() {
+        // 成功结算的旧快照：Promise 已清、令牌存活——与在途同走让位，由接管点判定
+        if (!this._bootPrefetchPromise && !this._bootPrefetchSettledOk()) return false;
+        return true;
+    },
+
+    /** B-12：loadSites 网络就绪、源下拉刷新后的预发处置点。返回 true = 预发渲染
+     *  接管本次启动渲染（调用方跳过末尾 loadHome）；false = 无预发/换源/换代/
+     *  预发失败，走原串行兜底 loadHome。M9：接管必须以预发「成功完成」为前提——
+     *  预发仍在途时先等其结算再判（loadSites 链路里本就有多个 await 点，等待
+     *  不引入额外时序）；loadHome 内部失败包络仍会 resolve（渲染空态/保留旧画面
+     *  非异常，属正常画面，不算失败），但 reject（组件异常等）或结算为失败时
+     *  接管会把故障画面永久顶在首页且跳过兜底，故拒绝接管。
+     *  快照一次性消费：接管/放弃后不再进入本分支。 */
+    async _bootPrefetchTakeOver() {
+        const token = this._bootPrefetchToken;
+        const site = this._bootPrefetchSite;
+        // 在途预发先等结算（M9）：结算只改标记/清 promise，不重建令牌，等待安全
+        if (this._bootPrefetchPromise) await this._bootPrefetchPromise.catch(() => {});
+        const ok = this._bootPrefetchOk; // 结算标记：true = 预发正常完成
+        this._bootPrefetchToken = 0;
+        this._bootPrefetchSite = '';
+        this._bootPrefetchOk = false;
+        if (!token || token !== this._loadToken || site !== this.site) return false; // 换源/换代：预发随旧代作废
+        if (!ok) return false; // M9：预发失败（或异常结算）→ 拒绝接管，调用方兜底 loadHome
+        // 预发 loadHome 已按当前「每页条数」设置渲染：抵消 loadSites 开头
+        // invalidatePageCaches 置位的脏标记，防 showView 时又触发一次重载（T80）。
+        this._pageSizeDirty = false;
+        return true;
+    },
+
+    /** M9：预发是否已「成功完成」结算（_bootPrefetchPromise 已清、_bootPrefetchOk
+     *  为 true 且快照同代同源）。供接管点判定；旧代遗留快照视为未结算。 */
+    _bootPrefetchSettledOk() {
+        return !this._bootPrefetchPromise && this._bootPrefetchOk === true &&
+            !!this._bootPrefetchToken && this._bootPrefetchToken === this._loadToken &&
+            this._bootPrefetchSite === this.site;
     },
 
     /** 冷启动即时上屏：用本地缓存的站点列表 + 当前源分类标签预渲染，避免等 /sites & homeContent 网络。
@@ -244,7 +383,10 @@ const Home = {
         const sitesLoadToken = ++this._sitesLoadToken;
         const isCurrentSitesLoad = () => sitesLoadToken === this._sitesLoadToken;
         // 配置切换时让正在进行的旧首页请求立即失效，避免旧内容回写。
-        this._nextLoadToken();
+        // B-12：仅 init 的冷启动 loadSites（opts.bootPrefetch）与 feed 预发并存时
+        // 让位——预发令牌存活，不重建代；配置重载事件/设置面板等其余入口照旧
+        // 重建一代（顺带作废在途预发），与旧版行为一致。
+        if (!(opts && opts.bootPrefetch && this._bootPrefetchYield())) this._nextLoadToken();
         // 先读取开关，再拉取源列表：即使 /sites 瞬时失败，也要保证关闭自动检测时
         // 不会继续使用历史 blockedSites 过滤源。
         const settings = await this._getSourceSettings();
@@ -311,6 +453,9 @@ const Home = {
             this._configPending = true; // 恢复未完成：站点请求会打空，刷新/搜索入口先提示
             this.sites = this._allSites.filter((s) => blocked.indexOf(s.key) < 0);
             this._renderSiteSelect();
+            // 恢复占位态提前返回：作废在途预发快照，防其接管后覆盖占位画面
+            this._bootPrefetchToken = 0;
+            this._bootPrefetchSite = '';
             return;
         }
         // 源集合变更（配置自动重载后 key 集不同，多仓漂移常见）：旧探测/屏蔽记录
@@ -331,6 +476,9 @@ const Home = {
                 $('#home-class').empty();
                 $('#home-grid').html('<div class="tip-line">正在恢复上次的配置，完成后自动刷新…</div>');
                 $('#home-pager').empty();
+                // 恢复占位态提前返回：作废在途预发快照，防其接管后覆盖占位画面
+                this._bootPrefetchToken = 0;
+                this._bootPrefetchSite = '';
                 return;
             }
             // 任务不在跑：真·首次运行（无任何配置），继续走示例源引导
@@ -368,11 +516,22 @@ const Home = {
             $('#home-class').empty();
             $('#home-grid').html('<div class="tip-line">尚未载入任何配置。请到“设置 → CatVod源设置”，粘贴配置 URL 或 JSON 后点“载入配置”。</div>');
             $('#home-pager').empty();
+            // 引导态提前返回：作废在途预发快照，防其接管后覆盖引导画面
+            this._bootPrefetchToken = 0;
+            this._bootPrefetchSite = '';
             return;
         }
         if (!this.sites.some((s) => s.key === this.site)) this.site = this.sites[0].key;
         $('#site-select').val(this.site);
         if (!isCurrentSitesLoad()) return;
+        // B-12：/sites 返回后预发处置——预发同代同源时由其渲染接管本次启动
+        // （feed 只依赖源 key，站点列表不变则预发即最新）；否则原路径兜底。
+        // 换代遗留快照（配置重载作废在途预发）：此处顺手清零，防下次误判接管。
+        if (this._bootPrefetchToken && this._bootPrefetchToken !== this._loadToken) {
+            this._bootPrefetchToken = 0;
+            this._bootPrefetchSite = '';
+        }
+        const bootTakeOver = await this._bootPrefetchTakeOver();
         // 页面状态恢复（切页/重启不回初始态）：回到上次离开时的源 + 视图模式。
         // 分类栏先用该源的持久化分类缓存渲染（homeContent 未返回前分类不空白），
         // 缓存缺失或分类已不存在时退回「全部」feed，不为恢复多发一次阻塞请求。
@@ -391,9 +550,9 @@ const Home = {
             }
         } else if (savedView && savedView.mode === 'search' && savedWord) {
             await this.searchCurrent(Number(savedView.page) || 1);
-        } else {
+        } else if (!bootTakeOver) {
             await this.loadHome(undefined, { silent });
-        }
+        } // else：B-12 接管——预发 loadHome 已渲染当前源「全部」feed，跳过重复请求
         if (!isCurrentSitesLoad()) return;
         if (this._autoProbeEnabled) {
             // 探测延迟启动：先让首页 feed/分类上屏（避免 8 并发探测与首屏内容
@@ -967,7 +1126,9 @@ const Home = {
             dismissLoading();
         }
         // T60：后台探测分类，隐藏无影片的分类（不阻塞首屏；结果不丢进度，见 _probeClasses）
-        if (this._autoProbeEnabled) this._probeClasses();
+        // B-12：bootPrefetch 预发不触发——探测轮由 loadSites 末尾统一延迟调度
+        // （PROBE_START_DELAY 后开跑），预发提前触发会与首屏请求抢后端。
+        if (this._autoProbeEnabled && !(opts && opts.bootPrefetch)) this._probeClasses();
     },
 
     /**
@@ -1040,6 +1201,9 @@ const Home = {
         this._cachePut(site, '__all__', pg, this._homeList, this.pagecount);
         // 持久化首页 feed 缓存（仅第 1 页、有内容时写入，下次冷启动直接上屏）
         this._cacheHomePut(site, this._homeList, this.pagecount);
+        // B-05：第 1 页窗口构建完成 → 快照合并窗口落盘（失败/空窗口在上方提前
+        // return 已跳过）；翻页（pg>1）不写，快照只锚定第 1 页断点
+        if (pg === 1) this._catWinCachePut(site, win);
         return this._homeList;
     },
 
@@ -1055,7 +1219,9 @@ const Home = {
     _cacheHomePut(site, items, pagecount) {
         try {
             if (typeof localCacheSet !== 'function' || !site || !Array.isArray(items) || !items.length) return;
-            localCacheSet(HOME_FEED_CACHE_PREFIX + site, { ts: Date.now(), pagecount, items: items.slice(0, 60) }, HOME_FEED_CACHE_TTL);
+            // B-10：feed 快照整页 60 卡 JSON（数十 KB）显式落大池（yuki_bigcache::），
+            // 与小池高频条目（封面/匹配等）独立记账互不挤占（优化.md 轻量方案裁决）
+            localCacheSet(HOME_FEED_CACHE_PREFIX + site, { ts: Date.now(), pagecount, items: items.slice(0, 60) }, HOME_FEED_CACHE_TTL, { pool: 'big' });
         } catch (e) { /* 缓存失败忽略 */ }
     },
 
@@ -1106,9 +1272,13 @@ const Home = {
     _appendGrid(items) {
         const grid = $('#home-grid');
         if (grid.children('.tip-line').length) grid.empty();
+        // 全局番剧屏蔽：渐进批次同样剔除命中条目（与 renderGrid 同口径）
+        const batch = (typeof filterBlocked === 'function')
+            ? filterBlocked(items, (v) => String((v && v.vod_name) || '')) : items;
+        if (!batch.length) return;
         // T65：新增卡片拼串后单次 append（替代逐条 append）
         const before = grid.children('.vod-card').length;
-        grid.append(items.map((v) => vodCard(v, this.site)).join(''));
+        grid.append(batch.map((v) => vodCard(v, this.site)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
         // 入场错峰：渐进批次只给新卡补延迟（旧卡不重播，common.js stageAppendedCards）
@@ -1133,20 +1303,16 @@ const Home = {
     },
 
     /**
-     * 新一代加载令牌：作废旧世代。此前令牌只是「渲染层丢弃旧结果」，在途请求
-     * 仍会打满站点 worker 的串行队列（每站并发 1、队列 8），快速切分类时请求
-     * 风暴把上游打到限流/超时，切完分类反而报「暂无内容（L3_RUNTIME_CALL_FAILED）」。
-     * 现在同代 AbortController 一并重建，doAction 的 signal 真正中止在途网络请求
-     * 并通知后端协作取消。
+     * 新一代加载令牌（A-31 收口到 common.js guardedLoad，原 _nextLoadToken 先例）：
+     * 作废旧世代。此前令牌只是「渲染层丢弃旧结果」，在途请求仍会打满站点 worker
+     * 的串行队列（每站并发 1、队列 8），快速切分类时请求风暴把上游打到限流/超时，
+     * 切完分类反而报「暂无内容（L3_RUNTIME_CALL_FAILED）」。现在 abort 型 guardedLoad
+     * 一并重建同代 AbortController，doAction 的 signal 真正中止在途网络请求并通知
+     * 后端协作取消。
      */
     _nextLoadToken() {
-        if (typeof AbortController === 'function') {
-            if (this._loadAbort) {
-                try { this._loadAbort.abort('superseded'); } catch (e) { /* ignore */ }
-            }
-            this._loadAbort = new AbortController();
-        }
-        return ++this._loadToken;
+        const g = guardedLoad(this, { abortable: true }); // abort 型（本文件/timeline.js 同源语义）
+        return g.token;
     },
 
     /**
@@ -1354,7 +1520,8 @@ const Home = {
         for (const k of Array.from(m.keys())) {
             if (k.indexOf(site + '|') === 0) m.delete(k);
         }
-        // 合并窗口同样按 site 清理
+        // 合并窗口同样按 site 清理（持久化快照刻意保留：按源隔离的续拉数据，
+        // 切回该源/下个会话仍可复用，与 feed 上屏缓存同策略，TTL 到期自然失效）
         for (const k of Array.from(this._catWin.keys())) {
             if (k.indexOf(site + '|') === 0) this._catWin.delete(k);
         }
@@ -1362,12 +1529,21 @@ const Home = {
 
     // ------------------------------------------------------------ 分类合并窗口（T75）
 
-    /** 取 site|tid 的源页合并窗口（懒建 + LRU：命中移到队尾，超 32 分类淘汰最旧）。 */
+    /** 取 site|tid 的源页合并窗口（懒建 + LRU：命中移到队尾，超 32 分类淘汰最旧）。
+     *  B-05：「全部」feed（tid='__all__'）窗口内存未命中时先尝试从持久化快照恢复，
+     *  冷启动翻页即可从快照的源页断点续拉，不必从源页 1 全量重拉。 */
     _catWinGet(site, tid) {
         const key = site + '|' + tid;
         let w = this._catWin.get(key);
         if (!w) {
             w = { items: [], seen: new Set(), sourcePg: 0, total: 0, perPage: 20 };
+            if (tid === '__all__') {
+                const snap = this._catWinCacheGet(site);
+                if (snap) {
+                    // 恢复快照：seen 与 items 一一对应（写入时同步 add/push），由 items 重建
+                    w = { items: snap.items, seen: new Set(snap.items.map((v) => v.vod_id)), sourcePg: snap.sourcePg, total: snap.total, perPage: snap.perPage };
+                }
+            }
             this._catWin.set(key, w);
             if (this._catWin.size > 32) this._catWin.delete(this._catWin.keys().next().value);
         } else {
@@ -1379,6 +1555,82 @@ const Home = {
     /** 删除指定 site|tid 的合并窗口（强制刷新时丢弃重拉）。 */
     _catWinDelete(site, tid) {
         this._catWin.delete(site + '|' + tid);
+        // 强制刷新（用户点刷新按钮）语义 = 窗口作废重拉最新：已落盘的快照同步删除，
+        // 否则下个会话又从旧快照恢复，刷新只对当前会话生效（幽灵缓存）。
+        if (tid === '__all__') this._catWinCacheDel(site);
+    },
+
+    // ---- 「全部」feed 合并窗口快照持久化（B-05）----
+
+    /** 快照条目精简：只保留卡片渲染（vodCard）与详情跳转消费的字段 + 去重主键，
+     *  其余源返回字段（简介/播放地址/扩展 json 等）丢弃，控制 localStorage 占用。 */
+    _catWinTrimItem(v) {
+        return { vod_id: v.vod_id, vod_name: v.vod_name, vod_pic: v.vod_pic, vod_remarks: v.vod_remarks };
+    },
+
+    /** 第 1 页窗口构建完成后的快照落盘（仅「全部」feed：首页 feed 是冷启动翻页主力）。
+     *  fp 绑定源内容指纹（api|spiderType），同名 key 换仓/换主后旧快照不误恢复。
+     *  M10：窗口超护栏（如 size=24 翻 13 页 ≈ 312 条 > 300）时不原样截断——截断条目
+     *  会被整页回退重拉覆盖（保留条目数 = sourcePg_retained × perPage，与 seen 的
+     *  items 重建自洽），恢复续拉无缺口；整页边界装不下则放弃本次落盘。 */
+    _catWinCachePut(site, win) {
+        try {
+            if (typeof localCacheSet !== 'function' || !site || !win || !win.items.length) return;
+            // M10：截断护栏与断点自洽——快照被截到 CAT_WIN_CACHE_MAX_ITEMS 条时，
+            // 恢复路径按 items 重建 seen 并从 sourcePg+1 续拉；若 sourcePg 不随之
+            // 回退，被截条目既不在 seen 也不会被续拉覆盖 → 永久缺口 + 重复风险。
+            // 选择「自洽回退 sourcePg」：按源页整页边界回退断点（perPage 为源页大小），
+            // 只保留完整源页，恢复翻页自会从回退断点重拉被丢页（重叠部分由 seen 去重，
+            // 恢复/续拉链路无缺口）；keepPg < 1（单页即超护栏，如 limit 巨大）时整页
+            // 回退不成立 → 放弃本次落盘。
+            const per = (win.perPage > 0 && isFinite(win.perPage)) ? win.perPage : 20;
+            let items = win.items;
+            let sourcePg = win.sourcePg;
+            if (items.length > CAT_WIN_CACHE_MAX_ITEMS) {
+                const keepPg = Math.min(sourcePg, Math.floor(CAT_WIN_CACHE_MAX_ITEMS / per));
+                if (!(keepPg >= 1)) return; // 无法保留完整一页：放弃本次落盘
+                items = items.slice(0, keepPg * per); // 整页边界截取（keepPg*per ≤ 护栏）
+                sourcePg = keepPg;
+            }
+            const s = this._allSites.find((x) => x && x.key === site);
+            const fp = s ? siteProbeFp(s) : '';
+            // perPage 取窗口实际值；total 原样——翻页续拉只靠自洽后的 sourcePg 与 items
+            localCacheSet(CAT_WIN_CACHE_PREFIX + site, {
+                ts: Date.now(), fp,
+                sourcePg, total: win.total || 0, perPage: win.perPage || 20,
+                items: items.map(this._catWinTrimItem),
+            }, CAT_WIN_CACHE_TTL);
+        } catch (e) { /* 缓存失败不影响主流程 */ }
+    },
+
+    /** 读取快照：过期/未命中/指纹不符/结构畸形（items 非数组、条目缺 vod_id、
+     *  sourcePg/perPage 非正数）一律按未命中处理——脏缓存不得进入渲染链路。 */
+    _catWinCacheGet(site) {
+        try {
+            if (typeof localCacheGet !== 'function' || !site) return null;
+            const d = localCacheGet(CAT_WIN_CACHE_PREFIX + site);
+            if (!d || typeof d !== 'object' || !Array.isArray(d.items) || !d.items.length) return null;
+            const pgOk = (n, min) => typeof n === 'number' && isFinite(n) && n >= min;
+            if (!pgOk(d.sourcePg, 1) || !pgOk(d.perPage, 1)) return null; // 断点未推进/非法 → 无恢复价值
+            if (d.total !== 0 && !pgOk(d.total, 1)) return null;
+            const items = [];
+            for (const v of d.items) {
+                // vod_id 为空即无法去重/跳详情，整条快照判畸形丢弃（部分损坏不可信）
+                if (!v || typeof v !== 'object' || v.vod_id == null || v.vod_id === '') return null;
+                items.push(this._catWinTrimItem(v));
+            }
+            const s = this._allSites.find((x) => x && x.key === site);
+            const fp = s ? siteProbeFp(s) : '';
+            if (d.fp && d.fp !== fp) return null; // 同名 key 换仓/换主：旧内容不可用
+            return { sourcePg: d.sourcePg, total: d.total, perPage: d.perPage, items };
+        } catch (e) { return null; }
+    },
+
+    /** 删除某源的窗口快照（强制刷新/切源清理时联动，不留幽灵缓存）。 */
+    _catWinCacheDel(site) {
+        try {
+            if (typeof localCacheDel === 'function' && site) localCacheDel(CAT_WIN_CACHE_PREFIX + site);
+        } catch (e) { /* ignore */ }
     },
 
     /**
@@ -1656,7 +1908,12 @@ const Home = {
 
     renderGrid(list, error) {
         const grid = $('#home-grid').empty();
-        if (!list.length) {
+        // 全局番剧屏蔽：渲染前剔除标题命中屏蔽词的条目（缓存/快照恢复路径的过滤点，
+        // 网络拉取路径在入库时已过滤；幂等，空词表时零开销）
+        const items = (typeof filterBlocked === 'function')
+            ? filterBlocked(list, (v) => String((v && v.vod_name) || '')) : list;
+        this._lastList = Array.isArray(list) ? list : []; // 屏蔽词变更时就地重渲染的画面来源
+        if (!items.length) {
             // #11：error 为后端/第三方源回传的 data.error（任意字符串/对象），
             // 进 .html() 前必须 escHtml，防止源注入 HTML/脚本
             const why = error ? `（${escHtml(errorTextOf(error, 100))}）` : '';
@@ -1664,7 +1921,7 @@ const Home = {
             return;
         }
         // T65：拼串一次性写入，替代逐条 append（减少 N 次 DOM 重排）
-        grid.html(list.map((v) => vodCard(v, this.site)).join(''));
+        grid.html(items.map((v) => vodCard(v, this.site)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
         // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
@@ -1703,3 +1960,26 @@ function vodCard(v, src, eager) {
     root.YUKI = root.YUKI || {};
     root.YUKI.home = Home;
 }(typeof window !== 'undefined' ? window : globalThis));
+
+// A-01 详情页列表快照写入侧（第一阶段；detail.js 消费接线由第二阶段代理做）：
+// 从点击的卡片 DOM 提取快照展示字段。DOM 是点击时刻卡片的单一数据面（列表项 v
+// 的 vod_pic 等不在点击处理器可达作用域）；卡片 DOM 不携带年份，跳过（部分快照
+// 合法）。封面为缺省占位图（assets/cover-fallback.svg）时不入快照：占位图渲染
+// hero 无意义，留空让详情页快照路径自行落占位逻辑。备注 .vod-remarks 文本为空
+// 时以 undefined 返回，由 DetailSnap.put 统一剔除（部分快照合法）。
+// 供 home/search/records/timeline/popular/bangumi-search 六处卡点击点复用
+// （Home 为顶层 const 全局可见）。
+// 封面 URL 刻意「原样捕获」不做代理解码：快照封面在详情页半渲染期要的就是
+// 「列表卡此刻正在显示的那个 URL」——同一会话内浏览器 HTTP 缓存必然命中，
+// hero 封面零网络秒出（解码回 origin 反而可能直连被墙图床，得不偿失）。跨会话
+// 后代理 URL（含端口+token）失效的场景由 onerror 占位兜底；bangumiInfo 到达后
+// 的完整 render 自会换上代理链首源（后端 B-08 磁盘缓存按 origin URL 命中）。
+Home._snapFieldsFromCard = function (el) {
+    const img = el.find('.vod-cover img').first();
+    const src = String(img.attr('src') || '');
+    return {
+        pic: src && src !== vodPlaceholder() ? src : undefined,
+        name: String(el.data('name') || '').trim() || undefined,
+        remarks: String(el.find('.vod-remarks').first().text() || '').trim() || undefined,
+    };
+};

@@ -15,9 +15,21 @@
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  * Kazumi 源页签独立走 /search/kazumi-stream SSE（2.3，T73 边搜边加载）。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter, FavHub, Timeline, bangumiEpBadge, BangumiSearch */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter, FavHub, Timeline, bangumiEpBadge, BangumiSearch, DetailSnap, Home, prefetchDetail, SettingsSnapshot, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 const SEARCH_PAGE_SIZE = 24; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39，默认 24）
+
+/** 详情快照写入（纯优化路径，永不抛错）。
+ *  DetailSnap 由 detail-snap.js 以 root.DetailSnap 挂载、Home 是 home.js 顶层
+ *  const——任一缺席都会在下方的 Detail.open / openBangumiInfoPage 之前抛
+ *  ReferenceError/TypeError，把「打开详情」主流程打断。写快照失败一律静默。 */
+function _snapPutSearch(site, id, $el) {
+    try {
+        if (typeof DetailSnap === 'undefined' || !DetailSnap.put) return false;
+        if (typeof Home === 'undefined' || typeof Home._snapFieldsFromCard !== 'function') return false;
+        return DetailSnap.put(site, id, Home._snapFieldsFromCard($el));
+    } catch (e) { return false; }
+}
 
 // ---- 搜索结果快照（页面状态持久化：切页/重启不回初始态）----
 // 搜索结束后把本次分组结果限量落盘（cache.js TTL 层），下次进入搜索页且无在途/
@@ -27,6 +39,15 @@ const SEARCH_SNAP_KEY_PREFIX = 'search::snap::'; // cache.js 键前缀（按页�
 const SEARCH_SNAP_TTL = 30 * 60 * 1000;          // 快照有效期 30 分钟
 const SEARCH_SNAP_MAX_GROUPS = 30;               // 快照最多收录源分组数
 const SEARCH_SNAP_MAX_ITEMS = 200;               // 每组最多收录条数
+// L39 容量上限：30 组 × 200 条 = 6000 条源返回 vod 原样收录（未裁剪大字段，
+// vod_play_url/vod_content 单条可达数百字节~数 KB），最坏可数 MB。cache.js 大池
+// 上限同为 3MB（MAX_BYTES_BIG）：need 超限静默拒收（false），2~3MB 区间则会被
+// 接收但挤占大池、按 t 淘汰其他大条目（各源 home feed 缓存等）。这里在写侧
+// 预检同阈值：超限不写（快照是体验优化非完整历史）并一次性 warn 诊断（平时
+// 静默不影响主流程；真发生说明源返回异常膨胀，值得留痕）。取舍得失：放弃
+// 「巨型快照部分收录」，换大池内 feed 缓存不被单条快照清场。
+const SEARCH_SNAP_MAX_BYTES = 3 * 1024 * 1024;   // 与 cache.js 大池 MAX_BYTES_BIG 对齐
+let SEARCH_SNAP_OVERSIZE_WARNED = false;         // 超限 warn 只发一次（避免每次搜索刷屏）
 
 /**
  * 创建一个页签专属的搜索控制器（聚合 / Kazumi 源 各一份）。
@@ -69,6 +90,52 @@ function createSearchPage(cfg) {
             if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
                 this._unsubFav = FavHub.onChanged(() => this.refreshBadges());
             }
+            // 全局番剧屏蔽：词表/开关变更时就地重算已渲染的分组（不重新发请求）。
+            // 分组的 raw 存着未过滤原始结果，重算后：整组被屏蔽干净 → 撤掉分组卡与
+            // 来源标签；条数变化 → 按当前页码重绘网格并更新计数。
+            if (typeof onBlockWordsChange === 'function') {
+                // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+                // loadBlockWords() 让新词表穿透缓存，否则就地重算仍按旧词表过滤。
+                onBlockWordsChange(async () => {
+                    await loadBlockWords();
+                    if (this._inited) this._repaintBlocked();
+                });
+            }
+            // 首搜前把词表读进内存：否则第一次搜索按「无屏蔽」渲染
+            if (typeof loadBlockWords === 'function') loadBlockWords();
+        },
+
+        /** 屏蔽词变更后重算全部分组（就地、无网络）。 */
+        _repaintBlocked() {
+            Object.keys(this._grpLists).forEach((gid) => {
+                const grp = this._grpLists[gid];
+                if (!grp) return;
+                const raw = Array.isArray(grp.raw) ? grp.raw : grp.list;
+                const kept = (typeof filterBlocked === 'function') ? filterBlocked(raw) : raw;
+                // gid 不作 DOM id：分组卡按 data-id 网格定位（`#${gid}` 恒空集死查询已删）
+                const $grp = $(`${cfg.resultsSel} .src-group`).filter(function () {
+                    return $(this).find(`#${gid}-grid`).length > 0;
+                });
+                if (!kept.length) {
+                    // 整组被屏蔽干净：撤掉分组卡与对应的来源筛选标签
+                    delete this._grpLists[gid];
+                    $grp.remove();
+                    $(cfg.filtersSel + ' .class-tab').filter(`[data-src="${CSS.escape(String(grp.src))}"]`).remove();
+                    // 显式回「全部」标签（data-src=""）：被删的可能正是当前活动标签，
+                    // 点 .active 会取空集失效，且点中的也未必是「全部」视图
+                    const $allTab = $(cfg.filtersSel + ' .class-tab').filter('[data-src=""]').first();
+                    if ($allTab.length && !$allTab.hasClass('active')) $allTab.trigger('click');
+                    return;
+                }
+                grp.list = kept;
+                $(`#${gid}-grid`).closest('.src-group').find('.src-count').text(String(kept.length));
+                $(cfg.filtersSel + ' .class-tab').filter(`[data-src="${CSS.escape(String(grp.src))}"]`)
+                    .text(`${grp.name || grp.src}（${kept.length}）`);
+                this._paintGrp(gid, 1);
+            });
+            // 全部分组都被屏蔽干净 → 显示空态（与搜索无结果同款文案）。
+            // 尚未发起过搜索时不得注入（改屏蔽词会误覆盖未搜索的空容器）。
+            if (this._searchToken && !Object.keys(this._grpLists).length) $(cfg.resultsSel).html('<div class="tip-line">无结果</div>');
         },
 
         /** 收藏变更后刷新徽标：重读映射并补挂当前全部分组网格。 */
@@ -146,6 +213,11 @@ function createSearchPage(cfg) {
                     let cachedMatch = null;
                     if (name && typeof Kazumi.getCachedBangumiMatch === 'function') cachedMatch = Kazumi.getCachedBangumiMatch(name);
                     if (cachedMatch && cachedMatch.id && typeof Kazumi.openBangumiInfoPage === 'function') {
+                        // A-01（Bangumi 快照写入侧）：Kazumi 结果经缓存匹配进 Bangumi 详情，
+                        // 卡片封面随快照垫场 hero（site='' 同 openBangumi 口径）
+                        if (typeof DetailSnap !== 'undefined' && DetailSnap.put) {
+                            _snapPutSearch('', String(cachedMatch.id), el);
+                        }
                         Kazumi.openBangumiInfoPage(cachedMatch.id, kazumiOrigin);
                         return;
                     }
@@ -165,7 +237,13 @@ function createSearchPage(cfg) {
                                         air_date: r0.air_date || r0.date || '',
                                     });
                                 }
-                                if (typeof Kazumi.openBangumiInfoPage === 'function') Kazumi.openBangumiInfoPage(r0.id, kazumiOrigin);
+                                if (typeof Kazumi.openBangumiInfoPage === 'function') {
+                                    // A-01（Bangumi 快照写入侧）：现场搜索匹配进详情，同快照口径
+                                    if (typeof DetailSnap !== 'undefined' && DetailSnap.put) {
+                                        _snapPutSearch('', String(r0.id), el);
+                                    }
+                                    Kazumi.openBangumiInfoPage(r0.id, kazumiOrigin);
+                                }
                                 else fallback();
                             } else {
                                 fallback();
@@ -176,8 +254,35 @@ function createSearchPage(cfg) {
                     fallback();
                     return;
                 }
+                // A-01 写入侧：CatVod 结果卡快照（封面可能已由补拉管线回填 DOM，fire-and-forget）。
+                // 与上方 Kazumi 分支同口径守卫：DetailSnap/Home 缺席时静默跳过，
+                // 不得在 Detail.open 之前抛错把主流程打断。
+                _snapPutSearch(src, el.data('id'), el);
                 Detail.open(src, el.data('id'), el.data('name'));
             });
+            // 详情意图预取（同 home.js）：悬停/触摸提前拉 detailContent，点击时
+            // 简介与线路多半已在缓存。只预取 CatVod 卡（kazumi 卡走 Bangumi 匹配链，
+            // 预取无消费路径）。
+            if (typeof prefetchDetail === 'function') {
+                let prefetchLast = '';
+                $(cfg.resultsSel)
+                    .on('mouseover', '.vod-card', (e) => {
+                        const el = $(e.currentTarget);
+                        const src = String(el.data('source') || '');
+                        const id = String(el.data('id') || '');
+                        if (!id || !src || src.startsWith('kazumi:') || src === 'bangumi') return;
+                        const pkey = src + '|' + id;
+                        if (pkey === prefetchLast) return;
+                        prefetchLast = pkey;
+                        prefetchDetail(src, id);
+                    })
+                    .on('pointerdown', '.vod-card', (e) => {
+                        const el = $(e.currentTarget);
+                        const src = String(el.data('source') || '');
+                        const id = String(el.data('id') || '');
+                        if (id && src && !src.startsWith('kazumi:') && src !== 'bangumi') prefetchDetail(src, id);
+                    });
+            }
         },
 
         /** 来源筛选标签：全部（限显前 20 条）/ 单源（分页看全部）。 */
@@ -327,7 +432,9 @@ function createSearchPage(cfg) {
                 try { payload = JSON.parse(ev.data); } catch (e) { return; }
                 recv += 1; // T74：每收到一个源（无论空/失败）都推进进度
                 const list = payload.list || [];
-                if (list.length) { shown += 1; items += list.length; this.renderGroup(payload, list); }
+                // 屏蔽在 renderGroup 内收口：整组被屏蔽干净时不计入「有结果的源」
+                const keptN = list.length ? (this.renderGroup(payload, list) || 0) : 0;
+                if (keptN) { shown += 1; items += keptN; }
                 this._setStatus('正在搜索…', { recv, total, items });
             };
 
@@ -359,8 +466,9 @@ function createSearchPage(cfg) {
                     results.forEach((r) => {
                         const data = r.data || [];
                         const payload = { source: 'kazumi:' + r.pluginName, name: r.pluginName };
-                        this.renderGroup(payload, data);
-                        if (data.length) { shown += 1; items += data.length; } // T60：只统计有结果的源
+                        // T60：只统计「屏蔽过滤后仍有结果」的源，计数与卡片数一致
+                        const keptN = data.length ? (this.renderGroup(payload, data) || 0) : 0;
+                        if (keptN) { shown += 1; items += keptN; }
                     });
                     // 已结束时更新为最终状态（含 Kazumi 结果）
                     this._setStatus(items ? `完成：${shown} 个源 · ${items} 条结果` : '无结果',
@@ -393,7 +501,19 @@ function createSearchPage(cfg) {
             let recv = 0;
             let shown = 0;
             let items = 0;
-            const es = new EventSource(apiUrl('/search/kazumi-stream?word=' + encodeURIComponent(word)));
+            // 验证码视觉 LLM 凭据随查询串传入（仅用于后端 ocrAvailable 探测与
+            // 后续 solve 动作，检索本身零 LLM 请求；不配置时省略参数）。
+            // 安全：captchaLLMKey 不随 URL 传输——EventSource 只能走 GET，完整
+            // 查询串会被 uvicorn 访问日志原样记录，密钥会落进明文日志。
+            // 方法在门面对象 Search 上（本处 this 是页签控制器），必须显式取。
+            let llmQ = '';
+            try {
+                const llmP = await Search._captchaLlmParams();
+                const { captchaLLMKey, ...safeLlm } = llmP; // eslint-disable-line no-unused-vars
+                const qs = new URLSearchParams(safeLlm).toString();
+                if (qs) llmQ = '&' + qs;
+            } catch (e) { /* 读设置失败按未配置处理 */ }
+            const es = new EventSource(apiUrl('/search/kazumi-stream?word=' + encodeURIComponent(word) + llmQ));
             this.es = es;
             es.onmessage = (ev) => {
                 let payload;
@@ -401,7 +521,9 @@ function createSearchPage(cfg) {
                 recv += 1;
                 if (payload.captcha) { this._renderKazumiCaptcha(payload); }
                 const list = payload.list || [];
-                if (list.length) { shown += 1; items += list.length; this.renderGroup(payload, list); }
+                // 屏蔽在 renderGroup 内收口：整组被屏蔽干净时按「该源无结果」处理
+                const keptN = list.length ? (this.renderGroup(payload, list) || 0) : 0;
+                if (keptN) { shown += 1; items += keptN; }
                 // 已验证但无结果的源：非验证问题（该源没收录此词），把「已验证·搜索中…」
                 // tab 收尾为「已验证·无结果」，不再静默消失
                 if (payload.source && !list.length && !payload.captcha
@@ -452,7 +574,17 @@ function createSearchPage(cfg) {
                 // 自动解题：后端取图→识别→提交→复验；成功后直接重搜
                 if (pluginName && typeof doAction === 'function') {
                     $tab.addClass('solving').text(`${$tab.data('captcha-name')} 识别中…`);
-                    doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000).then((rsp) => {
+                    // LLM 凭据异步取（非 async 回调：测试 VM 沙箱不支持函数体 await），
+                    // 取到后再发 solve；读失败按未配置处理。
+                    // 方法挂在门面对象 Search 上（本处 this 是页签控制器，取不到），
+                    // 必须显式取且要判存在——直接在实参位置调用会在 Promise.resolve
+                    // 求值前同步抛 TypeError，后面的 .catch 接不住，自动解题会永久
+                    // 停在「识别中…」且不回落人工窗口。
+                    const llmGetter = (typeof Search !== 'undefined' && Search._captchaLlmParams)
+                        ? Search._captchaLlmParams.bind(Search) : null;
+                    Promise.resolve(llmGetter ? llmGetter() : {}).catch(() => ({})).then((llmP) => {
+                        return doAction('kazumiCaptchaSolve', { plugin: pluginName, ...llmP }, '/kazumi/action', 60000);
+                    }).then((rsp) => {
                         if (rsp && rsp.result && rsp.result.ok) {
                             // 验证通过：tab 转为「已验证」态（成功样式），重搜后由真实结果接管；
                             // 若该源对这个词无收录（重搜无结果），保留「已验证·无结果」提示而非消失
@@ -495,24 +627,36 @@ function createSearchPage(cfg) {
             }
         },
 
+        /**
+         * 渲染一个来源的搜索结果（聚合 SSE / Kazumi 聚合 / Kazumi 流式 / 快照还原 共用）。
+         * 全局番剧屏蔽在此统一收口：标题命中屏蔽词的条目在进入分组前就被剔除，
+         * 因此计数、分组卡、快照、分页全部只看到「过滤后」的结果——被屏蔽的番剧
+         * 既不占位也不进快照，不会出现「结果数 10 但只显示 8 张卡」的错位。
+         * @returns 过滤后的条数（0 表示整组被屏蔽干净，调用方按「该源无结果」处理）
+         */
         renderGroup(payload, list) {
             const box = $(cfg.resultsSel);
             const src = payload.source || '';
-            const total = list.length;
+            // 屏蔽过滤：Kazumi 结果用 name 字段、CatVod 结果用 vod_name
+            const kept = (typeof filterBlocked === 'function')
+                ? filterBlocked(Array.isArray(list) ? list : []) : (Array.isArray(list) ? list : []);
+            const total = kept.length;
             // T60：无搜索结果的源不再显示（不出分组卡、不出来源筛选标签）
-            if (!total) return;
+            if (!total) return 0;
             const head = `<div class="src-group" data-source="${escHtml(src)}"><div class="src-head">${escHtml(payload.name || src)} <span class="src-count">${total}</span></div>`;
             // 来源筛选标签：带结果数，点击只看该源
             $(cfg.filtersSel).append(`<span class="class-tab" data-src="${escHtml(src)}" title="只看该源的结果">${escHtml(payload.name || src)}（${total}）</span>`);
             // 组内分页：数据已全量在手，纯前端切片，统一分页器驱动
             const gid = cfg.gidPrefix + (this._grpSeq++);
             // name 一并记录：结果快照恢复时 renderGroup 需要展示名（_grpLists 原本只有 src/list）
-            this._grpLists[gid] = { src, list, name: payload.name || src };
+            // raw 保留未过滤的原始结果：屏蔽词增删后就地重算（删词/关开关要能恢复显示）
+            this._grpLists[gid] = { src, list: kept, raw: Array.isArray(list) ? list : kept, name: payload.name || src };
             box.append(head + `<div class="vod-grid" id="${gid}-grid"></div><div class="src-hint tip-line" id="${gid}-hint" style="display:none"></div><div class="pager" id="${gid}-pager"></div></div>`);
             this._paintGrp(gid, 1);
             // T41 修复：搜索进行中已切到单源视图时，新到达的组要立即按筛选隐藏
             //（此前后到的组直接按「全部」模式追加，往下滑会看到其他源的影片）
             if (this._curSrc && src !== this._curSrc) box.children('.src-group').last().hide();
+            return total;
         },
 
         /**
@@ -555,6 +699,13 @@ function createSearchPage(cfg) {
                 }
                 // T59：搜索当前页封面立即加载（eager），不再等懒加载触发；已补拉过的封面直接复用缓存，避免重绘后占位+重复请求
                 const item = { ...v };
+                // 审查3.6：getCachedCover 内存未命中时同步读穿 localStorage（common.js
+                // _coverPersistGet → cache.js localCacheGet）。量级评估：该穿透读只取
+                // 单条 ~150B 的封面 URL 字符串（一次 getItem + JSON.parse，微秒级；
+                // 不涉及图片字节——图片本体经 <img> 异步加载），每分组首屏至多 24 次，
+                // 开销与一次 innerHTML 写入同量级，不值得为省它改成「占位 + 微任务
+                // 预热 + 命中后本帧二次刷新」的异步方案（多一次重排、要挂去重与销毁
+                // 守卫）。首渲后真正耗时的缺图网络补拉已由 fillMissingCovers 异步承担。
                 if (!item.vod_pic) item.vod_pic = getCachedCover(grp.src, v.vod_id);
                 const html = vodCard(item, null, true);
                 return html.replace('class="vod-card"', `class="vod-card" data-source="${escHtml(grp.src)}"`);
@@ -613,8 +764,24 @@ function createSearchPage(cfg) {
                     });
                 });
                 if (!groups.length) return;
+                // B-10：快照最多 30 组 × 200 条（未裁剪源 vod 原样收录，最坏可达数 MB）
+                // 显式落大池（yuki_bigcache::），与小池高频条目独立记账互不挤占
+                //（优化.md 轻量方案裁决）。写侧预检体积：超 SEARCH_SNAP_MAX_BYTES（与
+                // cache.js 大池上限对齐）时不落盘——cache.js 本会静默拒收（need >
+                // maxBytes 先行拒绝不触发淘汰），这里补一次性 warn 留痕便于诊断；
+                // 2~3MB 区间的快照则照常写入（LRU 按 t 淘汰自愈，见常量处取舍注释）。
+                try {
+                    const bytes = SEARCH_SNAP_KEY_PREFIX.length + JSON.stringify({ ts: Date.now(), groups }).length;
+                    if (bytes > SEARCH_SNAP_MAX_BYTES) {
+                        if (!SEARCH_SNAP_OVERSIZE_WARNED) {
+                            SEARCH_SNAP_OVERSIZE_WARNED = true;
+                            console.warn(`[search] 结果快照超限不落盘：key=${SEARCH_SNAP_KEY_PREFIX + cfg.mode} 约 ${Math.round(bytes / 1024)}KB（阈值 ${SEARCH_SNAP_MAX_BYTES / 1024 / 1024}MB，30 组×200 条源原样收录的最坏场景）`);
+                        }
+                        return;
+                    }
+                } catch (e2) { /* 估算失败照常尝试写入（cache.js 侧仍有兜底拒绝） */ }
                 localCacheSet(SEARCH_SNAP_KEY_PREFIX + cfg.mode,
-                    { ts: Date.now(), groups }, SEARCH_SNAP_TTL);
+                    { ts: Date.now(), groups }, SEARCH_SNAP_TTL, { pool: 'big' });
             } catch (e) { /* 快照失败不影响主流程 */ }
         },
 
@@ -630,7 +797,15 @@ function createSearchPage(cfg) {
             if (!snap || !Array.isArray(snap.groups)) return;
             const valid = snap.groups.filter((g) => g && g.src && Array.isArray(g.list) && g.list.length);
             if (!valid.length) return;
+            // 快照令牌（L32 同型竞态守卫）：上方是同步检查，但下面的 pageSizeOf await
+            // 之间存在宏任务窗口——期间用户点「搜索」会发起 run()（empty 容器 + 自增
+            // _searchToken + _grpLists 清空重置），慢到的 restore 继续执行会把旧快照
+            // 分组渲染进新搜索刚清空的容器。restore 前/渲染前重读令牌，与 run() 里
+            // ++this._searchToken 的初始值比较：不等说明窗口内已有新搜索，放弃还原。
+            const tokenAtStart = this._searchToken;
             this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
+            if (this._searchToken !== tokenAtStart || this.es
+                || Object.keys(this._grpLists).length) return; // 窗口内有新搜索/已有结果：旧快照不得覆盖
             // 重置来源筛选栏为「全部」后逐组重放（renderGroup 会追加各自的筛选标签）
             $(cfg.filtersSel).html('<span class="class-tab active" data-src="">全部</span>').show();
             this._curSrc = '';
@@ -668,6 +843,29 @@ const Search = {
     _stab: 'aggregate', // 当前激活页签：aggregate | kazumi | bangumi | image
     agg: null,          // 聚合搜索页控制器（独立面板/状态）
     kz: null,           // Kazumi 源页控制器（独立面板/状态）
+
+    /**
+     * 验证码视觉 LLM 请求参数（settings → 请求字段的唯一汇聚点）。
+     * settings 缺省时读一次设置快照。启用且 base/model 齐全才返回字段对象，
+     * 否则空对象（solve doAction 的 kv / SSE 查询串直接展开合并）。
+     * captchaLLMPrefer 一并带上：后端 solve 据此决定「先 LLM 还是先小模型」
+     * 的识别次序（默认关=先小模型，见 kazumi/captcha.py）。本查询串会被
+     * uvicorn 访问日志记录，故只允许非敏感的开关位随行——key 属凭据，已在
+     * 下方 SSE 组装处显式剔除（见 llmQ）。
+     */
+    async _captchaLlmParams(settings) {
+        const s = settings || await SettingsSnapshot.get();
+        if (s.captchaLLMEnable !== true) return {};
+        const base = String(s.captchaLLMBase || '').trim();
+        const model = String(s.captchaLLMModel || '').trim();
+        if (!base || !model) return {};
+        return {
+            captchaLLMBase: base,
+            captchaLLMModel: model,
+            captchaLLMKey: String(s.captchaLLMKey || '').trim(),
+            captchaLLMPrefer: s.captchaLLMPrefer === true ? '1' : '0',
+        };
+    },
 
     init() {
         if (this.agg) return;

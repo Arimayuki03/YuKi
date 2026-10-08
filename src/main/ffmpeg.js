@@ -7,6 +7,8 @@
  *
  * 二进制来源：<repo>/vendor/ffmpeg/ffmpeg.exe → PATH；
  * 缺失时 ensureFfmpeg() 后台下载 BtbN/FFmpeg-Builds 官方构建（约 190MB，zip 经系统 tar 解压）。
+ * 2026-09-30 用户拍板：vendor/ffmpeg 恢复内置安装包（撤销当日 C-08「移出+首启预下载」方案，
+ * 弱网首启下载 10-20 分钟不可接受），本文件恢复 HEAD 形态。
  */
 const fs = require('fs');
 const path = require('path');
@@ -64,22 +66,32 @@ function sha256File(p) {
     });
 }
 
-/** vendor 内置 → PATH 探测；找不到返回 null。 */
+// PATH 探测结果缓存（TTL 30s）：execSync('where ffmpeg') 每次起一个子进程（几十 ms），
+// 批量抓帧时每张图都重探会把主进程阻塞放大到秒级。vendor 内置路径仍每次 existsSync——
+// 单次 stat 开销可忽略，且 ensureFfmpeg 装好后无需失效协调即立即生效。
+const FFMPEG_PROBE_TTL_MS = 30000;
+let _pathProbe = { path: null, at: 0 };
+
+/** vendor 内置 → PATH 探测（结果 30s 缓存，命中负缓存直接返回 null）；找不到返回 null。 */
 function findFfmpeg() {
     const exe = WIN ? 'ffmpeg.exe' : 'ffmpeg';
     const vendor = path.join(ROOT, 'vendor', 'ffmpeg', exe);
     if (fs.existsSync(vendor)) return vendor;
+    const now = Date.now();
+    if (_pathProbe.at && now - _pathProbe.at < FFMPEG_PROBE_TTL_MS) return _pathProbe.path;
+    let found = null;
     try {
         if (WIN) {
             const out = execSync('where ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
             const first = out.split(/\r?\n/)[0];
-            if (first) return first;
+            if (first) found = first;
         } else {
             const out = execSync('command -v ffmpeg', { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
-            if (out) return out;
+            if (out) found = out;
         }
     } catch (e) { /* 不在 PATH */ }
-    return null;
+    _pathProbe = { path: found, at: now };
+    return found;
 }
 
 // 下载总超时：约 190MB 的 zip 在慢网下也要留足余量，10 分钟足够；
@@ -266,7 +278,10 @@ function makeThumb(videoPath, outJpg) {
                 finish(false);
             }, 30000);
         };
-        const proc = spawn(bin, ['-y', '-ss', '5', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
+        // -noaccurate_seek：默认 accurate seek 会在关键帧后逐帧解码丢弃到 5s 处，
+        // 高码率长 GOP 一抓几百帧 CPU（远程还要多下载这些帧的数据）；缩略图不需要
+        // 精确时间戳，直接取 ≤5s 的关键帧。失败重试分支不带 -ss，无需此参数。
+        const proc = spawn(bin, ['-y', '-noaccurate_seek', '-ss', '5', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
             { stdio: 'ignore', windowsHide: true });
         armTimeout(proc);
         proc.on('exit', () => {
@@ -335,9 +350,10 @@ function makeUrlThumb(url, outJpg) {
                 finish(false);
             }, 30000);
         };
-        // 远程流 -ss 预 seek 部分服务不支持（403/无帧）：失败再从头抓一帧
+        // 远程流 -ss 预 seek 部分服务不支持（403/无帧）：失败再从头抓一帧；
+        // -noaccurate_seek 关键帧直取省解码/下载（同 makeThumb，见彼处注释）
         const proc = spawn(bin, ['-y', '-hide_banner', '-user_agent', URL_THUMB_UA,
-            '-ss', '5', '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
+            '-noaccurate_seek', '-ss', '5', '-i', url, '-frames:v', '1', '-vf', 'scale=480:-2', outJpg],
         { stdio: 'ignore', windowsHide: true });
         armTimeout(proc);
         proc.on('exit', () => {

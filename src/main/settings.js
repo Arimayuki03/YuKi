@@ -14,7 +14,7 @@ const path = require('path');
 // 敏感键（凭据类）：落盘时经 electron safeStorage 加密（存为 enc:<base64>），
 // 读取时自动解密；内存中始终为明文，settings.get/all 返回原值（渲染层无感知）。
 // 旧版明文值读取兼容（无 enc: 前缀按明文处理，下次写盘自动转为密文）。
-const SENSITIVE_KEYS = new Set(['dandanAppSecret', 'bangumiToken', 'webDavPassword', 'translateLLMKey']);
+const SENSITIVE_KEYS = new Set(['dandanAppSecret', 'bangumiToken', 'webDavPassword', 'translateLLMKey', 'captchaLLMKey']);
 const ENC_PREFIX = 'enc:';
 
 class Settings {

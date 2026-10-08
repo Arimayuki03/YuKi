@@ -16,7 +16,13 @@ TEST_ROOT = os.environ.get('YUKI_TEST_ROOT') or os.path.join(BASE, '.test-runtim
 os.makedirs(TEST_ROOT, exist_ok=True)
 TEST_ENV = {**os.environ, 'YUKI_TEST_ROOT': TEST_ROOT,
             'YUKI_DATA_DIR': os.path.join(TEST_ROOT, 'data'),
-            'YUKI_CACHE_DIR': os.path.join(TEST_ROOT, 'cache')}
+            'YUKI_CACHE_DIR': os.path.join(TEST_ROOT, 'cache'),
+            # B-11：回归环境整体关掉 Worker 预热。test_http_api_blackbox /
+            # test_config_content_blackbox 会真实拉起后端并导入配置，若预热
+            # 在后台悄悄 spawn worker，会拖慢墙钟断言甚至挤占全局 worker 池；
+            # 预热行为由 test_worker_warmup.py 用假 runner 单独覆盖（它自己
+            # 管理 YUKI_WARMUP_SITES）。
+            'YUKI_WARMUP_SITES': '0'}
 
 STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
@@ -31,6 +37,10 @@ STAGES = [
     # 验证码小模型推理（numpy 纯推理，权重随应用打包）+ 自动解题流程（桩网络）
     ('kazumi-captcha-cnn', [PY, os.path.join(HERE, 'test_kazumi_captcha_cnn.py')]),
     ('kazumi-captcha-solve', [PY, os.path.join(HERE, 'test_kazumi_captcha_solve.py')]),
+    # 设置页「测试识别」（captcha_probe.py）：内置探测图合成/可辨性、分级判定
+    # （小模型只报可用性不判对错——合成图不在其训练分布内，实测近随机）、
+    # 视觉大模型连通/图片可读性/错误分类、端点信封恒 200
+    ('kazumi-captcha-probe', [PY, os.path.join(HERE, 'test_kazumi_captcha_probe.py')]),
     ('kazumi-cover-proxy', [PY, os.path.join(HERE, 'test_kazumi_cover_proxy.py')]),
     ('webdav-restore', [PY, os.path.join(HERE, 'test_webdav_restore.py')]),
     ('webdav-conn', [PY, os.path.join(HERE, 'test_webdav_conn.py')]),
@@ -41,6 +51,14 @@ STAGES = [
     ('spider-content-cache', [PY, os.path.join(HERE, 'test_spider_content_cache.py')]),
     # Kazumi 规则源搜索/章节的会话缓存（复用 mem_cache 底座）
     ('kazumi-cache', [PY, os.path.join(HERE, 'test_kazumi_cache.py')]),
+    # 聚合搜索 SSE 流整词缓存（B-01，照抄 kazumi 流索引+payload 双仓手法）：
+    # 首搜落缓存 / 二次整词重放不调源 / error·空源不落缓存 / refresh 旁路 /
+    # TTL 过期重走 / 中断整词失效
+    ('aggsearch-cache', [PY, os.path.join(HERE, 'test_aggsearch_cache.py')]),
+    # 封面磁盘缓存（B-08，优化.md 方案 B：键=URL sha1 与随机端口/token 解耦，
+    # 跨重启命中）：命中零网络 / 未命中写盘 / 失败不留脏文件 / LRU 配额淘汰 /
+    # TTL 过期重拉 / ETag 304 / cacheSize·clearCache 挂接
+    ('cover-cache', [PY, os.path.join(HERE, 'test_cover_cache.py')]),
     # HLS 广告段过滤（尽力而为）：DISCONTINUITY+跨host+路径词组合判定与防错杀护栏
     ('ad-filter', [PY, os.path.join(HERE, 'test_ad_filter.py')]),
     # RM-4：playerContent 解析结果持久缓存（跨重启跳过查源 + 失效重解析）
@@ -48,6 +66,10 @@ STAGES = [
     ('layered-diagnostics', [PY, os.path.join(HERE, 'test_layered_diagnostics.py')]),
     ('runtime-contract', [PY, os.path.join(HERE, 'test_runtime_contract.py')]),
     ('runtime-supervisor', [PY, os.path.join(HERE, 'test_runtime_supervisor.py')]),
+    # B-11 Worker 预热：配置恢复完成后对前 N 个站点串行发空 homeContent，
+    # 提前付掉 spawn+boot 冷启动。覆盖：调度计数 / N 上限与串行节流 /
+    # 失败静默 / 空配置零预热
+    ('worker-warmup', [PY, os.path.join(HERE, 'test_worker_warmup.py')]),
     ('site-health', [PY, os.path.join(HERE, 'test_site_health.py')]),
     ('config-compat', [PY, os.path.join(HERE, 'test_config_compat.py'), '--offline']),
     # 真实世界公共仓格式兼容回归（饭太硬/菜妮丝系 spider 数组/;;;主备/GBK/注释/
@@ -69,6 +91,9 @@ STAGES = [
     ('jar-phase', [PY, os.path.join(HERE, 'test_jar_phase.py')]),
     ('jar-e2e', [PY, os.path.join(HERE, 'test_jar_e2e.py')]),
     ('jar-supervisor', [PY, os.path.join(HERE, 'test_jar_supervisor.py')]),
+    # B-09 冷启动瘦身：asyncio 懒加载链（server._LazyAsyncio 代理 +
+    # runtime.errors 函数内懒加载）——fresh 解释器不加载、首触加载、并发首触单例
+    ('server-lazy-imports', [PY, os.path.join(HERE, 'test_server_lazy_imports.py')]),
     # dex2jar 生命周期：jar 反编译子进程的 spawn/收敛/超时契约
     ('dex2jar-lifecycle', [PY, os.path.join(HERE, 'test_dex2jar_lifecycle.py')]),
     # dex-tools 按需下载链路（0.2.7 打包不随附后的主路径）：布局落位/哈希校验/负缓存

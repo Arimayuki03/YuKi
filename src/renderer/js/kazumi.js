@@ -8,7 +8,7 @@
  *
  * 分工：kimi 负责 UI 布局/样式/交互，glm5.2 负责后端 API 与数据逻辑。
  */
-/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, localCacheDel, _coverCache, setBangumiMirrorRoot, bangumiWebFollowMirror */
+/* global $, doAction, escHtml, warnToast, showLoading, hideLoading, openDialog, closeDialog, confirmDialog, Player, Detail, Favorites, HistoryView, My, App, Search, recGet, recSet, renderStatusBar, bangumiCard, fitVodTitles, bangumiCover, stripHtml, apiUrl, localCacheGet, localCacheSet, localCacheDel, _coverCache, setBangumiMirrorRoot, bangumiWebFollowMirror, SettingsSnapshot */
 
 const Kazumi = {
     _rules: [],        // 已安装规则缓存（kazumiList 拉取）
@@ -17,6 +17,29 @@ const Kazumi = {
     _dlgStream: null,  // 选源弹窗 SSE 流（关闭时清理）
     _dlgState: null,   // 选源弹窗状态 {title, token, keyword, plugins, expanded}
     _inited: false,    // 事件只绑定一次；唯一入口由 app.js 在后端就绪后调用
+
+    /**
+     * 验证码视觉 LLM 请求字段（设置 → kazumiCaptchaSolve 表单的唯一汇聚点；
+     * 与 Search._captchaLlmParams 同口径但独立实现——search.js 与 kazumi.js
+     * 是两个互不依赖的页面模块，抽公共层反而引入加载顺序耦合）。
+     * 启用且 base/model 齐全才返回字段，否则空对象。key 明文随请求传后端不落盘。
+     * captchaLLMPrefer 一并带上：后端 solve 据此决定「先 LLM 还是先小模型」
+     * 的识别次序（默认关=先小模型，见 kazumi/captcha.py）。
+     */
+    async _captchaLlmParams(settings) {
+        const s = settings || (typeof SettingsSnapshot !== 'undefined'
+            ? await SettingsSnapshot.get() : (await window.yuki.settingsGet()) || {});
+        if (s.captchaLLMEnable !== true) return {};
+        const base = String(s.captchaLLMBase || '').trim();
+        const model = String(s.captchaLLMModel || '').trim();
+        if (!base || !model) return {};
+        return {
+            captchaLLMBase: base,
+            captchaLLMModel: model,
+            captchaLLMKey: String(s.captchaLLMKey || '').trim(),
+            captchaLLMPrefer: s.captchaLLMPrefer === true ? '1' : '0',
+        };
+    },
 
     // ---------------------------------------------------------------- 规则管理（设置页）
 
@@ -206,6 +229,17 @@ const Kazumi = {
         // 密码显隐：type=password ⇄ text（与网盘 Cookie 眼睛按钮同款交互）
         $('#webdav_pwd_eye').on('click', function () {
             const $p = $('#webdav_password');
+            const show = $p.attr('type') === 'password';
+            $p.attr('type', show ? 'text' : 'password');
+            this.textContent = show ? '🙈' : '👁️';
+        });
+        // Bangumi Token 显隐：与 WebDAV 密码框同款猴子/眼镜切换。
+        // review01 L23：初始态按密文相位把图标校准为 👁️（与 #webdav_pwd_eye 初始值
+        // 同相位）——index.html 里误写初始 🙈，导致首次点击（切明文）图标零变化；
+        // 点击处理本身按 input type 实时推算相位，无需改动。
+        $('#bangumi_token_eye').text('👁️');
+        $('#bangumi_token_eye').on('click', function () {
+            const $p = $('#bangumi_token');
             const show = $p.attr('type') === 'password';
             $p.attr('type', show ? 'text' : 'password');
             this.textContent = show ? '🙈' : '👁️';
@@ -743,7 +777,7 @@ const Kazumi = {
         this.testBangumi();
     },
 
-    /** 测试连接：GET /v0/me 显示用户名。 */
+    /** 测试连接：GET /v0/me 显示用户名（reason 区分 token 无效与网络/镜像故障）。 */
     async testBangumi() {
         const raw = $('#bangumi_token').val().trim() || await this._getBangumiToken();
         const token = this._normalizeToken(raw);
@@ -754,6 +788,9 @@ const Kazumi = {
             const status = $('#bangumi_status');
             if (me && me.username) {
                 status.text(`连接成功：${me.nickname || me.username}（ID ${me.id}）`).show();
+            } else if (rsp && rsp.reason === 'network') {
+                status.text('连接失败：网络或镜像故障（已自动切换官方/镜像源重试仍失败），请检查网络后重试，或在设置中更换 Bangumi 镜像域名').show();
+                warnToast('Bangumi 连接失败：网络/镜像故障，请稍后重试');
             } else {
                 status.text('连接失败：Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取').show();
                 warnToast('Bangumi Token 无效或已过期（401），请在 https://bgm.tv/settings/token 重新获取');
@@ -1582,6 +1619,19 @@ const Kazumi = {
     /** Bangumi 番剧详情。30 分钟 TTL 缓存（T74：详情页/弹窗/二级页重复打开免重复请求）。
      *  迁移到 localStorage 持久缓存（cache.js），重启仍即时上屏；纳入设置页「清理缓存」。 */
     _bgmInfoCacheKey(subjectId) { return 'detail::bgminfo::v1::' + String(subjectId); },
+
+    /** 同步窥探 bangumiInfo 的 localStorage 缓存（不回源）：openBangumi 据此判断
+     *  「缓存命中即毫秒级出完整版面」从而跳过快照半渲染（与 CatVod 路径 open() 读
+     *  详情 vod 缓存命中即跳快照同一口径）。与 bangumiInfo 的读路径同键同净化，
+     *  仅供存在性判断，不把结果交给调用方使用（权威数据仍由 bangumiInfo 返回）。 */
+    peekCachedBangumiInfo(subjectId) {
+        const key = String(subjectId || '');
+        if (!key || typeof localCacheGet !== 'function') return false;
+        try {
+            const hit = this._sanitizeBangumiInfo(localCacheGet(this._bgmInfoCacheKey(key)));
+            return !!(hit && hit.id);
+        } catch (e) { return false; }
+    },
     /**
      * Bangumi info 净化（安全审查 P2-3 放大项）：后端对 Bangumi 镜像响应原样透传、
      * 无字段校验，恶意镜像可借 info 携带注入 payload；此缓存写入 localStorage 存
@@ -1704,11 +1754,31 @@ const Kazumi = {
         return Object.assign(out, fetched);
     },
 
-    /** Bangumi 番剧分集信息。 */
+    /** Bangumi 分集缓存键（独立前缀，对齐 kazumi_bgm_cover 命名习惯）。 */
+    _bgmEpsLsKey(subjectId) { return 'kazumi_bgm_eps::' + String(subjectId); },
+
+    /** Bangumi 分集信息。localStorage 持久缓存（cache.js）30 分钟（对齐 bangumiInfo
+     *  缓存口径）：「分集」页签/起播补拉重复进出免重拉，二次打开秒出。
+     *  - 命中后校验形态（后端透传 Bangumi /v0/episodes 包装对象 {data,total}，或裸数组），
+     *    畸形缓存丢弃走网络；
+     *  - 网络成功返回才落缓存（失败 resolve(null) 不写），resolve/reject 语义与加缓存前完全一致。
+     *    注意：{code:200, episodes:{data:[],total:0}} 空包装是后端透传的合法数据（真实无分集条目），
+     *    会随 30min TTL 正常落盘——这是缓存行为而非毒化；消费侧（分集页签/起播集名）对空 data 均有兜底。 */
     async bangumiEpisodes(subjectId) {
+        const key = String(subjectId);
+        if (key && typeof localCacheGet === 'function') {
+            try {
+                const hit = localCacheGet(this._bgmEpsLsKey(key));
+                if (Array.isArray(hit) || (hit && Array.isArray(hit.data))) return hit;
+            } catch (e) { /* ignore */ }
+        }
         try {
             const rsp = await doAction('kazumiBangumiEpisodes', { id: subjectId }, '/kazumi/action');
-            return (rsp && rsp.episodes) || null;
+            const eps = (rsp && rsp.episodes) || null;
+            if (eps && key && typeof localCacheSet === 'function') {
+                try { localCacheSet(this._bgmEpsLsKey(key), eps, 30 * 60 * 1000); } catch (e) { /* 缓存失败忽略 */ }
+            }
+            return eps;
         } catch (e) {
             return null;
         }
@@ -2130,7 +2200,8 @@ const Kazumi = {
         $('#kazumi-dialog-body').html('<div class="tip-line">剧集页需要验证码，正在自动识别…</div>');
         let solved = false;
         try {
-            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000);
+            const llmP = await this._captchaLlmParams().catch(() => ({}));
+            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName, ...llmP }, '/kazumi/action', 60000);
             solved = !!(rsp && rsp.result && rsp.result.ok);
         } catch (e) { /* 走人工回落 */ }
         if (token !== this._dlgToken) return;
@@ -2186,7 +2257,8 @@ const Kazumi = {
         this._renderSourceCard(pluginName);
         let solved = false;
         try {
-            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName }, '/kazumi/action', 60000);
+            const llmP = await this._captchaLlmParams().catch(() => ({}));
+            const rsp = await doAction('kazumiCaptchaSolve', { plugin: pluginName, ...llmP }, '/kazumi/action', 60000);
             solved = !!(rsp && rsp.result && rsp.result.ok);
         } catch (e) { /* 网络异常等按失败口径走人工回落 */ }
         if (token !== this._dlgToken) return;
@@ -2397,11 +2469,14 @@ const Kazumi = {
             const id = String(btn.closest('.kazumi-col-btns').data('id') || '');
             const val = parseInt(btn.data('type'), 10);
             const nm = this._curBangumiName || '';
-            if (!id) return;
+            if (!id) { warnToast('收藏操作失败：缺少 Bangumi ID'); return; }
             if (val < 0) {
                 if (await this.removeBangumiCollection(id, nm)) this._applyBangumiColState(id);
-            } else if (await this.setBangumiCollection(id, val)) {
+            } else if (await this.setBangumiCollection(id, val, { quiet: true })) {
                 this._applyBangumiColState(id);
+            } else if (!this._bgmBatchActive) {
+                // review01 L35 同源补漏：失败时统一在此弹一次提示（setBangumiCollection 调用处传 quiet:true 静默，避免双 toast）
+                warnToast('收藏同步失败');
             }
         });
         // 标签点击：按 Bangumi 标签精确筛选番剧（非关键词搜索，任务四 4.2）
@@ -2913,6 +2988,10 @@ const WEBDAV_SETTINGS_EXCLUDE = new Set([
     'bangumiToken', 'dandanAppSecret',
     'cacheDir', 'dlDir', 'wallpaper', 'settingsCat',
     'webDavRestoreBackup', // 恢复前的本机备份快照，体积大且仅本机有意义
+    // LLM 凭据：与 bangumiToken 同级别，绝不随设置快照上传远端。
+    // 上传侧漏排的后果是明文密钥进用户自托管 WebDAV（可能还是自签名证书通道）；
+    // 恢复侧 WEBDAV_RESTORE_ALLOWED 本就未放行 key，说明上传侧是遗漏而非设计。
+    'translateLLMKey', 'captchaLLMKey',
 ]);
 
 /** 构建「设置同步」快照：全量设置剔除排除项后的浅拷贝。 */
@@ -2953,6 +3032,8 @@ const WEBDAV_RESTORE_ALLOWED = new Set([
     'probeFailStreak', 'lastSourceMap', 'recentWatches', 'watchStatsEnabled',
     'watchProgress', // 通用观看进度表（records.js 维护，随设置快照通道同步/恢复）
     'sourceAutoDetect', 'catvodBgmMatch', 'legacyParser', 'customLives',
+    // 全局番剧屏蔽：纯偏好数据（无 URL/路径/凭据），跨设备迁移合情合理
+    'blockWords', 'blockWordsEnable',
     'liveProbeCache', 'enableBangumiProxy', 'enableBangumiWebMirror', 'enableGitProxy',
     // 各列表页每页条数
     'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive',
@@ -2960,6 +3041,11 @@ const WEBDAV_RESTORE_ALLOWED = new Set([
     // Bangumi 同步偏好（仅开关，token 绝不恢复）
     'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
     'bangumiProgressSync', 'bangumiSyncPriority',
+    // 验证码视觉 LLM 配置：仅恢复开关与模型名。captchaLLMBase 属 URL 类键
+    // （与 bangumiMirrorRoot/proxyUrl 同口径，见本表上方注释）——恢复后本机会
+    // 把 safeStorage 解密的 captchaLLMKey 以 Bearer 发往该地址并附带验证码图片，
+    // 云端快照即可劫持本机凭据，故不予恢复，base 由用户在本机重新填写。
+    'captchaLLMEnable', 'captchaLLMModel', 'captchaLLMPrefer',
 ]);
 
 /** WebDAV 同步：上传收藏/历史/规则/设置/观看统计到远程；按子开关决定包含哪些数据。
@@ -3067,6 +3153,14 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
                     // 代理键经 setProxy 写入时已即时重启后端，但恢复流程只写 settings，
                     // 环境变量/会话代理不会重建，故仍需提示重启；playerHotkeys 需重建快捷键。
                     if (['playerHotkeys', 'proxyEnable', 'proxyUrl'].indexOf(key) >= 0) needRestartHint = true;
+                }
+                // 本循环是「程序化 settingsSet」，不产生 DOM change → 不会触发
+                // settings-snapshot.js 的 document 冒泡委托失效快照。而 player.js
+                // 的起播主链路（autoNext 等）已改读长驻快照，缺这一步会最长 90s
+                // 读到恢复前的旧值（典型：启动 5s 静默恢复把云端「关闭连播」写回，
+                // 用户随后起播仍继续自动连播）。同先例：live.js:398、detail.js:3968。
+                if (typeof SettingsSnapshot !== 'undefined' && SettingsSnapshot.invalidate) {
+                    try { SettingsSnapshot.invalidate(); } catch (e) { /* 失效失败不影响恢复结果 */ }
                 }
                 // 外观类设置即时重放（主题/缩放/字体等），其余多数在使用时读取自然生效
                 if (typeof applySkin === 'function') applySkin(d.settings);

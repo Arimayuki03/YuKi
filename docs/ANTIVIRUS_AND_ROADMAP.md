@@ -64,20 +64,21 @@
 3. **时间轴对齐挂账**：过滤后播放时间轴 ≠ 源站原始时间轴，本地登记的片头片尾秒数（T81 OP/ED）可能偏移——需换算或在广告过滤开启时标注登记值失效；
 4. 默认开启 + 误删护栏验证（30% 安全阀、多证据叠加）。
 
-## B. 验证码自动识别（ddddocr 主链已落地，animeko 边界）
+## B. 验证码自动识别（2026-10-01 定版：tiny-CNN 主链 + 视觉 LLM 兜底，ddddocr 移除）
 
 **边界定案**：只做 MacCMS 系**图片验证码**（4 位数字）+ 只在**搜索环节**自动识别；识别失败刷新重试最多 3 次 → 回落现有人工验证窗口（`captchaVerify`，parse-window.js:651，Cookie 自动回流）。Cloudflare/Turnstile/滑块只留人工通道。
 
-**已落地（2026-09-29，两轮复盘定案）**：
-- **主识别器 ddddocr**（MIT，模型内置 pip 包）：真实站验证码是花体/斜体艺术字（2kdm 系 0 呈 ∞ 形），自研合成模型分布外全错、ddddocr 实测直接命中——弃「合成训练换真实泛化」的幻想，直接用现成轮子。onnxruntime/opencv 进锁文件（打包增重 ~200MB），Python 3.14 轮子可用性已实测；
-- **兜底链自研 tiny-CNN**（`captcha_cnn.py` + assets 权重）：ddddocr 结果被 3-8 位门槛拒绝时兜底；训练管线 `tools/train_captcha_cnn.py` 保留（合成样本含花体斜切增强）；
-- **solve_captcha 会话与判定协议**（三源全败复盘修复）：
+**识别链终态（2026-10-01，体积决策）**：
+- **第一级 自研 tiny-CNN**（`captcha_cnn.py` + assets 权重 ~3MB）：numpy 纯推理毫秒级。2026-09-30/10-01 用「站点判题」协议（ddddocr 候选 + verify_check code==1 判卷）采集 mutefun/mgnacg/girigirilove 三站 5700 张零错标真实样本定向重训（工具链 `tools/sample_captcha_site.py` / `train_captcha_real.py` / `eval_captcha_real.py`，数据 .captcha-data/ 不入库），真实集 all4 从合成版 ~0% 提到 ~37%（v1 几何容量瓶颈，四轮数据/正则扩充实证），可扛简单形变样本省 LLM 调用；
+- **第二级 视觉大模型兜底**（`translate.llm_vision_recognize_captcha`，OpenAI 兼容多模态 /chat/completions）：设置页「验证码视觉识别」独立配置（`captchaLLM{Enable,Base,Key,Model}`，与划词翻译 LLM 两套配置互不影响；Key 经 safeStorage 加密落盘、按次传后端不持久化）。实测三站盲测 10/12 全对（83%，换图重试 ≤3 次端到端 ≈99.5%），扛花体/粘连等 tiny-CNN 分布外样本；未配置时该级静默跳过；
+- **ddddocr 移除**（2026-10-01 终态）：连带 onnxruntime/opencv 省约 200MB 打包体积（体积门禁 360→180MB）。决策链：09-29 落地 → 09-30 按「识别率优先」恢复 → 10-01 视觉 LLM 实测达标后按体积移除，识别率缺口由 LLM + 3 轮换图重试 + 人工窗口补偿；
+- **solve_captcha 会话与判定协议**（三源全败复盘修复，2026-09-29）：
   - 独立 `requests.Session` 持验证会话（共享 Session 挂 _NoStoreCookiePolicy 不落地 Cookie，原实现每次陌生会话→答案必错）；先 GET 搜索页建会话，取图/提交/复验共享 PHPSESSID；每跳过 `_guard_hop` SSRF 守卫；
   - 提交走 **POST** `/index.php/ajax/verify_check`（表单 `type=search&verify=<码>`，与站点 JS 的 MAC.Ajax 'post' 一致）；
   - 成功标准 = 提交响应 **code==1**（绝不以「复验页不再检出验证码」判定——答案错误时站点回「请勿频繁操作」提示页，无 captchaImage 节点，会被检测器误判为放行）；频率提示页等 2.5s 重试；失败必到 3 轮上限后明确返回，前端回落人工窗口；
   - 成功后验证会话 Cookie 显式落盘 cookie_jar（重启免重验）。
 - **真实站验证**（2026-09-29）：mutefun/mgnacg/giriGiriLove/dalvdm 四源 solve 全部 code==1 通过；前三源 solve 后真实搜索出结果（dalvdm 的 403 是其规则 searchURL 形态与站点不符的独立问题）。
 
-**待观察**：ddddocr 对个别字形仍会错（如 1/7 尾位混淆），3 轮换图重试 + 人工窗口兜底；打包体积增重 ~200MB 需在发版说明标注。
+**待观察**：视觉 LLM 识别延迟 1-3s/次（tiny-CNN 未命中时才触发）；未配置 LLM 且 tiny-CNN 未命中的组合端到端约 75%（3 轮重试），人工窗口兜底。tiny-CNN 若要继续提升需扩容几何（conv 24/48 + fc 512，训练侧已就绪）重训。
 
-**注意**：animeko 是 **AGPL-3.0**——机制/规则参数/模型契约可借鉴，代码与模型文件不可直接搬用（会传染许可证）。ddddocr 路线恰好是独立实现。
+**注意**：animeko 是 **AGPL-3.0**——机制/规则参数/模型契约可借鉴，代码与模型文件不可直接搬用（会传染许可证）。本链路为独立实现。

@@ -17,57 +17,133 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 
 /** 最小 jQuery 桩（对齐 detail-start-button.test.js）：链式 + html 捕获 + 委托记录。
  *  find() 同样走 makeNode 并记录链路，data() 按选择器内 data-eid="N" 解析，
- *  add/removeClass/toggle/html 记录到 ops（按选择器前缀聚合），支撑长列表网格交互断言。 */
+ *  add/removeClass/toggle/html 记录到 ops（按选择器前缀聚合），支撑长列表网格交互断言。
+ *  A-23：格网 cells 改节点重排（不再整片 innerHTML 重写），桩内置 cells 迷你 DOM——
+ *  #detail-tab-content.html(骨架) 时按 cellHtml 片段解析出轻量节点数组
+ *  （captor.cellsChildren，含 classList/getAttribute/remove），cells 容器经 [0]
+ *  暴露 { children, appendChild }（appendChild 已有节点 = 移动），支撑
+ *  「重排非重建」「active 随节点保留」「缺格补建/脏格移除」的节点级断言。 */
 function makeJqStub(captor) {
+    captor.cellsChildren = captor.cellsChildren || [];
+    // 轻量 cell 节点：data-eid + class 集合（classList.toggle 供高亮迁移走真语义）
+    const makeRawCell = (cls, eid) => ({
+        eid: Number(eid),
+        getAttribute: (a) => (a === 'data-eid' ? String(eid) : null),
+        classList: {
+            _s: new Set(String(cls || '').split(/\s+/).filter(Boolean)),
+            contains(c) { return this._s.has(c); },
+            add(c) { this._s.add(c); },
+            remove(c) { this._s.delete(c); },
+            toggle(c, force) {
+                if (force === undefined) { if (this._s.has(c)) this._s.delete(c); else this._s.add(c); }
+                else if (force) this._s.add(c);
+                else this._s.delete(c);
+                return this._s.has(c);
+            },
+        },
+        remove() {
+            const arr = captor.cellsChildren;
+            const i = arr.indexOf(this);
+            if (i >= 0) arr.splice(i, 1);
+        },
+    });
+    // 从 cellHtml 片段解析节点（class 在前 data-eid 在后，与 detail.js 模板一致；
+    // 模板 data-eid 与 title 之间有换行缩进，用 [\s\S]*? 跨行匹配属性间隙）
+    const parseCells = (html) => {
+        const out = [];
+        const re = /<button[\s\S]*?class="([^"]*)"[\s\S]*?data-eid="(\d+)"[\s\S]*?>/g;
+        let m;
+        while ((m = re.exec(String(html))) !== null) out.push(makeRawCell(m[1], m[2]));
+        return out;
+    };
     const makeNode = (sel) => {
+        const s = String(sel);
         const node = {
-            sel: String(sel),
+            sel: s,
             length: 1,
             on(ev, a, b) {
                 const fn = typeof b === 'function' ? b : a;
                 const delegated = typeof b === 'function' ? String(a) : '';
-                if (captor && typeof fn === 'function') captor.bound.push({ sel: String(sel), ev, delegated, fn });
+                if (captor && typeof fn === 'function') captor.bound.push({ sel: s, ev, delegated, fn });
                 return this;
             },
             off() { return this; },
-            html(s) {
-                if (captor && s !== undefined) captor.htmlBySel.set(String(sel), String(s));
-                if (captor && s !== undefined) captor.ops.push({ op: 'html', sel: String(sel), value: String(s) });
+            html(s2) {
+                if (captor && s2 !== undefined) {
+                    captor.htmlBySel.set(s, String(s2));
+                    captor.ops.push({ op: 'html', sel: s, value: String(s2) });
+                    // 骨架渲染重建 cells 迷你 DOM（等效真实 DOM 生成子节点）；
+                    // 原地 splice 重置而非换新数组——测试在渲染前解构的 cellsChildren
+                    // 引用才能持续看到后续变化（getter 求值一次即定值）
+                    const mm = String(s2).match(/<div class="ep-comments-grid-cells">([\s\S]*?)<\/div>\s*<\/div>/);
+                    if (mm) {
+                        const next = parseCells(mm[1]);
+                        captor.cellsChildren.splice(0, captor.cellsChildren.length, ...next);
+                    }
+                }
                 return this;
             },
-            text(s) { if (captor && s !== undefined) captor.ops.push({ op: 'text', sel: String(sel), value: String(s) }); return this; },
-            val(s) {
-                if (s !== undefined) { if (captor) captor.ops.push({ op: 'val', sel: String(sel), value: String(s) }); return this; }
+            text(s2) { if (captor && s2 !== undefined) captor.ops.push({ op: 'text', sel: s, value: String(s2) }); return this; },
+            val(s2) {
+                if (s2 !== undefined) { if (captor) captor.ops.push({ op: 'val', sel: s, value: String(s2) }); return this; }
                 // 读值：按选择器尾部匹配 context.$stubValues 预置值（跳转输入框等）
                 const values = (captor && captor.stubValues) || {};
                 for (const key of Object.keys(values)) {
-                    if (String(sel) === key || String(sel).endsWith(key) || String(sel).includes(`> ${key}`)) return values[key];
+                    if (s === key || s.endsWith(key) || s.includes(`> ${key}`)) return values[key];
                 }
                 return '';
             },
-            addClass(c) { if (captor) captor.ops.push({ op: 'addClass', sel: String(sel), value: String(c) }); return this; },
-            removeClass(c) { if (captor) captor.ops.push({ op: 'removeClass', sel: String(sel), value: String(c) }); return this; },
+            addClass(c) { if (captor) captor.ops.push({ op: 'addClass', sel: s, value: String(c) }); return this; },
+            removeClass(c) { if (captor) captor.ops.push({ op: 'removeClass', sel: s, value: String(c) }); return this; },
             toggleClass() { return this; },
-            toggle(v) { if (captor) captor.ops.push({ op: 'toggle', sel: String(sel), value: v === undefined ? 'toggle' : !!v }); return this; },
-            hide() { if (captor) captor.ops.push({ op: 'hide', sel: String(sel) }); return this; },
-            show() { if (captor) captor.ops.push({ op: 'show', sel: String(sel) }); return this; },
+            toggle(v) { if (captor) captor.ops.push({ op: 'toggle', sel: s, value: v === undefined ? 'toggle' : !!v }); return this; },
+            hide() { if (captor) captor.ops.push({ op: 'hide', sel: s }); return this; },
+            show() { if (captor) captor.ops.push({ op: 'show', sel: s }); return this; },
             is() { return false; },
             attr() { return this; },
             prop() { return this; },
             trigger() { return this; },
-            closest(s2) { return makeNode(`${s2} < ${String(sel)}`); },
-            find(s2) { return makeNode(`${String(sel)} > ${String(s2)}`); },
+            closest(s2) { return makeNode(`${s2} < ${s}`); },
+            find(s2) { return makeNode(`${s} > ${s2}`); },
             each() { return this; },
             map() { return this; },
             get() { return []; },
             filter() { return this; },
             data(k) {
                 // 按选择器内嵌的 data-eid="N" 解析（渲染出的 cell/chip 均带该属性）
-                const m = String(sel).match(/data-eid="(\d+)"/);
+                const m = s.match(/data-eid="(\d+)"/);
                 if (k === 'eid' && m) return Number(m[1]);
                 return undefined;
             },
         };
+        // $ 传入 cell html 片段（cellsBox.append($(cellHtml()).get(0))）：包装单节点
+        if (/^\s*<button/.test(s)) {
+            const parsed = parseCells(s);
+            node.length = parsed.length;
+            node.get = (i) => (i === undefined ? parsed : parsed[i]);
+            return node;
+        }
+        // cells 子集集合（高亮迁移 each / 点选 currentTarget 包装）：遍历迷你 DOM
+        if (s.includes('.ep-comments-cell')) {
+            node.length = captor.cellsChildren.length;
+            node.each = (fn) => { captor.cellsChildren.slice().forEach((c, i) => fn.call(c, i, c)); return node; };
+            node.get = (i) => captor.cellsChildren[i];
+            return node;
+        }
+        // cells 容器：[0] 暴露迷你 DOM（children 活引用 + appendChild 移动语义）
+        if (s.includes('.ep-comments-grid-cells')) {
+            node[0] = {
+                get children() { return captor.cellsChildren; },
+                appendChild(el) {
+                    const arr = captor.cellsChildren;
+                    const i = arr.indexOf(el);
+                    if (i >= 0) arr.splice(i, 1); // append 已有节点 = 先摘下再放末尾（移动）
+                    arr.push(el);
+                    return el;
+                },
+            };
+            node.append = (x) => { if (x && typeof x === 'object') captor.cellsChildren.push(x); return node; };
+        }
         return node;
     };
     return (sel) => makeNode(sel);
@@ -103,6 +179,29 @@ function loadDetail(extra) {
         localCacheDel: () => {},
         openDialog: () => {},
         closeDialog: () => {},
+        // A-14：detail.js 评论时间/排序实现已下沉 common.js，VM 内提供同款真实现
+        fmtCommentTimeFull: (ts) => {
+            if (!ts) return '';
+            if (typeof ts === 'string' && !/^\d+$/.test(ts)) return ts;
+            let n = Number(ts);
+            if (!n) return '';
+            if (n < 1e12) n *= 1000;
+            const d = new Date(n);
+            if (isNaN(d.getTime())) return '';
+            const pad = (x) => String(x).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        },
+        commentTsMs: (ts) => {
+            if (!ts) return 0;
+            if (typeof ts === 'string' && !/^\d+$/.test(ts)) {
+                const d = new Date(ts);
+                return isNaN(d.getTime()) ? 0 : d.getTime();
+            }
+            let n = Number(ts);
+            if (!n) return 0;
+            if (n < 1e12) n *= 1000;
+            return n;
+        },
         window: { yuki: { settingsGet: async () => ({}), settingsSet: async () => ({}) } },
     };
     Object.assign(context, extra || {});
@@ -110,7 +209,8 @@ function loadDetail(extra) {
     vm.createContext(context);
     vm.runInContext(source, context, { filename: 'detail.js' });
     const Detail = vm.runInContext('Detail', context);
-    return { Detail, bound: captor.bound, htmlBySel: captor.htmlBySel, ops: captor.ops, stubValues: captor.stubValues, toasts, context };
+    // cellsChildren 用 getter：桩在骨架渲染时会重建数组（captor.cellsChildren 重新赋值）
+    return { Detail, bound: captor.bound, htmlBySel: captor.htmlBySel, ops: captor.ops, stubValues: captor.stubValues, toasts, context, get cellsChildren() { return captor.cellsChildren; } };
 }
 
 const SAMPLE_EPISODES = {
@@ -135,7 +235,7 @@ const SAMPLE_EP_COMMENTS = [
 /** 标准夹具：Bangumi-only 详情 + 已加载分集 + 已渲染选集讨论页签。 */
 function fixtureEpComments(extra) {
     const opened = [];
-    const { Detail, htmlBySel, ops, bound, stubValues, context } = loadDetail(Object.assign({
+    const loaded = loadDetail(Object.assign({
         window: {
             open: (u) => opened.push(String(u)),
             yuki: { settingsGet: async () => ({}), settingsSet: async () => ({}) },
@@ -150,11 +250,12 @@ function fixtureEpComments(extra) {
             bangumiInfo: async () => ({ id: '42', name: '番剧', tags: [{ name: 'TV', count: 9 }] }),
         },
     }, extra || {}));
+    const { Detail, htmlBySel, ops, bound, stubValues, context } = loaded;
     Detail._bgmId = '42';
     Detail._bgmInfo = { id: 42, name: '番剧' };
     Detail.vodName = '番剧';
     Detail._activeTab = '选集讨论';
-    return { Detail, htmlBySel, ops, bound, stubValues, context, opened };
+    return { Detail, htmlBySel, ops, bound, stubValues, context, opened, get cellsChildren() { return loaded.cellsChildren; } };
 }
 
 // ---------------------------------------------------------------- 页签注册与派发
@@ -231,7 +332,7 @@ test('弹层 CSS 契约：向下展开 + 限高滚轮 + head 置顶（防遮挡�
 });
 
 test('弹层内排序切换：小图标只切格网方向（独立状态），不重写外层按钮、不动评论排序', async () => {
-    const { Detail, htmlBySel, ops, bound } = fixtureEpComments();
+    const { Detail, htmlBySel, ops, bound, cellsChildren } = fixtureEpComments();
     Detail._bgmEps = LONG_EPISODES.data.slice();
     await Detail._renderEpComments();
     // 初始态：格网默认倒序 → 图标「↓ 倒序」、首格为最大集（SP）；外层按钮不受影响
@@ -240,6 +341,10 @@ test('弹层内排序切换：小图标只切格网方向（独立状态），�
     assert.ok(html.includes('↓ 倒序'), '格网默认倒序图标文案');
     assert.ok(/class="ep-comments-grid-cells">\s*<button[^>]*data-eid="299"/.test(html.replace(/\n/g, ' ')), '倒序时网格首格为最大集（SP）');
     assert.ok(html.includes('⇅ 切正序'), '外层按钮初始文案不受弹层影响');
+    // A-23：切方向前记录每个格子的节点引用（重排非重建的断言锚点）
+    const beforeNodes = cellsChildren.map((c) => ({ node: c, eid: c.eid }));
+    assert.equal(beforeNodes.length, 25, '初始渲染 25 格');
+    assert.equal(beforeNodes[0].eid, 299, '倒序首格为 SP');
     // 点击图标：仅格网翻转 → 图标变「↑ 正序」、首格变第 1 集；
     // 外层按钮文案不动（无 text 操作目标 ep-comments-order）、_epCommentsDesc 不变
     const bind = bound.find((b) => /#ep-comments-grid-order$/.test(b.sel) && typeof b.fn === 'function');
@@ -249,16 +354,23 @@ test('弹层内排序切换：小图标只切格网方向（独立状态），�
     assert.equal(Detail._epCommentsDesc, true, '评论排序状态不受弹层图标影响');
     assert.ok(ops.some((o) => o.op === 'text' && String(o.value).includes('↑ 正序')), '图标文案更新为正序');
     assert.ok(!ops.some((o) => o.sel.includes('#ep-comments-order')), '外层切正序按钮文案不被重写（两控件互不干扰）');
-    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '网格重排');
-    const cellsHtml = [...htmlBySel.entries()].filter(([k]) => k.includes('ep-comments-grid-cells')).map(([, v]) => String(v)).join('');
-    assert.ok(/data-eid="200"/.test(cellsHtml), '正序时网格首格为第 1 集');
+    // A-23 核心断言：节点重排非重建——
+    // ① 同 eid 的格子节点对象引用不变（append 已有节点 = 移动位置）
+    const byEid = {};
+    cellsChildren.forEach((c) => { byEid[c.eid] = c; });
+    beforeNodes.forEach(({ node, eid }) => assert.ok(byEid[eid] === node, `格子 ${eid} 节点引用不变（重排非重建）`));
+    // ② 无 html 重写操作记录（旧实现整片 innerHTML 重写，新实现零 html 调用）
+    assert.ok(!ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '切方向不再整片重写 cells innerHTML');
+    // ③ 顺序翻转：正序首格为第 1 集（id=200）、末格为 SP
+    assert.equal(cellsChildren[0].eid, 200, '正序时首格为第 1 集');
+    assert.equal(cellsChildren[24].eid, 299, '正序时末格为 SP');
 });
 
 test('长列表点选：网格内点集 → 收起弹层 + 标题/按钮刷新（委托绑定，重排后仍生效）', async () => {
-    const { Detail, htmlBySel, ops, bound } = fixtureEpComments();
+    const { Detail, htmlBySel, ops, bound, cellsChildren } = fixtureEpComments();
     Detail._bgmEps = LONG_EPISODES.data.slice();
     await Detail._renderEpComments();
-    // 骨架绑定：cell 点选委托挂 .ep-comments-grid-cells（重排重写 innerHTML 不掉绑定）、
+    // 骨架绑定：cell 点选委托挂 .ep-comments-grid-cells（重排增删不掉绑定）、
     // picker 开合按钮直挂；桩记录 find 链选择器与委托目标
     const cellBind = bound.find((b) => /(^|>| )\.ep-comments-grid-cells$/.test(b.sel) && b.delegated === '.ep-comments-cell' && typeof b.fn === 'function');
     const gridBind = bound.find((b) => /#ep-comments-picker-btn$/.test(b.sel) && typeof b.fn === 'function');
@@ -267,15 +379,23 @@ test('长列表点选：网格内点集 → 收起弹层 + 标题/按钮刷新�
     // data-eid="N"，故 currentTarget 直接给带该属性的选择器串（同 DOM 语义）
     const cellFn = cellBind.fn;
     const currentTarget = 'button.ep-comments-cell[data-eid="223"]';
+    const nodeById = {};
+    cellsChildren.forEach((c) => { nodeById[c.eid] = c; });
     cellFn.call(currentTarget, { currentTarget });
     assert.equal(Detail._epCommentsEpisodeId, 223, '点选后选中集切换为第 24 集（id=223）');
     assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-title') && o.value.includes('第 24 集讨论')), '标题更新为第 24 集');
     assert.ok(ops.some((o) => o.op === 'hide'), '弹层收起');
-    // 高亮迁移：pickEp 同帧重写格网 cells（弹层 DOM 不重建，只 toggle 显隐——
-    // 不重写则下次点开仍是旧集高亮「选中格子无变化」），新集带 active、旧集无
-    const cellsHtml = [...htmlBySel.entries()].filter(([k]) => k.includes('grid-cells')).map(([, v]) => String(v)).join('');
-    const activeCells = [...cellsHtml.matchAll(/class="ep-comments-cell( active)?" data-eid="(\d+)"/g)].filter((m) => m[1]).map((m) => m[2]);
-    assert.deepEqual(activeCells, ['223'], '重写后仅新集带 active 高亮（再点开按钮能看到选中态）');
+    // A-23 高亮迁移：pickEp 在现有格子上切 active class（不重写 innerHTML）——
+    // 新集带 active、旧集无，节点引用不变（「选中格子无变化」根因仍在修）
+    assert.ok(!ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '点选不再整片重写 cells innerHTML（改切 class + 节点重排）');
+    // 格子集合写死期望（LONG_EPISODES：24 正片 id 200-223 + SP id 299，升序比对与顺序无关）
+    assert.equal(cellsChildren.map((c) => c.eid).sort((a, b) => a - b).join(','),
+        '200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,299',
+        '格子集合不变（点选不增删格子）');
+    assert.equal(cellsChildren.length, 25, '点选不增删格子');
+    cellsChildren.forEach((c) => assert.ok(nodeById[c.eid] === c, `格子 ${c.eid} 节点引用不变`));
+    const activeCells = cellsChildren.filter((c) => c.classList.contains('active')).map((c) => c.eid);
+    assert.deepEqual(activeCells, [223], 'active 高亮迁到新集格上（再点开按钮能看到选中态）');
     // 桩按 find 链记录 html（"#detail-tab-content > #ep-comments-picker-btn"），按尾部选择器取
     const btnEntry = [...htmlBySel.entries()].find(([k]) => k.trim().endsWith('#ep-comments-picker-btn'));
     const btnHtml = String((btnEntry && btnEntry[1]) || '');
@@ -284,6 +404,55 @@ test('长列表点选：网格内点集 → 收起弹层 + 标题/按钮刷新�
     const before = ops.length;
     cellFn.call(currentTarget, { currentTarget });
     assert.equal(ops.length, before + 1, '重复点选仅收起弹层，不触发重渲染');
+});
+
+// ---------------------------------------------------------------- A-23：格网 cells 节点重排
+
+test('A-23 勾选态/状态保留：重排与切集后格子上自定义 class 随节点保留（不随 innerHTML 重写丢失）', async () => {
+    const { Detail, bound, cellsChildren } = fixtureEpComments();
+    Detail._bgmEps = LONG_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    // 用户在格子上产生的自定义状态（此处以自加 class 模拟，真实场景同理由 DOM
+    // 节点承载：节点不重建则状态不丢——A-23 改节点重排的验收核心）
+    const mark = cellsChildren.find((c) => c.eid === 205);
+    assert.ok(mark, '目标格存在');
+    mark.classList.add('user-marked');
+    // 排序切换（节点重排）
+    const bind = bound.find((b) => /#ep-comments-grid-order$/.test(b.sel) && typeof b.fn === 'function');
+    bind.fn.call('#ep-comments-grid-order', { currentTarget: '#ep-comments-grid-order', stopPropagation() {} });
+    assert.ok(cellsChildren.some((c) => c.eid === 205 && c.classList.contains('user-marked')), '方向切换后自定义状态保留');
+    // 点选切集（class 迁移 + 节点重排）后仍在
+    const cellBind = bound.find((b) => /(^|>| )\.ep-comments-grid-cells$/.test(b.sel) && b.delegated === '.ep-comments-cell' && typeof b.fn === 'function');
+    cellBind.fn.call('button.ep-comments-cell[data-eid="223"]', { currentTarget: 'button.ep-comments-cell[data-eid="223"]' });
+    assert.ok(cellsChildren.find((c) => c.eid === 205).classList.contains('user-marked'), '切集重排后自定义状态保留');
+    // active 高亮只按选中集迁移，自定义状态不受影响
+    assert.ok(cellsChildren.find((c) => c.eid === 223).classList.contains('active'), 'active 已迁到新集');
+    assert.ok(!cellsChildren.find((c) => c.eid === 205).classList.contains('active'), '非选中集无 active');
+    // 勾选态语义等价验证：滚动位置因节点复用天然保留（无 DOM 重建），此处以
+    // 「cells 容器从未被 html() 重写」作为滚动锚不失效的桩级证据
+});
+
+test('A-23 chips 增删：syncGridCells 对缺格补建、多余格移除、顺序按当前方向重排', async () => {
+    const { Detail, ops, bound, cellsChildren } = fixtureEpComments();
+    Detail._bgmEps = LONG_EPISODES.data.slice();
+    await Detail._renderEpComments();
+    assert.equal(cellsChildren.length, 25, '初始 25 格');
+    // 注意：shell 闭包持有 _bgmEps 数组引用，分集表变化须原地 mutate（等价于
+    // 数据刷新写回同一缓存数组；换新数组必然走 shell 重绘，不在本用例范围）
+    Detail._bgmEps.splice(0, Detail._bgmEps.length,
+        ...Detail._bgmEps.filter((ep) => ep.id !== 201 && ep.id !== 202), // 删两集
+        { id: 350, sort: 26, ep: 26, type: 0, name: 'e26' });             // 增一集
+    // 触发同步：点选新表里的集（pickEp → syncGridCells）
+    const cellBind = bound.find((b) => /(^|>| )\.ep-comments-grid-cells$/.test(b.sel) && b.delegated === '.ep-comments-cell' && typeof b.fn === 'function');
+    cellBind.fn.call('button.ep-comments-cell[data-eid="299"]', { currentTarget: 'button.ep-comments-cell[data-eid="299"]' });
+    assert.equal(cellsChildren.length, 24, '删 2 增 1 后共 24 格');
+    const eids = cellsChildren.map((c) => c.eid);
+    assert.ok(!eids.includes(201) && !eids.includes(202), '多余格已移除');
+    assert.ok(eids.includes(350), '缺格已按需补建');
+    // 倒序方向下补建格（sort=26 全表最大）落在首位
+    assert.equal(cellsChildren[0].eid, 350, '补建格按当前方向落在首位');
+    // 点选切集期间未整片重写（节点级增删）
+    assert.ok(!ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '增删走节点操作而非 innerHTML 重写');
 });
 
 test('弹层集号跳转：输入集号直达切集，无效输入行内提示（长番快速定位）', async () => {
@@ -308,7 +477,8 @@ test('弹层集号跳转：输入集号直达切集，无效输入行内提示�
     assert.equal(Detail._epCommentsEpisodeId, 1249, '跳转后选中集为 ep=250（id=1249）');
     assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-title') && o.value.includes('第 250 集讨论')), '标题切到第 250 集');
     assert.ok(ops.some((o) => o.op === 'hide'), '跳转成功收起弹层');
-    assert.ok(ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '跳转后格网重写（高亮迁到新集）');
+    // A-23：跳转切集走高亮 class 迁移 + 节点重排，不再整片重写 cells
+    assert.ok(!ops.some((o) => o.op === 'html' && o.sel.includes('.ep-comments-grid-cells')), '跳转切集不再整片重写 cells innerHTML');
     // 无匹配集：行内提示，不改选中集
     stubValues['#ep-comments-jump-input'] = '999';
     const errBefore = Detail._epCommentsEpisodeId;

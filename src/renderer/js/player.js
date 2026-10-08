@@ -11,7 +11,7 @@
  *   渲染层判定「看完」（观看比例 ≥70% 或刚收到 ended）且队列还有下一集时，
  *   自动解析并起播下一集；用户提前关闭 mpv 则终止连播链。
  */
-/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel, AdSkip */
+/* global $, doAction, getJson, createRuntimeId, warnToast, showLoading, hideLoading, openDialog, closeDialog, Kazumi, Records, openSettingsPanel, AdSkip, SettingsSnapshot */
 
 // 媒体直链后缀：已是直链则无需解析（share/播放页等才需解析）
 const DIRECT_MEDIA_RE = /\.(m3u8|mp4|flv|mov|mkv|webm|ts)(\?|#|$)/i;
@@ -910,9 +910,14 @@ const Player = {
         this._opEdEdToasted = false;
         this._opEdStartPos = 0;  // 本次起播应用的片头位置（秒，仅 Kazumi 分支换算毫秒用）
         // 读取 opEdSkip/opEdSave 开关（opEdSkip 默认关、opEdSave 默认开）：登记入口/预览 tick/写入守卫均按此守卫；
-        // settingsGet 失败时保持默认（opEdSkip 关、opEdSave 开，不因读失败误开自动跳过）
+        // 读失败时保持默认（opEdSkip 关、opEdSave 开，不因读失败误开自动跳过）。
+        // A-27：起播主链路点，改走 SettingsSnapshot 内存快照（首读穿透一次 settingsGet，
+        // 之后内存直读）。opEdSkip/opEdSave 仅设置页写入且写后失效快照，起播瞬间读
+        // 快照与每次 IPC 拿最新值等价（用户不会边起播边改设置）；沙箱未加载快照层时
+        // 回退直读 settingsGet，行为不变。
         try {
-            const s0 = (await window.yuki.settingsGet()) || {};
+            const s0 = (typeof SettingsSnapshot !== 'undefined')
+                ? await SettingsSnapshot.get() : ((await window.yuki.settingsGet()) || {});
             this._opEdSkipEnabled = s0.opEdSkip === true;
             this._opEdSaveEnabled = s0.opEdSave !== false;
         } catch (e) {
@@ -928,7 +933,10 @@ const Player = {
         let opEdStartMs = 0;
         try {
             const adskip = _adSkip();
-            const s = (await window.yuki.settingsGet()) || {};
+            // A-27：起播主链路点，改走快照（同一 play() 帧内与上方开关读共用一次穿透，
+            // 串行 IPC 三并零）。片头记录本身在 AdSkip（localStorage），不依赖设置新鲜度。
+            const s = (typeof SettingsSnapshot !== 'undefined')
+                ? await SettingsSnapshot.get() : ((await window.yuki.settingsGet()) || {});
             if (adskip && s.opEdSkip === true && title) {
                 const startSec = adskip.resolveAutoOpSec(title, flag || '', null);
                 if (startSec > 0) {
@@ -947,7 +955,20 @@ const Player = {
         } catch (e) { /* 片头跳过失败不影响起播 */ }
         // 连播开关 + 上下文：从当前集起按序排队，mpv 退出后由 _onExit 推进
         let autoNext = true;
-        try { autoNext = ((await window.yuki.settingsGet()) || {}).autoNext !== false; } catch (e) { /* 读设置失败默认连播 */ }
+        // A-27：起播主链路点（play() 帧内第 3 读），改走快照——整季连播逐集 play()
+        // 的高频起播不再逐次打 IPC。
+        // autoNext 有**两个**写入点：①panels.js 设置页 #set_autonext 开关的 change
+        // 回调（写后经 settings-snapshot.js 的 document change 委托失效快照）；
+        // ②kazumi.js 的 WebDAV 恢复循环（WEBDAV_RESTORE_ALLOWED 含 autoNext，
+        // 程序化 settingsSet，不触发 change，含启动 5s 静默恢复路径）——②已在
+        // 循环结束后显式 SettingsSnapshot.invalidate()。若日后新增别的程序化写入
+        // 点，必须同步 invalidate，否则此处最长 90s（FALLBACK_MAX_AGE）读到旧值：
+        // 云端是「关闭连播」时仍会继续自动连播。先例：live.js:398、detail.js:3968。
+        try {
+            const s = (typeof SettingsSnapshot !== 'undefined')
+                ? await SettingsSnapshot.get() : ((await window.yuki.settingsGet()) || {});
+            autoNext = s.autoNext !== false;
+        } catch (e) { /* 读设置失败默认连播 */ }
         // 守卫：settingsGet await 期间已被新起播取代时，下方 _curMeta/队列分支/
         // 连播链写入都不再属于本帧（旧帧元信息会覆盖/污染新会话）
         if (playSuperseded()) {

@@ -598,24 +598,25 @@ describe('home.js · 分类/feed 持久化 helper', () => {
 // ================================================================ detail.js：_detailCacheGet / _detailCacheSet
 
 describe('detail.js · _detailCacheGet/_detailCacheSet TTL 语义', () => {
-    test('写入→读取往返：值完整还原，落在 yuki_cache::detail::vod::v1:: 命名空间', () => {
+    test('写入→读取往返：值完整还原，落在大池 yuki_bigcache::（详情条目显式路由，防被小池高频写入挤出）', () => {
         const ctx = loadDetail();
         const key = 'site-a|v1';
         ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, key, { vod_name: '片 A', vod_id: 'v1' }, 60000);
-        assert.ok(ctx.__lsStore.has('yuki_cache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + key));
+        assert.ok(ctx.__lsStore.has('yuki_bigcache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + key), '详情条目应落大池');
+        assert.ok(!ctx.__lsStore.has('yuki_cache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + key), '不应落小池');
         assert.deepEqual(ctx.__detailCacheGet(ctx.__DETAIL_VOD_CACHE_PREFIX, key), { vod_name: '片 A', vod_id: 'v1' });
     });
 
-    test('TTL 命中：10 分钟内可读（DETAIL_CACHE_TTL 语义）', () => {
+    test('TTL 命中：30 分钟内可读（DETAIL_CACHE_TTL 语义，对齐后端 spider:detail 1800s）', () => {
         const ctx = loadDetail();
-        assert.equal(ctx.__DETAIL_CACHE_TTL, 10 * 60 * 1000);
+        assert.equal(ctx.__DETAIL_CACHE_TTL, 30 * 60 * 1000);
         ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 's|1', { a: 1 }, ctx.__DETAIL_CACHE_TTL);
         assert.deepEqual(ctx.__detailCacheGet(ctx.__DETAIL_VOD_CACHE_PREFIX, 's|1'), { a: 1 });
     });
 
     test('TTL 过期：时间戳推进到过期后读取返回 null 并惰性删除', () => {
         const ctx = loadDetail();
-        const full = 'yuki_cache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + 's|exp';
+        const full = 'yuki_bigcache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + 's|exp';
         ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 's|exp', { a: 1 }, 1000);
         const saved = JSON.parse(ctx.__lsStore.get(full));
         saved.e = Date.now() - 1; // 手动过期
@@ -659,7 +660,8 @@ describe('detail.js · _detailCacheGet/_detailCacheSet TTL 语义', () => {
         const ctx = loadDetail();
         ctx.localCacheSet('warm', { a: 1 }, 60000);
         const big = 'x'.repeat(1.6 * 1024 * 1024);
-        const ok = ctx.localCacheSet('huge', big, 60000);
+        // B-10 双池：该体积无 opts 会自动路由大池（3MB 上限），本用例验证小池 1.5MB 上限语义，显式钉 small
+        const ok = ctx.localCacheSet('huge', big, 60000, { pool: 'small' });
         assert.equal(ok, false, '超限条目返回 false');
         assert.equal(ctx.localCacheGet('huge'), null);
         assert.deepEqual(ctx.localCacheGet('warm'), { a: 1 }, '已有条目不被淘汰');
@@ -668,7 +670,8 @@ describe('detail.js · _detailCacheGet/_detailCacheSet TTL 语义', () => {
     test('容量上限：累积写入触发淘汰最旧条目（仍在容量内可写入新值）', () => {
         const ctx = loadDetail();
         const chunk = 'y'.repeat(400 * 1024); // 每块约 400KB
-        for (let i = 0; i < 4; i++) ctx.localCacheSet('k' + i, chunk, 60000);
+        // B-10 双池：400KB 无 opts 会自动路由大池，本用例验证小池淘汰语义，显式钉 small
+        for (let i = 0; i < 4; i++) ctx.localCacheSet('k' + i, chunk, 60000, { pool: 'small' });
         assert.deepEqual(ctx.localCacheGet('k0'), null, '最旧条目被淘汰');
         assert.equal(ctx.localCacheGet('k3').length, chunk.length, '最新条目保留');
     });
@@ -846,6 +849,81 @@ describe('detail.js · 详情数据渲染', () => {
         await D.load();
         assert.equal(netCalls, 1);
         assert.deepEqual(ctx.__detailCacheGet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1'), VOD);
+    });
+
+    test('load SWR：TTL 过期 ≤7 天的陈旧缓存立即整页渲染（秒开），后台静默校准', async () => {
+        const ctx = loadDetail();
+        const D = detail(ctx);
+        // 先写一条缓存，再把过期时间拨到过去、写入时间拨回 3 天前（构造「过期但未超 SWR 上限」）
+        const old = { vod_id: 'v1', vod_name: '测试影片', vod_remarks: '全 12 集', vod_play_from: '线路A', vod_play_url: '第1集$u1' };
+        ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1', old, 1000);
+        const full = 'yuki_bigcache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + 'site-a|v1';
+        const saved = JSON.parse(ctx.__lsStore.get(full));
+        saved.e = Date.now() - 1000; // 过期时间拨到过去
+        saved.t = Date.now() - 3 * 24 * 60 * 60 * 1000; // 写入时间拨回 3 天前
+        ctx.__lsStore.set(full, JSON.stringify(saved));
+        assert.equal(ctx.__detailCacheGet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1'), null, '前置：TTL 内已过期');
+        let netCalls = 0;
+        ctx.doAction = async () => { netCalls++; return { list: [old] }; };
+        await D.load();
+        assert.equal(D._vod && D._vod.vod_name, '测试影片', '陈旧缓存立即上屏（不等网络）');
+        const html = String(ctx.__cap.bySel.get('#detail-body') || '');
+        assert.match(html, /测试影片/, '整页已渲染');
+        assert.ok(netCalls >= 1, '后台校准发出一次请求（SWR revalidate）');
+        // 校准结果与缓存一致 → 零额外重渲染（renderCalls 不再增长）
+        const rendersAfterLoad = ctx.__cap.bySel.size;
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(netCalls, 1, '校准只发一次');
+        void rendersAfterLoad;
+    });
+
+    test('load SWR：校准发现更新（vod_play_url 变化）→ 覆盖缓存并重渲染', async () => {
+        const ctx = loadDetail();
+        const D = detail(ctx);
+        const old = { vod_id: 'v1', vod_name: '测试影片', vod_remarks: '更新至第11集', vod_play_from: '线路A', vod_play_url: '第1集$u1' };
+        ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1', old, 1000);
+        const full = 'yuki_bigcache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + 'site-a|v1';
+        const saved = JSON.parse(ctx.__lsStore.get(full));
+        saved.e = Date.now() - 1000;
+        saved.t = Date.now() - 2 * 24 * 60 * 60 * 1000;
+        ctx.__lsStore.set(full, JSON.stringify(saved));
+        const fresh = { ...old, vod_remarks: '更新至第12集', vod_play_url: '第1集$u1#第2集$u2' };
+        ctx.doAction = async () => ({ list: [fresh] });
+        await D.load();
+        await new Promise((r) => setTimeout(r, 20)); // 让后台校准落地
+        assert.equal(D._vod.vod_remarks, '更新至第12集', '有更新：状态被新数据覆盖');
+        assert.match(String(ctx.__cap.bySel.get('#detail-body') || ''), /更新至第12集/, '页面重渲染为最新数据');
+        assert.deepEqual(ctx.__detailCacheGet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1'), fresh, '新数据回写缓存');
+    });
+
+    test('load SWR：陈旧超 7 天 → 按未命中处理（同步网络路径）', async () => {
+        const ctx = loadDetail();
+        const D = detail(ctx);
+        const old = { vod_id: 'v1', vod_name: '老片', vod_play_from: 'A', vod_play_url: '第1集$u1' };
+        ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1', old, 1000);
+        const full = 'yuki_bigcache::' + ctx.__DETAIL_VOD_CACHE_PREFIX + 'site-a|v1';
+        const saved = JSON.parse(ctx.__lsStore.get(full));
+        saved.e = Date.now() - 1000;
+        saved.t = Date.now() - 8 * 24 * 60 * 60 * 1000; // 8 天前：超 SWR 上限
+        ctx.__lsStore.set(full, JSON.stringify(saved));
+        let netCalls = 0;
+        ctx.doAction = async () => { netCalls++; return { list: [VOD] }; };
+        await D.load();
+        assert.equal(netCalls, 1, '超上限走同步网络');
+        assert.equal(D._vod.vod_name, '测试影片', '结果以网络为准');
+    });
+
+    test('load SWR：force（刷新按钮）跳过陈旧垫场直接回源', async () => {
+        const ctx = loadDetail();
+        const D = detail(ctx);
+        const old = { vod_id: 'v1', vod_name: '旧数据', vod_play_from: 'A', vod_play_url: '第1集$u1' };
+        ctx.__detailCacheSet(ctx.__DETAIL_VOD_CACHE_PREFIX, 'site-a|v1', old, 1000);
+        const kvSeen = [];
+        ctx.doAction = async (action, kv) => { kvSeen.push(kv); return { list: [VOD] }; };
+        await D.load(true);
+        assert.equal(kvSeen.length, 1, 'force 不吃陈旧缓存');
+        assert.equal(kvSeen[0].refresh, '1', 'force 请求带 refresh=1');
+        assert.equal(D._vod.vod_name, '测试影片');
     });
 
     test('load：并发加载去重——A→B 快速连开，慢的 A 响应不得覆盖 B 页面', async () => {

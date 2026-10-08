@@ -176,6 +176,15 @@ class PluginManager:
         self._file = os.path.join(hoststate.get_data_dir(), 'kazumi', 'plugins.json')
         self._username_cache = None  # Bangumi 当前用户名缓存（5 分钟 TTL，R1 收藏接口需真实用户名）
         self._username_ts = 0
+        # bangumi_me 最近一次失败归类（'auth' token 无效 / 'network' 网络·镜像故障 / None 成功），
+        # 收藏链路据此区分「请重新获取 token」与「网络故障请重试」两种用户提示。
+        # 并发安全（2026-10-02）：/kazumi/action 经 run_in_threadpool 并发执行，
+        # 多个 Bangumi 请求（启动自动同步 + 设置页测试连接 + 连播进度上报）会
+        # 互相覆盖实例字段——A 请求失败后、读 reason 前，B 请求成功把其置回
+        # None，A 读到 None。此时 server 返回无 reason，前端恰好回落成「Token
+        # 无效或已过期（401）」，正是本次要消灭的「网络故障被报成 token 失效」。
+        # 故按线程（= 当前请求）存，跨请求不串。
+        self._me_error_local = threading.local()
         self._task_lock = threading.Lock()   # 保护有效性检测/批量更新的运行状态
         self._validity_running = False
         self._validity_results = []          # list[{'name','validity','msg'}]
@@ -1055,6 +1064,13 @@ class PluginManager:
         中文名藏在单角色详情 /v0/characters/{id} 的 infobox「别名」项里。故拉到列表后
         并发补全每个角色的 name_cn（有界线程池，best-effort：单个失败保留原名），
         供前端「角色卡片默认用简体中文名」渲染。首次较慢，由 server 层 TTL 缓存兜住重复访问。
+
+        补全有上限（_CHAR_NAME_CN_ENRICH_LIMIT）：长番剧的演员表可达数百人（实测
+        subject 899 有 273 个角色），逐个拉详情是 N 次网络往返，冷态实测 8~22s。
+        详情页把角色/制作/关联与吐槽并发拉取，角色路一旦长时间挂起，前端页签会停在
+        「加载中/暂无数据」（表现为空页，用户以为没数据）。故只对前 N 个角色补全——
+        列表接口按主角→配角→闲角排序，前 N 个正是用户实际会看的主要人物；超出部分
+        保留原名渲染（卡片不缺内容，只是副标题不再显示中文名）。
         """
         try:
             rsp = http_client.get(
@@ -1073,9 +1089,22 @@ class PluginManager:
         self._enrich_characters_name_cn(chars)
         return chars
 
+    # 单条目角色中文名补全上限（超出的角色保留原名）。
+    # 取值依据：实测单角色详情往返 ~0.14s、并发 6 路；60 个 ≈ 1.5s，与制作/关联
+    # 两路（各 <1s）同量级，不会把并发页签拖进「长时间无数据」区间。长番剧的
+    # 闲角/客串（实测 273 个中最后 200+ 个）中文名收益极低，不值得付 N 次往返。
+    _CHAR_NAME_CN_ENRICH_LIMIT = 60
+
     def _enrich_characters_name_cn(self, chars):
         """并发为角色列表补全 name_cn（就地写入）：逐个拉 /v0/characters/{id} 详情，
-        从 infobox 提取简体中文名。有界并发≤6，单角色失败/无中文名时不写（保留原名回退）。"""
+        从 infobox 提取简体中文名。单角色失败/无中文名时不写（保留原名回退）。
+
+        两重有界（长番剧冷态曾实测 8~22s，把详情页并发页签拖成空页）：
+        - 条数上限 _CHAR_NAME_CN_ENRICH_LIMIT：只补全靠前的角色（列表按主角→配角
+          →闲角排序），超出保留原名；
+        - 并发上限 _CHAR_NAME_CN_ENRICH_WORKERS（8，高于旧的 6：实测单请求 ~0.14s
+          且瓶颈在往返而非本地 CPU，放宽并发直接缩短总墙钟）。
+        """
         def _fill(ch):
             if not isinstance(ch, dict):
                 return
@@ -1089,11 +1118,16 @@ class PluginManager:
         targets = [c for c in chars if isinstance(c, dict) and c.get('id') and not c.get('name_cn')]
         if not targets:
             return
+        # 只补全靠前的角色：列表接口按主角/配角/闲角排序，超出的闲角中文名收益低
+        targets = targets[:self._CHAR_NAME_CN_ENRICH_LIMIT]
         try:
-            with ThreadPoolExecutor(max_workers=min(6, len(targets))) as pool:
+            workers = min(self._CHAR_NAME_CN_ENRICH_WORKERS, len(targets))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
                 list(pool.map(_fill, targets))
         except Exception as e:
             logger.warning('[kazumi] enrich character name_cn failed: %s', e)
+
+    _CHAR_NAME_CN_ENRICH_WORKERS = 8
 
     @staticmethod
     def _pick_char_name_cn(info):
@@ -1291,31 +1325,150 @@ class PluginManager:
             'User-Agent': BANGUMI_UA,
         }
 
+    @staticmethod
+    def _rsp_body_is_cf_challenge(rsp):
+        """响应体是否带 CF 挑战页/网关拦截页特征（"Just a moment..."/challenge/cloudflare）。
+
+        独立成函数（M5）：bangumi_me 的 saw_401_403 归因需要区分「401/403 但
+        是 CF 拦截」（不是鉴权证据）与「401/403 且非 CF 页」（大概率鉴权失败）。"""
+        try:
+            body = str(getattr(rsp, 'text', '') or '')
+        except Exception:
+            body = ''
+        snippet = body[:400].lower()
+        if not snippet:
+            return False
+        return 'just a moment' in snippet or 'challenge' in snippet or 'cloudflare' in snippet
+
+    @staticmethod
+    def _rsp_body_indicates_auth_error(rsp):
+        """读 401/403 响应体片段，判断是否确为鉴权错误（而非 CF 挑战页/网关错误页）。
+
+        鉴权特征：JSON 错误结构（"code"/"error"）或明确鉴权语义短语
+        （sign in/login/unauthorized/token 无效等，见下方关键词表）；Cloudflare
+        挑战页、空体或不可读体一律返回 False（交由换基址重试兜底）。"""
+        try:
+            body = str(getattr(rsp, 'text', '') or '')
+        except Exception:
+            body = ''
+        snippet = body[:400].lower()
+        if not snippet:
+            return False
+        # CF/挑战页特征**必须优先于** JSON 判定：Cloudflare 拦截页与网关错误页
+        # 常含形如 <meta name="..." content="error-code"> 或 JS 片段里的 "code"/
+        # "error" 字面量，上面的通用 JSON 判定会把它误判为鉴权错误 → 立刻 return
+        # None 归 'auth'，换基址兜底失效，又回到「网络/反代故障被报成 Token 无效」。
+        if PluginManager._rsp_body_is_cf_challenge(rsp):
+            return False  # CF 挑战页特征：反代拦截，不是鉴权失败
+        if '"code"' in snippet or '"error"' in snippet:
+            return True  # 官方 API 未鉴权返回 {"code":401,...} 这类 JSON 错误
+        # 关键词只收**明确鉴权语义**的短语（M6）：裸词 forbidden/auth/token 会把
+        # nginx 默认 403 页（"403 Forbidden"）、含 "authorization" 头说明的网关
+        # 页等普通错误页误判成鉴权失败，误导用户重取 token。
+        return any(kw in snippet for kw in (
+            'sign in', 'sign-in', 'login', 'unauthorized', 'invalid token',
+            'invalid_token', 'token expired', 'token 无效', 'token 已过期'))
+
     def bangumi_me(self, token):
-        """当前用户信息（需 token；返回 None 表示 token 无效或网络失败）。"""
+        """当前用户信息（需 token；返回 None 表示 token 无效或网络失败）。
+
+        镜像站（mirrox 反代，Cloudflare 后）不稳定：读超时、偶发 200+空体/HTML 错误页、
+        403 CF 挑战页都会出现，旧实现单基址单次请求把这些一律误判成「token 无效」。
+        修复口径：
+        - 多基址兜底：当前基址失败后自动换官方/镜像另一基址再试（与写接口矩阵同源）；
+        - 单基址内一次快速重试（镜像抖动多为一次性，退避 0.5s 足够）；
+        - 401/403 必须结合响应体判断，不能只看状态码：响应体含 JSON 错误码
+          （官方无 token 返回 {"code":401,...}）或 sign in/login/unauthorized 等
+          鉴权特征才确证 token 无效；镜像的 Cloudflare 403 挑战页（"Just a
+          moment..."）是反代拦截而非鉴权失败，不立即归 auth，换基址继续试官方；
+        - 所有基址耗尽后：任一基址出现过 401/403 归 'auth'，否则归 'network'；
+        - 失败原因按当前线程记录（'auth' 鉴权失败 / 'network' 网络故障），
+          调用方据此给用户准确的提示文案。"""
         token = self._normalize_bangumi_token(token)
         if not token:
+            self._set_me_error('auth')
             return None
-        try:
-            rsp = http_client.get(f'{self._base_api()}/v0/me',
-                               headers=self._bangumi_auth_headers(token), timeout=(5, 8), verify=True)
-            if getattr(rsp, 'status_code', None) in (401, 403):
-                logger.warning('[kazumi] bangumi me 401/403: Token 无效或已过期，请在 https://bgm.tv/settings/token 重新获取')
-                return None
-            rsp.raise_for_status()
-            return rsp.json()
-        except Exception as e:
-            # requests HTTPError 携带 response，显式识别 401/403
-            try:
-                resp = getattr(e, 'response', None)
-                code = getattr(resp, 'status_code', None)
-                if code in (401, 403):
-                    logger.warning('[kazumi] bangumi me 401/403: Token 无效或已过期，请在 https://bgm.tv/settings/token 重新获取')
-                    return None
-            except Exception:
-                pass
-            logger.warning('[kazumi] bangumi me failed: %s', e)
-            return None
+        headers = self._bangumi_auth_headers(token)
+        bases = [self._base_api()]
+        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
+        if alt not in bases:
+            bases.append(alt)
+        last_err = None
+        saw_401_403 = False  # 任一基址返回过 401/403（耗尽后兜底归 auth）
+        for base in bases:
+            for attempt in range(2):  # 单基址 1 次快速重试（镜像一次性抖动）
+                try:
+                    rsp = http_client.get(f'{base}/v0/me',
+                                       headers=headers, timeout=(5, 8), verify=True)
+                    code = getattr(rsp, 'status_code', None)
+                    if code in (401, 403):
+                        if self._rsp_body_indicates_auth_error(rsp):
+                            saw_401_403 = True
+                            # 响应体确为鉴权错误（如官方 {"code":401,...}）：立即归因
+                            logger.warning('[kazumi] bangumi me 401/403: Token 无效或已过期，请在 https://bgm.tv/settings/token 重新获取')
+                            self._set_me_error('auth')
+                            return None
+                        # 401/403 但响应体是 CF 挑战页：不是鉴权证据（M5），不计入
+                        # saw_401_403——镜像被 CF 拦截会被兜底误归 'auth'，误导用户
+                        # 重取 token；其余非鉴权错误页（网关 403、空体等）维持旧
+                        # 口径计入，耗尽后大概率仍指向 token 问题。
+                        if not self._rsp_body_is_cf_challenge(rsp):
+                            saw_401_403 = True
+                        # 镜像 CF 挑战页/网关错误页：视为该基址不可用，换基址继续试官方
+                        logger.warning('[kazumi] bangumi me %s from %s（非鉴权响应体，换基址重试）', code, base)
+                        raise RuntimeError(f'HTTP {code} challenge/gateway body')
+                    if code is None or code >= 400:
+                        raise RuntimeError(f'HTTP {code}')
+                    # 200 但非 JSON（镜像网关偶发返回空体/HTML 错误页）→ 换基址重试
+                    try:
+                        data = rsp.json()
+                    except Exception as je:
+                        raise RuntimeError(f'non-JSON body (HTTP {code}): {str(je)[:60]}')
+                    if not isinstance(data, dict) or not data:
+                        raise RuntimeError(f'empty/invalid /v0/me payload (HTTP {code})')
+                    self._set_me_error(None)
+                    return data
+                except Exception as e:
+                    last_err = f'{base}/v0/me ERR {str(e)[:120]}'
+                    if attempt == 0:
+                        time.sleep(0.5)  # 镜像抖动退避后再试一次
+        logger.warning('[kazumi] bangumi me failed (tried %s): %s', ', '.join(bases), last_err)
+        # 所有基址耗尽：只要任一基址返回过 401/403 就归 auth（大概率 token 无效），
+        # 其余（超时/连接失败/非 JSON 等）归 network
+        self._set_me_error('auth' if saw_401_403 else 'network')
+        return None
+
+    def _bangumi_token_error_msg(self):
+        """token 相关失败的统一文案：鉴权失败提示重新获取，网络故障提示重试/切镜像。"""
+        if self._bangumi_me_failure_reason() == 'auth':
+            return ('Bangumi Token 无效或已过期（401），'
+                    '请前往 https://bgm.tv/settings/token 重新获取并在设置中保存')
+        return ('Bangumi 连接失败（网络或镜像故障，已自动切换官方/镜像重试），'
+                '请检查网络后重试，或在设置中更换 Bangumi 镜像域名')
+
+    def _bangumi_me_failure_reason(self):
+        """bangumi_me 最近一次失败的归类：'auth'（token 无效）/ 'network'（网络/镜像故障）/ None。
+
+        供调用方区分「请重新获取 token」与「网络故障，请稍后重试/切换镜像」两种文案。
+        注意：只读已发生的失败记录，不主动发起校验请求——历史签名里的 token 参数
+        从无调用方传入（5 处调用点全为无参），主动校验的职责在 bangumi_me 调用方。
+
+        取的是**当前线程**最近一次 bangumi_me 的归类（threading.local）：/kazumi/action
+        并发执行时实例级字段会被别的请求覆盖，读到别的请求的结果。"""
+        return getattr(self._me_error_local, 'reason', None)
+
+    def _set_me_error(self, reason):
+        """记录本次（当前线程）bangumi_me 的失败归类，供 _bangumi_me_failure_reason 读回。"""
+        self._me_error_local.reason = reason
+
+    @property
+    def _bangumi_me_error(self):
+        """兼容旧读取口径：返回**当前线程**的归类。
+
+        原实例字段在并发下会被别的请求覆盖（A 读到 B 的结果），已改为
+        threading.local；这里保留同名只读属性，使既有的「调用 bangumi_me 后直接
+        读 mgr._bangumi_me_error」用法（单线程测试/同步链路）语义不变。"""
+        return getattr(self._me_error_local, 'reason', None)
 
     def _bangumi_username(self, token):
         """当前用户名（/v0/me 获取，缓存 5 分钟）。
@@ -1323,7 +1476,6 @@ class PluginManager:
         R1 根因：`/v0/users/-/collections` 的 `-` 在未鉴权/无效 token 时会被当作字面用户名，
         官方 API 返回 404 "user doesn't exist"。对齐 Kazumi（api_endpoints.dart bangumiGetCollection
         用 `{username}` 占位），先取真实用户名再拼 URL。token 无效返回 None。"""
-        import time
         now = time.time()
         if self._username_cache and now - self._username_ts < 300:
             return self._username_cache
@@ -1344,7 +1496,11 @@ class PluginManager:
         limit = max(1, min(int(limit or 100), 100))
         username = self._bangumi_username(token)
         if not username:
-            logger.warning('[kazumi] bangumi collections: 无法获取用户名（token 无效或网络失败）')
+            reason = self._bangumi_me_failure_reason()
+            if reason == 'auth':
+                logger.warning('[kazumi] bangumi collections: 无法获取用户名（Token 无效或已过期）')
+            else:
+                logger.warning('[kazumi] bangumi collections: 无法获取用户名（网络/镜像故障，已双基址重试）')
             return []
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections',
@@ -1379,7 +1535,11 @@ class PluginManager:
             return None
         username = self._bangumi_username(token)
         if not username:
-            logger.warning('[kazumi] bangumi collection get: 无法获取用户名（token 无效）')
+            reason = self._bangumi_me_failure_reason()
+            if reason == 'auth':
+                logger.warning('[kazumi] bangumi collection get: 无法获取用户名（Token 无效或已过期）')
+            else:
+                logger.warning('[kazumi] bangumi collection get: 无法获取用户名（网络/镜像故障，已双基址重试）')
             return None
         try:
             rsp = http_client.get(f'{self._base_api()}/v0/users/{username}/collections/{subject_id}',
@@ -1437,7 +1597,7 @@ class PluginManager:
         self._username_ts = 0
         username = self._bangumi_username(token)
         if not username:
-            return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
+            return False, self._bangumi_token_error_msg()
         # type<0 语义：不发 type（纯评分/吐槽 PATCH，不动收藏类型）；合法类型 1-5 照旧透传。
         # type 为 None 时同样不发（收集 self._bgm... 场景外仅 apply_sync_plan 路径使用）。
         # 守卫 >=1：官方 SubjectCollectionType 枚举仅 1-5，0 不是合法收藏类型（发 0 会被
@@ -1501,7 +1661,7 @@ class PluginManager:
         self._username_ts = 0
         username = self._bangumi_username(token)
         if not username:
-            return False, 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'
+            return False, self._bangumi_token_error_msg()
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
@@ -1659,7 +1819,11 @@ class PluginManager:
             return []
         username = self._bangumi_username(token)
         if not username:
-            logger.warning('[kazumi] bangumi all collections: 无法获取用户名（token 无效或网络失败）')
+            reason = self._bangumi_me_failure_reason()
+            if reason == 'auth':
+                logger.warning('[kazumi] bangumi all collections: 无法获取用户名（Token 无效或已过期）')
+            else:
+                logger.warning('[kazumi] bangumi all collections: 无法获取用户名（网络/镜像故障，已双基址重试）')
             return []
         per_page = max(1, min(int(per_page or 100), 100))
         headers = self._bangumi_auth_headers(token)
@@ -1742,11 +1906,12 @@ class PluginManager:
         # 若远端拉取因 401 返回空且 token 经校验无效，补 error 提示（_bangumi_all_collections 已在 401 时直接返回 []）
         # 为保证测试中 mock _bangumi_all_collections 时不误判，仅当 remote 为空且用户名确实获取失败时附加错误
         if not remote_list:
-            # 轻量校验：尝试获取用户名，失败则视为 token 无效（避免把“空收藏”误判为鉴权失败，需同时满足本地有数据）
+            # 轻量校验：尝试获取用户名，失败则按真实原因报错（token 无效 / 网络故障均可能，
+            # 避免把“空收藏”误判为鉴权失败，需同时满足本地有数据）
             if local_favorites and not self._bangumi_username(token):
                 return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
                         'remoteTotal': 0, 'localTotal': len(local_favorites or []),
-                        'error': 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'}
+                        'error': self._bangumi_token_error_msg()}
         remote = {}
         for it in remote_list:
             sid = it.get('subject_id')
@@ -1862,7 +2027,7 @@ class PluginManager:
             return {'uploaded': 0, 'failed': 0, 'results': []}
         username = self._bangumi_username(token)
         if not username:
-            return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': 'Bangumi Token 无效或已过期（401），请前往 https://bgm.tv/settings/token 重新获取并在设置中保存'}
+            return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': self._bangumi_token_error_msg()}
         headers = self._bangumi_auth_headers(token)
         bases = [self._base_api()]
         alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()

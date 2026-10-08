@@ -11,7 +11,7 @@
  * - M3U：#EXTINF:-1 group-title="组名",频道名 后跟地址行
  * 播放：首地址交主进程 mpv；失败时返回当前地址和错误，不自动切换线路。
  */
-/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar, UIState */
+/* global $, getJson, doAction, escHtml, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, renderStatusBar, UIState, STAGGER_STEP_MS, STAGGER_MAX_IDX, SettingsSnapshot */
 
 /**
  * T39：直播每页频道数取「直播每页条数」设置（默认 120）；pageSizeOf 未设置时
@@ -389,6 +389,16 @@ const Live = {
                 delete cache[keys[0]];
             }
             await window.yuki.settingsSet('liveProbeCache', cache);
+            // 审查.md 2.2 同类（live.js 侧）：liveProbeCache 无对应设置页 input，
+            // 此处为程序化写 settingsSet，不经过任何控件 change——document 级
+            // change 委托（settings-snapshot.js 的失效通道）不会触发，SettingsSnapshot
+            // 快照不失效。直接调公开 invalidate() 清快照，后续 get() 重新穿透读新值
+            //（live.js:219 读 liveProbeCache 走 settingsGet 直读，不受快照影响；
+            //  invalidate 是防御性收口，防止其他快照读者拿到过期 liveProbeCache）。
+            if (typeof SettingsSnapshot !== 'undefined'
+                && SettingsSnapshot && typeof SettingsSnapshot.invalidate === 'function') {
+                SettingsSnapshot.invalidate();
+            }
         } catch (e) { /* 写缓存失败不影响本次探测结果展示 */ }
     },
 
@@ -466,9 +476,10 @@ const Live = {
         const pagecount = Math.ceil(shown.length / size);
         this._page = Math.min(Math.max(1, this._page), pagecount);
         // T65：当前页频道拼串一次性写入。animate 时按「可见序号」内联错峰延迟
-        //（30ms/张，全部频道逐张跃入，不设前 N 张上限；CSP style-src 允许内联 style）
+        //（参数引用 common.js 错峰常量 STAGGER_*：45ms/张、第 8 张起封顶 315ms，
+        // A-04 归一（原 30ms/张且无上限）；CSP style-src 允许内联 style）
         const html = shown.slice((this._page - 1) * size, this._page * size).map(({ c, i }, vi) =>
-            `<div class="live-item" data-idx="${i}"${animate ? ` style="animation-delay:${vi * 30}ms"` : ''} tabindex="0">
+            `<div class="live-item" data-idx="${i}"${animate ? ` style="animation-delay:${Math.min(vi, STAGGER_MAX_IDX) * STAGGER_STEP_MS}ms"` : ''} tabindex="0">
                 <span class="live-name">${escHtml(c.name)}</span>
                 <span class="live-group">${escHtml(c.group)}</span></div>`).join('');
         box.html(html);

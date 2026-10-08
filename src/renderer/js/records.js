@@ -10,7 +10,7 @@
  * 点击事件由 my.js 在 document 级委托打开 BgmRate 对话框——独立收藏页 #view-favorites
  * 与「我的」页内嵌网格两处 Bangumi 卡都生效）。
  */
-/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter */
+/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter, fmtCommentTimeFull, DetailSnap, prefetchDetail, Home, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 async function recGet(key) {
     try {
@@ -274,11 +274,12 @@ function fmtDur(sec) {
     return `${sec} 秒`;
 }
 
-/** 时间戳 → 本地时间串（YYYY-MM-DD HH:mm）。 */
+/** 时间戳 → 本地时间串（YYYY-MM-DD HH:mm）。
+ *  A-14：实现并入 common.js fmtCommentTimeFull（秒/毫秒自适配 + 畸形输入兜底），
+ *  此处保留 fmtTime 别名委托转发——收藏/历史卡的 ts 均为 Date.now() 毫秒数，
+ *  与原实现逐字符同输出；额外获得旧实现没有的畸形输入兜底（Invalid Date → ''）。 */
 function fmtTime(ts) {
-    if (!ts) return '';
-    const d = new Date(ts);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return fmtCommentTimeFull(ts);
 }
 
 /** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面徽章组带状态标签）。
@@ -427,42 +428,105 @@ function applyLocalCover(el, rel, url) {
     img.style.height = '100%';
 }
 
+/** 发起单张卡的抓帧请求（成功回填、失败记冷却；in-flight 按 rel 去重）。
+ *  由 fillLocalCovers 的视口回调或无 IntersectionObserver 环境的同步路径调用。 */
+function requestLocalCover(el, rel) {
+    const failAt = _localCoverFailAt.get(rel);
+    if (failAt && Date.now() - failAt < _localCoverRetryMs) return; // 冷却期内不重试
+    let p = _localCoverInFlight.get(rel);
+    if (!p) {
+        p = window.yuki.fileThumb(rel)
+            .then((r) => {
+                if (r && r.ok && r.path) {
+                    const u = localThumbUrl(r.path);
+                    _localCoverCache.set(rel, u);
+                    if (_localCoverCache.size > _localCoverCap) _localCoverCache.delete(_localCoverCache.keys().next().value);
+                    return u;
+                }
+                _localCoverFailAt.set(rel, Date.now());
+                if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
+                return null;
+            })
+            .catch(() => {
+                _localCoverFailAt.set(rel, Date.now());
+                if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
+                return null;
+            })
+            .finally(() => _localCoverInFlight.delete(rel));
+        _localCoverInFlight.set(rel, p);
+    }
+    Promise.resolve(p).then((u) => { if (u) applyLocalCover(el, rel, u); });
+}
+
+// 视口懒加载（单例观察器 + 批次登记）：收藏/历史一页最多 120 张本地/直链卡，
+// 整页立即抓帧会瞬间塞满 ffmpeg 并发队列（上限 4），首屏外的帧多半滚动到之前
+// 用不上。rootMargin 预取约一屏余量，滚动不露白；无 IntersectionObserver 的
+// 环境（老 WebView / 单测桩）退化为立即全量抓帧，与旧版行为一致。
+let _coverIO = null;
+// 按 grid 容器分组的登记项：makeRecordView 会产出多个视图实例（Favorites /
+// HistoryView，外加 my.js 的 #my-panel-favorites 第三个实例），若共用一个模块级
+// 集合，任一实例渲染都会把另外两个网格里仍存活、仍在等进入视口的节点一并取消
+// 观察——切回那个网格时若命中「未脏 → 复用旧网格」分支，fillLocalCovers 不再执行，
+// 这些封面就永久停在占位图。
+const _coverIOBatches = new Map(); // grid 元素 → Set<节点>
+
+function coverIO() {
+    if (!_coverIO) {
+        _coverIO = new IntersectionObserver((entries) => {
+            for (const en of entries) {
+                if (!en.isIntersecting) continue;
+                _coverIO.unobserve(en.target);
+                for (const set of _coverIOBatches.values()) set.delete(en.target);
+                const rel = en.target.getAttribute('data-local-path');
+                if (rel) requestLocalCover(en.target, rel);
+            }
+        }, { rootMargin: '240px 0px' });
+    }
+    return _coverIO;
+}
+
 function fillLocalCovers(grid) {
     if (!grid || !grid.length) return;
     if (!window.yuki || typeof window.yuki.fileThumb !== 'function') return;
-    const now = Date.now();
+    // 网格整格重写：本容器内上一批仍挂观察的节点已 detach，先解除观察——
+    // 观察器对登记目标持强引用，不清理会随每次渲染累积游离节点。
+    // 只清本容器的登记项：共用一个全局集合会把其他网格里仍存活的待抓帧节点
+    // 一并取消观察，那些封面就再也没人补了。
+    if (_coverIO) {
+        const rootEl = grid[0];
+        const batch = _coverIOBatches.get(rootEl);
+        if (batch && batch.size) {
+            for (const el of batch) _coverIO.unobserve(el);
+            batch.clear();
+        }
+    }
+    const lazy = typeof IntersectionObserver !== 'undefined';
     grid.find('.vod-cover[data-local-path]').each(function () {
         const el = this;
         const rel = el.getAttribute('data-local-path');
         if (!rel) return;
         const hit = _localCoverCache.get(rel);
         if (hit) { applyLocalCover(el, rel, hit); return; }
-        const failAt = _localCoverFailAt.get(rel);
-        if (failAt && now - failAt < _localCoverRetryMs) return; // 冷却期内不重试
-        let p = _localCoverInFlight.get(rel);
-        if (!p) {
-            p = window.yuki.fileThumb(rel)
-                .then((r) => {
-                    if (r && r.ok && r.path) {
-                        const u = localThumbUrl(r.path);
-                        _localCoverCache.set(rel, u);
-                        if (_localCoverCache.size > _localCoverCap) _localCoverCache.delete(_localCoverCache.keys().next().value);
-                        return u;
-                    }
-                    _localCoverFailAt.set(rel, Date.now());
-                    if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
-                    return null;
-                })
-                .catch(() => {
-                    _localCoverFailAt.set(rel, Date.now());
-                    if (_localCoverFailAt.size > _localCoverCap) _localCoverFailAt.delete(_localCoverFailAt.keys().next().value);
-                    return null;
-                })
-                .finally(() => _localCoverInFlight.delete(rel));
-            _localCoverInFlight.set(rel, p);
-        }
-        Promise.resolve(p).then((u) => { if (u) applyLocalCover(el, rel, u); });
+        if (!lazy) { requestLocalCover(el, rel); return; }
+        let batch = _coverIOBatches.get(grid[0]);
+        if (!batch) { batch = new Set(); _coverIOBatches.set(grid[0], batch); }
+        if (batch.has(el)) return;
+        batch.add(el);
+        coverIO().observe(el);
     });
+}
+
+/** 详情快照写入（纯优化路径，永不抛错）。
+ *  DetailSnap 由 detail-snap.js 以 root.DetailSnap 挂载、Home 是 home.js 顶层
+ *  const——任一缺席（脚本加载失败/顺序变化/测试沙箱）都会在 Detail.open 之前
+ *  抛 ReferenceError/TypeError，把「打开详情」这条主流程打断。写快照失败一律
+ *  静默：字段全空时 detail-snap.js 的 _trimFields 本就会返回 false 不落盘。 */
+function _snapPut(site, id, $el) {
+    try {
+        if (typeof DetailSnap === 'undefined' || !DetailSnap.put) return false;
+        if (typeof Home === 'undefined' || typeof Home._snapFieldsFromCard !== 'function') return false;
+        return DetailSnap.put(site, id, Home._snapFieldsFromCard($el));
+    } catch (e) { return false; } // 快照是优化路径：任何异常都不得上抛
 }
 
 // ---- 编辑记录（改显示标题）：两视图共用一个对话框 ----
@@ -566,7 +630,13 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     // Bangumi 收藏条目点击进 Bangumi 二级详情页（非 CatVod 详情）
                     if (String(el.data('site')) === 'bangumi') {
                         const id = String(el.data('id') || '');
-                        if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) Kazumi.openBangumiInfoPage(id);
+                        if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
+                            // A-01（Bangumi 快照写入侧）：收藏卡快照（site='' 同 openBangumi 口径）
+                            if (typeof DetailSnap !== 'undefined' && DetailSnap.put) {
+                                _snapPut('', id, el);
+                            }
+                            Kazumi.openBangumiInfoPage(id);
+                        }
                         return;
                     }
                     // Kazumi 源记录：历史里点击进 Bangumi 二级详情页（按片名匹配 subject）；
@@ -588,7 +658,14 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                                         id = (mm && mm.id) || 0;
                                     }
                                 } catch (e) { hideLoading(); }
-                                if (id && Kazumi.openBangumiInfoPage) Kazumi.openBangumiInfoPage(id);
+                                if (id && Kazumi.openBangumiInfoPage) {
+                                    // A-01（Bangumi 快照写入侧）：历史卡按片名匹配进详情——
+                                    // 卡封面（可能来自 Bangumi 补拉）随快照垫场 hero
+                                    if (typeof DetailSnap !== 'undefined' && DetailSnap.put) {
+                                        _snapPut('', String(id), el);
+                                    }
+                                    Kazumi.openBangumiInfoPage(id);
+                                }
                                 else {
                                     // 匹配不到 Bangumi 时回退选源弹窗
                                     const srcUrl = String(el.data('kazumi-src') || '');
@@ -633,8 +710,49 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                             return;
                         }
                     }
+                    // A-01 写入侧：收藏/历史卡快照（fire-and-forget；备注卡片 DOM 不展示，按缺字段跳过）。
+                    // 必须守卫：快照是纯优化，DetailSnap/Home 任一缺席（脚本加载失败、
+                    // 加载顺序变化、测试沙箱）都会在 Detail.open 之前抛错，把「打开详情」
+                    // 这条主流程一起打断。同仓其余写入点同此口径。
+                    _snapPut(site, String(el.data('id')), el);
                     Detail.open(site, String(el.data('id')), String(el.data('name')));
                 });
+            // 详情意图预取（同 home.js）：悬停/触摸提前拉 detailContent——历史/收藏
+            // 重开看过的影片时简介与线路多半已在缓存，点击秒出。只预取 CatVod 卡
+            // （bangumi/kazumi/local/download/direct 有各自的打开链路，预取无消费）。
+            if (typeof prefetchDetail === 'function') {
+                let prefetchLast = '';
+                // 与上方 click 处理器同口径：多选模式与删除/编辑/勾选/标签按钮都不打开
+                // 详情，预取发出后永不消费——白占 common.js DETAIL_PREFETCH_LIMIT=3
+                // 护栏把用户真想开的影片挤掉，还往后端 spider 池打无用 detailContent
+                // 并把结果塞进大池 30min 挤占真实详情缓存。
+                const opensDetail = (e) => !this._selectMode
+                    && !$(e.target).closest('.rec-del, .rec-edit, .rec-check, .rec-tag').length;
+                $(`#${viewName}-grid`)
+                    .off('mouseover.recprefetch').off('pointerdown.recprefetch')
+                    .on('mouseover.recprefetch', '.vod-card', (e) => {
+                        if (!opensDetail(e)) return;
+                        const el = $(e.currentTarget);
+                        const site = String(el.data('site') || el.data('source') || '');
+                        const id = String(el.data('id') || '');
+                        if (!id || !site || site === 'bangumi' || site.startsWith('kazumi:')
+                            || site === 'local' || site === 'download' || site === 'direct') return;
+                        const pkey = site + '|' + id;
+                        if (pkey === prefetchLast) return;
+                        prefetchLast = pkey;
+                        prefetchDetail(site, id);
+                    })
+                    .on('pointerdown.recprefetch', '.vod-card', (e) => {
+                        if (!opensDetail(e)) return;
+                        const el = $(e.currentTarget);
+                        const site = String(el.data('site') || el.data('source') || '');
+                        const id = String(el.data('id') || '');
+                        if (id && site && site !== 'bangumi' && !site.startsWith('kazumi:')
+                            && site !== 'local' && site !== 'download' && site !== 'direct') {
+                            prefetchDetail(site, id);
+                        }
+                    });
+            }
             // 清空按钮仅历史页保留（T40：收藏页已删除该按钮）
             if ($(`#${viewName}-clear`).length) $(`#${viewName}-clear`).on('click', () => this.clear());
             // 多选工具栏：进入/退出选择模式；全选仅收藏页（T40：历史页已移除全选）
@@ -696,11 +814,23 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     this.render();
                 });
             }
+            // 全局番剧屏蔽：词表/开关变更时就地重渲染（render 每次从存储重读列表，
+            // filterBlocked 按最新词表过滤；此前的接线缺口见审查 M27）。
+            if (typeof onBlockWordsChange === 'function') {
+                // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+                // loadBlockWords() 让新词表穿透缓存，否则仍按旧词表过滤。
+                onBlockWordsChange(async () => {
+                    await loadBlockWords();
+                    if (this._inited) this.render();
+                });
+            }
         },
 
         /** 视图切入时渲染最新列表。 */
         async enter() {
             this.init();
+            // 首渲前把词表读进内存：否则第一帧按「无屏蔽」渲染，用户会看到本该屏蔽的卡片闪一下
+            if (typeof loadBlockWords === 'function') await loadBlockWords();
             await this.render();
         },
 
@@ -732,6 +862,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             // CatVod 分类：非 Bangumi 托管的全部本地收藏（CatVod 源/本地文件/下载/直链/Kazumi 规则源）
             if (withTags && this._src === 'catvod') list = list.filter((v) => !isBangumiItem(v));
             if (withTags && this._tag) list = list.filter((v) => normTag(v.tag) === this._tag);
+            // 全局番剧屏蔽：按片名剔除命中屏蔽词的条目（只影响展示，不动存储——
+            // 删掉屏蔽词后记录照常回来）
+            list = (typeof filterBlocked === 'function')
+                ? filterBlocked(list, (v) => String((v && v.name) || '')) : list;
             const grid = $(`#${viewName}-grid`).empty();
             grid.toggleClass('selecting', this._selectMode);
             if (!list.length) {

@@ -11,7 +11,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/Arimayuki03/YuKi?logo=github)](https://github.com/Arimayuki03/YuKi/releases)
 [![License](https://img.shields.io/github/license/Arimayuki03/YuKi)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?logo=windows95)](https://github.com/Arimayuki03/YuKi/releases)
-[![Electron](https://img.shields.io/badge/Electron-31-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Stars](https://img.shields.io/github/stars/Arimayuki03/YuKi?style=flat&logo=github)](https://github.com/Arimayuki03/YuKi/stargazers)
 
@@ -21,7 +21,7 @@
 
 YuKi 是一个面向桌面的影视聚合应用：使用 **Electron** 作为界面与系统宿主，使用独立 **FastAPI/Python** 进程运行 **CatVod** 与 **Kazumi** 两套内容引擎，并通过 **mpv**、**aria2c** 和 **ffmpeg** 完成播放与下载。坚持 **本地优先、无追踪**——不上传任何个人数据。
 
-> 当前版本 `v0.2.6` · 主要开发与验证平台为 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`，仅显示名为 YuKi。
+> 当前版本 `v0.3.0` · 主要开发与验证平台为 Windows。内部包名、数据目录与 IPC 前缀仍为 `yuki`，仅显示名为 YuKi。
 
 ## ✨ 功能特性
 
@@ -30,7 +30,10 @@ YuKi 是一个面向桌面的影视聚合应用：使用 **Electron** 作为界�
 - **原生播放列表与边下边播**：在线整季经本地按需解析代理交给 mpv 原生队列连播（直链零过期），同源同集下载自动去重；网盘类源（夸克等）自动回退逐集连播并禁用线路回退，防止触发网盘风控。
 - **直播**：IPTV 直播源频道浏览与播放（txt / m3u 地址）。
 - **下载体系**：aria2c 直链下载、ffmpeg HLS 下载、按番剧建文件夹、下载记录与系统通知。
-- **数据与同步**：收藏、历史、观看统计、Bangumi 账号同步（收藏 / 观看进度自动上报 / 评分与吐槽提交）、WebDAV 备份、本地文件管理。
+- **全局屏蔽词**：按片名关键词屏蔽番剧（首页/分类/搜索/推荐/时间表/收藏/历史全列表生效，忽略大小写与标点差异），搜索直接跳过不占结果位，删词或关开关立即恢复。
+- **详情页快照与预取**：列表卡快照垫场（打开详情即显示卡片已持有的封面/标题）、设置快照层与悬停预取（详情简介/线路秒出）、骨架屏过渡，慢源体验显著平滑。
+- **划词翻译与验证码自动识别**：选中界面文字弹出翻译气泡（免费通道为主，可配 LLM）；Kazumi 源验证码 tiny-CNN 自动识别（毫秒级离线）+ 视觉大模型兜底。
+- **数据与同步**：收藏、历史、观看统计、Bangumi 账号同步（收藏 / 观看进度自动上报 / 评分与吐槽提交）、WebDAV 备份（含设置快照恢复）、本地文件管理。
 - **界面视觉系统**：按 [DESIGN.md](DESIGN.md) 契约构建（中性灰阶骨架 + 主题色点睛 + 动效令牌），背景图片支持拖动定位、缩放、透明度与模糊的自定义调整。
 
 ## 🖼 界面预览

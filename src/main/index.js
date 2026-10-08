@@ -490,15 +490,17 @@ function migratePlayerCache() {
 function getDirSize(p, fileFilter) {
     let bytes = 0, files = 0;
     if (!p || !fs.existsSync(p)) return { bytes, files };
+    const warn = (msg, dir) => console.warn(`[getDirSize] ${msg}: ${dir}`); // L20：吞错处至少留痕（带路径）
     const walk = (d) => {
         let ents;
-        try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        try { ents = fs.readdirSync(d, { withFileTypes: true }); }
+        catch (e) { warn(`readdir 失败（该层按 0 计，不中断向上汇总）`, d); return; }
         for (const ent of ents) {
             const full = path.join(d, ent.name);
             try {
                 if (ent.isDirectory()) walk(full);
                 else if (!fileFilter || fileFilter(ent.name)) { bytes += fs.statSync(full).size; files += 1; }
-            } catch (e) { /* 单项失败跳过 */ }
+            } catch (e) { warn(`stat 失败，单项跳过`, full); /* 单项失败跳过 */ }
         }
     };
     walk(p);
@@ -508,28 +510,33 @@ function getDirSize(p, fileFilter) {
 /**
  * 清空目录内容：单次遍历，边累加大小边删除（避免先 dirSize 再 rm 的 O(n^2) 二次遍历）。
  * 目录本身保留，仅清其内容；占用文件跳过不计入释放字节。
+ * 吞错说明（L20）：单项/单层 I/O 失败只 console.warn（带路径）后按 0 计或跳过，
+ * 不向上抛——调用方（cache-size 汇总、清理流程）依赖「尽力而为的释放量」契约，
+ * 让整次清理因一个占用文件而 reject 反而破坏可用性；留痕保证可排查。
  * @param {string} p 目录路径
  * @returns {{bytes:number, files:number}} 实际释放字节与删除文件数
  */
 function purgeDir(p) {
     let bytes = 0, files = 0;
     if (!p || !fs.existsSync(p)) return { bytes, files };
+    const warn = (msg, dir) => console.warn(`[purgeDir] ${msg}: ${dir}`); // L20：吞错处至少留痕（带路径）
     // 后序遍历：先删子内容并累加，再删空目录；避免删除后无法再 stat。
     const walk = (d) => {
         let ents;
-        try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+        try { ents = fs.readdirSync(d, { withFileTypes: true }); }
+        catch (e) { warn(`readdir 失败（该层内容未清理）`, d); return; }
         for (const ent of ents) {
             const full = path.join(d, ent.name);
             try {
                 if (ent.isDirectory()) {
                     walk(full);
-                    try { fs.rmdirSync(full); } catch (e) { /* 仍有占用文件：保留 */ }
+                    try { fs.rmdirSync(full); } catch (e) { warn(`rmdir 失败（仍有占用文件，保留）`, full); }
                 } else {
                     const size = fs.statSync(full).size;
                     fs.rmSync(full, { force: true });
                     bytes += size; files += 1;
                 }
-            } catch (e) { /* 单文件失败/占用跳过 */ }
+            } catch (e) { warn(`删除失败，单项跳过`, full); /* 单文件失败/占用跳过 */ }
         }
     };
     walk(p);
@@ -575,6 +582,7 @@ const cancelPendingShutdown = () => {
 // key——不淘汰会随观看无限增长。按条目数上限淘汰最旧（mtime 最小）文件：签名直链
 // 的旧封面天然先失效，先删不影响热封面。
 const LOCAL_THUMBS_MAX_ENTRIES = 512;
+let _thumbEvictAt = 0; // 淘汰检查节流时间戳（60s 内至多全扫一次，见 evictLocalThumbs）
 
 // 视频扩展名白名单（与 file-manager.js VIDEO_EXTS 同表）：file-thumb / file-push
 // 在 fileMgr 极早期未初始化窗口内也能完成白名单判定，不依赖 fileMgr 实例。
@@ -583,6 +591,13 @@ const LOCAL_AUDIO_EXTS_SET = new Set(['.mp3', '.flac', '.wav', '.aac', '.ogg', '
 const isVideoExt = (name) => LOCAL_VIDEO_EXTS.has(path.extname(String(name || '')).toLowerCase());
 
 function evictLocalThumbs() {
+    // 节流 60s：淘汰检查挂在每次抓帧请求上（一页 24 张历史卡 = 24 次），同步
+    // readdir+stat 全扫 ≤512 项在机械盘/杀软实时扫描下单次可达几十 ms，逐请求
+    // 执行会把主进程事件循环卡出可感知顿挫。缩略图写入频率低（有抓帧缓存），
+    // 60s 内略超上限无实害，下一次触发即收敛。
+    const now = Date.now();
+    if (_thumbEvictAt && now - _thumbEvictAt < 60000) return;
+    _thumbEvictAt = now;
     const dir = path.join(app.getPath('userData'), 'local-thumbs');
     let names;
     try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.jpg')); } catch (e) { return; }
@@ -2028,6 +2043,9 @@ app.whenReady().then(() => {
         'autoLineFallback', 'legacyParser', 'mediaProbe', 'uiStateMemory',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
         'bangumiMirrorRoot', 'bangumiProgressSync', 'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
+        // 全局番剧屏蔽（common.js 屏蔽引擎 + panels.js 设置页）：blockWords 屏蔽词数组、
+        // blockWordsEnable 总开关。缺本表则设置页写入被静默 ignored
+        'blockWords', 'blockWordsEnable',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
         // enableBangumiWebMirror：详情页「↗ Bangumi 页」条目页跳转跟随镜像开关（detail.js 跳转读取）
         'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableBangumiWebMirror', 'enableGitProxy',
@@ -2043,6 +2061,11 @@ app.whenReady().then(() => {
         // 划词翻译（translate-bubble.js；LLM 凭据按次传后端，key 本身在 SENSITIVE_KEYS 加密落盘）
         'translateEnable', 'translateTrigger', 'translateTarget',
         'translateLLMEnable', 'translateLLMBase', 'translateLLMKey', 'translateLLMModel',
+        // 验证码视觉 LLM（kazumi.js 独立一套配置，与划词翻译分开——翻译走文本
+        // 模型、验证码需要视觉模型；凭据同样按次传后端不落盘，key 加密落盘）。
+        // captchaLLMPrefer：识别次序开关（先 LLM 后小模型），缺了它设置页开关的
+        // 写入被静默 ignored——面板看着开了、后端永远收到 0（H-1 同类）。
+        'captchaLLMEnable', 'captchaLLMBase', 'captchaLLMKey', 'captchaLLMModel', 'captchaLLMPrefer',
         'simulDownload', 'startupView', 'systemTitleBar', 'textColor', 'textSize', 'theme',
         'updateNotify', 'useMisansFont', 'wallpaper', 'wallpaperAdjust', 'wallpaperDim',
         // watchProgress：通用观看进度表（不依赖收藏；records.js 经 settingsSet('watchProgress', map) 写入）
@@ -2201,6 +2224,109 @@ app.whenReady().then(() => {
         } finally {
             _mpvDownloading = false;
             send('yuki:mpv-download-state', { downloading: false });
+        }
+    });
+
+    // 图片放大浮层「保存图片」：系统保存对话框选路径 → 主进程 fetch 拉图写盘。
+    // fetch 放主进程（渲染层 fetch 跨域图片受 CORS 限制，多数图床直链会挂）；
+    // http(s) 之外的 scheme 一律拒绝，防 file:// 任意读盘。canceled 静默不算错。
+    // 加固（审查3.4）：异步写盘（fs.promises，不阻塞主进程事件循环）；体积上限
+    // （headers content-length 预判 + 读盘后兜底复查）；content-type 白名单；
+    // defaultPath 文件名 basename 化 + 剥离路径分隔符（纵深防御，见内注释）。
+    // 体积上限取 25MB：该功能面向封面/截图/头像类图片，合理量级远小于此
+    // （番剧海报普遍 <1MB，漫画/整页截图也就几 MB），25MB 已留足余量，
+    // 同时防止被诱导下载超大响应拖垮内存/磁盘。
+    const SAVE_IMAGE_MAX_BYTES = 25 * 1024 * 1024; // 25MB
+    // content-type 白名单：image/* 放行；application/octet-stream 也放行——
+    // 不少图床/CDN 对图片回 octet-stream，一律拒绝会误伤正常保存；配合魔数
+    // 嗅探可以更严但过重，此处按「image/* + octet-stream 放行、其余拒绝」取舍，
+    // 空 ctype 同 octet-stream 口径（部分站点不带该头）。拒绝典型误用如 text/html
+    // （误传网页 URL）与 application/json。(?!svg) 排除 image/svg+xml：SVG 可内嵌
+    // script，落盘后打开即 XSS（L11），扩展名白名单同步移除 svg。
+    const SAVE_IMAGE_CTYPE_RE = /^(image\/(?!svg)[\w.+-]+|application\/octet-stream)\s*(;|$)/i;
+    // L12 SSRF 拦截：本 handler 对渲染层传来的任意 http(s) URL 发起主进程 fetch
+    // （有 isTrustedIpcSender + 保存对话框两道门槛，仍构成私网探测面）。命中
+    // 私网/本机地址一律拒绝：localhost、127.x、10.x、172.16-31.x、192.168.x、
+    // 169.254.x（链路本地）、0.0.0.0、[::1]、[::]，以及 IPv4-mapped IPv6 中的
+    // 127.x（靠无锚点的 127\. 分支顺带覆盖）。轻量正则实现，不做 DNS 解析——
+    // 公网域名解析到内网的 advanced 绕过不在本门槛目标内（纵深另议）。
+    const SAVE_IMAGE_PRIVATE_HOST_RE = /^(localhost([:.]|$)|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.0\.0\.0|\[::1\]|\[::\])/i;
+    ipcMain.handle('yuki:save-image', async (_e, url, suggestedName) => {
+        // L13：提前返回前取消/消费响应体，避免悬挂连接累积（各分支 return 前统一走此 helper）
+        const dropBody = async (res) => {
+            try { await res.body?.cancel(); } catch (e) { /* 已读完/不可取消：忽略 */ }
+        };
+        try {
+            const u = String(url || '');
+            if (!/^https?:\/\//i.test(u)) return { ok: false, reason: 'invalid-url' };
+            // L12 SSRF：fetch 前解析 hostname 拦私网/本机地址（含 hostname 内嵌 @/穿越形态，
+            // URL 解析后取 hostname 天然规避 userinfo 欺骗）
+            try {
+                const parsed = new URL(u);
+                if (SAVE_IMAGE_PRIVATE_HOST_RE.test(parsed.hostname)) return { ok: false, reason: 'private-address' };
+            } catch (e) {
+                return { ok: false, reason: 'invalid-url' };
+            }
+            let name = String(suggestedName || 'image').trim() || 'image';
+            // 纵深防御：渲染层传来的 URL 末段经 decodeURIComponent 后可能仍含
+            // 路径分隔符（%5C=\ 、%2F=/），构造 defaultPath 前先 basename 化并
+            // 剥离所有分隔符，确保只落在对话框默认文件名。对话框 defaultPath
+            // 本非直接写路径（真正落盘路径由用户在对话框选定），此为二层兜底，
+            // 防未来实现变化或对话框行为差异把名字当路径展开。
+            name = path.basename(name).replace(/[\\\/]/g, '') || 'image';
+            if (!/\.(jpg|jpeg|png|gif|webp|bmp|avif|svg)$/i.test(name)) name += '.jpg';
+            const r = await dialog.showSaveDialog(win, {
+                title: '保存图片',
+                defaultPath: name,
+            });
+            if (r.canceled || !r.filePath) return { ok: false, reason: 'cancelled' };
+            const res = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'yuki/1.0' } });
+            if (!res.ok) {
+                await dropBody(res);
+                return { ok: false, reason: `http-${res.status}` };
+            }
+            // content-type 白名单校验（仅 res.ok 不够：误传网页 URL 会把 HTML 存成 .jpg）；
+            // M10：空 ctype 同 octet-stream 放行（部分图床不带该头），非空才进白名单判定
+            const ctype = String(res.headers.get('content-type') || '').trim();
+            if (ctype && !SAVE_IMAGE_CTYPE_RE.test(ctype)) {
+                await dropBody(res);
+                return { ok: false, reason: `bad-content-type:${ctype}` };
+            }
+            // 体积上限第一道：headers 有 content-length 时先预判，超限不下载不写盘
+            const declared = parseInt(res.headers.get('content-length'), 10);
+            if (Number.isFinite(declared) && declared > SAVE_IMAGE_MAX_BYTES) {
+                await dropBody(res);
+                return { ok: false, reason: 'too-large' };
+            }
+            // 边读边限流：先 `await res.arrayBuffer()` 把整个响应体读进主进程内存
+            // 再判断超不超，等于放任无限缓冲——content-length 谎报或不带该头的
+            // chunked 响应（多数图床直连即此形态）会绕过第一道检查，把任意大的
+            // body 全部缓冲到主进程（几百 MB 直接拖垮主进程）。超阈值立即取消流。
+            const chunks = [];
+            let got = 0;
+            if (res.body && typeof res.body[Symbol.asyncIterator] === 'function') {
+                for await (const chunk of res.body) {
+                    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                    got += piece.length;
+                    if (got > SAVE_IMAGE_MAX_BYTES) {
+                        // 超限中止：for-await 内流已锁定，显式 cancel 会 TypeError；
+                        // 直接 return，取消由 for-await 退出（迭代器 return 调 cancel）完成
+                        return { ok: false, reason: 'too-large' };
+                    }
+                    chunks.push(piece);
+                }
+            } else {
+                chunks.push(Buffer.from(await res.arrayBuffer()));
+            }
+            const buf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+            if (!buf.length) return { ok: false, reason: 'empty-body' };
+            if (buf.length > SAVE_IMAGE_MAX_BYTES) return { ok: false, reason: 'too-large' };
+            // 异步写盘：原 fs.writeFileSync 在大图/慢盘上会阻塞主进程事件循环
+            //（全应用冻结），IPC handler 返回 promise，写盘期间 UI 不卡。
+            await fs.promises.writeFile(r.filePath, buf);
+            return { ok: true, path: r.filePath };
+        } catch (err) {
+            return { ok: false, reason: err.message || 'save-failed' };
         }
     });
 

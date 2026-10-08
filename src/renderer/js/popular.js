@@ -10,7 +10,7 @@
  * 整页免逐条回源详情）+ 收藏状态徽标（账号收藏六态 + 本地标记合并，默认隐藏，
  * 悬停显形；复用 Timeline._attachFavBadges/_attachEpBadges 与 .vod-fav-row CSS 动画）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState, playCardsEnter, recGet, FavHub, Timeline */
+/* global $, doAction, warnToast, showLoading, hideLoading, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, escHtml, Kazumi, fitVodTitles, localCacheGet, localCacheSet, localCacheDel, UIState, playCardsEnter, recGet, FavHub, Timeline, DetailSnap, Home, guardedLoad, loadBlockWords, filterBlocked, onBlockWordsChange */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const POPULAR_TAGS = [
@@ -44,12 +44,29 @@ const Popular = {
             if (e.type === 'keydown') e.preventDefault();
             const id = String($(e.currentTarget).data('id') || '');
             if (id && typeof Kazumi !== 'undefined' && Kazumi.openBangumiInfoPage) {
+                // A-01 写入侧：Bangumi 卡快照（site='' 对齐 openBangumi 的 this.site 口径）。
+                // 快照是纯优化：DetailSnap/Home 任一缺席都不得阻断下方
+                // openBangumiInfoPage 主流程（同仓其余写入点同此守卫口径）
+                if (typeof DetailSnap !== 'undefined' && DetailSnap.put
+                    && typeof Home !== 'undefined' && typeof Home._snapFieldsFromCard === 'function') {
+                    DetailSnap.put('', id, Home._snapFieldsFromCard($(e.currentTarget)));
+                }
                 Kazumi.openBangumiInfoPage(id);
             }
         });
         // 订阅收藏变更：详情页/收藏页改状态后重读映射并刷新当前网格徽标
         if (typeof FavHub !== 'undefined' && FavHub.onChanged) {
             this._unsubFav = FavHub.onChanged(() => this.refreshBadges());
+        }
+        // 全局番剧屏蔽：词表/开关变更时就地重渲染（_items 仍为原始结果，无网络请求）。
+        // invalidateBlockWords 只置脏并广播、不重读词表——重绘前先 await
+        // loadBlockWords() 让新词表穿透缓存，否则仍按旧词表过滤。
+        if (typeof onBlockWordsChange === 'function') {
+            onBlockWordsChange(async () => {
+                await loadBlockWords();
+                if (this._inited) this._renderGrid();
+            });
+            loadBlockWords(); // 首渲前把词表读进内存，避免第一帧闪现被屏蔽的番剧
         }
         const tagSelect = $('#popular-tags');
         tagSelect.html('<option value="">热门番组</option>'
@@ -127,12 +144,17 @@ const Popular = {
      * 阻塞，响应回来仅当令牌仍为最新时才写状态/渲染。
      */
     async load(page, silent) {
-        const token = ++this._loadToken;
+        // A-31：世代守卫收口到 common.js guardedLoad（纯世代型先例——本页无
+        // abort 需求，响应回来仅当令牌仍为最新时才写状态/渲染）
+        const g = guardedLoad(this); // 不传 abortable：纯世代型（本文件同源语义；detail.js 仍用自有 _loadGen 手写守卫，未接线此抽象）
         this._size = await this._pageSize();
-        if (token !== this._loadToken) return; // 读取设置期间已有更新请求，让位
+        if (!g.isLive()) return; // 读取设置期间已有更新请求，让位
         this._page = Math.max(1, page || 1);
         this._saveView(); // 页码存档（标签/翻页共用此入口）
-        if (!silent) showLoading();
+        if (!silent) {
+            showLoading();
+            this._pendingVisible = (this._pendingVisible || 0) + 1;
+        }
         try {
             const offset = (this._page - 1) * this._size;
             let items = [];
@@ -146,7 +168,7 @@ const Popular = {
                 items = (rsp && rsp.trends) || [];
                 total = (rsp && rsp.total) || 0;
             }
-            if (token !== this._loadToken) return; // 已切标签/翻页：旧响应丢弃，不回写
+            if (!g.isLive()) return; // 已切标签/翻页：旧响应丢弃，不回写
             this._items = items;
             this._total = total;
             this._renderGrid();
@@ -155,12 +177,20 @@ const Popular = {
             else $('#popular-status').hide();
             this._saveCache(); // 仅缓存热门番组（推荐页落地视图），内部按 _tag 守卫
         } catch (e) {
-            if (token !== this._loadToken) return; // 旧请求的失败提示不打断新视图
+            if (!g.isLive()) return; // 旧请求的失败提示不打断新视图
             if (!silent) warnToast('推荐载入失败');
             // 载入失败且当前无内容：同样落到网络/镜像引导空态（多为无法直连 Bangumi）
             if (!this._items.length) this._renderGrid();
         } finally {
-            if (token === this._loadToken && !silent) hideLoading(); // 新请求的 loading 不被旧请求收尾
+            // 按「在途非 silent 请求数」记账，而非按世代判定：非 silent 的 A 被
+            // silent 的 B 取代时，A 的 finally 因 isLive() 为假不收遮罩，而
+            // silent 的 B 既不 show 也不 hide——遮罩就此卡住，只能等下一次
+            // show/hide 配对才清掉。计数归零才收，则既不会出现旧请求收掉新请求
+            // 的遮罩，也不留下无人收尾的孤儿遮罩。
+            if (!silent) {
+                this._pendingVisible = Math.max(0, (this._pendingVisible || 1) - 1);
+                if (!this._pendingVisible) hideLoading();
+            }
         }
     },
 
@@ -209,17 +239,22 @@ const Popular = {
 
     _renderGrid() {
         const grid = $('#popular-grid').empty();
-        if (!this._items.length) {
+        // 全局番剧屏蔽：渲染前剔除标题命中屏蔽词的条目（_items 保留原始结果，
+        // 删掉屏蔽词后无需重新请求即可恢复显示）
+        const shown = (typeof filterBlocked === 'function')
+            ? filterBlocked(this._items, (it) => String((it && (it.name_cn || it.name)) || '')) : this._items;
+        this._shown = shown; // 当前展示切片：屏蔽词变更时就地重渲染用
+        if (!shown.length) {
             // 空态引导：多为网络无法访问 Bangumi，落到网络/镜像引导空态
             grid.html(bangumiNetGuide());
             return;
         }
-        grid.html(this._items.map((item) => bangumiCard(item)).join(''));
+        grid.html(shown.map((item) => bangumiCard(item)).join(''));
         // T74 收尾：按当前列宽把标题 JS 截到恰好两行（DOM 不保留超行文字）
         fitVodTitles(grid);
         // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
         playCardsEnter(grid);
-        this._attachBadges(grid);
+        this._attachBadges(grid, shown);
     },
 
     // ---------------------------------------------------------------- 封面悬停徽章
@@ -227,10 +262,10 @@ const Popular = {
     /** 挂当前网格的封面徽章：话数徽章常驻 + 收藏徽标行（Timeline._attachFavBadges，
      *  徽标默认塌缩隐藏、悬停显形）+ 话数徽章（_attachEpBadges itemsFull 快捷分支——趋势/榜单响应
      *  自带 eps/air_date，整页免逐条回源）。首次进入异步重建收藏映射后补挂。 */
-    _attachBadges(grid) {
+    _attachBadges(grid, itemsOverride) {
         if (typeof Timeline === 'undefined' || !Timeline._attachFavBadges) return; // 沙箱/时间表缺席降级
         const gridEl = grid || $('#popular-grid');
-        const items = this._items;
+        const items = itemsOverride || this._shown || this._items;
         Timeline._attachFavBadges(gridEl, items, this._colStateMap);
         Timeline._attachEpBadges(gridEl, items, true).catch(() => { /* 徽章补齐失败不外溢 */ });
         if (!this._badgesOn) {

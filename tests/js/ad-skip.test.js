@@ -200,8 +200,11 @@ test('decideEdAction：跳过窗口/提示窗口/越过后不动作', () => {
 
 test('resolveAutoOpSec：只信任同键（片名+线路）记录，不跨线路自动套用', () => {
     const { AdSkip } = loadAdSkip();
-    AdSkip.recordOpEd('番剧A', '线路1', 'op', 90);
-    AdSkip.recordOpEd('番剧A', '线路2', 'op', 95);
+    // 显式注入 now：findSiblingOpEd 按记录 ts 取最新，实时钟跨毫秒边界时后写的
+    // 线路2会反超线路1成「最新兄弟」，hint 断言随机失败（既有 flaky）——固定
+    // 时间戳让「线路1 是最新记录」成为确定事实。
+    AdSkip.recordOpEd('番剧A', '线路2', 'op', 95, null, 1000);
+    AdSkip.recordOpEd('番剧A', '线路1', 'op', 90, null, 2000);
     assert.equal(AdSkip.resolveAutoOpSec('番剧A', '线路2', null), 95);
     // 不同压制线路片头长度可能不同：无本线路记录时不套用兄弟线路值（返回 0 从头播）
     assert.equal(AdSkip.resolveAutoOpSec('番剧A', '线路3', null), 0);

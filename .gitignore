@@ -62,3 +62,7 @@ python-backend/tests/fixtures/config/disguise.png
 
 # open-code-review 本地配置与审查产物（含 LLM 网关 key，禁止入库）
 .opencodereview/
+
+# 验证码定向训练本地数据（真实样本/日志，禁止入库）
+.captcha-data/
+.review-tmp/

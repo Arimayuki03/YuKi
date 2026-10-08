@@ -148,12 +148,14 @@ function loadFfmpeg(opts = {}) {
         throw new Error('ffmpeg.test: 未预期的 require(' + id + ')'); // electron：非 Electron 环境
     };
 
-    // 虚拟时钟：把 30s（抓帧超时）/10min（下载超时）压到 30ms，长尾等待不拖慢单测
+    // 虚拟时钟分档压缩：<=1s 保持原样（进度/重试定时器）；1s~60s 压成 30ms（30s 抓帧超时档）；
+    // >60s 压成 300ms（10min 下载总超时档）。两档拉开差距，避免压缩后的总超时与真实桩
+    // 响应 + 磁盘 I/O 竞态（30ms 不足以覆盖下载用例的桩响应/写盘，曾致 flaky）。
     const timers = new Map();
     let tid = 0;
     const vSetTimeout = (fn, ms) => {
         const id = ++tid;
-        const delay = typeof ms === 'number' && ms > 1000 ? 30 : (ms || 0);
+        const delay = typeof ms !== 'number' ? (ms || 0) : ms > 60000 ? 300 : ms > 1000 ? 30 : ms;
         timers.set(id, realSetTimeout(() => { timers.delete(id); fn(); }, delay));
         return id;
     };
@@ -263,6 +265,45 @@ test('findFfmpeg：PATH 探测命令抛错（不在 PATH）→ 返回 null 且�
 test('findFfmpeg：where 输出全空白 → 返回 null（首行为空串不能当路径）', () => {
     const { mod } = loadFfmpeg({ platform: 'win32', execSync: () => Buffer.from('  \r\n \r\n') });
     assert.strictEqual(mod.findFfmpeg(), null);
+});
+
+test('findFfmpeg：PATH 探测结果 30s 缓存——连续调用只 execSync 一次（批量抓帧不重探）', () => {
+    let n = 0;
+    const { mod } = loadFfmpeg({
+        platform: 'win32',
+        execSync: () => { n++; return Buffer.from('C:\\bin\\ffmpeg.exe\r\n'); },
+    });
+    const p1 = mod.findFfmpeg();
+    assert.strictEqual(p1, 'C:\\bin\\ffmpeg.exe');
+    assert.strictEqual(mod.findFfmpeg(), p1, 'TTL 内应复用缓存路径');
+    assert.strictEqual(mod.findFfmpeg(), p1);
+    assert.strictEqual(n, 1, '三次探测只能起一次 where 子进程');
+});
+
+test('findFfmpeg：负结果同样缓存 30s——无 ffmpeg 环境批量抓帧不反复起 where', () => {
+    let n = 0;
+    const { mod } = loadFfmpeg({
+        platform: 'win32',
+        execSync: () => { n++; throw new Error('where: 找不到文件'); },
+    });
+    assert.strictEqual(mod.findFfmpeg(), null);
+    assert.strictEqual(mod.findFfmpeg(), null);
+    assert.strictEqual(n, 1, '负缓存同样只探测一次');
+});
+
+test('findFfmpeg：vendor 命中绕过缓存——ensureFfmpeg 装好后立即生效', () => {
+    const root = mktmp();
+    let n = 0;
+    const { mod } = loadFfmpeg({
+        root,
+        platform: 'win32',
+        execSync: () => { n++; return Buffer.from('C:\\stale\\ffmpeg.exe\r\n'); },
+    });
+    // 先制造一条「PATH 命中」的缓存（此刻 vendor 还不存在），再落下 vendor 二进制
+    assert.strictEqual(mod.findFfmpeg(), 'C:\\stale\\ffmpeg.exe');
+    const bin = installVendorBin(root);
+    assert.strictEqual(mod.findFfmpeg(), bin, 'vendor 存在必须优先，不受 30s PATH 缓存影响');
+    assert.strictEqual(n, 1);
 });
 
 // ================================================================ ffmpegLock：锁定源读取
@@ -552,7 +593,7 @@ test('thumb：无扩展名（旧版存量文件）放行给 ffmpeg 探测', asyn
     assert.strictEqual(calls.spawn.length, 1);
 });
 
-test('thumb：参数拼装为 -y -ss 5 -i <视频> -frames:v 1 -vf scale=480:-2 <输出>', async () => {
+test('thumb：参数拼装为 -y -noaccurate_seek -ss 5 -i <视频> -frames:v 1 -vf scale=480:-2 <输出>', async () => {
     const root = mktmp();
     const bin = installVendorBin(root);
     const video = makeVideo(root, 'v.mp4');
@@ -562,7 +603,7 @@ test('thumb：参数拼装为 -y -ss 5 -i <视频> -frames:v 1 -vf scale=480:-2 
     assert.strictEqual(r.ok, true);
     assert.strictEqual(calls.spawn[0].bin, bin, '必须用 findFfmpeg 探测到的二进制');
     assert.strictEqual(calls.spawn[0].args.join('|'),
-        `-y|-ss|5|-i|${video}|-frames:v|1|-vf|scale=480:-2|${r.path}`);
+        `-y|-noaccurate_seek|-ss|5|-i|${video}|-frames:v|1|-vf|scale=480:-2|${r.path}`);
     assert.strictEqual(calls.spawn[0].opts.windowsHide, true);
 });
 
@@ -776,7 +817,7 @@ test('urlThumb：参数比本地多 -hide_banner 与 -user_agent（远程站点�
     assert.strictEqual(args[args.indexOf('-user_agent') + 1], mod.URL_THUMB_UA, 'UA 常量');
     assert.match(mod.URL_THUMB_UA, /Mozilla/, 'UA 需伪装浏览器');
     assert.strictEqual(args.join('|'),
-        `-y|-hide_banner|-user_agent|${mod.URL_THUMB_UA}|-ss|5|-i|${url}|-frames:v|1|-vf|scale=480:-2|${r.path}`);
+        `-y|-hide_banner|-user_agent|${mod.URL_THUMB_UA}|-noaccurate_seek|-ss|5|-i|${url}|-frames:v|1|-vf|scale=480:-2|${r.path}`);
 });
 
 test('urlThumb：缓存 key 为 md5(url)（远程无 mtime/size 可比）', async () => {

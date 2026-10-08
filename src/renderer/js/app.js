@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, UIState, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular */
+/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, UIState, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular, SettingsSnapshot */
 
 const App = {
     currentView: 'home',
@@ -23,7 +23,9 @@ const App = {
     _branchLast: { home: 'home', search: 'search', popular: 'popular', timeline: 'timeline' },
     // 页级缓存（任务十一）：只读浏览视图在 TTL 内再次切入时跳过 enter 网络重拉。
     // 仅收录只读视图（home/popular/timeline/my-统计）；history/收藏/下载等反映用户操作的视图绝不缓存。
-    _cacheableViews: { home: 60000, popular: 60000, timeline: 60000 },
+    // TTL 5 分钟（B-03）：popular/timeline 是 Bangumi 慢频数据，切回页面零等待窗口 1→5min；
+    // 手动刷新走视图自身刷新按钮（不经 showView）或 showView(name,{refresh:true})，不受 TTL 影响。
+    _cacheableViews: { home: 5 * 60 * 1000, popular: 5 * 60 * 1000, timeline: 5 * 60 * 1000 },
     _viewLoadedAt: {}, // name → 上次 enter 完成时间戳
     _scrollPos: {},    // name → 离开视图时的 scrollTop（返回时恢复浏览位置）
 
@@ -128,6 +130,9 @@ const App = {
                 Timeline.refreshCollections(); // 重建收藏过滤集合（仅本地，无日历网络）
                 if (!firstTl) Timeline.load(); // 再次切入且已过期 → 刷新日历（TTL 内则跳过）
             }
+            // 每页条数变更即时重排：init() 被 _inited 短路，TTL 内切入又不走 load()，
+            // 这段必须挂在每次切入路径上（同 live.js enter 由本处调用）。
+            if (Timeline.enter) Timeline.enter();
             this._viewLoadedAt.timeline = Date.now();
         } // 番剧时间表（Bangumi）
         if (name === 'popular' && !skipEnter) { Popular.enter(); this._viewLoadedAt.popular = Date.now(); } // Kazumi 首页推荐（Bangumi 趋势，T62）
@@ -410,6 +415,13 @@ $(async function bootstrap() {
     Player.init();
     Detail.init();
     Search.init();
+    // 预热设置快照（后台，不阻塞启动）：详情页 load() 的 _restoreLastSource、
+    // 播放起播链路首读走 SettingsSnapshot.get()——无快照时是一次全量 settingsGet
+    // IPC 穿透，落在「点开详情→渲染」的同步等待段。启动即后台拉一次填缓存，
+    // 用户点开详情时快照恒命中（穿透成本 0-1 次 IPC 移出交互路径）。
+    if (typeof SettingsSnapshot !== 'undefined' && SettingsSnapshot.get) {
+        SettingsSnapshot.get().catch(() => { /* 预热失败不影响启动：首读自会重试 */ });
+    }
     if (typeof BangumiSearch !== 'undefined' && BangumiSearch.init) BangumiSearch.init();
     Live.init();
     // Kazumi 规则引擎前端模块（kimi UI，glm5.2 后端端点）

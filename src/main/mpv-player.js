@@ -19,6 +19,7 @@ const { EventEmitter } = require('events');
 const { bringToFront } = require('./win-focus');
 
 // 打包后 extraResources 放在 resources/，vendor 从该处读取
+// （2026-09-30 用户拍板：vendor/mpv 恢复内置安装包，撤销当日 C-09 移出方案）
 const ROOT = (() => {
     try {
         const { app } = require('electron');
@@ -543,8 +544,7 @@ class MpvPlayer extends EventEmitter {
             title: String(opts.title || ''), // 会话标题（本地文件等无渲染层元信息的播放，登记 OP/ED 用）
             stderr: '',         // 最近一段 mpv 错误输出（避免错误日志无限增长）
             nativeQueue,        // 原生多集队列：ended 逐集携带 nativeQueue/playlistPos 供渲染层逐集记账
-            pendingSeekSec: deferredSeekSec, // 首集装载后一次性 seek（原生队列替代全局 --start）
-            seekApplied: false,
+            pendingSeekSec: deferredSeekSec, // 每次装载逐集应用 seek（原生队列替代全局 --start，见 file-loaded 逐集注释）
             queueIdx: startIndex >= 0 ? startIndex
                 : Math.max(0, Number(opts.startIndex) || 0), // 当前播放的列表下标（file-loaded 时经 IPC 刷新；end-file 记账用）
             itemStartMs: Date.now(), // 当前集墙钟起点（每次 file-loaded 刷新；逐集统计用）
@@ -1083,15 +1083,6 @@ class MpvPlayer extends EventEmitter {
      * 属性不可用时回退观察缓存），无会话/未连接时为 null。同步方法：渲染层
      * 经 yuki:player 'get-pos' 消费，仅作位置展示/估算，不承担精确时钟职责。
      */
-    /**
-     * 当前会话标题（本地文件等主进程直起播放）：oped-record 转发渲染层时携带，
-     * 渲染层 _curMeta 为空时以此登记 AdSkip。无会话返回 ''。
-     */
-    getSessionTitle() {
-        const active = this._activeSession;
-        return (active && active.title) || '';
-    }
-
     getTimePos() {
         const active = this._activeSession;
         if (!this.proc || !active || !this._connected || !this.socket) return null;
@@ -1101,6 +1092,15 @@ class MpvPlayer extends EventEmitter {
             }
         }).catch(() => { /* 媒体尚未起播/属性不可用：保持缓存原值 */ });
         return (typeof active.pos === 'number' && active.pos >= 0) ? active.pos : null;
+    }
+
+    /**
+     * 当前会话标题（本地文件等主进程直起播放）：oped-record 转发渲染层时携带，
+     * 渲染层 _curMeta 为空时以此登记 AdSkip。无会话返回 ''。
+     */
+    getSessionTitle() {
+        const active = this._activeSession;
+        return (active && active.title) || '';
     }
 
     /**

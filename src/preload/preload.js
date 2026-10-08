@@ -132,6 +132,8 @@ contextBridge.exposeInMainWorld('yuki', {
     captchaVerify: (url) => ipcRenderer.invoke('yuki:captcha-verify', { url }),
     /** 换肤：选择本地图片作壁纸（系统文件对话框，返回路径） */
     pickWallpaper: () => ipcRenderer.invoke('yuki:pick-wallpaper'),
+    /** 图片放大浮层保存图片：主进程弹保存对话框 + 拉图写盘（渲染层 fetch 受 CORS 限制） */
+    saveImage: (url, suggestedName) => ipcRenderer.invoke('yuki:save-image', url, suggestedName),
     /** 应用版本号（关于分类展示） */
     appVersion: () => ipcRenderer.invoke('yuki:app-version'),
     /** 窗口控制（无边框模式下的最小化/最大化/关闭） */

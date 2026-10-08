@@ -711,6 +711,32 @@ test('契约形状：yuki:external-player 空/非法 URL 返回 {ok:false, reaso
     } finally { env.dispose(); }
 });
 
+test('契约形状：yuki:file-thumb 淘汰检查 60s 节流——批量请求只做一次全扫（P2-15 性能口径）', async () => {
+    const env = await bootEnv();
+    try {
+        const thumbsDir = path.join(env.tmpRoot, 'userData', 'local-thumbs');
+        fs.mkdirSync(thumbsDir, { recursive: true });
+        const mkFiles = (from, to) => {
+            for (let i = from; i < to; i++) fs.writeFileSync(path.join(thumbsDir, `t${i}.jpg`), 'x');
+        };
+        const h = env.handlers.get('yuki:file-thumb');
+        // 走完整链路：下载目录里放一个真实 mp4，相对路径命中下载目录白名单
+        // （直链分支不走本地淘汰检查的同一调用点，白名单拒绝路径在 evict 之前 return）
+        const video = path.join(env.tmpRoot, 'downloads', 'v.mp4');
+        fs.writeFileSync(video, 'fake');
+        // 第一段：600 个文件（超 512 上限），首次请求应全扫淘汰到 512（淘汰功能本身不回归）
+        mkFiles(0, 600);
+        await h(null, 'v.mp4');
+        assert.equal(fs.readdirSync(thumbsDir).length, 512, '首次请求应完成淘汰（512 上限）');
+        // 第二段：再补回 88 个（512+88=600），节流窗口内连续 4 次请求都不得再全扫——
+        // 若节流失效（每次请求都扫），这里会被淘汰回 512
+        mkFiles(600, 688);
+        for (let i = 0; i < 4; i++) await h(null, 'v.mp4');
+        assert.equal(fs.readdirSync(thumbsDir).length, 600,
+            '60s 节流窗口内的后续请求不得再触发全扫淘汰（节流失效会回到 512）');
+    } finally { env.dispose(); }
+});
+
 test('契约形状：yuki:file-* 族空/null 入参统一返回 {ok:false, reason} 而非 TypeError', async () => {
     const env = await bootEnv();
     try {
@@ -805,6 +831,28 @@ test('契约形状：yuki:settings-set 白名单外的键返回 {ignored:true} �
         const ok = await set(null, 'theme', 'dark');
         assert.equal(ok.ignored, undefined);
         assert.equal(ok.value, 'dark');
+    } finally { env.dispose(); }
+});
+
+test('契约形状：验证码 LLM 五键全部可经 yuki:settings-set 落盘（含 captchaLLMPrefer）', async () => {
+    // 背景：captchaLLMPrefer 曾漏在 SETTINGS_SET_ALLOWED 外，设置页「优先使用视觉
+    // 大模型识别」开关的写入被静默 ignored——面板看着开了、settings.json 永无此键、
+    // 后端 solve 恒收 captchaLLMPrefer=0，识别链永远小模型优先（H-1 同类回归）。
+    // 此处与 kazumi.js WEBDAV_RESTORE_ALLOWED 的键逐一对齐，防再漏。
+    const env = await bootEnv();
+    try {
+        const set = env.handlers.get('yuki:settings-set');
+        const get = env.handlers.get('yuki:settings-get');
+        const kv = { captchaLLMEnable: true, captchaLLMPrefer: true, captchaLLMBase: 'http://127.0.0.1:7863/v1', captchaLLMKey: 'sk-test', captchaLLMModel: 'glm-5.3-flash' };
+        for (const [k, v] of Object.entries(kv)) {
+            const r = await set(null, k, v);
+            assert.equal(r.ignored, undefined, `${k} 应在白名单内，不得被静默忽略`);
+            assert.equal(r.value, v);
+        }
+        const all = await get();
+        assert.equal(all.captchaLLMPrefer, true, '开关写入必须落盘');
+        assert.equal(all.captchaLLMEnable, true);
+        assert.equal(all.captchaLLMModel, 'glm-5.3-flash');
     } finally { env.dispose(); }
 });
 

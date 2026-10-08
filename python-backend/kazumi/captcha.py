@@ -11,19 +11,22 @@ animeko（open-ani/ani）的做法（app/shared/app-data/.../web/captcha/）：
   - URL/HTML 启发式分类器在 kazumi/utils.py（looks_like_image_captcha_url /
     detect_image_captcha_html，animeko WebCaptchaDetector 对应位）；
   - 本文件只做「识别一件事」：验证码图片字节 → 文本（recognize_captcha_bytes）。
-    识别链两级（2026-09-29 重排，ddddocr 为主识别器）：① ddddocr（专为中文
-    站点滑块/字符验证码训练，含自带 onnx 模型）；② 自研 tiny-CNN 兜底
-    （captcha_cnn.py，numpy 纯推理，权重随应用打包，参考 animeko 小模型
-    契约——机制可借鉴、其 AGPL 代码/模型不可搬），4 位数字 MacCMS 验证码。
-    任何一级 import 失败或调用异常一律返回
-    None——渲染层把 None 视为「未识别」，沿既有交互兜底：人工验证窗口
-    （animeko InteractiveSolveDialog 对应位）。不阻塞登录/搜索主链路。
 
-依赖策略：numpy / ddddocr（连带 onnxruntime、opencv-python）均进
-requirements.txt 锁文件——2026-09-29 起真实站验证码为花体艺术字，自研合成
-模型分布外全错、ddddocr 大部分直接命中，已升级为主识别器随 PyInstaller 打包
-（增重约 200MB 换真实站可用性）。
+识别链（2026-10-01 重排，ddddocr 移除）：
+  1. 自研 tiny-CNN（captcha_cnn.py，numpy 纯推理，权重随应用打包 ~3MB）：
+     毫秒级、零外部依赖，扛住大部分标准形变样本；
+  2. 视觉 LLM（translate.llm_vision_recognize_captcha，OpenAI 兼容多模态）：
+     用户在划词翻译设置里配了 LLM（baseURL/model）时启用，扛花体/粘连等
+     tiny-CNN 的分布外样本。凭据按次传入不落盘；未配置/失败/超时一律静默
+     降级。决策记录：ddddocr（+200MB onnxruntime/opencv）按体积决策移除，
+     识别率缺口由 LLM 兜底 + 3 轮换图重试 + 人工窗口补偿（用户 2026-10-01
+     拍板，替代 2026-09-30 的「识别率优先」口径）。
+
+任何一级 import 失败或调用异常一律返回 None——渲染层把 None 视为「未识别」，
+沿既有交互兜底：人工验证窗口（animeko InteractiveSolveDialog 对应位）。
+不阻塞登录/搜索主链路。
 """
+import base64
 import logging
 import threading
 
@@ -40,44 +43,35 @@ logger = logging.getLogger('yuki.kazumi.captcha')
 _CAPTCHA_LEN_MIN = 3
 _CAPTCHA_LEN_MAX = 8
 
-# 模块级懒加载缓存：None=尚未尝试，False=不可用，否则为识别器实例。
-# 构造必须持锁串行（双检）：DdddOcr 构造装载 ~几十 MB 的 onnx 模型，重且慢，
-# 并发调用若不加锁会同时构造多份；tried 只能在构造结束后置位，先置位会让
-# 并发窗口内的其他线程拿到假 None 静默降级。
-_ocr_holder = {'ocr': None, 'tried': False}
-_ocr_lock = threading.Lock()
+# 模块级懒加载缓存：None=尚未尝试，False=不可用，否则为 tiny-CNN 可用。
+_cnn_holder = {'ok': None, 'tried': False}
+_cnn_lock = threading.Lock()
 
 
-def _load_ocr():
-    """懒加载 ddddocr 识别器（双检锁：构造在锁内完成，失败永久标记不可用）。
-
-    GIL 只保证 dict 赋值原子，不保证「检查-构造-写回」复合操作的互斥，
-    重依赖的懒加载必须显式加锁。"""
-    ocr = _ocr_holder['ocr']
-    if ocr is not None or _ocr_holder['tried']:
-        return ocr if ocr else None
-    with _ocr_lock:
-        ocr = _ocr_holder['ocr']
-        if ocr is not None or _ocr_holder['tried']:
-            return ocr if ocr else None
+def _cnn_available():
+    """tiny-CNN 权重探测（双检锁；失败永久标记不可用，不重复尝试）。"""
+    ok = _cnn_holder['ok']
+    if ok is not None:
+        return ok
+    with _cnn_lock:
+        ok = _cnn_holder['ok']
+        if ok is not None:
+            return ok
         try:
-            import ddddocr  # 可选依赖：未安装/无 onnxruntime 轮子时走降级路径
-            ocr = ddddocr.DdddOcr(show_ad=False)
+            ok = bool(_load_cnn().model_available())
         except Exception as e:
-            logger.info('[kazumi] ddddocr 不可用（验证码自动识别降级为手动输入）: %s', e)
-            _ocr_holder['ocr'] = False
-            _ocr_holder['tried'] = True
-            return None
-        _ocr_holder['ocr'] = ocr
-        _ocr_holder['tried'] = True
-        return ocr
+            logger.info('[kazumi] tiny-CNN 探测不可用（降级 LLM 链）: %s', e)
+            ok = False
+        _cnn_holder['ok'] = ok
+        _cnn_holder['tried'] = True
+        return ok
 
 
 def reset_ocr_cache():
     """重置识别器缓存（测试用：mock 注入后强制重新加载）。"""
-    with _ocr_lock:
-        _ocr_holder['ocr'] = None
-        _ocr_holder['tried'] = False
+    with _cnn_lock:
+        _cnn_holder['ok'] = None
+        _cnn_holder['tried'] = False
 
 
 def _load_cnn():
@@ -86,21 +80,24 @@ def _load_cnn():
     return captcha_cnn
 
 
-def ocr_available():
+def ocr_available(llm_cfg=None):
     """当前进程是否具备自动识别能力（只探测，不识别）。
 
-    两级识别链任一可用即为 True：ddddocr（主识别器）或自研小模型
-    （权重随应用打包）。"""
-    # _load_cnn() 会触发 import captcha_cnn → 顶部 import numpy：numpy 缺失
-    # 时 ImportError 必须在本模块边界吞掉降级，不能从「只探测」的探测口溢出
-    # （本模块契约：任何一级 import 失败一律降级）。
+    两级识别链任一可用即为 True：tiny-CNN（权重随应用打包）或视觉 LLM
+    （用户已配置 baseURL/model）。llm_cfg 缺省时只探测 tiny-CNN——调用方
+    （solve_captcha）在真正识别时才拿得到按次传入的凭据，这里多探一步
+    LLM 只为前端「⚡可自动」提示更准确。
+
+    _load_cnn() 会触发 import captcha_cnn → 顶部 import numpy：numpy 缺失
+    时 ImportError 必须在本模块边界吞掉降级，不能从「只探测」的探测口溢出
+    （本模块契约：任何一级 import 失败一律降级）。"""
     try:
-        if _load_cnn().model_available():
+        if _cnn_available():
             return True
     except Exception as e:
-        # 只吞加载类异常（ImportError 等）；探测路径正常情况不抛业务异常
-        logger.info('[kazumi] 小模型探测不可用（降级 ddddocr 探测）: %s', e)
-    return _load_ocr() is not None
+        logger.info('[kazumi] tiny-CNN 探测异常（降级 LLM 探测）: %s', e)
+    return bool(llm_cfg and str((llm_cfg or {}).get('model') or '').strip()
+                and str((llm_cfg or {}).get('base') or '').strip())
 
 
 def is_plausible_captcha_text(text):
@@ -115,41 +112,80 @@ def is_plausible_captcha_text(text):
     return all(32 < ord(ch) < 127 or ch.isalnum() for ch in t)
 
 
-def recognize_captcha_bytes(image_bytes):
+def _recognize_with_llm(image_bytes, llm_cfg):
+    """视觉 LLM 二级识别。配置缺失/异常/结果不可信一律返回 None。"""
+    if not (llm_cfg and str((llm_cfg or {}).get('model') or '').strip()
+            and str((llm_cfg or {}).get('base') or '').strip()):
+        return None
+    try:
+        from . import translate
+        img_b64 = base64.b64encode(bytes(image_bytes)).decode('ascii')
+        text = translate.llm_vision_recognize_captcha(img_b64, llm_cfg)
+    except Exception as e:
+        logger.info('[kazumi] LLM 验证码识别失败（降级人工窗口）: %s', e)
+        return None
+    text = str(text or '').strip()
+    if is_plausible_captcha_text(text):
+        return text
+    if text:
+        logger.info('[kazumi] LLM 验证码结果不可信: %r', text[:16])
+    return None
+
+
+def recognize_captcha_bytes(image_bytes, llm_cfg=None, prefer_llm=False):
     """验证码图片字节 → 文本；无法识别返回 None（调用方降级手动输入）。
 
-    两级识别链（2026-09-29 重排：真实站验证码是花体/斜体艺术字，自研
-    合成模型分布外全错、ddddocr 大部分直接命中，见 roadmap B 节复盘）：
-      1. ddddocr（优先）：专为中文站点字符验证码训练，模型内置在 pip 包，
-         MIT 许可；PyInstaller 打包增重约 200MB（onnxruntime + opencv），
-         换取真实站可用性。
-      2. 自研 tiny-CNN（captcha_cnn，权重随应用打包）：数字域兜底，在
-         ddddocr 结果不可信（3-8 位门槛拒绝）时尝试。
+    两级识别链（2026-10-01 重排：ddddocr +200MB 依赖按体积决策移除）：
+      1. tiny-CNN（captcha_cnn，权重随应用打包）：毫秒级零依赖，4 位数字域；
+      2. 视觉 LLM（llm_cfg 按次传入，用户在划词翻译设置配置）：多模态
+         /chat/completions 识别，扛 tiny-CNN 分布外的花体/粘连字形。
+
+    prefer_llm（2026-10-08 新增开关，默认 False）：为 True 时把两级次序
+    倒过来（先 LLM 后 CNN）。背景是「默认次序下 LLM 几乎永不上场」——
+    tiny-CNN 在真实站点样本上永远返回 4 位数字（500 张实测返回 None 0 次），
+    而 4 位数字恒能通过 is_plausible_captcha_text 的格式闸门，故一级总是
+    「成功」返回、二级无机会。实测同一批样本 all4 仅 0.37，即 63% 的错读
+    被直接提交给了站点。想要识别率而非延迟的用户需要一条绕开 CNN 的路，
+    这就是本开关；默认关闭以保住零依赖毫秒级的默认体验。
+
+    次序倒转而非「跳过 CNN」：LLM 失败/不可信仍回落 CNN，最后才是 None
+    （人工窗口）——偏好识别率的用户也不该因为 LLM 临时不可用而失去本地能力。
 
     任何异常（缺库/模型损坏/图片非法/结果不可信）都吞掉并返回 None：
     本模块是可选增强，绝不让识别失败破坏搜索/登录主链路。"""
     if not image_bytes:
         return None
-    # 第一级：ddddocr
-    ocr = _load_ocr()
-    if ocr is not None:
-        try:
-            text = ocr.classification(bytes(image_bytes))
-        except Exception as e:
-            logger.warning('[kazumi] ddddocr 识别异常（继续小模型链）: %s', e)
-            text = None
-        text = str(text or '').strip()
-        if is_plausible_captcha_text(text):
-            return text
+    levels = (_LEVEL_LLM, _LEVEL_CNN) if prefer_llm else (_LEVEL_CNN, _LEVEL_LLM)
+    for level in levels:
+        text = _LEVELS[level](image_bytes, llm_cfg)
         if text:
-            logger.info('[kazumi] ddddocr 结果不可信: %r', text[:16])
-    # 第二级：自研小模型（4 位数字域兜底）
-    try:
-        text = _load_cnn().recognize(image_bytes)
-        if text and is_plausible_captcha_text(text):
             return text
-        if text:
-            logger.info('[kazumi] 小模型验证码结果不可信: %r', str(text)[:16])
-    except Exception as e:
-        logger.warning('[kazumi] 小模型验证码识别异常: %s', e)
     return None
+
+
+def _recognize_level_cnn(image_bytes, llm_cfg):
+    """第一级 tiny-CNN 识别（llm_cfg 本层不用，签名对齐便于统一调度）。"""
+    try:
+        if _cnn_available():
+            raw = _load_cnn().recognize(image_bytes)
+            # 必须 strip：合法性校验按 strip 后的长度判定，但提交给站点的是
+            # 返回值本身——不 strip 就会把带空白的原值发过去，站点判题必失败
+            # （与二级 LLM 路径的 str(...).strip() 同口径）。
+            text = str(raw or '').strip()
+            if text and is_plausible_captcha_text(text):
+                return text
+            if raw:
+                logger.info('[kazumi] tiny-CNN 验证码结果不可信: %r', str(raw)[:16])
+    except Exception as e:
+        logger.warning('[kazumi] tiny-CNN 验证码识别异常: %s', e)
+    return None
+
+
+def _recognize_level_llm(image_bytes, llm_cfg):
+    """第二级视觉 LLM 识别（配置门禁 + 合法性校验已在 _recognize_with_llm 内）。"""
+    return _recognize_with_llm(image_bytes, llm_cfg)
+
+
+_LEVEL_CNN = 'cnn'
+_LEVEL_LLM = 'llm'
+_LEVELS = {_LEVEL_CNN: _recognize_level_cnn, _LEVEL_LLM: _recognize_level_llm}

@@ -270,16 +270,17 @@ test('file-manager 边界输入：中文/特殊字符/空目录/不存在路径�
     const fm = new FileManager(tmp, { confirm: async () => 1, getRecords: () => [] });
     fm.setRoot(root);
     // 正常列举：中文名/特殊字符名不炸；time 空串兜底（statSync 失败项）
-    const listing = fm.list('');
+    // list() 为异步（目录扫描卸载到 worker 线程，不阻塞主进程事件循环）
+    const listing = await fm.list('');
     assert.ok(listing.files.length >= 2);
     for (const f of listing.files) {
         assert.equal(typeof f.name, 'string');
         assert.equal(typeof f.time, 'string');
         assert.ok(!path.isAbsolute(f.path), '返回路径必须仍是相对路径');
     }
-    // 不存在目录 / 穿越一律抛 Error（fileIpc 层负责收敛为 ok:false）
-    assert.throws(() => fm.list('不存在目录'), /not a directory/);
-    assert.throws(() => fm.list('..\\..'), /path outside whitelist/);
+    // 不存在目录 / 穿越一律 reject Error（fileIpc 层负责收敛为 ok:false）
+    await assert.rejects(() => fm.list('不存在目录'), /not a directory/);
+    await assert.rejects(() => fm.list('..\\..'), /path outside whitelist/);
     assert.throws(() => fm.newFolder('', ''), /invalid name/);
     assert.throws(() => fm.newFolder('', '..'), /invalid name/);
     assert.throws(() => fm.delFile('ghost.mp4'), /not a file/);
@@ -385,5 +386,48 @@ test('渲染层 panels.js loadLocalThumbs：fileThumb 调用链必须带 catch',
     const end = src.indexOf('\n}', start);
     assert.ok(end > start, 'loadLocalThumbs 函数体应可定位');
     const body = src.slice(start, end);
-    assert.match(body, /\.catch\(/, 'loadLocalThumbs 内 fileThumb promise 必须 .catch（防未捕获 rejection 传播到全局）');
+    // 懒加载重构后抓帧 promise 链委托给 fetchLocalThumb：本体或委托实现内必须有一处 .catch
+    const delegates = body.includes('fetchLocalThumb(el, rel)');
+    assert.ok(
+        /\.catch\(/.test(body)
+        || (delegates && (() => {
+            const fStart = src.indexOf('function fetchLocalThumb(');
+            if (fStart < 0) return false;
+            const fEnd = src.indexOf('\n}', fStart);
+            return fEnd > fStart && /\.catch\(/.test(src.slice(fStart, fEnd));
+        })()),
+        'loadLocalThumbs 本体或其委托的 fetchLocalThumb 内 fileThumb promise 必须 .catch（防未捕获 rejection 传播到全局）');
+});
+
+// ------------------------------------------------------------------
+// 5. 视口懒加载（性能回归防线）：无 IO 环境必须保留立即全量抓帧的退化路径
+//    （单测 VM 桩 / 老 WebView 无 IntersectionObserver——退化路径丢了，缩略图会整体空白）
+// ------------------------------------------------------------------
+test('渲染层懒加载退化路径：无 IntersectionObserver 时仍同步抓帧（records.js / panels.js）', () => {
+    for (const [file, fn, marker] of [
+        ['records.js', 'function fillLocalCovers(grid) {', 'requestLocalCover(el, rel)'],
+        ['panels.js', 'function loadLocalThumbs() {', 'fetchLocalThumb(el, rel)'],
+    ]) {
+        const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'js', file), 'utf8');
+        const start = src.indexOf(fn);
+        assert.ok(start >= 0, `${file} 的 ${fn} 应存在`);
+        const end = src.indexOf('\n}', start);
+        const body = src.slice(start, end);
+        assert.match(body, /typeof IntersectionObserver !== 'undefined'/,
+            `${file} 应按 IntersectionObserver 可用性选择懒加载/立即抓帧`);
+        assert.match(body, new RegExp(`!lazy\\) \\{ ${marker.replace(/[()]/g, '\\$&')}`),
+            `${file} 无 IO 环境必须走立即抓帧退化路径（缩略图不能整体空白）`);
+    }
+    // 观察器批次清理：fillLocalCovers 整格重写前必须 unobserve 上一批（游离节点不累积）。
+    // 2026-10-02 改为按 grid 容器分组（_coverIOBatches: grid 元素 → Set），
+    // 修复「任一视图渲染清空全局集合，把其他网格里仍存活的待抓帧节点一并取消观察」；
+    // 断言随之改为验证「按本容器批次 unobserve」这一语义而非旧的单集合写法。
+    const rec = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'js', 'records.js'), 'utf8');
+    assert.match(rec, /for \(const el of batch\) _coverIO\.unobserve\(el\)/,
+        'records.js 旧批次必须解除观察（观察器强引用游离节点会累积）');
+    assert.match(rec, /_coverIOBatches\.get\(/,
+        'records.js 批次必须按 grid 容器分组（多视图实例不得共用一份全局集合）');
+    const pan = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'js', 'panels.js'), 'utf8');
+    assert.match(pan, /for \(const el of _thumbIOBatch\) _thumbIO\.unobserve\(el\)/,
+        'panels.js 旧批次必须解除观察');
 });

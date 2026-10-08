@@ -10,6 +10,8 @@
  * server.py 不新增 do —— 复用 kazumiBangumiSyncApply 端点单条透传（type<1 表示不动收藏）。
  * 提交成功后 FavHub.changed 广播，my.js 自动作废 Bangumi 收藏缓存并重拉；
  * 当前详情页匹配该条目时另触发吐槽乐观刷新（Detail.onBgmCommentSubmitted）。
+ * 打开流程（即时开窗）：入口点击同步 openRateDialog 先弹窗，当前评分/吐槽/标签由
+ * fetchCurrent 后台补查、mergeFetched 合并进已开的对话框（用户已编辑则丢弃）。
  *
  * 纯逻辑函数（clampRate / starsFor / fmtRateLabel / normalizeTagInput /
  * buildRatingPayload）导出到 YUKI.bgmRate 供 tests/js/bgm-rate.test.js 在 VM 中直接单测。
@@ -51,6 +53,12 @@ const BgmRate = {
     _inFlightId: '',
     // 当前对话框上下文（subjectId/name/当前评分/当前吐槽/标签状态）
     _ctx: null,
+    // 对话框会话序号：每次 openRateDialog 递增并写入 _ctx.fetchId，用于区分同一
+    // 条目先后开的两次对话框（晚到补查只归属它自己的那一次会话）
+    _fetchSeq: 0,
+    // 用户在补查数据合并前是否已编辑过对话框（星级/吐槽/标签/颜文字任一交互置位）：
+    // 置位后 mergeFetched 丢弃晚到的远端数据，避免覆盖用户输入；开窗时复位
+    _touched: false,
     // 热门标签展开态：每次打开对话框重置为收起
     _showAllPopular: false,
     // 颜文字面板展开态：悬停展开/离开收起；点击按钮钉住（pin），点面板外才收起
@@ -181,6 +189,7 @@ const BgmRate = {
         // 避免旧 Promise 悬挂、其 _resolve 被新会话覆盖后永不 settle
         if (this._resolve) this._close(false);
         this._showAllPopular = false;
+        this._touched = false;
         this._kamojiPinned = false;
         this._kamojiOpen = false;
         // 状态复位必须同步 DOM（面板/按钮是 index.html 常驻元素，重开不重建）：
@@ -189,15 +198,22 @@ const BgmRate = {
         // 残影只能靠悬停清除，故开窗前主动同步。
         this._kamojiSync();
         const initTags = this.normalizeTags(opts.tags);
+        // 会话标识：同一条目可先后开多次对话框（首次入口补查超时 → 先开窗 →
+        // 用户关掉重开）。晚到的补查必须能区分属于哪一次会话，否则第一次的
+        // 迟到响应会覆盖第二次会话里用户尚未编辑的内容（只按 subjectId 判归属
+        // 串台）。调用方把 openRateDialog 返回的 fetchId 传给 mergeFetched。
+        const fetchId = ++this._fetchSeq;
+        this._lastFetchId = fetchId; // 供调用方取本次会话号（合并晚到补查用）
         this._ctx = {
             subjectId: sid,
+            fetchId,
             name: String(opts.name || ''),
             rate: this.clampRate(opts.rate),
             comment: String(opts.comment || ''),
             // 当前个人标签（收藏接口回传）：对话框内可增删，提交时整体覆盖
             tags: initTags.slice(),
             // 初始标签快照：脏检查用（一致则 payload 不带 tags 键，不动远端标签）
-            tagsInit: initTags,
+            tagsInit: initTags.slice(),
             // 热门建议 = 条目公共标签（用户没选的不展示计数徽标，纯名展示）
             popularTags: this.normalizeTags(opts.popularTags),
         };
@@ -209,6 +225,37 @@ const BgmRate = {
             if (this._ctx.rate !== null) $('#bgm-rate-comment').trigger('focus');
             else $('#bgm-rate-submit').trigger('focus');
         });
+    },
+
+    /**
+     * 后台补查数据合并进已打开的对话框（入口超时先开窗路径的收尾）。
+     * 入口点击转圈等待 fetchCurrent（≤4s）后开窗；超时时先开窗（无预填），
+     * 原补查到达后调此方法补齐；本对话框已关/已换成别的条目则丢弃。
+     * 用户在补查到达前已编辑（_touched）时丢弃远端数据，不覆盖用户输入。
+     * @param {string} subjectId 数据归属条目
+     * @param {{rate?:number|null, comment?:string, tags?:string[]}} data fetchCurrent 结果
+     * @param {number} [fetchId] 本次补查对应的对话框会话（openRateDialog 返回值）；
+     *   省略时不做会话校验（兼容既有单测与「只按条目判归属」的旧调用）。
+     */
+    mergeFetched(subjectId, data, fetchId) {
+        const c = this._ctx;
+        const d = data || {};
+        if (!c || c.subjectId !== String(subjectId || '').trim()) return false;
+        // 会话校验：同一条目先后开两次对话框时，第一次的迟到响应不得覆盖第二次
+        //（L28：严格比较，null/undefined 双排除语义不变，不依赖隐式转换）
+        if (fetchId !== null && fetchId !== undefined && c.fetchId !== fetchId) return false;
+        if (this._touched) return false;
+        if ('rate' in d) c.rate = this.clampRate(d.rate);
+        if ('comment' in d) c.comment = String(d.comment || '');
+        if ('tags' in d) {
+            c.tags = this.normalizeTags(d.tags);
+            // 必须同步初始快照：tags 是本次补查拿到的远端初始值，只更新 c.tags
+            // 会让脏检查把「用户从未改过」判成已修改，随评分一起 PATCH 覆盖掉
+            // 补查之后的并发标签变更。
+            c.tagsInit = c.tags.slice();
+        }
+        this._renderDialog();
+        return true;
     },
 
     /** 渲染对话框内容（按 _ctx）：星级选择器 + 当前评分标签 + 吐槽文本框 + 标签编辑区。
@@ -313,6 +360,7 @@ const BgmRate = {
     _insertKamoji(k) {
         const s = String(k || '');
         if (!s) return;
+        this._touched = true;
         const $ta = $('#bgm-rate-comment');
         const cur = String($ta.val() || '');
         const pos = Number($ta.prop('selectionStart'));
@@ -338,6 +386,7 @@ const BgmRate = {
         if (!c) return;
         const t = String(tag || '').trim();
         if (!t) return;
+        this._touched = true;
         const idx = (c.tags || []).indexOf(t);
         if (idx >= 0) {
             c.tags.splice(idx, 1);
@@ -354,6 +403,7 @@ const BgmRate = {
     _pickRate(val) {
         const c = this._ctx;
         if (!c) return;
+        this._touched = true;
         c.rate = (c.rate === val) ? 0 : val;
         this._renderDialog({ preserveTagInput: true });
     },
@@ -362,6 +412,7 @@ const BgmRate = {
     _clearRate() {
         const c = this._ctx;
         if (!c) return;
+        this._touched = true;
         c.rate = 0;
         this._renderDialog({ preserveTagInput: true });
     },
@@ -576,6 +627,14 @@ function escHtmlAttr(s) {
             handle.addEventListener('pointercancel', onUp);
         });
     }
+    // 吐槽框/标签输入框打字：视为用户已编辑（_touched），后台补查数据到达时
+    // mergeFetched 不再覆盖输入内容（星级/标签/颜文字交互在各自函数内置位）
+    $('#bgm-rate-comment').on('input', () => {
+        if (typeof BgmRate !== 'undefined' && BgmRate._ctx) BgmRate._touched = true;
+    });
+    $('#bgm-rate-tag-input').on('input', () => {
+        if (typeof BgmRate !== 'undefined' && BgmRate._ctx) BgmRate._touched = true;
+    });
     // 提交
     $('#bgm-rate-submit').on('click', () => {
         if (typeof BgmRate !== 'undefined') BgmRate.submit();

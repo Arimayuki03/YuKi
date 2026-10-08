@@ -180,6 +180,54 @@ class TestLlm(unittest.TestCase):
         self.assertEqual(cm.exception.code, 'bad_request')
 
 
+class TestExtractCaptchaDigits(unittest.TestCase):
+    """视觉模型回复 → 4 位验证码提取（生产链与设置页探测共享口径）。
+
+    回归锚点（2026-10-03 用户实测）：模型读对图但回复「验证码是1797」，
+    旧口径 \\b 在汉字与数字间不成立（Python \\w 匹配汉字）整体漏提取——
+    设置页测试误报「识别为空」，生产链把读对的回复降级人工窗口。"""
+
+    def test_plain_digits(self):
+        self.assertEqual(tr.extract_captcha_digits('1797'), '1797')
+        self.assertEqual(tr.extract_captcha_digits(' 1797 '), '1797')
+        self.assertEqual(tr.extract_captcha_digits('**1797**'), '1797')
+
+    def test_chinese_wrapped_reply(self):
+        """汉字紧邻数字（\\b 不成立）的核心回归形态。"""
+        self.assertEqual(tr.extract_captcha_digits('验证码是1797。'), '1797')
+        self.assertEqual(tr.extract_captcha_digits('图片中的数字是1797'), '1797')
+        self.assertEqual(tr.extract_captcha_digits('识别结果：\n1797\n以上。'), '1797')
+
+    def test_fullwidth_digits_normalized(self):
+        self.assertEqual(tr.extract_captcha_digits('１７９７'), '1797')
+        self.assertEqual(tr.extract_captcha_digits('验证码１７９７'), '1797')
+
+    def test_spaced_digits_second_pass(self):
+        """空格分位（1 7 9 7）走二级提取。"""
+        self.assertEqual(tr.extract_captcha_digits('1 7 9 7'), '1797')
+        self.assertEqual(tr.extract_captcha_digits('9 6 3 2'), '9632')
+
+    def test_digit_group_boundaries(self):
+        """「两侧非数字」界定：5 位串不截取 4 位（宁空勿错）；
+        「12 34」一级即命中（数字粘连已是 4 位组），不产生假答案。"""
+        self.assertEqual(tr.extract_captcha_digits('12345'), '')
+        self.assertEqual(tr.extract_captcha_digits('123456'), '')
+        self.assertEqual(tr.extract_captcha_digits('12 34'), '1234')
+
+    def test_no_digits_or_empty(self):
+        self.assertEqual(tr.extract_captcha_digits('无法读取'), '')
+        self.assertEqual(tr.extract_captcha_digits(''), '')
+        self.assertEqual(tr.extract_captcha_digits(None), '')
+
+    def test_vision_recognize_uses_shared_extraction(self):
+        """生产链 llm_vision_recognize_captcha 端到端：中文前缀回复提取成功。"""
+        with mock.patch.object(http_client, 'post', return_value=_Rsp(
+                200, '{"choices":[{"message":{"content":"验证码是1797。"}}]}')):
+            out = tr.llm_vision_recognize_captcha(
+                'aW1n', {'base': 'https://x.com/v1', 'model': 'vlm'})
+        self.assertEqual(out, '1797')
+
+
 class TestTranslateText(unittest.TestCase):
     """编排层：缓存命中、failover 次序、参数校验。"""
 

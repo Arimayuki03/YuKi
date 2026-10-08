@@ -44,6 +44,11 @@ class RuntimeRequest:
     deadline_ms: int
     args: dict[str, Any] = field(default_factory=dict)
     play_session_id: str = ''
+    # probe=True：预热/健康探测等「非用户请求」。supervisor 对这类请求的超时
+    # 不杀 worker、不记熔断（M2：预热超时本不该反转成「主动制造故障」——
+    # 杀掉刚预热的 worker 让真实首请求重新付冷启动成本，还让慢源 3 次预热
+    # 就熔断 60s，真实请求被 L3_CIRCUIT_OPEN 拒绝）。
+    probe: bool = False
     created_at: float = field(default_factory=time.time)
     _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _cancel_reason: str = field(default='', repr=False, compare=False)
@@ -51,7 +56,7 @@ class RuntimeRequest:
     @classmethod
     def create(cls, *, site_key: str = '', method: str = '', deadline_ms: int | None = None,
                args: Mapping[str, Any] | None = None, request_id: str = '',
-               play_session_id: str = ''):
+               play_session_id: str = '', probe: bool = False):
         method = str(method or '')
         default = DEFAULT_DEADLINES_MS.get(method, 30000)
         try:
@@ -66,6 +71,7 @@ class RuntimeRequest:
             deadline_ms=deadline,
             args=dict(args or {}),
             play_session_id=normalize_request_id(play_session_id) if play_session_id else '',
+            probe=bool(probe),
         )
 
     @classmethod

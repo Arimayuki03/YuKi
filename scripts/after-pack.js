@@ -22,6 +22,9 @@
  *    UNKNOWN/EACCES 或更新元数据标记 isAdminRightsRequired 时才调 elevate.exe，
  *    二者对本应用都不成立，缺失时 NsisUpdater 另有 shell.openPath 兜底。
  *    packElevateHelper:false 已在源头关闭，此处兜底防御版本差异并给出可操作报错。
+ * 5. LICENSES.chromium.html（产物根，约 20MB 量级，随 Electron 版本漂移）——Chromium
+ *    依赖许可证汇总 HTML，非运行时组件；Electron 许可证文本 LICENSE.electron.txt 保留，
+ *    删汇总 HTML 是业界通行做法（VS Code 等同样不随包分发），详见下方函数注释。
  *
  * 职责三：可执行体版本信息门禁（fail build）
  *    package.json 缺 author 字段时 electron-builder 不写 CompanyName，YuKi.exe 保留
@@ -35,6 +38,16 @@
  *    含真实登录 Cookie）被原样打进 app.asar——asar 不加密，任何人一条命令即可取出。
  *    现 files 已收窄（打包后后端只读 extraResources 的 PyInstaller 产物，asar 内的
  *    python-backend 属纯冗余），本门禁负责在将来有人重新放宽 files 时立刻让构建失败。
+ *
+ * 职责四：mac/linux 打包剔除 vendor 内 win 专属二进制（C-10，防御性）
+ *    vendor 经 extraResources 无条件复制进所有平台产物——electron-builder 25 的
+ *    filter 无平台字段，平台段（build.mac/build.linux）条目只能追加、无法排除顶层
+ *    条目（app-builder-lib/out/fileMatcher.js getFileMatchers：全局与平台段模式合并），
+ *    而当前锁定的 aria2/ffmpeg/mpv 均为 win 构建（.exe，合计约 258MB），未来出
+ *    mac/linux 包会白白多背。此处按 electronPlatformName 在 extraResources 落盘后
+ *    删除（afterPack 钩子晚于 copyFiles、早于 DMG/AppImage/deb 打包，删除安全有效）：
+ *    仅删 .exe/.dll（PE 系后缀，unix 平台无法执行），同名无后缀的 unix 二进制不受
+ *    影响；win 打包路径不进入该分支（零变化）。
  *
  * 逃生口：YUKI_KEEP_SYSTEM_DLLS=1 npx electron-builder --win 保留全部（诊断对比用）。
  *    注意：该开关只影响 DLL 剔除，**不影响**敏感文件门禁（泄密不可豁免）。
@@ -51,6 +64,58 @@ const BACKEND_INTERNAL = path.join('resources', 'python-backend', 'yuki-backend'
 const ROOT_NAMES = ['d3dcompiler_47.dll', 'vulkan-1.dll'];
 const UCRT_RE = /^(ucrtbase\.dll|api-ms-win-.+\.dll|vcruntime140(_1)?\.dll)$/i;
 const ELEVATE = path.join('resources', 'elevate.exe');
+// C-10：vendor 内 win 专属二进制的判定——仅 PE 后缀（.exe/.dll）。
+// 不按文件名删（aria2c/ffmpeg/mpv 未来在 mac/linux 下是同名无后缀二进制，不能误删）；
+// 不限定具体目录（未来 vendor 新增子目录同样被覆盖），删除范围收敛到 resources/vendor
+// 子树，避免波及产物其他位置的同名文件（如 PyInstaller 后端 _internal 下的 DLL 由
+// stripSystemDlls 的 win 分支负责，平台不同、职责不同）。
+const WIN_BINARY_EXT_RE = /\.(exe|dll)$/i;
+
+// mac 产物目录名（L18）：来自 build.productName（当前 "YuKi"）+ mac bundle 后缀
+// ".app"——electron-builder appInfo.productName = config.productName →
+// metadata.productName → metadata.name，productFilename = build.executableName（未设置）
+// 否则 sanitizeFileName(productName)，mac 产物 bundle 即为 <productFilename>.app。
+// build.executableName 与 build.mac.productName 均未配置，故按 productName 推导即与
+// 配置一致。注意：若改 package.json 的 productName，需同步确认此推导仍成立。
+// L9：回退链与 verify-exe-metadata.js 的 PRODUCT_NAME 统一（build.productName →
+// productName → name，单一来源，避免两处回退口径漂移）。
+const _pkg = require('../package.json');
+const PRODUCT_NAME = (_pkg.build && _pkg.build.productName) || _pkg.productName || _pkg.name;
+const MAC_APP_DIR = path.join(
+    String(PRODUCT_NAME) + '.app',
+    'Contents',
+    'Resources',
+);
+
+/** 递归收集目录下所有文件（绝对路径）；目录不存在返回空数组。 */
+function walkAllFiles(dir, out) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return out; }
+    for (const ent of entries) {
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) walkAllFiles(p, out);
+        else if (ent.isFile()) out.push(p);
+    }
+    return out;
+}
+
+/**
+ * C-10：剔除 mac/linux 产物中 extraResources 落盘的 vendor win 专属二进制。
+ * 判定保守：仅 .exe/.dll 后缀（PE 格式后缀，unix 无法执行，且 vendor 当前只有
+ * aria2c.exe/ffmpeg.exe/mpv.exe 三个 win 构建物，约 258MB）；同名无后缀 unix
+ * 二进制（未来 aria2c/ffmpeg/mpv 的 mac/linux 构建）不受影响。返回 [{rel, size}]。
+ */
+function stripVendorWinBinaries(appOutDir, resourcesDir) {
+    const vendor = path.join(appOutDir, resourcesDir, 'vendor');
+    const removed = [];
+    for (const file of walkAllFiles(vendor, [])) {
+        if (!WIN_BINARY_EXT_RE.test(file)) continue;
+        const size = fs.statSync(file).size;
+        fs.rmSync(file);
+        removed.push({ rel: path.relative(appOutDir, file), size });
+    }
+    return removed;
+}
 
 /**
  * 读取 PE 文件的 VERSION_INFO 资源（VS_VERSIONINFO StringFileInfo）。
@@ -151,6 +216,25 @@ function walkMatching(dir, re, out) {
     return out;
 }
 
+/**
+ * 剔除产物根的 LICENSES.chromium.html（Electron 自带，体积为 20MB 量级、随 Electron
+ * 版本漂移，故注释不写死数值——实际大小以剔除日志打印为准）。
+ * 许可证合规依据：这是 Chromium 依赖的汇总 HTML 许可证清单，非任何运行时组件；
+ * Electron 自身的许可证在产物根 LICENSE.electron.txt 中完整保留，第三方组件的
+ * 许可证义务由源码仓库的 LICENSE（GPL-3.0-only）与各上游声明承担。删除汇总 HTML
+ * 是业界通行做法（VS Code、Chromium 系发行包普遍不随包分发该文件），不影响
+ * Electron/Chromium 的 BSD-style 许可证合规（其要求的是随附许可证文本，即保留的
+ * LICENSE.electron.txt）。
+ */
+function stripLicensesHtml(appOutDir) {
+    const html = path.join(appOutDir, 'LICENSES.chromium.html');
+    if (!fs.existsSync(html)) return;
+    const size = fs.statSync(html).size;
+    fs.rmSync(html);
+    console.log(`[after-pack] 已剔除 LICENSES.chromium.html（${(size / 1024 / 1024).toFixed(1)}MB）`
+        + '——Chromium 许可证汇总 HTML，非运行时组件；许可证文本以保留的 LICENSE.electron.txt 为准');
+}
+
 /** 剔除产物中的系统自带冗余 DLL，返回 [{rel, size}]；无匹配文件时为空数组（no-op，兼容 mac/linux）。 */
 function stripSystemDlls(appOutDir) {
     const removed = [];
@@ -231,9 +315,38 @@ module.exports = function afterPack(context) {
             + '\n修复：收窄 package.json build.files，勿用 python-backend/** 这类全量收纳。');
     }
 
-    if (context.electronPlatformName === 'win') {
+    // electron-builder 25 的 electronPlatformName 是 Platform.nodeName：win 构建
+    // 传 'win32'（非 'win'）——旧判断 === 'win' 自 v0.2.7 引入起从未命中，win 分支
+    // （elevate/LICENSES 剔除）一直被静默跳过，且 C-10 落地后 else 分支还会在
+    // win 构建上误删 vendor/aria2c.exe。按 nodeName 取值修正，mac='darwin'/linux='linux' 不变。
+    const platformName = String(context.electronPlatformName || '');
+    if (platformName === 'win32' || platformName === 'win') {
         stripElevateHelper(context.appOutDir);
-        checkExecutableMetadata(context.appOutDir);
+        stripLicensesHtml(context.appOutDir);
+        // 注意：可执行体版本信息校验（checkExecutableMetadata）不能在 afterPack 里做——
+        // rcedit 覆写 exe 元数据发生在框架 afterPack（signApp）阶段，晚于用户钩子，
+        // 在这里查永远读到 Electron 原始值（CompanyName="GitHub, Inc."）误报。
+        // 已移至 afterAllArtifactBuild 钩子（verify-exe-metadata.js），全产物落定后校验。
+    } else if (platformName === 'darwin' || platformName === 'linux') {
+        // C-10：仅 mac/linux——vendor 的 win 专属二进制（.exe/.dll）纯死重。
+        // 显式白名单：只有确认是 mac/linux 才执行剔除；平台名取值一旦漂移
+        // （electron-builder 版本变更/未知新值）宁可漏剔也不误删 win 产物的
+        // aria2c/ffmpeg/mpv（与 verify-exe-metadata.js「宁可漏判不误判」同取向）。
+        // resources 目录布局按平台区分：mac 为 <productName>.app/Contents/Resources
+        // （MAC_APP_DIR 常量，来源见其定义处），linux 与 win 同为 <appOutDir>/resources
+        // （electron-builder getMacOsResourcesDir）。
+        const resourcesDir = platformName === 'darwin'
+            ? MAC_APP_DIR
+            : 'resources';
+        const removed = stripVendorWinBinaries(context.appOutDir, resourcesDir);
+        if (removed.length > 0) {
+            const mb = removed.reduce((s, r) => s + r.size, 0) / 1024 / 1024;
+            console.log(`[after-pack] 已剔除 vendor 内 win 专属二进制 ${removed.length} 个（共 ${mb.toFixed(1)}MB）——mac/linux 产物不含 PE 文件：`);
+            for (const r of removed) console.log(`  - ${r.rel}`);
+        }
+    } else {
+        // 未知平台名：fail-loud 提示而非静默走任一剔除分支
+        console.warn(`[after-pack] 警告：未知 electronPlatformName="${platformName}"，已跳过 vendor win 二进制剔除（宁漏剔不误删）。`);
     }
 
     if (process.env.YUKI_KEEP_SYSTEM_DLLS === '1') {
@@ -264,13 +377,23 @@ function stripElevateHelper(appOutDir) {
 /**
  * 校验产物内主 exe 的版本信息已被 rcedit 正确覆盖（职责三）。
  * CompanyName 缺失/仍为 Electron 原始值 = package.json 缺 author 字段，启发式扣分项。
+ *
+ * 职责分层（verify-exe-metadata.js 依赖本函数）：exe 不存在时此处静默 return，是供
+ * 复用方按自身语义处置的宽容分支——真正的 win 门禁由 verify-exe-metadata.js 在调用
+ * 前先行 fs.existsSync 校验（缺失即 process.exit(1) fail-closed），因此本静默分支
+ * 在 afterAllArtifactBuild 门禁路径上不会被触发。
  */
-function checkExecutableMetadata(appOutDir) {
-    const exe = path.join(appOutDir, 'YuKi.exe');
+function checkExecutableMetadata(appOutDir, exeName) {
+    // exe 名由调用方传入（按 productName 推导）：此前这里写死 'YuKi.exe'，
+    // 而 verify-exe-metadata.js 是按 productName 推导文件名的——productName 一变
+    // （或将来设了 build.executableName），verify 侧校验的是新文件名、本函数却仍
+    // 找旧名 → 走「不存在则静默 return」→ win 元数据门禁整体失效且构建照常通过
+    // （假绿）。两处必须共用同一个推导。
+    const exe = path.join(appOutDir, exeName || 'YuKi.exe');
     if (!fs.existsSync(exe)) return; // 非 win 产物或布局变更时静默跳过
     const strings = readVersionStrings(exe);
     if (strings == null) {
-        throw new Error('[after-pack] 无法解析 YuKi.exe 的 VERSION_INFO 资源（PE 结构异常或版本资源缺失）。'
+        throw new Error(`[after-pack] 无法解析 ${path.basename(exe)} 的 VERSION_INFO 资源（PE 结构异常或版本资源缺失）。`
             + '缺失版本信息的未签名 exe 是杀软启发式的重点命中对象，请检查产物完整性。');
     }
     const bad = [];
@@ -293,4 +416,6 @@ module.exports.findSecrets = findSecrets;
 module.exports.readVersionStrings = readVersionStrings;
 module.exports.checkExecutableMetadata = checkExecutableMetadata;
 module.exports.stripElevateHelper = stripElevateHelper;
+module.exports.stripLicensesHtml = stripLicensesHtml;
+module.exports.stripVendorWinBinaries = stripVendorWinBinaries;
 

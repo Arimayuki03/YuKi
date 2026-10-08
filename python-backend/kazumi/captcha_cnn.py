@@ -6,12 +6,16 @@
 文件不可搬用——本模块为独立实现）：
   - 模型契约：灰度 32×96（H×W）→ 两层 stride-2 池化卷积（12/24 通道，3×3 核）→
     每列 4 个数字槽位 × 10 类（'0'-'9'）logits，对齐 MacCMS 4 位数字验证码；
-  - 权重随应用打包（kazumi/assets/captcha_cnn.npz，约 2.9MB），无 onnxruntime
-    / ddddocr 硬依赖，导入本模块即可用；
-  - 训练脚本 tools/train_captcha_cnn.py（合成样本，源码树内，不随应用打包）。
+  - 权重随应用打包（kazumi/assets/captcha_cnn.npz，约 2.9MB；2026-09-30 真实
+    数据重训后实测 3,061,633 字节），无 onnxruntime / ddddocr 硬依赖（ddddocr
+    连同 onnxruntime/opencv 已按体积决策整体移除，见 requirements.in），导入
+    本模块即可用；
+  - 训练脚本 tools/train_captcha_cnn.py（合成样本）与 tools/train_captcha_real.py
+    （真实样本混合，源码树内，不随应用打包）。
 
-推理链上层约定（captcha.py）：任何异常/权重缺失/输出不可信一律返回 None，
-调用方降级 ddddocr 或人工窗口——本模块绝不让识别失败破坏搜索主链路。
+推理链上层约定（captcha.py，2026-10-01 终态）：本模块是识别链第一级，其后
+视觉 LLM（用户配置）兜底，再退人工窗口；本模块异常/权重缺失/输出不可信一律
+返回 None，调用方按序降级——绝不让识别失败破坏搜索主链路。
 """
 import logging
 import os
@@ -46,10 +50,10 @@ def _weights_path():
 
 
 def _load_weights():
-    """懒加载 npz 权重（双检锁；缺失/损坏永久标记不可用，行为同 ddddocr 降级口径）。
+    """懒加载 npz 权重（双检锁；缺失/损坏永久标记不可用，同 captcha.py 探测口径）。
 
-    holder 内以 False 作「不可用」哨兵（与 captcha.py _ocr_holder 同约定），
-    对外返回一律归一为 None（`w if w else None`，同 captcha.py ddddocr 加载器
+    holder 内以 False 作「不可用」哨兵（与 captcha.py _cnn_holder 同约定），
+    对外返回一律归一为 None（`w if w else None`，同 captcha.py CNN 加载器
     口径）——曾因快速路径把 False 当成功泄漏，导致 model_available() 首次
     False 后永久 True、forward 在布尔值上取下标（'bool' object is not
     subscriptable）。"""
@@ -94,20 +98,20 @@ def model_available():
     return _load_weights() is not None
 
 
-def preprocess(image_bytes):
-    """验证码图片字节 → float32 灰度张量 (1, 1, 32, 96)，值域 [0,1]。
+def preprocess_pil(img):
+    """PIL Image（L 模式）→ float32 灰度张量 (1, 1, 32, 96)，值域 [0,1]。
+
+    preprocess 的 PIL 入口：训练脚本对真实样本做在线增强后直接复用本函数，
+    保证训练/推理走同一几何/归一化路径（两侧路径分叉是识别率天坑）。
 
     归一口径（与训练脚本 gen_sample 严格一致，训练/推理不一致是识别率
     天坑——2026-09-28 两侧重复反色曾把识别率打回随机水平）：
-      1. PIL 解码（L 模式灰度，任何格式失败抛异常由上层吞掉降级）；
-      2. 保持纵横比缩放到 32×96 画布，浅色（255=背景域）空白填充
+      1. 保持纵横比缩放到 32×96 画布，浅色（255=背景域）空白填充
          （数字多为瘦高字形，直接拉伸会破坏宽度特征）；
-      3. 归一化后「浅底=1、深字=0」，不在此处反色——训练样本同样保持
+      2. 归一化后「浅底=1、深字=0」，不在此处反色——训练样本同样保持
          「浅底深字」原域，域语义两侧统一由同一份注释约束。
     """
-    from PIL import Image
-    import io
-    img = Image.open(io.BytesIO(image_bytes)).convert('L')
+    from PIL import Image  # 函数内懒加载：保持本模块「无 PIL 也可 import」的软依赖口径
     w, h = img.size
     if w <= 0 or h <= 0:
         raise ValueError('empty image')
@@ -118,6 +122,17 @@ def preprocess(image_bytes):
     canvas.paste(img, ((INPUT_W - nw) // 2, (INPUT_H - nh) // 2))
     arr = np.asarray(canvas, dtype=np.float32) / 255.0
     return arr.reshape(1, 1, INPUT_H, INPUT_W)
+
+
+def preprocess(image_bytes):
+    """验证码图片字节 → float32 灰度张量 (1, 1, 32, 96)，值域 [0,1]。
+
+    PIL 解码（L 模式灰度，任何格式失败抛异常由上层吞掉降级）后走
+    preprocess_pil 的统一几何/归一化路径。"""
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(image_bytes)).convert('L')
+    return preprocess_pil(img)
 
 
 def _conv2d(x, w, b, stride=1):
@@ -171,7 +186,7 @@ def recognize(image_bytes):
     """验证码图片字节 → 4 位数字文本；无法识别返回 None。
 
     任何异常（权重缺失/图片非法/维度不符）都吞掉返回 None——本识别器是
-    可选增强的第一优先级，失败自动落到 ddddocr/人工路径。"""
+    识别链第一级（tiny-CNN → 视觉 LLM → 人工窗口），失败自动落到下一级。"""
     try:
         logits = forward(image_bytes)
         if logits is None:

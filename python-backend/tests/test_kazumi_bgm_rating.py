@@ -377,49 +377,49 @@ class TestCaptchaOcr(unittest.TestCase):
         self.assertIsNone(captcha_mod.recognize_captcha_bytes(b'fake-png-bytes'))
         self.assertIsNone(captcha_mod.recognize_captcha_bytes(None))
 
-    def test_recognize_uses_ocr_when_available(self):
+    def test_recognize_uses_cnn_when_available(self):
         # mock 识别器：验证「合法结果透传 / 噪声结果拒绝」两分支。
-        # ddddocr 是主链：噪声拒绝后小模型兜底也要屏蔽，才能断言最终 None。
-        class FakeOcr:
+        # 现行一级是自研 tiny-CNN（ddddocr 已按体积决策移除）。
+        class FakeCnn:
             def __init__(self, text):
                 self.text = text
 
-            def classification(self, data):
+            def recognize(self, data):
                 return self.text
 
-        fake = FakeOcr('w2x9')
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
-                mock.patch.object(captcha_mod, '_load_cnn') as m_cnn:
+        fake = FakeCnn('w2x9')
+        captcha_mod._cnn_holder.update({'ok': True, 'tried': True})
+        with mock.patch.object(captcha_mod, '_load_cnn', return_value=fake):
             self.assertEqual(captcha_mod.recognize_captcha_bytes(b'img'), 'w2x9')
-            m_cnn.assert_not_called()  # ddddocr 命中时不走小模型
-        fake.text = 'x' * 30  # 过长噪声 → 拒绝
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
-                mock.patch.object(captcha_mod, '_load_cnn',
-                                  return_value=mock.MagicMock(recognize=lambda _: None)):
+        fake.text = 'x' * 30  # 过长噪声 → 拒绝 → 回落二级（未配置）→ None
+        with mock.patch.object(captcha_mod, '_load_cnn', return_value=fake):
             self.assertIsNone(captcha_mod.recognize_captcha_bytes(b'img'))
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=fake), \
-                mock.patch.object(captcha_mod, '_load_cnn',
-                                  return_value=mock.MagicMock(recognize=lambda _: None)):
-            # classification 抛异常 → 降级小模型（也 None）→ 最终 None
+        with mock.patch.object(captcha_mod, '_load_cnn', return_value=fake):
+            # recognize 抛异常 → 吞掉并回落二级（也未配置）→ 最终 None
             def boom(_data):
                 raise RuntimeError('model broken')
-            fake.classification = boom
+            fake.recognize = boom
             self.assertIsNone(captcha_mod.recognize_captcha_bytes(b'img'))
 
-    def test_recognize_falls_back_to_cnn(self):
-        # ddddocr 噪声/缺席 → 自研小模型兜底链生效
-        with mock.patch.object(captcha_mod, '_load_ocr', return_value=None), \
-                mock.patch.object(captcha_mod, '_load_cnn',
-                                  return_value=mock.MagicMock(recognize=lambda _: '4486')):
-            self.assertEqual(captcha_mod.recognize_captcha_bytes(b'img'), '4486')
+    def test_recognize_falls_back_to_llm(self):
+        # 一级不可用 → 视觉 LLM 兜底链生效（需配置齐全，缺失时二级直接返回 None）
+        captcha_mod._cnn_holder.update({'ok': False, 'tried': True})
+        with mock.patch.object(captcha_mod, '_recognize_with_llm',
+                               return_value='4486') as m_llm:
+            self.assertEqual(
+                captcha_mod.recognize_captcha_bytes(
+                    b'img', llm_cfg={'base': 'https://x/v1', 'model': 'm'}), '4486')
+        self.assertEqual(m_llm.call_count, 1)
 
 
 class TestCaptchaLazyLoadRace(unittest.TestCase):
     """懒加载双检锁：并发探测下识别器构造函数只执行一次。
 
-    无锁时 16 线程并发 `_load_ocr` 会在「检查-构造-写回」窗口内重复构造
-    （重模型构造是纯浪费）；先置 tried 后构造更糟——其他线程拿到假 None
-    静默降级。契约：构造串行化、tried 仅在构造结束后置位。"""
+    无锁时多线并发会在「检查-构造-写回」窗口内重复构造（懒加载是 3MB 权重
+    np.load，重复构造等于重复付成本）；先置 tried 后构造更糟——其他线程拿到
+    假 None 静默降级。契约：构造串行化、tried 仅在构造结束后置位。
+    现行一级是 tiny-CNN（captcha._load_cnn → captcha_cnn.model_available），
+    ddddocr 已按体积决策移除，故直接桩 _load_cnn 即可锁定探测路径。"""
 
     def test_concurrent_ocr_available_constructs_once(self):
         import threading
@@ -428,19 +428,13 @@ class TestCaptchaLazyLoadRace(unittest.TestCase):
         construct_calls = []
         gate = threading.Event()
 
-        class FakeOcr:
-            def classification(self, data):  # pragma: no cover - 不参与断言
-                return 'ab1'
-
-        def fake_ddddocr_cls(show_ad=False):
+        def fake_load_cnn():
             # 构造慢速段：让所有线程都挤进检查窗口，放大竞态
-            construct_calls.append(show_ad)
+            construct_calls.append(True)
             gate.wait(timeout=5)
-            return FakeOcr()
+            return mock.MagicMock(model_available=lambda: True)
 
-        # ocr_available 现在两级链：小模型可用会短路 ddddocr 探测，必须先屏蔽
-        with mock.patch.object(captcha_cnn_mod, 'model_available', return_value=False), \
-                mock.patch.dict('sys.modules', {'ddddocr': mock.MagicMock(DdddOcr=fake_ddddocr_cls)}):
+        with mock.patch.object(captcha_mod, '_load_cnn', side_effect=fake_load_cnn):
             barrier = threading.Barrier(8)
             results = []
 
@@ -451,7 +445,7 @@ class TestCaptchaLazyLoadRace(unittest.TestCase):
             threads = [threading.Thread(target=probe) for _ in range(8)]
             for t in threads:
                 t.start()
-            # 构造函数已被恰一个线程进入后放行 gate
+            # 构造已被恰一个线程进入后放行 gate
             deadline = 50
             while len(construct_calls) < 1 and deadline > 0:  # 等首个构造进入
                 threading.Event().wait(0.01)

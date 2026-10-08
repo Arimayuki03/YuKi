@@ -52,7 +52,8 @@ function jqOf(items) {
     return api;
 }
 
-/** 极简 DOM 元素：_classes/_children/style/textContent/attrs + 事件监听收集。 */
+/** 极简 DOM 元素：_classes/_children/style/textContent/attrs + 事件监听收集。
+ *  A-04：playCardsEnter 走 replayClass 直接驱动原生 classList，桩补一份同源视图。 */
 function makeEl(classes = [], props = {}) {
     const el = {
         _classes: new Set(classes),
@@ -66,6 +67,12 @@ function makeEl(classes = [], props = {}) {
         addEventListener(type, fn, opt) { this.listeners.push({ type, fn, opt }); },
         removeEventListener() {},
         closest() { return null; },
+    };
+    el.classList = {
+        _s: el._classes,
+        add(c) { this._s.add(c); },
+        remove(c) { this._s.delete(c); },
+        contains(c) { return this._s.has(c); },
     };
     return Object.assign(el, props);
 }
@@ -127,6 +134,7 @@ function loadCommon(extra = {}) {
     vodCoverChain, bangumiResizeUrl, setBangumiMirrorRoot, bangumiMirrorUrl,
     isBangumiCoverUrl, bangumiCoverImg, bangumiCover, errorTextOf, bangumiCard,
     normalizePic, fmtSize, stripHtml, toFileUrl, bangumiWebUrl,
+    fmtCommentTimeFull, commentTsMs,
 };`, context, { filename: 'common.js' });
     // 源码内 `function warnToast` 声明会覆盖外部同名桩（localPlayToast 直调它），
     // 加载后重绑定，让 toast 文案落到 __toasts 供断言（同 records.test.js 手法）。
@@ -849,6 +857,20 @@ test('bangumiCoverImg：非 Bangumi 封面无镜像差异 → 单级链（无 da
     assert.match(empty, /data-cover-missing="1"/);
 });
 
+test('bangumiCoverImg：size=large 保持大图（API 形式摘 r 前缀，裸路径原样），缺省仍 card 缩放', () => {
+    // 详情页 hero 大图口径（T75）：走代理链但 URL 不做 400px 缩放。
+    const ctx = loadCommon();
+    const { bangumiCoverImg, setBackendInfo } = A(ctx);
+    setBackendInfo({ base: 'http://127.0.0.1:9977', token: 'tk' });
+    const api = bangumiCoverImg('https://lain.bgm.tv/r/400/pic/cover/l/aa/bb/1.jpg', false, 'large');
+    assert.match(api, /url=https%3A%2F%2Flain\.bgm\.tv%2Fpic%2Fcover%2Fl%2Faa%2Fbb%2F1\.jpg/, 'API 形式 large 应摘掉 /r/400/ 前缀');
+    const bare = bangumiCoverImg('https://lain.bgm.tv/pic/cover/l/aa/bb/1.jpg', false, 'large');
+    assert.match(bare, /url=https%3A%2F%2Flain\.bgm\.tv%2Fpic%2Fcover%2Fl%2Faa%2Fbb%2F1\.jpg/, '裸路径 large 原样保留 l 段');
+    // 缺省仍按 card 缩放（列表卡既有口径不回归）
+    const card = bangumiCoverImg('https://lain.bgm.tv/r/400/pic/cover/l/aa/bb/1.jpg');
+    assert.match(card, /r%2F400%2F/, '缺省 card：API 形式保留 /r/400/ 宽度段');
+});
+
 // ---------------------------------------------------------------- bangumiCover（对象/裸 URL 双形态）
 
 test('bangumiCover：images 对象按 size 取变体，旧缓存裸 URL 走 resize 降级', () => {
@@ -882,4 +904,64 @@ test('bangumiWebUrl：默认官方 bgm.tv；跟随镜像开启走镜像站主域
     // 关闭跟随：回到官方
     api.setFollow(false);
     assert.equal(api.bangumiWebUrl('456'), 'https://bgm.tv/subject/456');
+});
+
+// ---------------------------------------------------------------- fmtCommentTimeFull / commentTsMs（A-14 自 detail.js 下沉）
+
+// 固定参考点：本地时区下 2023-11-15 06:22:30 的毫秒时间戳（America/New_York 下跨日也成立——
+// 断言只用 getFullYear 等本地取值反推，不写死 Y-M-D，避免 CI 时区差异）。
+const REF_SEC = 1700000000;
+const REF_MS = REF_SEC * 1000;
+
+/** 用同一 Date 断言「输出串 == 本地年月日时分」：与实现口径一致，时区无关。 */
+function expectLocalStamp(assert, stamp, fmt) {
+    let n = Number(stamp);
+    if (n < 1e12) n *= 1000; // 与实现同口径：秒归一到毫秒
+    const d = new Date(n);
+    const pad = (x) => String(x).padStart(2, '0');
+    const expected = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    assert.equal(fmt(stamp), expected);
+}
+
+test('fmtCommentTimeFull：Unix 秒与毫秒同输出（秒自动 ×1000），与本地年月日时分一致', () => {
+    const { fmtCommentTimeFull } = A(loadCommon());
+    expectLocalStamp(assert, REF_SEC, fmtCommentTimeFull);
+    expectLocalStamp(assert, REF_MS, fmtCommentTimeFull);
+    assert.equal(fmtCommentTimeFull(REF_SEC), fmtCommentTimeFull(REF_MS), '秒/毫秒归一到同一时刻');
+    assert.equal(fmtCommentTimeFull(String(REF_SEC)), fmtCommentTimeFull(REF_SEC), '数字串同输出');
+});
+
+test('fmtCommentTimeFull：非数字字符串原样透传（Bangumi 偶发日期串），畸形输入兜底空串', () => {
+    const { fmtCommentTimeFull } = A(loadCommon());
+    assert.equal(fmtCommentTimeFull('2023-11-14 22:13'), '2023-11-14 22:13');
+    assert.equal(fmtCommentTimeFull('2023/11/14'), '2023/11/14');
+    // 空值族：0 / '' / null / undefined / NaN 均回 ''，绝不输出 Invalid Date；
+    // 'abc' 这类非数字串按原实现语义原样透传（见上一断言），'12x34' 混合串同样透传
+    for (const bad of [0, '', null, undefined, NaN]) {
+        assert.equal(fmtCommentTimeFull(bad), '', `fmtCommentTimeFull(${String(bad)}) 应为空串`);
+    }
+    for (const passthrough of ['abc', '12x34']) {
+        assert.equal(fmtCommentTimeFull(passthrough), passthrough, `fmtCommentTimeFull(${passthrough}) 原样透传`);
+    }
+});
+
+test('commentTsMs：秒/毫秒/数字串归一毫秒，日期串走 Date 解析，畸形回 0', () => {
+    const { commentTsMs } = A(loadCommon());
+    assert.equal(commentTsMs(REF_SEC), REF_MS, 'Unix 秒 ×1000');
+    assert.equal(commentTsMs(REF_MS), REF_MS, '毫秒原样');
+    assert.equal(commentTsMs(String(REF_SEC)), REF_MS, '数字串按秒处理');
+    assert.equal(commentTsMs(String(REF_MS)), REF_MS, '毫秒数字串原样');
+    assert.equal(commentTsMs(new Date(REF_MS).toISOString()), REF_MS, '日期串解析回毫秒');
+    for (const bad of [0, '', null, undefined, NaN, 'abc']) {
+        assert.equal(commentTsMs(bad), 0, `commentTsMs(${String(bad)}) 应回 0`);
+    }
+});
+
+test('fmtCommentTimeFull + commentTsMs 组合：排序键与展示串来自同一时间基（口径自洽）', () => {
+    const { fmtCommentTimeFull, commentTsMs } = A(loadCommon());
+    const a = commentTsMs(REF_SEC), b = commentTsMs(REF_SEC + 60);
+    assert.ok(a < b, '新评论排序键更大（倒序渲染语义）');
+    // 时间基一致：串格式反解析（本地口径）与排序键同分钟
+    const stamp = fmtCommentTimeFull(REF_SEC);
+    assert.equal(stamp, fmtCommentTimeFull(commentTsMs(REF_SEC)), '下沉后两函数口径互洽');
 });

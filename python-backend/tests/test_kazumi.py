@@ -679,8 +679,7 @@ class TestBangumiSync(unittest.TestCase):
         me = {'id': 1, 'username': 'alice', 'nickname': '爱丽丝'}
 
         class FakeRsp:
-            def raise_for_status(self):
-                pass
+            status_code = 200
 
             def json(self):
                 return me
@@ -694,6 +693,124 @@ class TestBangumiSync(unittest.TestCase):
 
     def test_me_empty_token(self):
         self.assertIsNone(self.mgr.bangumi_me(''))
+        self.assertEqual(self.mgr._bangumi_me_error, 'auth')
+
+    def test_me_nonjson_200_falls_back_to_alt_base(self):
+        # 2026-09-30 bug：镜像站偶发 200+HTML/空体（mirrox 反代网关错误页），
+        # 旧实现 rsp.json() 抛错被当「token 无效」；修复后应换基址重试并最终区分失败原因
+        from unittest import mock
+
+        class HtmlRsp:
+            status_code = 200
+
+            def json(self):
+                raise ValueError('Expecting value: line 1 column 1 (char 0)')
+
+        with mock.patch('http_client.get', return_value=HtmlRsp()), \
+                mock.patch('time.sleep'):
+            result = self.mgr.bangumi_me('tok')
+        self.assertIsNone(result)
+        # 200+非 JSON 是网关故障而非鉴权失败
+        self.assertEqual(self.mgr._bangumi_me_error, 'network')
+
+    def test_me_auth_401_marks_auth_failure(self):
+        # 官方基址 401 + JSON 鉴权错误体（{"code":401,...}）→ 立即归因 auth
+        from unittest import mock
+
+        class Rsp401:
+            status_code = 401
+            text = '{"code":401,"error":"Unauthorized"}'
+
+        with mock.patch('http_client.get', return_value=Rsp401()) as m:
+            result = self.mgr.bangumi_me('tok')
+        self.assertIsNone(result)
+        self.assertEqual(self.mgr._bangumi_me_error, 'auth')
+        # 响应体确证鉴权错误时立即终止，不浪费第二次基址尝试
+        self.assertEqual(m.call_count, 1)
+        self.assertIn('api.bgm.tv/v0/me', m.call_args[0][0])
+
+    def test_me_mirror_cf_challenge_403_falls_back_to_official(self):
+        # 2026-09-30 bug：镜像（Cloudflare 后）403「Just a moment...」挑战页曾被
+        # 只看状态码的实现误判成「token 无效」。修复后：401/403 须结合响应体判断，
+        # CF 挑战页不归 auth，应继续尝试官方基址；官方 401+JSON 鉴权错误体才归 auth
+        from unittest import mock
+
+        class CfChallenge403:
+            status_code = 403
+            text = '<!DOCTYPE html><title>Just a moment...</title>Checking your browser before accessing bangumi.vip'
+
+        class Official401:
+            status_code = 401
+            text = '{"code":401,"error":"Unauthorized"}'
+
+        def fake_get(url, **kw):
+            if 'api.bgm.tv' in url:
+                return Official401()
+            return CfChallenge403()
+
+        with mock.patch.object(self.mgr, 'enable_bangumi_proxy', True), \
+                mock.patch('http_client.get', side_effect=fake_get), \
+                mock.patch('time.sleep'):
+            result = self.mgr.bangumi_me('tok')
+        self.assertIsNone(result)
+        self.assertEqual(self.mgr._bangumi_me_error, 'auth')
+
+    def test_me_all_bases_403_challenge_exhausted_falls_back_auth(self):
+        # 所有基址耗尽且响应体为「非 CF 挑战页」的错误页（如 nginx 403 页）：
+        # 按口径「任一基址出现过 401/403 → 归 auth」兜底（此时大概率仍是
+        # token 无效）；区别于 200+HTML 网关故障归 network。
+        # （M5 修正：CF 挑战页特征的不计入，test_me_all_cf_challenge_403 归
+        # network——挑战页是反代拦截，不是任何鉴权证据。）
+        from unittest import mock
+
+        class Plain403:
+            status_code = 403
+            text = '<html><body><h1>403 Forbidden</h1><hr>nginx</body></html>'
+
+        with mock.patch.object(self.mgr, 'enable_bangumi_proxy', True), \
+                mock.patch('http_client.get', return_value=Plain403()), \
+                mock.patch('time.sleep'):
+            result = self.mgr.bangumi_me('tok')
+        self.assertIsNone(result)
+        self.assertEqual(self.mgr._bangumi_me_error, 'auth')
+
+    def test_me_all_cf_challenge_403_exhausted_falls_back_network(self):
+        # M5：所有基址的 403 全是 CF 挑战页 → 挑战页不是鉴权证据，兜底归
+        # network（提示用户切镜像/重试），不再误导用户去重取 token
+        from unittest import mock
+
+        class CfChallenge403:
+            status_code = 403
+            text = '<!DOCTYPE html><title>Just a moment...</title>challenge'
+
+        with mock.patch.object(self.mgr, 'enable_bangumi_proxy', True), \
+                mock.patch('http_client.get', return_value=CfChallenge403()), \
+                mock.patch('time.sleep'):
+            result = self.mgr.bangumi_me('tok')
+        self.assertIsNone(result)
+        self.assertEqual(self.mgr._bangumi_me_error, 'network')
+
+    def test_me_timeout_then_alt_base_success(self):
+        # 首基址读超时 → 自动换官方/镜像另一基址成功（不再把超时误判为 token 无效）
+        from unittest import mock
+        me = {'id': 1, 'username': 'alice'}
+
+        class OkRsp:
+            status_code = 200
+
+            def json(self):
+                return me
+
+        def fake_get(url, **kw):
+            if 'api.bgm.tv' in url:
+                return OkRsp()
+            raise Exception("HTTPSConnectionPool(host='mirror', port=443): Read timed out.")
+
+        with mock.patch.object(self.mgr, 'enable_bangumi_proxy', True), \
+                mock.patch('http_client.get', side_effect=fake_get), \
+                mock.patch('time.sleep'):
+            result = self.mgr.bangumi_me('tok')
+        self.assertEqual(result, me)
 
     def test_user_collections(self):
         from unittest import mock
@@ -720,8 +837,7 @@ class TestBangumiSync(unittest.TestCase):
         from unittest import mock
 
         class FakeRsp:
-            def raise_for_status(self):
-                pass
+            status_code = 200
 
             def json(self):
                 return {'username': 'alice', 'nickname': '爱丽丝'}
@@ -1276,6 +1392,55 @@ class TestBangumiSync(unittest.TestCase):
             info = self.mgr.bangumi_character_detail('123')
         self.assertEqual(info['name'], '角色A')
         self.assertIn('/v0/characters/123', m.call_args[0][0])
+
+    def test_enrich_characters_name_cn_bounded(self):
+        """长番剧角色表：补全请求数被 LIMIT 截断（不按角色数线性放大）。
+
+        回归背景：/v0/subjects/{id}/characters 列表无中文名，旧实现为**每个**角色
+        拉一次 /v0/characters/{id} 详情补 name_cn。长番剧（实测 subject 899 有 273
+        个角色）即 273 次往返，冷态 8~22s——详情页把角色与制作/关联并发拉取，角色
+        路长时间挂起会让前端页签停在空态，表现为「数据太多反而显示暂无」。
+        """
+        from unittest import mock
+        chars = [{'id': i, 'name': '名%d' % i} for i in range(1, 201)]
+        called = []
+
+        def fake_detail(cid):
+            called.append(cid)
+            return {'infobox': [{'key': '简体中文名', 'value': '中%s' % cid}]}
+
+        with mock.patch.object(self.mgr, 'bangumi_character_detail', side_effect=fake_detail):
+            self.mgr._enrich_characters_name_cn(chars)
+        limit = self.mgr._CHAR_NAME_CN_ENRICH_LIMIT
+        self.assertEqual(len(called), limit,
+                         '补全请求数须被 LIMIT 截断（实际 %d，LIMIT=%d）' % (len(called), limit))
+        # 靠前的角色（主角/配角，列表按主次排序）拿到中文名；超出部分保留原名
+        self.assertEqual(chars[0]['name_cn'], '中1')
+        self.assertEqual(chars[limit - 1]['name_cn'], '中%d' % limit)
+        self.assertNotIn('name_cn', chars[limit], '超出 LIMIT 的角色不补全（保留原名）')
+        self.assertNotIn('name_cn', chars[-1])
+        # 全量角色仍在列表里（补全只加字段，不删数据）
+        self.assertEqual(len(chars), 200)
+
+    def test_enrich_characters_name_cn_skips_existing_and_caps_workers(self):
+        """已有 name_cn 的角色不再请求；并发上限不超过条目数（ThreadPool 不空转）。"""
+        from unittest import mock
+        chars = [{'id': 1, 'name': 'A', 'name_cn': '已有中文'}, {'id': 2, 'name': 'B'}]
+        called = []
+        with mock.patch.object(self.mgr, 'bangumi_character_detail',
+                               side_effect=lambda cid: called.append(cid) or None):
+            self.mgr._enrich_characters_name_cn(chars)
+        self.assertEqual(called, [2], '已带 name_cn 的角色跳过请求')
+        self.assertEqual(chars[0]['name_cn'], '已有中文', '既有中文名不被覆盖为空')
+
+    def test_enrich_characters_name_cn_single_failure_keeps_original(self):
+        """单角色详情失败（返回 None）→ 保留原名，不影响其余角色补全（best-effort）。"""
+        from unittest import mock
+        chars = [{'id': 1, 'name': 'A'}, {'id': 2, 'name': 'B'}]
+        with mock.patch.object(self.mgr, 'bangumi_character_detail', side_effect=[None, {'infobox': [{'key': '简体中文名', 'value': ' Bee'}]}]):
+            self.mgr._enrich_characters_name_cn(chars)
+        self.assertNotIn('name_cn', chars[0], '失败角色保留原名')
+        self.assertEqual(chars[1]['name_cn'], 'Bee', '其余角色照常补全')
 
 
 class TestBangumiSeason(unittest.TestCase):

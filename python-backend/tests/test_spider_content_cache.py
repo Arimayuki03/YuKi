@@ -30,21 +30,21 @@ def test_spider_cache_key_uses_relevant_params_per_do():
     site_key = 'siteA'
     # homeContent：只取 filter
     k1 = server._spider_cache_key('homeContent', site_key, {'filter': 'true', 'pg': '9'})
-    assert k1 == 'siteA|homeContent|filter=true', k1
+    assert k1 == 'siteAhomeContentfilter=true', k1
     assert server._spider_cache_key('homeContent', site_key, {'filter': 'false'}) == \
-        'siteA|homeContent|filter=false'
+        'siteAhomeContentfilter=false'
     # categoryContent：tid+pg+filter+extend（extend 原文参与，忽略无关 token）
     k3 = server._spider_cache_key('categoryContent', site_key,
                                   {'tid': '1', 'pg': '2', 'filter': 'true', 'extend': '{}',
                                    'token': 'x'})
-    assert k3 == 'siteA|categoryContent|tid=1|pg=2|filter=true|extend={}', k3
+    assert k3 == 'siteAcategoryContenttid=1pg=2filter=trueextend={}', k3
     # detailContent：ids 原文
     k4 = server._spider_cache_key('detailContent', site_key, {'ids': '123,456'})
-    assert k4 == 'siteA|detailContent|ids=123,456', k4
+    assert k4 == 'siteAdetailContentids=123,456', k4
     # searchContent：word+quick+pg（word 允许 key 别名，但缓存键按生效字段 word 取值）
     k5 = server._spider_cache_key('searchContent', site_key,
                                   {'word': '海贼王', 'quick': '1', 'pg': '3'})
-    assert k5 == 'siteA|searchContent|word=海贼王|quick=1|pg=3', k5
+    assert k5 == 'siteAsearchContentword=海贼王quick=1pg=3', k5
     # 同语义不同顺序的 form 应命中同一键
     assert server._spider_cache_key('searchContent', site_key,
                                     {'pg': '3', 'quick': '1', 'word': '海贼王'}) == k5
@@ -54,7 +54,7 @@ def test_spider_cache_key_uses_relevant_params_per_do():
     # 别名换值必须产生不同键（跨关键词不得命中同一条目）
     k_alias = server._spider_cache_key('searchContent', site_key,
                                        {'key': '火影', 'quick': '1', 'pg': '3'})
-    assert k_alias == 'siteA|searchContent|word=火影|quick=1|pg=3', k_alias
+    assert k_alias == 'siteAsearchContentword=火影quick=1pg=3', k_alias
     assert k_alias != k5
 
 

@@ -1,6 +1,6 @@
 {
   "name": "yuki",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "description": "YuKi：影视聚合应用桌面端",
   "author": {
     "name": "Arimayuki03",
@@ -38,6 +38,11 @@
       "output": "dist"
     },
     "afterPack": "scripts/after-pack.js",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "compression": "maximum",
     "extraResources": [
       {
         "from": "python-dist",
@@ -62,7 +67,8 @@
       "assets/icon.png",
       "assets/tray/**",
       "scripts/download-binaries.js",
-      "scripts/binaries.lock.json"
+      "scripts/binaries.lock.json",
+      "!**/*.js.map"
     ],
     "win": {
       "target": [
@@ -101,7 +107,8 @@
         "deb"
       ],
       "category": "Video"
-    }
+    },
+    "afterAllArtifactBuild": "scripts/verify-exe-metadata.js"
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",

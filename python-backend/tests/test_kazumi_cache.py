@@ -124,7 +124,7 @@ def test_search_cache_plugin_filter_separate_key():
         lambda: (200, ok_body))
     # 带单源过滤的请求有独立键，不命中全量条目
     assert body == ok_body
-    assert mem_cache.get_value('kazumi:search', '海贼王|p:enlie') == ok_body
+    assert mem_cache.get_value('kazumi:search', '海贼王p:enlie') == ok_body
 
 
 def test_chapters_cache_roundtrip_and_refresh():
@@ -138,7 +138,7 @@ def test_chapters_cache_roundtrip_and_refresh():
 
     status, body = server._cached_kazumi_chapters({}, 'enlie', 'https://x/1', builder)
     assert status == 200 and calls == [1] and body == roads_body
-    assert mem_cache.get_value('kazumi:chapters', 'enlie|https://x/1') == roads_body
+    assert mem_cache.get_value('kazumi:chapters', 'enliehttps://x/1') == roads_body
     # 命中：builder 不再被调
     status2, body2 = server._cached_kazumi_chapters({}, 'enlie', 'https://x/1', builder)
     assert status2 == 200 and calls == [1] and body2 == roads_body
@@ -159,7 +159,7 @@ def test_chapters_empty_roads_not_cached():
     status, body = server._cached_kazumi_chapters({}, 'enlie', 'https://x/1', builder)
     assert status == 200 and body == '{"code": 200, "roads": []}'
     # 空 roads 不缓存，防止异常源把空结果钉死整个 TTL
-    assert mem_cache.get_value('kazumi:chapters', 'enlie|https://x/1') is None
+    assert mem_cache.get_value('kazumi:chapters', 'enliehttps://x/1') is None
     server._cached_kazumi_chapters({}, 'enlie', 'https://x/1', builder)
     assert len(calls) == 2
 
@@ -167,20 +167,20 @@ def test_chapters_empty_roads_not_cached():
 def test_stream_cache_put_and_replay():
     mem_cache.clear_all()
     # 索引不存在 → 返回 None（走正常并发搜索）
-    assert server._kazumi_stream_cached_payloads('海贼王', '||') is None
+    assert server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f') is None
     p1 = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
     p2 = '{"source": "kazumi:b", "name": "b", "list": [], "status": "noresult"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'b', p2)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'b', p2)
     # 按登记顺序重放
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     assert payloads == [p1, p2]
     # 重复写同一源不产生重复索引条目
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     assert payloads == [p1, p2]
     # 换一个 word 互不影响
-    assert server._kazumi_stream_cached_payloads('火影', '||') is None
+    assert server._kazumi_stream_cached_payloads('火影', '\x1f\x1f') is None
 
 
 def test_stream_cache_filters_are_part_of_key():
@@ -188,28 +188,29 @@ def test_stream_cache_filters_are_part_of_key():
     mem_cache.clear_all()
     p_unfiltered = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
     p_tagged = '{"source": "kazumi:a", "name": "a", "list": [2], "status": "success"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p_unfiltered)
-    server._kazumi_stream_cache_put_source('海贼王', '热血|2024|', 'a', p_tagged)
-    assert server._kazumi_stream_cached_payloads('海贼王', '||') == [p_unfiltered]
-    assert server._kazumi_stream_cached_payloads('海贼王', '热血|2024|') == [p_tagged]
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p_unfiltered)
+    server._kazumi_stream_cache_put_source('海贼王', '热血\x1f2024\x1f', 'a', p_tagged)
+    assert server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f') == [p_unfiltered]
+    assert server._kazumi_stream_cached_payloads('海贼王', '热血\x1f2024\x1f') == [p_tagged]
     # 第三个筛选未缓存过
-    assert server._kazumi_stream_cached_payloads('海贼王', '||2024') is None
+    assert server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f2024') is None
     # 指纹规范化：None/空串同键
-    assert server._kazumi_stream_filters_key('', '', '') == '||'
-    assert server._kazumi_stream_filters_key(None, None, None) == '||'
+    assert server._kazumi_stream_filters_key('', '', '') == '\x1f\x1f'
+    assert server._kazumi_stream_filters_key(None, None, None) == '\x1f\x1f'
 
 
 def test_stream_cache_replay_skips_missing_entries():
     mem_cache.clear_all()
     p1 = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
     p2 = '{"source": "kazumi:b", "name": "b", "list": [2], "status": "success"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'b', p2)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'b', p2)
     # 某条单源缓存过期/被 LRU 淘汰后，重放跳过缺失项而不是整词失效
-    # （payload 键形如 stream|word|fkey|plugin；fkey='||' 时 b 源全键为
-    # stream|海贼王||||b——用与实现相同的格式表达式构造，避免竖线数数错）
-    mem_cache._store['kazumi:stream'].pop('stream|%s|%s|%s' % ('海贼王', '||', 'b'), None)
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    # （payload 键形如 stream\x1fword\x1ffkey\x1fplugin；fkey='\x1f\x1f' 时
+    # b 源全键为 stream\x1f海贼王\x1f\x1f\x1f\x1fb——用与实现相同的格式
+    # 表达式构造，避免分隔符数错）
+    mem_cache._store['kazumi:stream'].pop('stream\x1f%s\x1f%s\x1f%s' % ('海贼王', '\x1f\x1f', 'b'), None)
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     assert payloads == [p1]
 
 
@@ -218,10 +219,10 @@ def test_stream_cache_empty_replay_means_miss():
     绝不能与「索引不存在」混同——后者返回 None，两者都不该重放出空结果。"""
     mem_cache.clear_all()
     p1 = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
     # 全部 payload 失效：索引仍在（独立条目），返回空列表而非 None
-    mem_cache.invalidate_prefix('kazumi:stream', 'stream|海贼王||')
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    mem_cache.invalidate_prefix('kazumi:stream', 'stream\x1f海贼王\x1f\x1f\x1f')
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     assert payloads == []
     assert payloads is not None  # 调用方 `if cached_payloads:` 空列表即回退网络
 
@@ -230,27 +231,27 @@ def test_stream_error_source_not_cached():
     """P2-6：error 单源 payload 不落缓存——瞬时故障不该冻结进重放。"""
     mem_cache.clear_all()
     err = '{"source": "kazumi:a", "name": "a", "list": [], "status": "error", "msg": "boom"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', err)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', err)
     # 写入 helper 本身不做 error 判定（调用方过滤），但这里验证端点口径：
     # 模拟端点行为——error 时跳过 put。
     mem_cache.clear_all()
-    assert server._kazumi_stream_cached_payloads('海贼王', '||') is None
+    assert server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f') is None
     # 端点对 error 结果不调用 put_source → 索引与 payload 均不存在
     ok = '{"source": "kazumi:b", "name": "b", "list": [1], "status": "success"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'b', ok)
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'b', ok)
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     assert payloads == [ok]  # 只有成功源进索引；error 源重放时天然缺失被跳过
 
 
 def test_invalidate_helpers():
     mem_cache.clear_all()
     mem_cache.set_value('kazumi:search', 'kw', 'v')
-    server._kazumi_stream_cache_put_source('kw', '||', 'a', '{"name":"a","list":[1]}')
+    server._kazumi_stream_cache_put_source('kw', '\x1f\x1f', 'a', '{"name":"a","list":[1]}')
     mem_cache.set_value('kazumi:chapters', 'p|s', 'v')
     # 默认清 search+stream 两 ns（失效判定/重排场景：章节不受插件集合影响）
     server._kazumi_invalidate_caches()
     assert mem_cache.get_value('kazumi:search', 'kw') is None
-    assert server._kazumi_stream_cached_payloads('kw', '||') is None
+    assert server._kazumi_stream_cached_payloads('kw', '\x1f\x1f') is None
     assert mem_cache.get_value('kazumi:chapters', 'p|s') == 'v'
     # chapters=True 三 ns 一起清（插件增删/Cookie 场景）
     mem_cache.set_value('kazumi:search', 'kw2', 'v')
@@ -264,15 +265,15 @@ def test_stream_cache_invalidate_word():
     mem_cache.clear_all()
     p1 = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
     p2 = '{"source": "kazumi:b", "name": "b", "list": [2], "status": "success"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'b', p2)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'b', p2)
     # 其他词/其他筛选不受波及
-    server._kazumi_stream_cache_put_source('海贼王', '热血||', 'a', p1)
-    server._kazumi_stream_cache_put_source('火影', '||', 'a', p1)
-    server._kazumi_stream_cache_invalidate_word('海贼王', '||')
-    assert server._kazumi_stream_cached_payloads('海贼王', '||') is None  # 索引+payload 全清
-    assert server._kazumi_stream_cached_payloads('海贼王', '热血||') == [p1]
-    assert server._kazumi_stream_cached_payloads('火影', '||') == [p1]
+    server._kazumi_stream_cache_put_source('海贼王', '热血\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_put_source('火影', '\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_invalidate_word('海贼王', '\x1f\x1f')
+    assert server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f') is None  # 索引+payload 全清
+    assert server._kazumi_stream_cached_payloads('海贼王', '热血\x1f\x1f') == [p1]
+    assert server._kazumi_stream_cached_payloads('火影', '\x1f\x1f') == [p1]
 
 
 def test_stream_missing_names():
@@ -280,9 +281,9 @@ def test_stream_missing_names():
     mem_cache.clear_all()
     p1 = '{"source": "kazumi:a", "name": "a", "list": [1], "status": "success"}'
     p2 = '{"source": "kazumi:b", "name": "b", "list": [], "status": "noresult"}'
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'a', p1)
-    server._kazumi_stream_cache_put_source('海贼王', '||', 'b', p2)
-    payloads = server._kazumi_stream_cached_payloads('海贼王', '||')
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'a', p1)
+    server._kazumi_stream_cache_put_source('海贼王', '\x1f\x1f', 'b', p2)
+    payloads = server._kazumi_stream_cached_payloads('海贼王', '\x1f\x1f')
     # c 上次 error 不落缓存 → 重放缺它 → 必须被列为补齐对象（否则其卡永久 pending）
     assert server._kazumi_stream_missing_names(payloads, ['a', 'b', 'c']) == ['c']
     assert server._kazumi_stream_missing_names(payloads, ['a', 'b']) == []

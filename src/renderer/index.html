@@ -31,7 +31,9 @@
     <script src="js/jquery.min.js" defer></script>
     <script src="js/common.js" defer></script>
     <script src="js/cache.js" defer></script>
+    <script src="js/detail-snap.js" defer></script><!-- A-01 详情页列表快照写入侧（第二阶段 detail.js 接线由后续代理做） -->
     <script src="js/ui-state.js" defer></script>
+    <script src="js/settings-snapshot.js" defer></script><!-- A-27 设置快照层：须先于 detail/player -->
     <script src="js/panels.js" defer></script>
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
@@ -378,7 +380,12 @@
 
             <!-- 详情 -->
             <section id="view-detail" class="view">
-                <button id="detail-back" class="md-btn md-btn-tonal back-btn">← 返回</button>
+                <!-- 刷新按钮 v2：图标化并移到返回按钮右侧，与 #detail-back 同容器兄弟节点
+                     （样式与 #home-refresh/#timeline-refresh/#popular-refresh 同款：md-btn-icon + Material refresh 图标） -->
+                <div class="detail-topbar">
+                    <button id="detail-back" class="md-btn md-btn-tonal back-btn">← 返回</button>
+                    <button id="detail-refresh" class="md-btn md-btn-tonal md-btn-icon" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4c-4.42 0-8 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg></button>
+                </div>
                 <div id="detail-body"></div>
             </section>
 
@@ -481,7 +488,8 @@
                         <span class="settings-nav-item" data-cat="storage">缓存</span>
                         <span class="settings-nav-item" data-cat="source">CatVod源设置</span>
                         <span class="settings-nav-item" data-cat="kazumi">Kazumi规则</span>
-                        <span class="settings-nav-item" data-cat="translate">翻译</span>
+                        <span class="settings-nav-item" data-cat="translate">翻译与验证码</span>
+                        <span class="settings-nav-item" data-cat="block">屏蔽过滤</span>
                         <span class="settings-nav-item" data-cat="sync">同步</span>
                         <span class="settings-nav-item" data-cat="system">系统</span>
                         <span class="settings-nav-item" data-cat="about">关于</span>
@@ -1042,7 +1050,7 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="md-field" ><input id="bangumi_token" class="md-input" type="password" placeholder="粘贴你的 Bangumi Access Token（仅保存在本机）" /></div>
+                        <div class="md-field"><div class="webdav-pwd-wrap"><input id="bangumi_token" class="md-input" type="password" placeholder="粘贴你的 Bangumi Access Token（仅保存在本机）" /><button type="button" id="bangumi_token_eye" class="pan-cookie-eye" title="显示/隐藏 Token">👁️</button></div></div>
                         <div class="wall-row" >
                             <button id="bangumi_token_save" class="md-btn md-btn-filled">保存 Token</button>
                             <button id="bangumi_test" class="md-btn md-btn-tonal">测试连接</button>
@@ -1170,7 +1178,12 @@
                                 <option value="en">English</option>
                                 <option value="ja">日本語</option>
                             </select>
-                            <div class="tip-line pad0" style="margin-top:10px;">翻译服务：默认免费通道（Edge 主 + Google 备，自动互切）；配置 LLM 后优先走 LLM（OpenAI 兼容接口）。</div>
+                            <div class="tip-line pad0 info-tip" style="margin-top:10px;">
+                                <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                                <div class="info-body"><span class="info-label">说明</span>
+                                    <div class="info-detail">翻译服务：默认免费通道（Edge 主 + Google 备，自动互切）；配置 LLM 后优先走 LLM（OpenAI 兼容接口）。</div>
+                                </div>
+                            </div>
                             <label class="md-switch" title="优先使用自建 LLM 翻译（质量更好；失败自动回落免费通道）"><input type="checkbox" id="set_translate_llm_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 LLM 翻译</span></label>
                             <div id="translate_llm_fields" style="display:none;">
                                 <div class="tip-line pad0">Base URL</div>
@@ -1187,6 +1200,32 @@
                                     <div class="tip-line pad0" id="set_translate_llm_test_result" hidden></div>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                    <div class="tool-card" data-setcat="translate">
+                        <div class="tool-card-title">验证码视觉识别（Kazumi 源）</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                        <div class="info-detail">Kazumi 规则源触发站点验证码时的自动识别：内置小模型优先（毫秒级、离线）；本区块配置视觉大模型作为兜底（识别率更高，每次识别约 1-3 秒并消耗 API 额度）。与「划词翻译」的 LLM 相互独立，可配置不同服务商；API Key 加密存储、仅随识别请求传给后端。</div>
+                            </div>
+                        </div>
+                        <label class="md-switch" title="调整识别优先级：默认关闭时先跑内置小模型（毫秒级、离线、只认 4 位数字），失败才转视觉大模型；开启后先用视觉大模型（识别率明显更高，可辨认字母/形变/粘连等非小模型训练分布的字形），失败再回落内置小模型。代价是每次识别多 1-3 秒并消耗 API 额度，且所有验证码图片都会发往你配置的服务商。"><input type="checkbox" id="set_captcha_llm_prefer"><span class="md-switch-track"></span><span class="md-switch-label">优先使用视觉大模型识别</span></label>
+                        <label class="md-switch" title="配置后，小模型识别失败时自动调用视觉大模型识别（需支持图片输入的模型，如 gpt-4o / qwen-vl 等）"><input type="checkbox" id="set_captcha_llm_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用视觉大模型兜底</span></label>
+                        <div id="captcha_llm_fields" style="display:none;">
+                            <div class="tip-line pad0">Base URL</div>
+                            <div class="md-field"><input id="set_captcha_llm_base" class="md-input" type="text" placeholder="如 https://api.openai.com/v1" /></div>
+                            <div class="tip-line pad0">API Key</div>
+                            <div class="webdav-pwd-wrap">
+                                <input id="set_captcha_llm_key" class="md-input" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+                                <button type="button" id="set_captcha_llm_key_eye" class="pan-cookie-eye" title="显示/隐藏 API Key" aria-label="显示或隐藏 API Key">👁️</button>
+                            </div>
+                            <div class="tip-line pad0">模型</div>
+                            <div class="md-field"><input id="set_captcha_llm_model" class="md-input" type="text" placeholder="需支持图片输入，如 gpt-4o-mini / qwen-vl-plus" /></div>
+                        </div>
+                        <div class="wall-row">
+                            <button id="set_captcha_test" class="md-btn md-btn-tonal" title="用内置验证码图跑一次识别链：检测内置小模型是否可用，以及已配置的视觉大模型能否连通并正确读图">测试识别</button>
+                            <div class="tip-line pad0" id="set_captcha_test_result" hidden></div>
                         </div>
                     </div>
                     <div class="tool-card" data-setcat="about">
@@ -1213,7 +1252,7 @@
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
                                 <div class="info-detail">
-                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer（手动指定的自定义 mpv 使用其自身原生配置，不注入 YuKi 外观与中文菜单资源，「恢复默认」切回引擎样式）；ffmpeg / aria2 缺失可执行 <code>node scripts/download-binaries.js</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下整季播放列表可正常加载、连播可用，但 Anime4K 超分、应用内快捷键与右键菜单、截图、续播进度与弹幕不生效；观看统计按播放器运行时长计入（运行 ≥15 秒记一次，VLC 开启「仅允许一个实例」时的秒退转交不计），播放进度无法获取（历史条目进度显示 0%）。
+                                    这里显示应用依赖的本地组件（播放器 / 下载引擎等）的就绪情况：缺失播放器时可点「下载内置播放器」一键补装 mpv，或用「指定播放器」选择本机已装的 mpv/VLC/PotPlayer（手动指定的自定义 mpv 使用其自身原生配置，不注入 YuKi 外观与中文菜单资源，「恢复默认」切回引擎样式）；mpv 与 ffmpeg 已随安装包内置，无需联网下载，aria2 缺失可执行 <code>node scripts/download-binaries.js aria2</code> 补装，Anime4K 着色器会在启动时自动补齐。注意：外部播放器模式（VLC/PotPlayer）下整季播放列表可正常加载、连播可用，但 Anime4K 超分、应用内快捷键与右键菜单、截图、续播进度与弹幕不生效；观看统计按播放器运行时长计入（运行 ≥15 秒记一次，VLC 开启「仅允许一个实例」时的秒退转交不计），播放进度无法获取（历史条目进度显示 0%）。
                                     <div class="tip-line pad0" style="margin-top:6px;">播放器：<span id="player_line">mpv（自动发现）</span></div>
                                 </div>
                             </div>
@@ -1227,6 +1266,31 @@
                             <button id="clear_player" class="md-btn md-btn-tonal" style="display:none;">恢复默认</button>
                             <button id="download_mpv" class="md-btn md-btn-filled" style="display:none;">下载内置播放器</button>
                         </div>
+                    </div>
+                    <div class="tool-card" data-setcat="block">
+                        <div class="tool-card-title">全局番剧屏蔽</div>
+                        <div class="tip-line pad0 info-tip">
+                            <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
+                            <div class="info-body"><span class="info-label">说明</span>
+                                <div class="info-detail">
+                                    按片名关键字屏蔽番剧：凡是标题里包含任一关键词的条目，在首页、分类、搜索（聚合 / Kazumi / Bangumi）、推荐、时间表与收藏 / 历史列表中一律不显示，搜索时也会直接跳过不占用结果位。
+                                    <div class="tip-line pad0" style="margin-top:6px;">匹配为「包含」语义且不区分大小写、忽略空格与常见标点差异（例如填「我的英雄学院」会命中《我的英雄学院 第4季》《我的英雄学院：两位英雄》）。词越短命中面越广，建议填完整的番剧名以免误伤。</div>
+                                    <div class="tip-line pad0" style="margin-top:6px;">屏蔽只作用于列表展示：已收藏 / 已有的观看历史不会删除，关掉开关或删掉关键词后立刻恢复显示。</div>
+                                </div>
+                            </div>
+                        </div>
+                        <label class="md-switch" title="关闭后所有屏蔽词暂时失效，列表恢复显示被屏蔽的番剧">
+                            <input type="checkbox" id="set_block_words_enable" checked><span class="md-switch-track"></span><span class="md-switch-label">启用番剧屏蔽</span>
+                        </label>
+                        <div class="md-field">
+                            <input id="block_word_input" class="md-input" type="text" placeholder="输入要屏蔽的番剧名关键词，如：我的英雄学院" maxlength="60" />
+                        </div>
+                        <div class="wall-row">
+                            <button id="block_word_add" class="md-btn md-btn-filled">添加屏蔽词</button>
+                            <button id="block_word_clear" class="md-btn md-btn-tonal" title="清空全部屏蔽词">清空</button>
+                        </div>
+                        <div class="tip-line pad0" style="margin-top:6px;">已屏蔽 <span id="block_word_count">0</span> 个关键词</div>
+                        <div id="block_word_list" class="history-list"></div>
                     </div>
                     </div>
                 </div>

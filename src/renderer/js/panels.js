@@ -9,7 +9,9 @@
  */
 /* global $, doAction, getJson, escHtml, escPath, fmtSize, warnToast, showLoading, hideLoading, renderStatusBar,
           openDialog, closeDialog, registerEsc, confirmDialog, Home, Live, Downloads, About, Player, createRuntimeId,
-          applyMisansFont, localPlayToast, UIState, AdSkip, YukiTranslate, apiUrl */
+          applyMisansFont, localPlayToast, UIState, AdSkip, YukiTranslate, apiUrl, replayClass,
+          normalizeBlockWords, normalizeBlockText, invalidateBlockWords, SettingsSnapshot,
+          STAGGER_STEP_MS, STAGGER_MAX_IDX */
 
 const icDir = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23F5A623'><path d='M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z'/></svg>`;
 const icFile = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23717970'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/></svg>`;
@@ -551,6 +553,93 @@ function renderLiveSources(list) {
     });
 }
 
+/**
+ * 全局番剧屏蔽词（settings.blockWords + blockWordsEnable）。
+ *
+ * 词表本身由 common.js 的屏蔽引擎持有并消费（normalizeBlockWords/isTitleBlocked/
+ * filterBlocked），本文件只负责设置页的增删与持久化：
+ * 写盘后必须调 invalidateBlockWords()，否则引擎仍按内存中旧的词表过滤——
+ * 它会通知各列表页注册的订阅者就地重渲染，无需重新搜索/重进页面。
+ */
+const BLOCK_WORDS_MAX = 200; // 词数上限（异常输入护栏，远超实际使用量）
+
+/** 读回当前屏蔽词（已归一化：去重、去空、去纯符号）。 */
+async function _blockWordsRead() {
+    const s = (await window.yuki.settingsGet()) || {};
+    return { words: normalizeBlockWords(s.blockWords) };
+}
+
+/** 写回屏蔽词并让引擎与各列表页失效重渲染。 */
+async function _blockWordsWrite(words) {
+    await window.yuki.settingsSet('blockWords', words);
+    // 写盘后同步失效设置快照：loadBlockWords 穿透 SettingsSnapshot.get() 时，
+    // 90s 快照窗口内会读回旧词表（_blockWordsRead 刚把快照回填为旧值），仅
+    // invalidateBlockWords 置脏不够——先例：detail.js/live.js/kazumi.js 恢复链路。
+    if (typeof SettingsSnapshot !== 'undefined' && SettingsSnapshot && typeof SettingsSnapshot.invalidate === 'function') SettingsSnapshot.invalidate();
+    invalidateBlockWords(); // 引擎失效 + 通知列表页重渲染
+}
+
+function renderBlockWords(list) {
+    const box = $('#block_word_list');
+    box.empty();
+    const words = Array.isArray(list) ? list : [];
+    $('#block_word_count').text(String(words.length));
+    if (!words.length) {
+        box.html('<div class="tip-line">暂无屏蔽词。添加后，标题含该关键词的番剧不再出现在任何列表与搜索结果里。</div>');
+        return;
+    }
+    words.forEach((w, i) => {
+        const name = String(w == null ? '' : w);
+        const short = name.length > 40 ? name.slice(0, 40) + '…' : name;
+        box.append(`<div class="history-item" title="${escHtml(name)}">
+            <span class="history-url">${escHtml(short)}</span>
+            <button class="history-btn block-word-del" data-idx="${i}" title="删除该屏蔽词">✕</button>
+        </div>`);
+    });
+}
+
+/** 添加屏蔽词：归一化后去重；纯符号/空词直接拒绝（归一后无匹配意义）。 */
+async function addBlockWord() {
+    const raw = String($('#block_word_input').val() || '').trim();
+    if (!raw) { warnToast('请输入要屏蔽的番剧名关键词'); return; }
+    if (!normalizeBlockText(raw)) { warnToast('该关键词不含可匹配的文字，请重新输入'); return; }
+    if (raw.length > 60) { warnToast('关键词过长（最多 60 字）'); return; }
+    try {
+        const { words } = await _blockWordsRead();
+        const key = normalizeBlockText(raw);
+        if (words.some((w) => normalizeBlockText(w) === key)) { warnToast('该关键词已在屏蔽列表里'); return; }
+        if (words.length >= BLOCK_WORDS_MAX) { warnToast(`屏蔽词已达上限 ${BLOCK_WORDS_MAX} 个`); return; }
+        words.push(raw);
+        await _blockWordsWrite(words);
+        $('#block_word_input').val('');
+        renderBlockWords(words);
+        warnToast('已屏蔽，相关番剧将不再显示');
+    } catch (e) { warnToast('添加失败'); }
+}
+
+async function removeBlockWord(idx) {
+    try {
+        const { words } = await _blockWordsRead();
+        if (!(idx >= 0 && idx < words.length)) return;
+        if (!await confirmDialog(`不再屏蔽「${words[idx]}」？`, { okText: '删除' })) return;
+        words.splice(idx, 1);
+        await _blockWordsWrite(words);
+        renderBlockWords(words);
+    } catch (e) { warnToast('删除失败'); }
+}
+
+/** 清空全部屏蔽词（二次确认；总开关不动）。 */
+async function clearBlockWords() {
+    try {
+        const { words } = await _blockWordsRead();
+        if (!words.length) { warnToast('屏蔽列表本来就是空的'); return; }
+        if (!await confirmDialog(`清空全部 ${words.length} 个屏蔽词？`, { okText: '清空' })) return;
+        await _blockWordsWrite([]);
+        renderBlockWords([]);
+        warnToast('已清空屏蔽词');
+    } catch (e) { warnToast('清空失败'); }
+}
+
 async function removeLiveSource(idx) {
     try {
         const s = (await window.yuki.settingsGet()) || {};
@@ -639,25 +728,60 @@ function buildVideoCard(name, time, path) {
     </div>`;
 }
 
+/** 发起单卡的抓帧请求（loadLocalThumbs 的视口回调与退化路径共用）。 */
+function fetchLocalThumb(el, rel) {
+    window.yuki.fileThumb(rel).then((r) => {
+        // 目录已切换则丢弃结果；仍同卡片才回填
+        if (!r || !r.ok || !el.isConnected || el.getAttribute('data-thumb-rel') !== rel) return;
+        const ph = el.querySelector('.local-thumb.ph');
+        if (!ph) return;
+        const img = document.createElement('img');
+        img.className = 'local-thumb';
+        // 与 records.js localThumbUrl 同一缺陷的孪生：含 #/% 的文件名不编码
+        // 会被截断/误解析，复用 records.js 的逐段编码实现
+        img.src = window.localThumbUrl ? window.localThumbUrl(r.path) : ('file:///' + String(r.path).replace(/\\/g, '/'));
+        img.alt = '';
+        ph.replaceWith(img);
+    }).catch(() => { /* 单卡抓帧失败保持占位图：不得让 rejection 逃成全局未捕获 */ });
+}
+
+// 视口懒加载：大目录一页可能数百视频卡，整页立即抓帧会瞬间塞满 ffmpeg 并发
+// 队列（上限 4）；只抓视口附近（rootMargin 约一屏余量）的卡，滚动到再补。
+// 无 IntersectionObserver 的环境退化为立即全量抓帧（与旧版一致）。
+let _thumbIO = null;
+const _thumbIOBatch = new Set();
+
+function thumbIO() {
+    if (!_thumbIO) {
+        _thumbIO = new IntersectionObserver((entries) => {
+            for (const en of entries) {
+                if (!en.isIntersecting) continue;
+                _thumbIO.unobserve(en.target);
+                _thumbIOBatch.delete(en.target);
+                const rel = en.target.getAttribute('data-thumb-rel');
+                if (rel) fetchLocalThumb(en.target, rel);
+            }
+        }, { rootMargin: '240px 0px' });
+    }
+    return _thumbIO;
+}
+
 /** 异步加载视频预览图（主进程 ffmpeg 抓帧限并发；失败/缺 ffmpeg 保持占位图）。 */
 function loadLocalThumbs() {
+    // 目录切换后旧批次节点已 detach：先解除观察，观察器不持游离节点
+    if (_thumbIO && _thumbIOBatch.size) {
+        for (const el of _thumbIOBatch) _thumbIO.unobserve(el);
+        _thumbIOBatch.clear();
+    }
+    const lazy = typeof IntersectionObserver !== 'undefined';
     $('#file_list .local-card').each(function () {
         const el = this;
         const rel = el.getAttribute('data-thumb-rel');
         if (!rel) return;
-        window.yuki.fileThumb(rel).then((r) => {
-            // 目录已切换则丢弃结果；仍同卡片才回填
-            if (!r || !r.ok || !el.isConnected || el.getAttribute('data-thumb-rel') !== rel) return;
-            const ph = el.querySelector('.local-thumb.ph');
-            if (!ph) return;
-            const img = document.createElement('img');
-            img.className = 'local-thumb';
-            // 与 records.js localThumbUrl 同一缺陷的孪生：含 #/% 的文件名不编码
-            // 会被截断/误解析，复用 records.js 的逐段编码实现
-            img.src = window.localThumbUrl ? window.localThumbUrl(r.path) : ('file:///' + String(r.path).replace(/\\/g, '/'));
-            img.alt = '';
-            ph.replaceWith(img);
-        }).catch(() => { /* 单卡抓帧失败保持占位图：不得让 rejection 逃成全局未捕获 */ });
+        if (!lazy) { fetchLocalThumb(el, rel); return; }
+        if (_thumbIOBatch.has(el)) return;
+        _thumbIOBatch.add(el);
+        thumbIO().observe(el);
     });
 }
 
@@ -1533,20 +1657,16 @@ function initSettingsPanel() {
             $(this).toggle(on);
             // 错峰延迟按「可见序号」内联计算：display:none 的卡片不占错峰位，
             // 各分类首卡均从 0 起跳（纯 CSS nth-child 会把隐藏卡也计入序号导致基准漂移）；
-            // 封顶第 8 张，源设置等大类不再拖沓
-            this.style.animationDelay = on ? `${Math.min(visIdx++, 7) * 45}ms` : '';
+            // 封顶第 8 张，源设置等大类不再拖沓（参数引用 common.js 错峰常量，A-04 归一）
+            this.style.animationDelay = on ? `${Math.min(visIdx++, STAGGER_MAX_IDX) * STAGGER_STEP_MS}ms` : '';
         });
-        // 重触发分类切换入场动画：移除→强制 reflow→重挂（同 detail.js _swapTabContent
-        // 的 tab-enter 手法）；动画本体在 ui.css，仅非毛玻璃启用（T54：毛玻璃下
-        // tool-card 携带 backdrop-filter，opacity/transform 动画会重建模糊采样层致闪烁）
+        // 重触发分类切换入场动画：移除→强制 reflow→重挂（统一走 common.js replayClass，
+        // A-04 收口；动画本体在 ui.css，仅非毛玻璃启用（T54：毛玻璃下
+        // tool-card 携带 backdrop-filter，opacity/transform 动画会重建模糊采样层致闪烁））
         // 判空：本函数是设置页唯一的分类切换入口，DOM 结构变动时若在此抛 TypeError，
         // initSettingsPanel 会提前 return，其后的快捷键回填/资产状态等全部不执行。
         const grid = document.querySelector('#view-settings .settings-grid');
-        if (grid) {
-            grid.classList.remove('set-enter');
-            void grid.offsetWidth; // 强制 reflow 以重启动画
-            grid.classList.add('set-enter');
-        }
+        if (grid) replayClass(grid, 'set-enter');
         if (cat === 'about' && typeof About !== 'undefined' && About.enter) About.enter();
     };
     // 暴露给 openSettingsPanel（跨文件入口：播放失败弹窗的「去配置」按钮）
@@ -1575,6 +1695,9 @@ function initSettingsPanel() {
         getJson('/sites').then(renderConfigDiagnostics).catch(() => {});
         // 自定义直播源列表
         renderLiveSources(Array.isArray(s.customLives) ? s.customLives : []);
+        // 全局番剧屏蔽：开关（默认开）+ 词表（归一化后展示，与引擎同一口径）
+        $('#set_block_words_enable').prop('checked', s.blockWordsEnable !== false);
+        renderBlockWords(normalizeBlockWords(s.blockWords));
         // 外观：各选项回填 + 壁纸路径缓存
         if (s.theme) $('#set_theme').val(s.theme);
         if (s.customTheme) $('#set_theme_pick').val(s.customTheme);
@@ -1633,6 +1756,15 @@ function initSettingsPanel() {
         $('#set_translate_llm_base').val(s.translateLLMBase || '');
         $('#set_translate_llm_key').val(s.translateLLMKey || '');
         $('#set_translate_llm_model').val(s.translateLLMModel || '');
+        // 验证码视觉 LLM（独立于划词翻译的一套配置；key 同样经主进程加密落盘）
+        // prefer 默认关闭（严格 === true 回填，与 opEdSkip 同口径）：内置小模型
+        // 毫秒级离线，只有明确想要识别率的用户才应付出延迟与额度代价。
+        $('#set_captcha_llm_prefer').prop('checked', s.captchaLLMPrefer === true);
+        $('#set_captcha_llm_enable').prop('checked', s.captchaLLMEnable === true);
+        $('#captcha_llm_fields').toggle(s.captchaLLMEnable === true);
+        $('#set_captcha_llm_base').val(s.captchaLLMBase || '');
+        $('#set_captcha_llm_key').val(s.captchaLLMKey || '');
+        $('#set_captcha_llm_model').val(s.captchaLLMModel || '');
         $('#set_oped_skip').prop('checked', s.opEdSkip === true); // 跳过片头片尾（默认关，回填严格按持久化值）
         $('#set_oped_save').prop('checked', s.opEdSave !== false); // 保存片头/片尾登记记录（默认开）
         $('#oped_save_fields').toggle(s.opEdSkip === true); // 跳过片头片尾关闭时收起保存开关
@@ -1692,6 +1824,19 @@ function initSettingsPanel() {
     $('#live_src_url').on('keydown', function (e) { if (e.key === 'Enter') { this.blur(); addLiveSource(); } });
     $('#live_src_list').on('click', '.live-src-del', function () {
         removeLiveSource(parseInt($(this).data('idx'), 10));
+    });
+    // 全局番剧屏蔽：添加 / 删除 / 清空 / 总开关
+    $('#block_word_add').on('click', addBlockWord);
+    $('#block_word_input').on('keydown', function (e) { if (e.key === 'Enter') { this.blur(); addBlockWord(); } });
+    $('#block_word_list').on('click', '.block-word-del', function () {
+        removeBlockWord(parseInt($(this).data('idx'), 10));
+    });
+    $('#block_word_clear').on('click', clearBlockWords);
+    $('#set_block_words_enable').on('change', async function () {
+        const on = this.checked;
+        await window.yuki.settingsSet('blockWordsEnable', on);
+        invalidateBlockWords(); // 关开即时生效：列表页就地重渲染，不必重进页面
+        warnToast(on ? '已启用番剧屏蔽' : '已停用番剧屏蔽，被屏蔽的番剧恢复显示');
     });
     // 直链播放：粘贴链接 → 自动解析 → mpv
     $('#direct_play_go').on('click', playDirectLink);
@@ -1870,6 +2015,96 @@ function initSettingsPanel() {
         const show = $input.attr('type') === 'password';
         $input.attr('type', show ? 'text' : 'password');
         $(this).text(show ? '🙈' : '👁️');
+    });
+    // ---- 验证码视觉 LLM（独立配置区块，绑定模式与划词翻译 LLM 一致） ----
+    // 优先级开关：开启后小模型退居次席（默认关，见 kazumi/captcha.py 次序说明）。
+    // 未启用「视觉大模型兜底」时本开关无实际作用（识别链该级缺配置直接跳过），
+    // 故提示用户先启用兜底，避免"开了没效果"的困惑。
+    $('#set_captcha_llm_prefer').on('change', function () {
+        window.yuki.settingsSet('captchaLLMPrefer', this.checked);
+        if (this.checked && !$('#set_captcha_llm_enable').prop('checked')) {
+            warnToast('已开启优先 LLM，但「视觉大模型兜底」尚未启用——请填写 Base URL 与模型后才会生效');
+        }
+    });
+    $('#set_captcha_llm_enable').on('change', function () {
+        window.yuki.settingsSet('captchaLLMEnable', this.checked);
+        $('#captcha_llm_fields').toggle(this.checked);
+    });
+    $('#set_captcha_llm_base').on('change', function () {
+        window.yuki.settingsSet('captchaLLMBase', String(this.value || '').trim());
+    });
+    $('#set_captcha_llm_key').on('change', function () {
+        window.yuki.settingsSet('captchaLLMKey', String(this.value || '').trim());
+    });
+    $('#set_captcha_llm_model').on('change', function () {
+        window.yuki.settingsSet('captchaLLMModel', String(this.value || '').trim());
+    });
+    $('#set_captcha_llm_key_eye').on('click', function () {
+        const $input = $('#set_captcha_llm_key');
+        const show = $input.attr('type') === 'password';
+        $input.attr('type', show ? 'text' : 'password');
+        $(this).text(show ? '🙈' : '👁️');
+    });
+    // 验证码识别链测试：拿当前表单值（未保存也能测）经 do=kazumiCaptchaProbe
+    // 让后端用内置验证码图跑一次识别链。诊断口径（与后端 captcha_probe 同约）：
+    //   - 内置小模型：只报「可用/不可用 + 耗时」——本探测图是合成图，不在小模型
+    //     的真实站点训练分布内（实测权重在合成图上整图仅 ~9%，近随机），故此处
+    //     的识别对错**不代表**线上识别率，绝不给用户打红叉；
+    //   - 视觉大模型：报「连通 + 是否支持图片输入 + 读得对不对」——纯文本模型会
+    //     在这一步以 4xx/bad_response 暴露，这是验证码场景最常见的配置错误。
+    $('#set_captcha_test').on('click', async function () {
+        const $r = $('#set_captcha_test_result');
+        const btn = this;
+        const enabled = $('#set_captcha_llm_enable').prop('checked');
+        const cfg = enabled ? {
+            captchaLLMBase: $('#set_captcha_llm_base').val().trim(),
+            captchaLLMKey: $('#set_captcha_llm_key').val().trim(),
+            captchaLLMModel: $('#set_captcha_llm_model').val().trim(),
+        } : {};
+        // 优先级开关随测试请求发送：后端据此跑同一次序的识别链，这样「测试」
+        // 验的就是线上真正会走的那条路（否则开关开了而测试仍按旧次序跑，
+        // 结果会误导用户）。
+        if (enabled) cfg.captchaLLMPrefer = $('#set_captcha_llm_prefer').prop('checked') ? '1' : '0';
+        btn.disabled = true;
+        // 结果行初始 hidden：必须显式揭掉（text/css 不改 display，曾致「点了没反应」）
+        $r.prop('hidden', false).text('测试中…').css('color', 'var(--md-on-surface-variant)');
+        try {
+            const rsp = await doAction('kazumiCaptchaProbe', cfg, '/kazumi/action', 60000);
+            const d = (rsp && rsp.result) || {};
+            if (!d.image) {
+                $r.text('✗ 内置测试图不可用（后端缺少可用字体）').css('color', 'var(--md-error)');
+                return;
+            }
+            const lines = [];
+            const cnn = d.cnn || {};
+            if (cnn.available) {
+                lines.push(`✓ 内置小模型 · ${cnn.ms || 0}ms · 识别「${cnn.text || '—'}」`);
+                lines.push(`（${cnn.note || '合成测试图不在其训练分布内，不代表线上识别率'}）`);
+            } else {
+                lines.push('✗ 内置小模型不可用（权重缺失）');
+            }
+            const llm = d.llm || {};
+            // 「识别为空」必须给得出原因：附模型回复原文（后端截 64 字符），
+            // 用户能直接看到是「回复真空」还是「有内容没提取到」，可判断该查
+            // 模型还是该查应用（旧版后端无该字段时省略此行）。
+            const rawTail = (llm.ok && !llm.correct && llm.raw !== undefined)
+                ? `\n模型回复：「${llm.raw || '(空)'}」` : '';
+            if (!llm.enabled) {
+                lines.push('— 视觉大模型未启用（未测）');
+            } else if (llm.ok) {
+                const tail = llm.correct ? '识别正确' : `识别为「${llm.text || '空'}」，应为「${d.answer}」${rawTail}`;
+                lines.push(`${llm.correct ? '✓' : '⚠'} 视觉大模型 · ${llm.ms || 0}ms · ${tail}`);
+            } else {
+                const label = LLM_TEST_ERR_LABEL[llm.err || ''] || llm.err || '未知错误';
+                lines.push(`✗ 视觉大模型 · ${label}`);
+            }
+            const failed = !cnn.available || (llm.enabled && !llm.ok);
+            $r.text(lines.join('\n')).css('color', failed ? 'var(--md-error)' : 'var(--md-primary)');
+        } catch (e) {
+            $r.text('✗ 后端不可达（Python 服务未就绪？）').css('color', 'var(--md-error)');
+        } finally {
+            btn.disabled = false;
+        }
     });
     // LLM 连通性测试：拿当前表单值（未保存也能测）走后端 /translate 探测模式
     // （prefer=probe：只走 LLM 单通道、不 failover、不缓存），按错误分类回显

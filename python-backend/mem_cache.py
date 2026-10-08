@@ -47,6 +47,17 @@ DEFAULT_TTL = {
     'kazumi:chapters': 1800,
 }
 
+# Kazumi 命名空间单点定义：server.py 的读写/失效与 config.py 的站点热替换
+# 必须指向同一批字符串——两处各写字面量时，任何一侧改名都会静默失效
+# （热替换清不掉对应缓存）。此前 server.py 已按 NS_KAZUMI_* 引用而本未定义，
+# 导致 import server 直接 AttributeError（连带所有依赖该导入的测试报错）。
+NS_KAZUMI_SEARCH = 'kazumi:search'
+NS_KAZUMI_STREAM = 'kazumi:stream'
+NS_KAZUMI_CHAPTERS = 'kazumi:chapters'
+# 聚合搜索（L15）：server.py 的聚合搜索缓存与 config.py 的站点热替换失效
+# 同用一 ns，字面量双写在此单点化（与 NS_KAZUMI_* 同款风格）。
+NS_SPIDER_AGGSEARCH = 'spider:aggsearch'
+
 _lock = Lock()
 # ns -> OrderedDict[key -> [value, exp, last_access]]（OrderedDict 维护 LRU 序）
 _store = {}

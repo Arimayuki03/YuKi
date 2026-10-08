@@ -195,7 +195,7 @@ test('API 全集快照：暴露的方法名清单与契约清单完全一致（�
         'download.onEvent', 'download.onGoto', 'download.play',
         'pushUrl', 'pushInfo', 'onPushReceived',
         'resolveParse', 'captureDirect', 'cancelRuntime', 'captchaVerify',
-        'pickWallpaper', 'appVersion', 'winMinimize', 'winMaximize', 'winClose', 'fontCss',
+        'pickWallpaper', 'saveImage', 'appVersion', 'winMinimize', 'winMaximize', 'winClose', 'fontCss',
         'settingsGet', 'settingsSet', 'settingsReset', 'pickCacheDir', 'pickFolder',
         'clearAppCaches', 'getAppCacheSize', 'updateHotkeys', 'updatePlayerPrefs',
         'mpvScreenshot', 'loadDanmaku', 'mpvScreenshotDir',
@@ -575,6 +575,12 @@ test('pushUrl 把待推送 URL 直接透传（不做装箱）', async () => {
     const state = loadPreload({ handlers: { 'yuki:push-url': (u) => ({ ok: true, u }) } });
     assert.deepEqual(await state.api.pushUrl('http://lan/play.m3u8'), { ok: true, u: 'http://lan/play.m3u8' });
     assert.deepEqual(invokes(state, 'yuki:push-url')[0].args, ['http://lan/play.m3u8']);
+});
+
+test('saveImage 双参透传（URL + 建议文件名，图片放大浮层保存）', async () => {
+    const state = loadPreload({ handlers: { 'yuki:save-image': (u, n) => ({ ok: true, u, n }) } });
+    assert.deepEqual(await state.api.saveImage('https://x/a.jpg', 'a.jpg'), { ok: true, u: 'https://x/a.jpg', n: 'a.jpg' });
+    assert.deepEqual(invokes(state, 'yuki:save-image')[0].args, ['https://x/a.jpg', 'a.jpg']);
 });
 
 test('loadDanmaku 把弹幕数组原样透传（不装箱）', async () => {

@@ -4,6 +4,8 @@
 ; 由于 electron-builder 的 extraResources 会无条件把 vendor/ 复制进安装目录，
 ; 这里的做法是：始终复制，然后在 customInstall 阶段——若用户取消勾选——删除
 ; 安装目录下的 resources\vendor\mpv 目录。用户可日后在「设置 → 扩展」里一键补装。
+; 2026-09-30 用户拍板：vendor/mpv 恢复内置安装包（撤销当日 C-09「移出+首启预下载」
+; 方案），本文件恢复勾选页原设计。
 ;
 ; 用到的宏钩子（electron-builder 会在存在时自动 !insertmacro 调用）：
 ;   customPageAfterChangeDir : 在「选择安装目录」页之后插入自定义 nsDialogs 页
@@ -15,7 +17,8 @@
 !include "LogicLib.nsh"
 
 ; 复选框状态变量（1=安装内置播放器，0=跳过）；默认安装。
-; 仅在安装器中使用，卸载器构建时不定义以避免 warning 6001 被 -WX 当作错误
+; 仅在安装器中使用，卸载器构建时不定义以避免 warning 6001/6010 被 -WX 当作错误
+;（卸载器不引用安装页函数时，NSIS zeroing 告警 6010 会被判死，故整段守卫）
 !ifndef BUILD_UNINSTALLER
 Var YukiMpvCheckbox
 Var YukiInstallMpv
@@ -25,7 +28,9 @@ Var YukiInstallMpv
 ; electron-builder 的 assisted 安装器（oneClick:false）在 allowToChangeInstallationDirectory
 ; 为 true 时会有目录选择页，本宏把自定义页插在其后。
 !macro customPageAfterChangeDir
-  Page custom yukiMpvPageCreate yukiMpvPageLeave
+  !ifndef BUILD_UNINSTALLER
+    Page custom yukiMpvPageCreate yukiMpvPageLeave
+  !endif
 !macroend
 
 !ifndef BUILD_UNINSTALLER

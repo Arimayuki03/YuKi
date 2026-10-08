@@ -1205,8 +1205,9 @@ class ConfigManager:
                 s.runner.destroy()
             except Exception:
                 pass
-        # 站点热替换后，旧站点的内容缓存全部失效：spider:* 各 ns 逐个清理
-        # （不用 clear_all，避免把 kazumi 等与站点配置无关的命名空间连带清掉）。
+        # 站点热替换后，旧站点的内容缓存全部失效：spider:* 各 ns + kazumi 检索
+        # 三 ns 逐个清理（不用 clear_all，避免把 translate/cover 等与站点配置
+        # 无关的命名空间连带清掉）。
         # 时机在旧 runner 销毁之后：已在途的旧请求若在销毁前完成，builder 回写
         # 的旧内容会先随销毁一起失效；若提前清理，在途回填会让旧配置内容以
         # 新站点 key 的名义存活整个 TTL。
@@ -1215,7 +1216,16 @@ class ConfigManager:
         # 才完成的旧请求 builder 仍可能以旧内容回写到清理后的 ns（同站点 key），
         # 存活至 TTL 到期。窗口=单个在途请求 × 低频显式热替换，代际键/在途
         # 取消属过度设计。
-        for ns in ('spider:home', 'spider:category', 'spider:detail', 'spider:search'):
+        for ns in ('spider:home', 'spider:category', 'spider:detail', 'spider:search',
+                   mem_cache.NS_SPIDER_AGGSEARCH,
+                   # Kazumi 规则源检索同样按站点集合出结果：站点换血后旧条目会
+                   # 以新站点集合的名义存活整个 TTL（10~30 分钟）。kazumi:stream
+                   # 风险最实——整词索引保留而其中某些单源 payload 未淘汰时，
+                   # /search/stream 的重放路径会把已删除源的旧 payload 继续回放
+                   # 给前端（卡片停在旧内容，只能靠 refresh 纠正）。
+                   # 常量与 server.py 共用 mem_cache 单点定义，避免口径漂移。
+                   mem_cache.NS_KAZUMI_SEARCH, mem_cache.NS_KAZUMI_STREAM,
+                   mem_cache.NS_KAZUMI_CHAPTERS):
             mem_cache.invalidate(ns)
         # 回收新配置不再引用的 JVM 桥（同 jar 复用，换掉的才关停）
         new_bridge_ids = set()
