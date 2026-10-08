@@ -737,12 +737,24 @@ test('后端：收藏 PATCH 支持 tags（对齐 Kazumi rating_review_dialog 边
 
 // ---------------------------------------------------------------- Python 侧纯逻辑（VM 外，直接 subprocess 跑断言脚本）
 
-/** Python 解释器探测：优先 venv，回退 PATH（CI js job 无 venv，无回退会 ENOENT）。 */
+/** Python 解释器探测：优先 venv，回退 PATH（CI js job 无 venv，无回退会 ENOENT）。
+ *  仅「解释器存在」不够——plugin_manager → http_client 传递 import requests，
+ *  CI js job 的裸 Python 没装 requests 时 import 链直接炸（2026-10-08 CI 实证）。
+ *  故探测升级为「解释器 + 依赖可导入」双检：解释器在但依赖缺也返回 null 跳过，
+ *  该断言由 python job 的 kazumi-bgm-rating stage 全量覆盖。 */
 function hasPython() {
     const fs2 = require('fs');
+    const { execFileSync } = require('child_process');
+    const probe = 'import sys; sys.path.insert(0, \'python-backend\'); import kazumi.plugin_manager';
     const venv = path.join(ROOT, 'python-backend', '.venv', 'Scripts', 'python.exe');
-    if (fs2.existsSync(venv)) return venv;
-    try { require('child_process').execFileSync('python', ['--version'], { stdio: 'ignore' }); return 'python'; } catch (e) { return null; }
+    if (fs2.existsSync(venv)) {
+        try { execFileSync(venv, ['-c', probe], { stdio: 'ignore', cwd: ROOT }); return venv; }
+        catch (e) { return null; }
+    }
+    try {
+        execFileSync('python', ['-c', probe], { stdio: 'ignore', cwd: ROOT });
+        return 'python';
+    } catch (e) { return null; }
 }
 
 test('normalize_bgm_tags：边界与非法值（Python 纯逻辑）', { skip: !hasPython() && '无可用 Python 解释器（CI js job 无 venv）——该断言由 python job 的 kazumi-bgm-rating stage 覆盖' }, async () => {
