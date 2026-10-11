@@ -390,6 +390,36 @@ def test_send_wininet_proxy_is_passed_through():
     assert mocked.call_args.kwargs['proxies'] == proxies
 
 
+def test_system_proxies_no_proxy_star_blocks_wininet_fallback():
+    """NO_PROXY='*'（应用内代理开关关闭时主进程注入的强制直连信号）必须拦住
+    WinINET 回退：系统代理注册表残留值（如 Clash 卸载后留下的 ProxyServer）
+    不得再把 WebDAV 等请求接管到已关闭的代理上（回归：还原设置连接失败）。"""
+    proxies = {'http': 'http://127.0.0.1:7897', 'https': 'http://127.0.0.1:7897'}
+    for key in ('NO_PROXY', 'no_proxy'):
+        with _no_env_proxy(), \
+                patch.dict(os.environ, {key: '*'}), \
+                patch.object(http_client, '_read_wininet',
+                             side_effect=AssertionError('wininet must not be read')):
+            assert http_client.system_proxies('https://dav.example.com/dav') == {}
+        # 非 '*' 值（如具体豁免列表）不算强制直连信号，WinINET 回退保持原语义
+        with _no_env_proxy(), \
+                patch.dict(os.environ, {key: 'localhost,127.0.0.1'}), \
+                patch.object(http_client, '_read_wininet', return_value=(proxies, '')):
+            assert http_client.system_proxies('https://dav.example.com/dav') == proxies
+
+
+def test_send_no_proxy_star_forces_direct():
+    """NO_PROXY='*' 时 _send 直连发送且不带 proxies 键（连接层端到端）。"""
+    with _no_env_proxy(), \
+            patch.dict(os.environ, {'NO_PROXY': '*'}), \
+            patch.object(http_client, '_read_wininet',
+                         side_effect=AssertionError('wininet must not be read')):
+        with patch.object(Session, 'request', return_value=_fake_response()) as mocked:
+            http_client._send('GET', 'https://dav.example.com/dav/favorites.json')
+    assert mocked.call_count == 1
+    assert 'proxies' not in mocked.call_args.kwargs
+
+
 def test_send_proxy_failure_falls_back_to_direct():
     """代理连接失败（RequestException）→ 自动回退直连，且直连不再带 proxies。"""
     sentinel = _fake_response()

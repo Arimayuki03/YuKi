@@ -18,6 +18,7 @@ jar_bridge.py 重复实现三份且语义有微妙差异。
   环境变量代理改由 system_proxies() 显式解析，语义不变。
 - verify 默认 True；确有需要坏证书兼容的调用方显式传 verify=False。
 """
+import os
 import threading
 from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import urljoin, urlparse, urlencode
@@ -137,6 +138,11 @@ def system_proxies(url=None):
        这里显式解析以保持该行为，含 NO_PROXY 豁免语义）；
     2. WinINET 系统代理注册表（TVBox 源/夸克链路；url 给定时按
        ProxyOverride 判定直连）。
+
+    NO_PROXY='*'（主进程在应用内代理开关关闭时注入的「强制直连」信号）生效时
+    直接返回空：环境变量代理已被 requests 判为全豁免，WinINET 回退不得再兜底，
+    否则开关关闭后 WebDAV 等链路仍被残留系统代理（如 Clash 卸载后留下的
+    ProxyServer 注册表值）接管而连接失败。
     """
     try:
         env = requests.utils.get_environ_proxies(url or '')
@@ -144,6 +150,8 @@ def system_proxies(url=None):
             return env
     except Exception:
         pass
+    if (os.environ.get('NO_PROXY') or os.environ.get('no_proxy') or '').strip() == '*':
+        return {}
     proxies, bypass = _read_wininet()
     if not proxies:
         return {}

@@ -2318,9 +2318,16 @@ function initSettingsPanel() {
     $('#set_catvod_bgm_match').on('change', function () {
         window.yuki.settingsSet('catvodBgmMatch', this.checked);
     });
-    // 代理开关：切换时仅收起/展开地址表单（真正启用仍由「保存代理」测试后生效）
-    $('#set_proxy_enable').on('change', function () {
+    // 代理开关：关闭方向立即生效（直连无前置条件，无需「保存代理」——此前拨开关
+    // 只收起表单，proxyEnable 落盘仍是 true，WebDAV 等继续走已死的代理端口）；
+    // 启用方向仍走「保存代理」按钮（连通性测试通过才生效）。
+    $('#set_proxy_enable').on('change', async function () {
         $('#proxy_fields').toggle(this.checked);
+        if (this.checked) return;
+        try {
+            const r = await window.yuki.setProxy({ url: '', enable: false });
+            warnToast(r && r.ok ? '代理已关闭并生效（后端已重启）' : '代理关闭失败');
+        } catch (e) { warnToast('代理关闭失败'); }
     });
     // 网络代理：保存并应用（先连通性测试，通过才启用 —— 仿 Kazumi proxyConfigured 门；重启后端使 Python requests 生效）
     $('#set_proxy_save').on('click', async () => {

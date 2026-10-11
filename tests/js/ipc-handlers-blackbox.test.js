@@ -883,6 +883,33 @@ test('契约形状：yuki:set-proxy / yuki:set-log-level / yuki:set-log-cleanup 
     } finally { env.dispose(); }
 });
 
+test('yuki:set-proxy 开关切换的 env 语义：关闭注入 NO_PROXY 强制直连，再启用必须清除残留（回归）', async () => {
+    // 后端场景：NO_PROXY='*' 是「关闭应用内代理」的强制直连信号；启用分支若不删除，
+    // 「先关后开」后 Python requests 把所有目标按 no_proxy 直连，代理对后端静默失效
+    //（启动逻辑 4022 行附近本就有同口径 delete，此测试钉住运行时切换路径）。
+    const tmpRoot = makeWorkspace();
+    const { sandbox, handlers, timerFence } = await loadMainIndexReady(tmpRoot);
+    try {
+        const env = sandbox.process.env;
+        // 关闭：注入强制直连信号（也是 WebDAV 不走系统代理的依据）
+        const off = await handlers.get('yuki:set-proxy')(null, { url: '', enable: false });
+        assert.equal(off.ok, true);
+        assert.equal(env.NO_PROXY, '*', '关闭分支应注入 NO_PROXY=* 让后端强制直连');
+        assert.equal(env.no_proxy, '*');
+        assert.equal(env.HTTP_PROXY, undefined, '关闭分支应删除 HTTP_PROXY');
+        // 再启用：残留信号必须清除
+        const on = await handlers.get('yuki:set-proxy')(null, { url: '127.0.0.1:7890', enable: true });
+        assert.equal(on.ok, true);
+        assert.equal(env.NO_PROXY, undefined, '启用代理后 NO_PROXY 残留必须清除，否则代理静默失效');
+        assert.equal(env.no_proxy, undefined);
+        assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:7890');
+        assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:7890');
+    } finally {
+        timerFence.clear();
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+});
+
 test('契约形状：yuki:pick-* 系列在用户取消时统一返回 {ok:false, reason:"cancelled"}', async () => {
     const env = await bootEnv();
     try {

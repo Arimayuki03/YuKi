@@ -1,4 +1,4 @@
-﻿// 组件测试：playlist-proxy.js — 在线整季原生播放列表的本地按需解析代理
+// 组件测试：playlist-proxy.js — 在线整季原生播放列表的本地按需解析代理
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');

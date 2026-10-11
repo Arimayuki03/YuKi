@@ -4,6 +4,18 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-12
+
+### Fixed
+
+- **WebDAV 关代理后同步/还原失败（用户实测回归）**：两层修复——①后端 `http_client.system_proxies` 在 `NO_PROXY='*'`（应用内代理开关关闭时主进程注入的强制直连信号）生效时不再回退读 WinINET 系统代理注册表。此前 WebDAV 还原（走 `http_client.get`）在注册表残留系统代理（如 Clash 退出后留下的 `ProxyServer=127.0.0.1:7897`）时仍被接管到已死代理端口而连接失败，与走裸 `requests` 的同步/测试连接行为割裂（表现为「同步正常、还原设置失败」）；非 `'*'` 值（具体豁免列表）语义不变，TVBox/网盘链路不受影响。②主进程 `yuki:set-proxy` 启用分支补删 `NO_PROXY`/`no_proxy` 残留——此前「先关后开」后 requests 把所有目标按 no_proxy 直连，应用内代理对 Python 后端静默失效（启动逻辑本有同口径 delete，运行时切换路径漏了）。回归：test_http_client.py NO_PROXY 用例 3 例 + ipc-handlers-blackbox.test.js env 语义切换用例。
+- **设置页「启用代理」开关关闭方向立即生效**：此前拨到关闭只收起地址表单，不落盘不重启后端（`proxyEnable` 保持 true、后端 `HTTP_PROXY` 环境变量仍在），必须再点「保存代理」才真正关闭——用户关掉开关后 WebDAV 等链路继续走已死代理端口（日志实证 `ProxyError 127.0.0.1:7897 拒绝连接`）。现关闭方向拨开关立即调 `yuki:set-proxy`（`{url:'',enable:false}`）写设置 + 注入 `NO_PROXY='*'` + 重启后端并提示「代理已关闭并生效」；启用方向维持「填地址 → 保存代理（连通性测试通过才生效）」流程防误启用。回归：captcha-probe-ui.test.js 代理开关用例 2 例（关闭立即下发 / 启用不下发）。
+- **时间表话数徽章单测时间敏感假红**：`_attachEpBadges` 批量回源用例的放送日写死 `2026-10-05` 且断言 `[01]/24`（假定「当周首播」），跨周后 aired 推算到 2 稳定假红（v0.3.0 定版时在界内，10-12 复跑暴露）。断言放宽为「连载中 N/24 或已完结 24话」按执行日期自洽，消除日期依赖。
+
+### Tests
+
+- JS 单测 2350/2350、Python run_all.py 全 stage PASS（790 py 编译零错误）、smoke 18/18、ESLint/Ruff 零 error。
+
 ## [0.3.0] - 2026-10-08
 
 ### Changed

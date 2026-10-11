@@ -93,7 +93,11 @@ function loadPanels(opts) {
     // 触达 window.yuki 上二十余个方法。本用例只关心验证码测试按钮，故用
     // Proxy 自动补桩，避免为每个无关接口写桩（漏一个就 TypeError 打断绑定，
     // 从而拿不到被测处理器）。
+    const setProxyCalls = [];
+    const toasts = [];
     const yukiBase = {
+        // 代理开关关闭方向的处理器会真实调 setProxy：按显式桩记录调用（其余走 Proxy 自动补桩）
+        setProxy: async (kv) => { setProxyCalls.push(kv); return { ok: true }; },
         settingsSet: async () => true,
         settingsGet: async () => ({}),
         settingsReset: async () => ({}),
@@ -130,7 +134,7 @@ function loadPanels(opts) {
         },
         window: { yuki, _cfgHistoryCache: undefined, addEventListener() { }, removeEventListener() { } },
         escHtml: (s) => String(s), escPath: (s) => String(s),
-        warnToast: () => { }, showLoading: () => { }, hideLoading: () => { },
+        warnToast: (m) => { toasts.push(String(m)); }, showLoading: () => { }, hideLoading: () => { },
         openDialog: () => { }, closeDialog: () => { }, confirmDialog: async () => true,
         registerEsc: () => { }, createRuntimeId: (p) => `${p}-test`, fmtSize: (b) => `${b}B`,
         getJson: async () => ({}), localPlayToast: () => { }, toFileUrl: (p) => `file:///${p}`,
@@ -161,7 +165,7 @@ function loadPanels(opts) {
     // initSettingsPanel 自身初始化就会发若干 doAction（cacheSize / panCookie 等），
     // 故只按 action 名筛出本按钮发起的探测请求，避免断言被无关请求污染。
     const probeCalls = () => doActions.filter((c) => c.action === 'kazumiCaptchaProbe');
-    return { click, doActions, probeCalls, resultText, resultRec, recs, rec };
+    return { click, doActions, probeCalls, resultText, resultRec, recs, rec, setProxyCalls, toasts };
 }
 
 /** 触发点击并等待处理器内所有 await 落地。 */
@@ -320,4 +324,34 @@ test('结果行必须显式揭掉 hidden（text/css 不改 display）', async ()
     await click(h.click);
     const rec = h.resultRec();
     assert.equal(rec.prop.hidden, false, 'hidden 必须由处理器显式揭掉，否则「点了没反应」');
+});
+
+
+// ---------------------------------------------------------------- 代理开关立即生效（2026-10-10 回归）
+
+/** 触发 change 并等待处理器内所有 await 落地。 */
+async function change(handler, el) {
+    await handler.call(el || { checked: false }, {});
+}
+
+test('代理开关关闭方向：立即调 setProxy({enable:false}) 并提示（回归：此前只收表单不生效，WebDAV 继续走已死代理端口）', async () => {
+    const h = loadPanels({});
+    const rec = h.recs.find((r) => r.sel === '#set_proxy_enable');
+    const onChange = rec && rec.handlers.change && rec.handlers.change[0];
+    assert.ok(onChange, '#set_proxy_enable 应已绑定 change 处理器');
+    await change(onChange, { checked: false });
+    assert.equal(h.setProxyCalls.length, 1, '关闭方向只发一次 setProxy');
+    const kv = h.setProxyCalls[0];
+    assert.equal(kv.enable, false);
+    assert.equal(kv.url, '',
+        '关闭方向必须立即下发 setProxy({url:"",enable:false})，不得等「保存代理」');
+    assert.match(h.toasts[h.toasts.length - 1] || '', /代理已关闭/, '应提示已生效');
+});
+
+test('代理开关启用方向：只展开表单，不下发 setProxy（启用仍由「保存代理」带连通性测试生效）', async () => {
+    const h = loadPanels({});
+    const rec = h.recs.find((r) => r.sel === '#set_proxy_enable');
+    const onChange = rec.handlers.change[0];
+    await change(onChange, { checked: true });
+    assert.equal(h.setProxyCalls.length, 0, '启用方向不得绕过连通性测试直接生效');
 });

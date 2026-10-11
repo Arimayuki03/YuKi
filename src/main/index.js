@@ -2509,6 +2509,10 @@ app.whenReady().then(() => {
             if (enable && url) {
                 process.env.HTTP_PROXY = url;
                 process.env.HTTPS_PROXY = url;
+                // 启用前先清掉关闭分支注入的 NO_PROXY：否则「先关后开」后 requests
+                // 把所有目标按 no_proxy 直连，应用内代理对后端静默失效（启动逻辑同口径）
+                delete process.env.NO_PROXY;
+                delete process.env.no_proxy;
                 if (url.startsWith('socks')) {
                     // Electron session 不支持 socks 直设，显式走系统代理（渲染层直连）；socks 代理作用于后端/下载任务
                     await session.defaultSession.setProxy({ mode: 'system' });

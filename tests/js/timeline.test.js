@@ -285,10 +285,11 @@ test('_attachEpBadges：缺 eps 条目合并为一次批量请求（bangumiInfoB
     await t._attachEpBadges(grid, items, true);
     assert.equal(batchCalls, 1, '整页只发一次批量请求');
     assert.deepEqual([...batchIds], ['100', '200'], '缺失条目 id 全部并入批量');
-    // 2026-10-05（周一）放送：按天粒度推算首播日当天 aired=1，但今天恰为放送日
-    // 前夜（Date.now() < start）时 clamp 到 0——用宽松断言兼容执行时刻。
-    // 连载未完结保留「N/总话数」格式（用户要求）
-    assert.match(cards[100].html, /[01]\/24/, '当周首播 → 0 或 1/24');
+    // 2026-10-05 放送：aired 按周推算随真实日期增长（曾因写死「当周首播 0/1」在
+    // 跨周后稳定假红）。未完结分支（放送日 + 24 周 + 3 天前）文本恒为「N/24」且
+    // N ∈ [0,24]；完结判定同样随日期推进，不写死具体 N。
+    assert.match(cards[100].html, /(title="已播出 \d{1,2} 话 \/ 共 24 话">\d{1,2}\/24)|(\d{1,2}话<)/,
+        '连载中显示 N/24 或已完结显示 24话（按执行日期）');
     // 批量结果缺值的条目（200 无 info）不挂徽章，也不抛错
     assert.doesNotMatch(cards[200].html, /timeline-ep-badge/, '批量缺值条目静默跳过');
 });
