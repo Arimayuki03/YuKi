@@ -38,13 +38,26 @@ YuKi 是一个面向桌面的影视聚合应用：使用 **Electron** 作为界�
 
 ## 🖼 界面预览
 
-| 首页 · CatVod 聚合源浏览 | 推荐 · Bangumi 热门番组 |
+| 首页 · CatVod 影视源浏览 | 搜索 · Kazumi 源聚合检索 |
 |:--:|:--:|
-| ![首页：CatVod 聚合源分类浏览](assets/screenshots/home.png) | ![推荐：Bangumi 热门番组](assets/screenshots/recommend.png) |
-| **Bangumi 详情 · 评分与收藏同步** | **设置 · CatVod 源配置与站点诊断** |
-| ![Bangumi 详情：评分、排名与收藏同步](assets/screenshots/bangumi-detail.png) | ![设置：CatVod 源配置与站点诊断](assets/screenshots/settings-catvod.png) |
-| **设置 · Kazumi 规则管理** | **我的收藏 · 番剧列表与状态筛选** |
-| ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | ![我的收藏：番剧列表与状态筛选](assets/screenshots/favorites.png) |
+| ![首页：CatVod 影视源分类浏览](assets/screenshots/home.png) | ![搜索：Kazumi 规则源聚合检索](assets/screenshots/search-kazumi.png) |
+| **搜索 · Bangumi 条目检索** | **推荐 · Bangumi 热门番组** |
+| ![搜索：Bangumi 条目标签检索](assets/screenshots/search-bangumi.png) | ![推荐：Bangumi 热门番组](assets/screenshots/popular.png) |
+| **时间表 · 每周放送一览** | **我的收藏 · 状态筛选与 Bangumi 同步** |
+| ![时间表：每周放送一览](assets/screenshots/timeline.png) | ![我的收藏：番剧列表与状态筛选](assets/screenshots/favorites.png) |
+
+<details>
+<summary><b>⚙️ 更多界面：直播、源设置、规则管理、翻译、云同步（点击展开）</b></summary>
+
+| 直播 · IPTV 频道浏览 | 设置 · CatVod 源配置与站点诊断 |
+|:--:|:--:|
+| ![直播：IPTV 频道浏览](assets/screenshots/live.png) | ![设置：CatVod 源配置与站点诊断](assets/screenshots/settings-catvod.png) |
+| **设置 · Kazumi 规则管理** | **设置 · 划词翻译与验证码识别** |
+| ![设置：Kazumi 规则导入与有效性管理](assets/screenshots/settings-kazumi.png) | ![设置：划词翻译与验证码识别](assets/screenshots/settings-translate.png) |
+| **设置 · WebDAV 云同步** | **设置 · Bangumi 账号同步** |
+| ![设置：WebDAV 云同步](assets/screenshots/settings-webdav.png) | ![设置：Bangumi 账号同步](assets/screenshots/settings-sync.png) |
+
+</details>
 
 ## 📥 安装
 
