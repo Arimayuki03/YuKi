@@ -15,7 +15,7 @@
  * 看该源全部结果；数据已由 SSE 一次给全，纯前端切片，避免千百条撑爆 DOM。
  * Kazumi 源页签独立走 /search/kazumi-stream SSE（2.3，T73 边搜边加载）。
  */
-/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter, FavHub, Timeline, bangumiEpBadge, BangumiSearch, DetailSnap, Home, prefetchDetail, SettingsSnapshot, loadBlockWords, filterBlocked, onBlockWordsChange */
+/* global $, apiUrl, escHtml, warnToast, Detail, vodCard, vodCoverImg, renderPagerBox, pageSizeOf, fillMissingCovers, abortCoverFill, getCachedCover, showLoading, hideLoading, doAction, Kazumi, fitVodTitles, renderStatusBar, openDialog, closeDialog, errorTextOf, localCacheGet, localCacheSet, UIState, playCardsEnter, FavHub, Timeline, bangumiEpBadge, BangumiSearch, DetailSnap, Home, prefetchDetail, SettingsSnapshot, loadBlockWords, filterBlocked, onBlockWordsChange, SearchHistory */
 
 const SEARCH_PAGE_SIZE = 24; // 兜底值；实际每页条数取「搜索页每页条数」设置（T39，默认 24）
 
@@ -388,7 +388,11 @@ function createSearchPage(cfg) {
         async run() {
             const word = $(cfg.keywordSel).val().trim();
             if (!word) { warnToast('请输入关键字'); return; }
-            this._saveWord(word); // 持久化本页签关键词（切页/重启回填搜索框）
+            this._saveWord(word); // 记录本页签最近用词（UIState；已不再回填输入框，见 _restoreShellOnce）
+            // 搜索历史只在这里记（真正发起检索的那一刻）：输入过程不写盘（需求明确禁止）
+            if (typeof SearchHistory !== 'undefined' && SearchHistory.record) {
+                SearchHistory.record(word, cfg.mode === 'kazumi' ? 'kazumi' : 'aggregate');
+            }
             const myToken = ++this._searchToken; // M-30a：搜索令牌——旧词在途回调不作数
             // T39：每页条数取「搜索页」单独设置（默认 24）
             this._size = (await pageSizeOf('pageSizeSearch')) || SEARCH_PAGE_SIZE;
@@ -733,7 +737,11 @@ function createSearchPage(cfg) {
                 : { page: 1, pagecount: 1 });
         },
 
-        /** 持久化本页签关键词（UIState；ui-state.js 未加载的沙箱环境静默跳过）。 */
+        /** 记录本页签最近一次搜索的词（UIState）。
+         *  注意：「重启/切页把词回填进输入框」的旧行为已按需求移除（改由搜索历史面板
+         *  在输入框下方列历史供用户自选），此处只剩「最近用词」这一份轻量记录，
+         *  不再有任何回填消费方——保留是为兼容既有 UIState.search.words 结构
+         *  （search-page.test.js 的持久化契约仍在断言它）。 */
         _saveWord(word) {
             try {
                 if (typeof UIState === 'undefined' || !UIState.get || !UIState.set) return;
@@ -880,6 +888,13 @@ const Search = {
             keywordSel: '#kazumi-search-keyword', goSel: '#kazumi-search-go',
             filtersSel: '#kazumi-search-filters', statusSel: '#kazumi-search-status', resultsSel: '#kazumi-search-results',
         });
+        // 搜索历史面板：必须先于 agg.init()/kz.init() 绑定——控制器 init 里会给同一批
+        // 输入框绑「回车即搜」，而面板的键盘上下+回车要能先一步 stopImmediatePropagation
+        // 拦下回车（同元素上先绑先跑），否则高亮项永远没机会生效。
+        if (typeof SearchHistory !== 'undefined' && SearchHistory.attach) {
+            SearchHistory.attach('#search-keyword', 'aggregate');
+            SearchHistory.attach('#kazumi-search-keyword', 'kazumi');
+        }
         this.agg.init();
         this.kz.init();
         // 页签切换：四个页签各自面板互斥可见（聚合/Kazumi 不再共用一套容器）
@@ -927,21 +942,16 @@ const Search = {
         } catch (e) { /* 持久化失败不影响主流程 */ }
     },
 
-    /** 首次进入搜索视图时恢复持久化的页签与各页签关键词（切页/重启不回初始态）。
-     *  仅一次：之后以用户实际操作为准，不再反向覆盖。 */
+    /** 首次进入搜索视图时恢复持久化的页签（切页/重启回到上次所在的搜索页签）。
+     *  仅一次：之后以用户实际操作为准，不再反向覆盖。
+     *  关键词已不再回填输入框（需求：持久化的词改由搜索历史面板呈现）——旧 UIState
+     *  的 words 仍在写（_saveWord）、此处不再读，输入框一律从空开始，由用户在历史面板里挑。 */
     _restoreShellOnce() {
         if (this._shellRestored) return;
         this._shellRestored = true;
         let st = null;
         try { st = (typeof UIState !== 'undefined' && UIState.get) ? UIState.get('search') : null; } catch (e) { st = null; }
         if (!st) return;
-        const words = (st.words && typeof st.words === 'object') ? st.words : {};
-        // 关键词回填（聚合/Kazumi/Bangumi 输入框；无记录的不动）
-        try {
-            if (words.aggregate) $('#search-keyword').val(String(words.aggregate));
-            if (words.kazumi) $('#kazumi-search-keyword').val(String(words.kazumi));
-            if (words.bangumi) $('#bgm-search-keyword').val(String(words.bangumi));
-        } catch (e) { /* 回填失败不影响展示 */ }
         // 页签还原：激活目标 tab（复用点击链路，面板互斥/聚焦逻辑一并生效）
         const stab = ['aggregate', 'kazumi', 'bangumi', 'image'].indexOf(st.stab) >= 0 ? st.stab : '';
         if (stab && stab !== this._stab) {
@@ -951,7 +961,7 @@ const Search = {
     },
 
     onViewShown() {
-        this._restoreShellOnce(); // 首次切入恢复页签/关键词（仅一次）
+        this._restoreShellOnce(); // 首次切入恢复页签（仅一次）
         if (this.agg) this.agg.onViewShown();
         if (this.kz) this.kz.onViewShown();
         if (typeof BangumiSearch !== 'undefined' && BangumiSearch.onViewShown) BangumiSearch.onViewShown(); // 每页条数变更后重拉（服务端分页）

@@ -63,6 +63,15 @@ const Kazumi = {
         $('#kazumi_rule_editor').on('click', () => this.openEditorDialog());
         $('#kazumi_rule_check').on('click', () => this.checkValidity());
         $('#kazumi_rule_update').on('click', () => this.batchUpdate());
+        // 批量管理（任务2）：入口按钮为开关（已在批量模式时再点是退出，
+        // 而不是重新进入——重新进入会清空已勾选项，避免这种误操作）
+        $('#kazumi_rule_batch').on('click', () => this.toggleBatchMode());
+        $('#kazumi_batch_all').on('click', () => this._batchApply('all'));
+        $('#kazumi_batch_invert').on('click', () => this._batchApply('invert'));
+        $('#kazumi_batch_clear').on('click', () => this._batchApply('clear'));
+        $('#kazumi_batch_update').on('click', () => this.batchUpdateSelected());
+        $('#kazumi_batch_del').on('click', () => this.batchRemoveSelected());
+        $('#kazumi_batch_exit').on('click', () => this.exitBatchMode());
         // 启动时自动检查规则更新（开关默认关）
         $('#set_kazumi_autoupdate').on('change', function () {
             window.yuki.settingsSet('kazumiAutoUpdateOnStart', this.checked);
@@ -160,37 +169,82 @@ const Kazumi = {
             if (rsp && rsp.code === 200) warnToast(`Bangumi 镜像域名已保存：${norm}（api.bgm.tv → api.${norm}）`);
             else warnToast('镜像域名保存失败：后端不可达或域名格式不正确');
         });
+        // ---- 规则行交互（删除/编辑/启停/手动排序/拖拽/批量勾选）----
+        // 批量模式下这些按钮在渲染时就带 disabled（视觉禁用），这里再按状态兜底：
+        // 键盘可达路径（Enter）与渲染竞态下的点击都不会误触删除/启停/排序
         $('#kazumi_rule_list').on('click', '.kazumi-rule-del', (e) => {
+            if (this._batchMode) return;
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.removeRule(name);
         });
         $('#kazumi_rule_list').on('click', '.kazumi-rule-edit', (e) => {
+            if (this._batchMode) return;
             const name = String($(e.currentTarget).data('name') || '');
             if (name) this.openEditorDialog(name);
         });
         $('#kazumi_rule_list').on('change', '.kazumi-rule-toggle', (e) => {
+            if (this._batchMode) return;
             const name = String($(e.currentTarget).data('name') || '');
             const enabled = !!e.currentTarget.checked;
             if (name) this.toggleRule(name, enabled);
         });
-        // 手动排序（2.5，仿 Kazumi ReorderableListView）：上移/下移按钮 + 拖拽
+        // 批量勾选：只认原生复选框（卡片本体不绑定 click，避免点空白区误选）
+        $('#kazumi_rule_list').on('change', '.kazumi-rule-checkbox', (e) => {
+            this._batchCheckboxChanged(e.currentTarget);
+        });
+        // 手动排序（2.5，仿 Kazumi ReorderableListView）：上移/下移按钮 + 拖拽。
+        // 上移/下移保留为键盘/无鼠标场景的排序通道，与拖拽共用同一顺序计算与保存通道
         $('#kazumi_rule_list').on('click', '.kazumi-rule-move', (e) => {
+            if (this._batchMode) return;
             const name = String($(e.currentTarget).data('name') || '');
             const dir = parseInt($(e.currentTarget).data('dir'), 10) || 0;
             if (name && dir) this.moveRule(name, dir);
         });
+        // 拖拽排序：dragover/drop 委托在容器（不是行）上——只有容器能覆盖
+        // 「行间空隙 / 最后一行下方 / 列表空白区」这些落点；插入位置用行上的
+        // before/after 类画指示线，不插占位节点（避免拖拽期 flex 重排抖动）
         $('#kazumi_rule_list')
             .on('dragstart', '.kazumi-rule-row', (e) => {
-                this._dragName = String($(e.currentTarget).data('name') || '');
-                try { e.originalEvent.dataTransfer.effectAllowed = 'move'; } catch (err) { /* ignore */ }
+                if (this._batchMode) { e.preventDefault(); return; } // 批量模式禁用拖拽
+                const name = String($(e.currentTarget).data('name') || '');
+                if (!name) { e.preventDefault(); return; }
+                this._dragName = name;
+                const dt = (e.originalEvent || e).dataTransfer;
+                if (dt) {
+                    try {
+                        dt.effectAllowed = 'move';
+                        dt.setData('text/plain', name); // Firefox/部分环境不设数据不启动拖拽
+                    } catch (err) { /* dataTransfer 只读环境（测试桩）忽略 */ }
+                }
+                // 半透明/浮起视觉延后一帧再加类：Chromium 在 dragstart 同步改样式会把
+                // 拖拽影子一起拍成半透明（拖起来像没抓到手）
+                const row = e.currentTarget;
+                this._dragTimer = setTimeout(() => $(row).addClass('dragging'), 0);
             })
-            .on('dragover', '.kazumi-rule-row', (e) => { e.preventDefault(); })
-            .on('drop', '.kazumi-rule-row', (e) => {
+            .on('dragover', (e) => {
+                if (!this._dragName || this._batchMode) return;
+                e.preventDefault(); // 不 preventDefault 不会触发 drop
+                const dt = (e.originalEvent || e).dataTransfer;
+                if (dt) { try { dt.dropEffect = 'move'; } catch (err) { /* ignore */ } }
+                this._updateDropIndicator(this._dropGapFromEvent(e));
+            })
+            .on('drop', (e) => {
+                if (!this._dragName || this._batchMode) return;
                 e.preventDefault();
-                const targetName = String($(e.currentTarget).data('name') || '');
-                this.dragRuleTo(this._dragName, targetName);
-                this._dragName = null;
-            });
+                const dragName = this._dragName;
+                const gap = this._dropGapFromEvent(e);
+                this._endDragVisual();
+                this.dropRuleAt(dragName, gap);
+            })
+            .on('dragleave', (e) => {
+                // 拖出列表时清掉指示线；relatedTarget 仍在列表内（行与行之间移动，
+                // 容器边界不真正离开）不清，否则指示线会随鼠标在行间闪烁
+                const to = (e.originalEvent && e.originalEvent.relatedTarget) || null;
+                const host = document.getElementById('kazumi_rule_list');
+                if (to && host && host.contains(to)) return;
+                this._updateDropIndicator(null);
+            })
+            .on('dragend', '.kazumi-rule-row', () => this._endDragVisual());
         // WebDAV 同步（3.2 对齐 Kazumi：主开关 + 子开关 + 保存/测试/同步/恢复）
         $('#webdav_sync').on('click', () => this.webdavSyncUI());
         $('#webdav_restore').on('click', () => this.webdavRestoreUI());
@@ -216,6 +270,30 @@ const Kazumi = {
                 window.yuki.settingsSet('webDavEnableRules', false);
                 window.yuki.settingsSet('webDavAutoEnable', false);
                 window.yuki.settingsSet('webDavStartupPull', false);
+            } else {
+                // 重开主开关（或首次启用）：子开关此刻必然全灭——关闭时被清空、新装时静态
+                // 标记也没有 checked——用户会落进"已启用但没有任何同步内容"的死角：
+                // 点同步只得到「未选择任何内容」，看起来像功能坏了。启用即补一份可用默认：
+                // 五项**内容**全选并落盘；自动同步/启动恢复属自动化行为，仍留给用户显式开启
+                // （不替他决定定时与启动即拉取）。只在"全都没选"时兜底，不覆盖已有选择。
+                const hasAny = $('#webdav_enable_history').prop('checked')
+                    || $('#webdav_enable_collect').prop('checked')
+                    || $('#webdav_enable_settings').prop('checked')
+                    || $('#webdav_enable_stats').prop('checked')
+                    || $('#webdav_enable_rules').prop('checked');
+                if (!hasAny) {
+                    const contentKeys = [
+                        ['#webdav_enable_history', 'webDavEnableHistory'],
+                        ['#webdav_enable_collect', 'webDavEnableCollect'],
+                        ['#webdav_enable_settings', 'webDavEnableSettings'],
+                        ['#webdav_enable_stats', 'webDavEnableStats'],
+                        ['#webdav_enable_rules', 'webDavEnableRules'],
+                    ];
+                    for (const [sel, key] of contentKeys) {
+                        $(sel).prop('checked', true);
+                        window.yuki.settingsSet(key, true);
+                    }
+                }
             }
             Kazumi.scheduleWebdavAutoSync(); // 主开关关闭联动停表，重开恢复调度
         });
@@ -275,32 +353,223 @@ const Kazumi = {
     _renderRuleList() {
         const box = $('#kazumi_rule_list');
         $('#kazumi_rule_count').text(this._rules.length);
+        const batch = !!this._batchMode;
+        box.toggleClass('batch-mode', batch);
+        // 整表重渲意味着行节点被替换：拖拽中的 from 索引随之失效（列表可能已被
+        // 检测/更新/增删改过），此处直接作废本次拖拽——drop 会静默放弃，
+        // 不会用旧索引把规则挪错位（宁可不排序，也不产生重复/丢失）
+        if (this._dragName) this._endDragVisual();
+        // 选集与当前列表求交后再渲染：检测/更新/删除完成都会走到这里，被删掉的
+        // 规则不能留在选中集里，否则「已选 N 项」是假的、批量操作会对着不存在的
+        // 名字发请求
+        if (batch) this._batchSel = this._batchReconcile(this._batchSel, this._rules.map((r) => r.name));
+        this._renderBatchBar();
         if (!this._rules.length) {
             box.html('<div class="tip-line">尚未导入任何 Kazumi 规则。</div>');
             return;
         }
         box.html(this._rules.map((r) => {
+            const name = String(r.name || '');
             const validInfo = this._validityLabel(r.validity);
             const times = [r.installed_at ? '安装 ' + r.installed_at : '',
                            r.updated_at && r.updated_at !== r.installed_at ? '更新 ' + r.updated_at : '']
                 .filter(Boolean).join(' · ');
+            // 源网站（任务3）：优先自带来源，其次 referer，最后站点 URL 的域名
+            const src = this._ruleSourceLabel(r);
+            const checked = batch && this._batchSel.has(name);
+            const dis = batch ? ' disabled' : ''; // 批量模式下卡片按钮禁用，勾选不会误触
             return `
-            <div class="history-item kazumi-rule-row" draggable="true" data-name="${escHtml(r.name)}">
-                <button class="history-btn kazumi-rule-move" data-name="${escHtml(r.name)}" data-dir="-1" title="上移">↑</button>
-                <button class="history-btn kazumi-rule-move" data-name="${escHtml(r.name)}" data-dir="1" title="下移">↓</button>
+            <div class="history-item kazumi-rule-row${checked ? ' kazumi-rule-checked' : ''}" draggable="${batch ? 'false' : 'true'}" data-name="${escHtml(name)}">
+                ${batch ? `<label class="kazumi-rule-check" title="选择该规则">
+                    <input type="checkbox" class="kazumi-rule-checkbox" data-name="${escHtml(name)}"${checked ? ' checked' : ''}>
+                </label>` : ''}
+                <button class="history-btn kazumi-rule-move" data-name="${escHtml(name)}" data-dir="-1" title="上移"${dis}>↑</button>
+                <button class="history-btn kazumi-rule-move" data-name="${escHtml(name)}" data-dir="1" title="下移"${dis}>↓</button>
                 <div class="kazumi-rule-main">
-                    <span class="kazumi-rule-name" title="${escHtml(r.name)} v${escHtml(r.version || '')}">${escHtml(r.name)} <span class="kazumi-subver">v${escHtml(r.version || '')}</span></span>
+                    <span class="kazumi-rule-name" title="${escHtml(name)} v${escHtml(r.version || '')}">${escHtml(name)} <span class="kazumi-subver">v${escHtml(r.version || '')}</span></span>
+                    ${src ? `<span class="kazumi-rule-source" title="来源：${escHtml(src.title)}">来源 ${escHtml(src.text)}</span>` : ''}
                     ${times ? `<span class="kazumi-rule-times">${escHtml(times)}</span>` : ''}
                 </div>
                 ${validInfo ? `<span class="kazumi-validity ${validInfo.cls}" title="${escHtml(validInfo.label)}">${escHtml(validInfo.label)}</span>` : ''}
-                <button class="history-btn kazumi-rule-edit" data-name="${escHtml(r.name)}" title="编辑规则">✎</button>
+                <button class="history-btn kazumi-rule-edit" data-name="${escHtml(name)}" title="编辑规则"${dis}>✎</button>
                 <label class="md-switch">
-                    <input type="checkbox" class="kazumi-rule-toggle" data-name="${escHtml(r.name)}" ${r.enabled !== false ? 'checked' : ''}>
+                    <input type="checkbox" class="kazumi-rule-toggle" data-name="${escHtml(name)}" ${r.enabled !== false ? 'checked' : ''}${dis}>
                     <span class="md-switch-track"></span>
                 </label>
-                <button class="history-btn kazumi-rule-del" data-name="${escHtml(r.name)}" title="删除该规则">✕</button>
+                <button class="history-btn kazumi-rule-del" data-name="${escHtml(name)}" title="删除该规则"${dis}>✕</button>
             </div>`;
         }).join(''));
+    },
+
+    // ---------------------------------------------------------------- 排序 / 来源 / 批量选择纯函数
+    // （排序、域名提取、批量选择三处状态计算都做成纯函数：边界只有一处定义，可单测）
+
+    /**
+     * 数组移动（插入语义：结果中该元素位于索引 to）。to 越界夹到 [0, n-1]；
+     * from 越界/非整数、from === to、非数组输入都返回原列表浅拷贝（无副作用）。
+     * 上移/下移与拖拽落位共用，保证「拖到自己/越界」在任何路径下都安全。
+     */
+    _moveItem(list, from, to) {
+        const arr = Array.isArray(list) ? list.slice() : [];
+        if (!Number.isInteger(from) || !Number.isInteger(to)) return arr;
+        if (from < 0 || from >= arr.length) return arr;
+        const dst = Math.max(0, Math.min(arr.length - 1, to));
+        if (dst === from) return arr;
+        const [moved] = arr.splice(from, 1);
+        arr.splice(dst, 0, moved);
+        return arr;
+    },
+
+    /**
+     * 拖拽落点间隙（几何纯函数）：gap = 指针位于多少行「中线」之下，取值 0..n，
+     * gap===n 表示落在最后一行下方（列表末尾）。
+     * rects[i] 取 {top, height}；无效项跳过。指针非法或全部矩形非法返回 null，
+     * 调用方放弃落位——宁可不排序，也不用坏索引打乱顺序。
+     */
+    _dropGapFromRects(rects, y) {
+        const list = Array.isArray(rects) ? rects : [];
+        const py = Number(y);
+        if (!Number.isFinite(py)) return null;
+        let gap = 0;
+        let valid = 0;
+        for (const r of list) {
+            if (!r || !Number.isFinite(Number(r.top)) || !Number.isFinite(Number(r.height))) continue;
+            valid++;
+            if (py > Number(r.top) + Number(r.height) / 2) gap++;
+        }
+        if (!valid && list.length) return null;
+        return gap;
+    },
+
+    /**
+     * 落点间隙 → 移动目标索引：移除 from 会使其后的间隙整体左移一格
+     * （gap > from ⇒ gap-1），gap ≤ from 时目标即 gap（含 gap===from 的原地落位）。
+     * from 非法（拖拽期间规则已被删/列表已刷新）返回 -1，调用方放弃。
+     */
+    _dropTargetIndex(from, gap, length) {
+        const n = Number.isInteger(length) && length > 0 ? length : 0;
+        if (!n || !Number.isInteger(from) || from < 0 || from >= n) return -1;
+        const g = Math.max(0, Math.min(n, Number.isInteger(gap) ? gap : from));
+        return g > from ? g - 1 : g;
+    },
+
+    /** 是否为同一规则集合的排列（长度 + 名称多重集一致），防竞态下丢/重规则。 */
+    _sameRuleSet(a, b) {
+        const x = Array.isArray(a) ? a : [];
+        const y = Array.isArray(b) ? b : [];
+        if (x.length !== y.length) return false;
+        const key = (r) => String((r && r.name) || '');
+        const sx = x.map(key).sort();
+        const sy = y.map(key).sort();
+        return sx.every((v, i) => v === sy[i]);
+    },
+
+    /**
+     * 从 URL 文本提取站点主机名（纯函数）：支持完整 URL / 协议相对 //host /
+     * 无协议 host/path、带端口、认证信息、路径、查询、片段、占位符（{keyword}）。
+     * 仅 http/https（或无协议）视为合法站点；其它 scheme（javascript:/data:/
+     * mailto: 等）与非域名（含空格、非法字符、缺域名点）返回 ''——宁可不显示，
+     * 也不用垃圾文本占卡片。去 www. 前缀并统一小写，便于卡片紧凑展示。
+     * 已知限制：中文等非 ASCII 域名（需 punycode）与 IPv6 字面量不识别。
+     */
+    _extractHost(raw) {
+        const s = String(raw == null ? '' : raw).trim();
+        if (!s) return '';
+        // scheme 判定分两层：
+        // 1) `scheme://` 形态只有 http/https 可视作站点，其余（thunder:// 等）拒绝；
+        // 2) 无 `//` 时冒号通常不是协议——`host:8080`（端口）与 `user:pw@host`（凭据）
+        //    都是合法无协议写法，只有「冒号后既非数字、又不含 @」的形态才按未知
+        //    scheme 拒绝（javascript:alert(1) / data:text/... / about:blank 等）；
+        // 3) 带 @ 的形态里再显式拒绝已知非站点 scheme（mailto:a@b.com 会被
+        //    「凭据」规则误读成 b.com）。未知 scheme + @ 仍可能被误读，但输入来自
+        //    规则字段（baseURL/referer），出错只影响展示文本。
+        const withSlashes = /^([a-z][a-z0-9+.-]*):\/\//i.exec(s);
+        if (withSlashes && !/^https?$/i.test(withSlashes[1])) return '';
+        const bare = /^([a-z][a-z0-9+.-]*):([^/]*)/i.exec(s);
+        if (!withSlashes && bare) {
+            const after = bare[2];
+            if (!/^\d/.test(after) && !after.includes('@')) return '';
+            if (after.includes('@') && /^(javascript|data|mailto|tel|file|about|blob|chrome|view-source|ftp|ws|wss|magnet|thunder|ed2k|smb|ssh|sftp|irc|urn|intent)$/i.test(bare[1])) return '';
+        }
+        let rest = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^\/\//, '');
+        rest = rest.split(/[/?#]/)[0];      // 去路径/查询/片段（{keyword} 占位符随之丢弃）
+        rest = rest.split('@').pop() || ''; // 去 user:pass@
+        rest = rest.replace(/:\d+$/, '');   // 去端口
+        rest = rest.replace(/^www\./i, '');
+        rest = rest.toLowerCase();
+        if (rest === 'localhost') return rest;
+        if (rest.length > 253) return '';
+        return /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9_])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(rest) ? rest : '';
+    },
+
+    /**
+     * 规则卡片「源网站」展示值（纯函数）：自带来源 → referer → 站点 URL
+     * （baseURL、searchURL）取域名；全缺/非法返回 null（卡片不渲染该行）。
+     * 字段可用性（已核实后端 kazumi/plugin_manager.list_all）：list 只回
+     * name/version/enabled/api/baseURL/searchURL/installed_at/updated_at/validity，
+     * 既无 source/homepage 也无 referer——所以现阶段实际展示 baseURL 域名；
+     * 后端将来补字段时无需改前端即可自动优先展示（见报告「需 lead 协调」）。
+     */
+    _ruleSourceLabel(rule) {
+        const r = rule || {};
+        const rawSource = r.source;
+        const text = (typeof rawSource === 'string' || typeof rawSource === 'number')
+            ? String(rawSource).trim() : '';
+        if (text) {
+            // 自带来源可能是任意文本（非 URL），原样展示并整串放进 title
+            return { text: text.length > 80 ? text.slice(0, 80) + '…' : text, title: text, from: 'source' };
+        }
+        const homepage = String(r.homepage || r.homePage || '').trim();
+        if (homepage) {
+            const host = this._extractHost(homepage);
+            if (host) return { text: host, title: homepage, from: 'homepage' };
+        }
+        const referer = String(r.referer || '').trim();
+        if (referer) {
+            const host = this._extractHost(referer);
+            if (host) return { text: host, title: referer, from: 'referer' };
+        }
+        for (const field of ['baseURL', 'searchURL']) {
+            const value = String(r[field] || '').trim();
+            if (!value) continue;
+            const host = this._extractHost(value);
+            if (host) return { text: host, title: value, from: field };
+        }
+        return null;
+    },
+
+    /**
+     * 批量选择集合运算（纯函数）：reconcile 把选集收窄到当前仍存在的名称，
+     * 列表刷新/规则被删后不残留幽灵选中项。Set 比较在下游只做 has/forEach，
+     * 因此这里统一返回新 Set（不改入参）。
+     */
+    _batchReconcile(selected, names) {
+        const universe = new Set((Array.isArray(names) ? names : []).map((n) => String(n || '')));
+        const out = new Set();
+        if (selected && typeof selected.forEach === 'function') {
+            selected.forEach((n) => { const key = String(n == null ? '' : n); if (key && universe.has(key)) out.add(key); });
+        }
+        return out;
+    },
+
+    /** 选集开关一项（纯函数，返回新集合；空名称忽略）。 */
+    _batchToggle(selected, name, on) {
+        const out = new Set();
+        if (selected && typeof selected.forEach === 'function') selected.forEach((n) => out.add(String(n == null ? '' : n)));
+        const key = String(name == null ? '' : name);
+        if (!key) return out;
+        if (on === false) out.delete(key);
+        else out.add(key);
+        return out;
+    },
+
+    /** 反选（纯函数，返回新集合）：以当前列表为全集，未选中的选中、已选中的取消。 */
+    _batchInvert(selected, names) {
+        const universe = new Set((Array.isArray(names) ? names : []).map((n) => String(n || '')));
+        const picked = (selected && typeof selected.has === 'function') ? selected : new Set();
+        const out = new Set();
+        universe.forEach((n) => { if (!picked.has(n)) out.add(n); });
+        return out;
     },
 
     /** 有效性徽标：unknown 不显示，valid 绿，invalid 红，captcha 橙。 */
@@ -567,15 +836,26 @@ const Kazumi = {
     /** 删除规则（confirmDialog 二次确认）。 */
     async removeRule(name) {
         if (!await confirmDialog(`删除规则「${name}」？`, { okText: '删除' })) return;
+        const r = await this._removeRuleDirect(name);
+        if (r.ok) {
+            warnToast('已删除');
+            this.refreshRuleList();
+        } else {
+            warnToast('删除失败：' + r.msg);
+        }
+    },
+
+    /**
+     * 单条删除通道（不含确认框）：单条删除与批量删除共用同一后端调用，
+     * 批量场景由调用方先做一次「删除 N 条」的二次确认。后端 kazumiRemove
+     * 每次只接受一个 name，故批量删除按最小请求数语义逐条串行调用。
+     */
+    async _removeRuleDirect(name) {
         try {
             const rsp = await doAction('kazumiRemove', { name }, '/kazumi/action');
-            if (rsp && rsp.code === 200) {
-                warnToast('已删除');
-                this.refreshRuleList();
-            } else {
-                warnToast('删除失败：' + ((rsp && rsp.msg) || '未知错误'));
-            }
-        } catch (e) { warnToast('删除失败'); }
+            if (rsp && rsp.code === 200) return { ok: true, msg: '' };
+            return { ok: false, msg: (rsp && rsp.msg) || '未知错误' };
+        } catch (e) { return { ok: false, msg: '请求失败' }; }
     },
 
     /** 启用/禁用规则。 */
@@ -594,38 +874,169 @@ const Kazumi = {
         }
     },
 
-    /** 上移/下移一条规则（改顺序并持久化，2.5）。 */
+    /** 上移/下移一条规则（步长 dir；顺序计算走 _moveItem，2.5）。 */
     async moveRule(name, dir) {
         const idx = this._rules.findIndex((r) => r.name === name);
-        const target = idx + dir;
-        if (idx < 0 || target < 0 || target >= this._rules.length) return;
-        const arr = this._rules.slice();
-        const [it] = arr.splice(idx, 1);
-        arr.splice(target, 0, it);
-        await this._applyRuleOrder(arr);
+        const to = idx + (parseInt(dir, 10) || 0);
+        // 首/尾越界直接返回（不产生请求），与手动拖到列表首尾是同一条边界口径
+        if (idx < 0 || to < 0 || to >= this._rules.length) return;
+        await this._applyRuleOrder(this._moveItem(this._rules, idx, to));
     },
 
-    /** 拖拽落位：把拖动规则移到目标规则位置（持久化）。 */
-    async dragRuleTo(dragName, targetName) {
-        if (!dragName || dragName === targetName) return;
+    /** 读取列表行几何（顺序即渲染顺序，与 _rules 一致）。 */
+    _dragRowRects() {
+        const rects = [];
+        $('#kazumi_rule_list .kazumi-rule-row').each(function () {
+            const r = this.getBoundingClientRect ? this.getBoundingClientRect() : null;
+            rects.push(r ? { top: r.top, height: r.height } : null);
+        });
+        return rects;
+    },
+
+    /** 由拖拽事件取落点间隙（DOM 几何 + 指针 Y 交给纯函数算）。 */
+    _dropGapFromEvent(e) {
+        const oe = (e && e.originalEvent) || e || {};
+        return this._dropGapFromRects(this._dragRowRects(), Number(oe.clientY));
+    },
+
+    /** 插入位置指示线：gap 落在第 g 行上方；gap===n 画在最后一行下方。 */
+    _updateDropIndicator(gap) {
+        const rows = $('#kazumi_rule_list .kazumi-rule-row');
+        if (gap === null || gap === undefined) { rows.removeClass('kazumi-drop-before kazumi-drop-after'); this._dropGap = null; return; }
+        if (gap === this._dropGap) return; // dragover 高频触发，落点没变就不动 DOM
+        this._dropGap = gap;
+        rows.removeClass('kazumi-drop-before kazumi-drop-after');
+        if (!rows.length) return;
+        if (gap >= rows.length) rows.eq(rows.length - 1).addClass('kazumi-drop-after');
+        else rows.eq(gap).addClass('kazumi-drop-before');
+    },
+
+    /** 结束拖拽：清定时器、拖拽态与指示线（dragend/drop/取消统一收口）。 */
+    _endDragVisual() {
+        if (this._dragTimer) { clearTimeout(this._dragTimer); this._dragTimer = null; }
+        this._dragName = null;
+        this._dropGap = null;
+        $('#kazumi_rule_list .kazumi-rule-row').removeClass('dragging kazumi-drop-before kazumi-drop-after');
+    },
+
+    /**
+     * 拖拽落位：gap 为落点间隙（0..n）。从当前 _rules 现场求 from/to——
+     * 拖拽期间列表可能已被刷新（检测/更新完成），索引一律以最新列表为准；
+     * from 找不到（规则被删）或落位后位置不变时静默返回，不产生副作用。
+     */
+    async dropRuleAt(dragName, gap) {
         const from = this._rules.findIndex((r) => r.name === dragName);
-        const to = this._rules.findIndex((r) => r.name === targetName);
-        if (from < 0 || to < 0) return;
-        const arr = this._rules.slice();
-        const [it] = arr.splice(from, 1);
-        arr.splice(to, 0, it);
-        await this._applyRuleOrder(arr);
+        if (!dragName || from < 0) return;
+        const to = this._dropTargetIndex(from, gap, this._rules.length);
+        if (to < 0 || to === from) return;
+        await this._applyRuleOrder(this._moveItem(this._rules, from, to));
     },
 
-    /** 按新顺序应用并持久化：乐观更新 + 失败回滚。 */
+    /**
+     * 按新顺序应用并持久化：一次 kazumiReorder（names 全量数组，后端一次落盘）
+     * + 乐观更新 + 失败回滚。写前校验新序与当前列表同集合——竞态下基于旧索引
+     * 算出的排列若会丢/重规则，直接放弃并回到当前真实列表。
+     */
     async _applyRuleOrder(arr) {
         const prev = this._rules.slice();
+        if (!this._sameRuleSet(prev, arr)) { this._renderRuleList(); return; }
         this._rules = arr;
         this._renderRuleList();
         try {
             const rsp = await doAction('kazumiReorder', { names: JSON.stringify(arr.map((r) => r.name)) }, '/kazumi/action');
             if (!rsp || rsp.code !== 200) { warnToast('排序保存失败'); this._rules = prev; this._renderRuleList(); }
         } catch (e) { warnToast('排序保存失败'); this._rules = prev; this._renderRuleList(); }
+    },
+
+    // ---------------------------------------------------------------- 批量管理（任务2）
+
+    // 批量模式状态：_batchSel 初值用 null 而不是 new Set()——对象字面量在脚本
+    // 加载期求值，极简 vm 沙箱（既有单测桩未提供全局 Set）会在这里直接抛错
+    _batchMode: false,
+    _batchSel: null,
+
+    /** 进入批量管理（无规则时无意义，直接提示）。 */
+    enterBatchMode() {
+        if (!this._rules.length) { warnToast('当前没有已导入的规则'); return; }
+        this._batchMode = true;
+        this._batchSel = new Set();
+        this._renderRuleList();
+    },
+
+    /** 退出批量管理：清空选择、恢复普通交互（卡片按钮/拖拽）。 */
+    exitBatchMode() {
+        this._batchMode = false;
+        this._batchSel = new Set();
+        this._renderRuleList();
+    },
+
+    /** 入口按钮开关：已在批量模式时再点即退出（不重新进入，避免误清空勾选）。 */
+    toggleBatchMode() {
+        if (this._batchMode) this.exitBatchMode();
+        else this.enterBatchMode();
+    },
+
+    /** 批量操作条与入口按钮状态（模式 + 选中数联动）。 */
+    _renderBatchBar() {
+        const n = this._batchSel ? this._batchSel.size : 0;
+        $('#kazumi_batch_ops').toggle(!!this._batchMode);
+        $('#kazumi_rule_batch').toggleClass('active', !!this._batchMode);
+        $('#kazumi_batch_count').text(`已选 ${n} 项`);
+        // 0 选中时批量操作无意义：禁用而不是弹提示，避免误点出确认框
+        $('#kazumi_batch_update, #kazumi_batch_del').prop('disabled', n === 0);
+    },
+
+    /** 操作条入口（全选 / 反选 / 清空选择），整表重渲以同步勾选框。 */
+    _batchApply(mode) {
+        const names = this._rules.map((r) => r.name);
+        if (mode === 'all') this._batchSel = new Set(names.map((n) => String(n || '')));
+        else if (mode === 'invert') this._batchSel = this._batchInvert(this._batchSel, names);
+        else this._batchSel = new Set();
+        this._renderRuleList();
+    },
+
+    /** 勾选框变更：只更新选中集与该行高亮（不整表重渲，保留键盘焦点）。 */
+    _batchCheckboxChanged(el) {
+        const name = String($(el).data('name') || '');
+        if (!name) return;
+        this._batchSel = this._batchToggle(this._batchSel, name, !!(el && el.checked));
+        $(el).closest('.kazumi-rule-row').toggleClass('kazumi-rule-checked', this._batchSel.has(name));
+        this._renderBatchBar();
+    },
+
+    /** 选中项名称（按列表顺序，保证批量请求顺序稳定）。 */
+    _batchSelectedNames() {
+        return this._rules.filter((r) => this._batchSel && this._batchSel.has(String(r.name || '')))
+            .map((r) => String(r.name || ''));
+    },
+
+    /** 批量更新选中项：复用 batchUpdate 的子集通道；启动成功才退出批量模式。 */
+    async batchUpdateSelected() {
+        const names = this._batchSelectedNames();
+        if (!names.length) { warnToast('请先勾选要更新的规则'); return; }
+        const started = await this.batchUpdate(names);
+        if (started) this.exitBatchMode();
+    },
+
+    /**
+     * 批量删除选中项：一次二次确认（写明条数）+ 复用单条删除通道逐条执行。
+     * 逐条而不是并发：后端每条 remove 都会落盘一次，串行避免写文件竞争；
+     * 名字里含逗号的规则无法走批量更新（后端按逗号切分），删除不受此限制。
+     */
+    async batchRemoveSelected() {
+        const names = this._batchSelectedNames();
+        if (!names.length) { warnToast('请先勾选要删除的规则'); return; }
+        if (!await confirmDialog(`将删除选中的 ${names.length} 条规则，删除后无法恢复，确认继续？`,
+            { okText: `删除 ${names.length} 条` })) return;
+        let ok = 0;
+        let fail = 0;
+        for (const name of names) {
+            const done = await this._removeRuleDirect(name);
+            if (done.ok) ok++; else fail++;
+        }
+        warnToast(`批量删除完成：成功 ${ok} 条${fail ? ` · 失败 ${fail} 条` : ''}`, { summary: true });
+        this.exitBatchMode();          // 退出批量模式（清空选择、恢复普通交互）
+        await this.refreshRuleList();  // 再拉真实列表，校正计数与顺序
     },
 
     // ---------------------------------------------------------------- 有效性检测 / 批量更新
@@ -674,13 +1085,45 @@ const Kazumi = {
         try { const s = (await window.yuki.settingsGet()) || {}; return this._normalizeToken(s.bangumiToken || ''); } catch (e) { return ''; }
     },
 
+    /** 同步优先级取值归一化（与后端 PluginManager.normalize_sync_priority 同一套白名单口径）：
+     *  新值 local/remote/newest；旧版下拉落盘的是 '0'/'1'，按语义迁移，老用户设置既不能丢也不能反转。
+     *  非法/缺失回落 'local'（= 改动前的既有行为，老用户语义不变）。 */
+    _normalizeSyncPriority(v) {
+        const s = String(v === undefined || v === null ? '' : v).trim().toLowerCase();
+        if (s === 'local' || s === 'remote' || s === 'newest') return s;
+        if (s === '0') return 'local';   // 旧下拉：'0' = 本地优先
+        if (s === '1') return 'remote';  // 旧下拉：'1' = Bangumi 优先
+        return 'local';
+    },
+
+    /** 上次同步完成时间，供后端「本地自上次同步未改动 → 远端胜」的增量判定使用。
+     *  当前没有任何写入方：主进程 SETTINGS_SET_ALLOWED 白名单未放行 bangumiLastSyncAt，
+     *  渲染层写入会被静默忽略（src/main/index.js），故这里读不到就回 null，后端按
+     *  「无历史同步时间」处理（不猜值）。待 lead 在白名单放行并在同步成功后写入，本函数自动生效。 */
+    async _getLastSyncAt(settings) {
+        try {
+            const s = settings || (await window.yuki.settingsGet()) || {};
+            const v = s.bangumiLastSyncAt;
+            if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+            if (typeof v === 'string' && v.trim()) return v;  // ISO 字符串原样透传，由后端解析
+            return null;
+        } catch (e) { return null; }
+    },
+
     /** 回填 token 输入框（设置已保存过时展示）与同步选项。 */
     async _prefillBangumiToken() {
         const t = await this._getBangumiToken();
         if (t) $('#bangumi_token').val(t);
         try {
             const s = (await window.yuki.settingsGet()) || {};
-            if (s.bangumiSyncPriority !== undefined && s.bangumiSyncPriority !== null) $('#bangumi_sync_priority').val(String(s.bangumiSyncPriority));
+            const prio = this._normalizeSyncPriority(s.bangumiSyncPriority);
+            $('#bangumi_sync_priority').val(prio);
+            // 旧值（'0'/'1'）读到即迁移落盘：否则每次开设置页都要再迁一次，
+            // 且用户只要不动下拉就一直留着死值（读侧虽已兼容，但库里长期是两种口径）
+            if (s.bangumiSyncPriority !== undefined && s.bangumiSyncPriority !== null
+                && String(s.bangumiSyncPriority).trim().toLowerCase() !== prio) {
+                try { window.yuki.settingsSet('bangumiSyncPriority', prio); } catch (e) { /* 迁移失败不阻塞 */ }
+            }
             $('#bangumi_immediate_toast').prop('checked', s.bangumiImmediateSyncToastEnable !== false);
             $('#set_bangumi_autosync_status').prop('checked', s.bangumiAutoSyncStatus === true);
             $('#set_bangumi_autosync_on_start').prop('checked', s.bangumiAutoSyncOnStart === true);
@@ -1061,8 +1504,15 @@ const Kazumi = {
      * 相比旧串行逐条 set（每条重置用户名缓存 + 8 组合兜底），本管线：远端只拉一次、上传有界并发、
      * 用户名只解析一次，大批量收藏显著提速。单条失败不中断整批。
      *
+     * 同步优先级（设置项 bangumiSyncPriority）在这里被真正消费：'local'/'remote'/'newest'
+     * 原样传给后端做冲突裁决；'newest'（最新修改时间优先）下后端按「本地 ts vs 远端 updated_at」
+     * 判较新者，远端较新的条目会被写回本地收藏标签（覆盖本地展示/状态），
+     * 明细（谁胜/依据/双方时间）在控制台 [bangumi-sync] 日志里可查。
+     * 此前这里硬编码 priority:'local' 且从不传 lastSyncAt，设置页下拉是个死开关。
+     *
      * @param onProgress 可选 (done, total) => void，用于 UI 进度展示（契约不变）。
-     * @returns {Promise<{uploaded:number, skipped:number, failed:number, total:number}|null>} 无 Token 返回 null。
+     * @returns {Promise<{uploaded:number, skipped:number, failed:number, total:number,
+     *   conflicts:number, byNewest:number, remoteOverridden:number, priority:string}|null>} 无 Token 返回 null。
      */
     async uploadFavoritesToBangumi(onProgress) {
         const token = await this._getBangumiToken();
@@ -1075,6 +1525,7 @@ const Kazumi = {
         // 阶段 A：解析每条收藏的 subjectId + type（进度用于「匹配」阶段），无法匹配计 skipped
         const localFavs = [];
         const idWriteback = new Map(); // uid → bangumiId：结束后统一回写
+        const uidSubject = new Map();  // uid → subjectId：「远端较新」时按 uid 反查本地记录回写标签
         let resolveSkipped = 0;
         for (let i = 0; i < targets.length; i++) {
             const f = targets[i];
@@ -1087,6 +1538,7 @@ const Kazumi = {
                 }
                 if (subjectId) {
                     localFavs.push({ subjectId: String(subjectId), type, ts: Number(f.ts) || 0, name: f.name });
+                    if (f.uid) uidSubject.set(f.uid, String(subjectId));
                     if (f.uid && String(f.bangumiId || '') !== String(subjectId)) idWriteback.set(f.uid, String(subjectId));
                 } else {
                     resolveSkipped++; // 匹配不到 Bangumi subject
@@ -1108,11 +1560,18 @@ const Kazumi = {
                 if (changed) await recSet('favorites', list);
             } catch (e) { /* 回写失败不影响上传 */ }
         }
-        // 阶段 B：一次调后端生成三方合并计划（远端全量分页拉取在后端完成）
+        // 阶段 B：一次调后端生成三方合并计划（远端全量分页拉取在后端完成）。
+        // 优先级/上次同步时间在这里读设置：此前硬编码 priority:'local' 且从不传 lastSyncAt，
+        // 设置页下拉完全没被消费（死开关）。
+        const settings = await (async () => { try { return (await window.yuki.settingsGet()) || {}; } catch (e) { return {}; } })();
+        const priority = this._normalizeSyncPriority(settings.bangumiSyncPriority);
+        const lastSyncAt = await this._getLastSyncAt(settings);
         let plan = null;
         try {
             const rsp = await doAction('kazumiBangumiSync', {
-                token, favorites: JSON.stringify(localFavs), priority: 'local',
+                token, favorites: JSON.stringify(localFavs), priority,
+                // 无落盘时间时传空串：URLSearchParams 会把 null 序列化成 "null"，后端只认空/缺失
+                lastSyncAt: (lastSyncAt === null || lastSyncAt === undefined) ? '' : lastSyncAt,
             }, '/kazumi/action');
             plan = (rsp && rsp.plan) || null;
         } catch (e) { plan = null; }
@@ -1126,10 +1585,51 @@ const Kazumi = {
             }
             return { uploaded: 0, skipped: resolveSkipped, failed: localFavs.length, total, error: plan.error };
         }
+        // 冲突裁决结果：至少让「本次哪些条目按最新时间裁决」在控制台/日志可查（不为它新增大 UI）。
+        const conflicts = Array.isArray(plan.conflict) ? plan.conflict : [];
+        const resolvedByNewest = conflicts.filter((c) => c && c.resolvedBy === 'newest');
+        const remoteWon = resolvedByNewest.filter((c) => c && c.resolved === 'remote');
+        const conflictStats = {
+            conflicts: conflicts.length, byNewest: resolvedByNewest.length,
+            remoteOverridden: 0, priority,
+        };
+        if (conflicts.length) {
+            console.log(`[bangumi-sync] 冲突 ${conflicts.length} 条 · 按最新时间裁决 ${resolvedByNewest.length} 条 · 优先级 ${priority}`);
+            conflicts.forEach((c) => {
+                if (!c) return;
+                const localTime = (c.localTsSec === null || c.localTsSec === undefined) ? '无时间' : String(c.localTsSec);
+                const remoteTime = (c.remoteUpdatedAt === undefined || c.remoteUpdatedAt === null) ? '无时间' : String(c.remoteUpdatedAt);
+                console.log(`[bangumi-sync] ${c.name || c.subjectId}：本地 type=${c.localType}(${localTime}) ↔ Bangumi type=${c.remoteType}(${remoteTime}) → ${c.resolved === 'local' ? '本地胜' : 'Bangumi 胜'} via ${c.resolvedBy}`);
+            });
+        }
+        // 「最新时间优先」判定远端较新的条目：把远端收藏类型覆盖回本地收藏标签（本地展示/状态跟随远端）。
+        // 只回写 resolvedBy==='newest' 的条目——priority=local/remote 的既有语义保持不动，不扩大改动面。
+        // 不动 ts：它是「用户本地改动时间」，这里写的是同步下行状态；写完 type 已一致，不会反复触发。
+        if (remoteWon.length) {
+            const TYPE_TAG = { 1: 'want', 2: 'seen', 3: 'watching', 4: 'hold', 5: 'dropped' };
+            const wonBySid = new Map(remoteWon.map((c) => [String(c.subjectId), c]));
+            try {
+                const list = await recGet('favorites'); // 重读最新表，避免覆盖同步期间其他改动
+                let changed = 0;
+                (list || []).forEach((it) => {
+                    if (!it || !it.uid) return;
+                    const hit = wonBySid.get(uidSubject.get(it.uid));
+                    const tag = hit && TYPE_TAG[Number(hit.remoteType)];
+                    if (!tag || it.tag === tag) return;
+                    it.tag = tag;
+                    changed++;
+                });
+                if (changed) {
+                    await recSet('favorites', list);
+                    console.log(`[bangumi-sync] 已按最新时间把 ${changed} 条本地收藏标签改为 Bangumi 端状态`);
+                }
+                conflictStats.remoteOverridden = changed;
+            } catch (e) { /* 回写失败不影响上传结果 */ }
+        }
         const uploads = plan.upload || [];
         const planSkipped = Number(plan.skipped) || 0;
         if (!uploads.length) {
-            return { uploaded: 0, skipped: resolveSkipped + planSkipped, failed: 0, total };
+            return { uploaded: 0, skipped: resolveSkipped + planSkipped, failed: 0, total, ...conflictStats };
         }
         // 阶段 C：并发上传（后端 max_workers=3 + 限速）。进度切到「上传」阶段。
         if (typeof onProgress === 'function') { try { onProgress(0, uploads.length); } catch (e) { /* ignore */ } }
@@ -1154,7 +1654,7 @@ const Kazumi = {
             }
         } catch (e) { failed = uploads.length; }
         if (typeof onProgress === 'function') { try { onProgress(uploads.length, uploads.length); } catch (e) { /* ignore */ } }
-        return { uploaded, skipped: resolveSkipped + planSkipped, failed, total, error: applyError };
+        return { uploaded, skipped: resolveSkipped + planSkipped, failed, total, error: applyError, ...conflictStats };
     },
 
     /** 立即同步：拉取 Bangumi 收藏并刷新「我的收藏」合并网格（复用 My 的缓存刷新）。
@@ -1195,7 +1695,11 @@ const Kazumi = {
             if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
             else hideLoading();
             const upMsg = up ? `上传 ${up.uploaded} · 跳过 ${up.skipped}${up.failed ? ` · 失败 ${up.failed}` : ''}` : '';
-            warnToast(`已同步 Bangumi 收藏（${n} 条）${upMsg ? '；' + upMsg : ''}`, { summary: true });
+            // 冲突裁决摘要：只在本次确实发生「最新时间优先」裁决时才追加，日常同步文案不变长
+            const newestMsg = (up && up.byNewest)
+                ? ` · 最新时间裁决 ${up.byNewest}${up.remoteOverridden ? `（Bangumi 覆盖本地 ${up.remoteOverridden}）` : ''}`
+                : '';
+            warnToast(`已同步 Bangumi 收藏（${n} 条）${upMsg ? '；' + upMsg : ''}${newestMsg}`, { summary: true });
         } catch (e) {
             if (typeof My !== 'undefined' && My._closeSyncProgress) My._closeSyncProgress();
             else hideLoading();
@@ -1338,12 +1842,20 @@ const Kazumi = {
         }
     },
 
-    /** 批量更新：从商店拉取全部规则最新版，4 并发更新。 */
-    async batchUpdate() {
-        if (!await confirmDialog('将从规则商店批量检查并更新所有已安装规则，继续？', { okText: '更新' })) return;
+    /**
+     * 批量更新：从商店拉取规则最新版（4 并发，后端实现）。
+     * names 缺省 = 原入口行为（全部已安装规则，确认文案保持不变）；
+     * 传名称数组 = 只更新子集（批量管理选中项；后端 kazumiBatchUpdate 的
+     * names 逗号分隔协议），确认文案写明条数。
+     * 返回是否成功启动，调用方（批量管理）据此决定是否退出批量模式。
+     */
+    async batchUpdate(names) {
+        const subset = Array.isArray(names) ? names.map((n) => String(n == null ? '' : n).trim()).filter(Boolean) : [];
+        const scope = subset.length ? `选中的 ${subset.length} 条` : '所有已安装';
+        if (!await confirmDialog(`将从规则商店批量检查并更新${scope}规则，继续？`, { okText: '更新' })) return false;
         try {
-            const rsp = await doAction('kazumiBatchUpdate', {}, '/kazumi/action');
-            if (!rsp || !rsp.started) { warnToast('已有批量更新正在运行'); return; }
+            const rsp = await doAction('kazumiBatchUpdate', subset.length ? { names: subset.join(',') } : {}, '/kazumi/action');
+            if (!rsp || !rsp.started) { warnToast('已有批量更新正在运行'); return false; }
             warnToast('正在批量更新规则…');
             this._pollTask('kazumiUpdateStatus', (s) => {
                 const results = s.results || [];
@@ -1353,8 +1865,10 @@ const Kazumi = {
                 warnToast(`更新完成：更新 ${updated} · 已最新 ${upToDate}${failed ? ` · 失败 ${failed}` : ''}`);
                 this.refreshRuleList();
             }, '批量更新');
+            return true;
         } catch (e) {
             warnToast('批量更新启动失败');
+            return false;
         }
     },
 
@@ -1913,9 +2427,13 @@ const Kazumi = {
      * 对齐 Kazumi SourceSheet（T74）：并发流式搜索全部启用源（复用 /search/kazumi-stream SSE），
      * 每源一张卡片带状态徽标（检索中/N 条/需验证/失败/无结果），首个有结果源自动展开；
      * 点结果行解析选集播放；空/失败/验证码源卡内补救操作（重试/别名/手动检索/浏览器打开）。
+     * 「别名检索」：手动检索里换词搜出结果的关键词会沉淀成该番剧的别名，标题轮一个
+     * 可用源都没有时按别名顺序重试（见下方 _alias* 一组）。调用方可传 opts.subjectId
+     * 用 Bangumi id 做别名键（更稳）；不传则按片名归一化做键。
      * @param title 影片名
      * @param site  来源标识（kazumi:规则名 或 CatVod site key）
      * @param src    Kazumi 搜索结果链接（kazumi: 前缀时作为默认选中，直接解析该源）
+     * @param opts  { subjectId?, downloadEpisodes?, downloadIndexes?, downloadTitle?, playIndexes? }
      */
     async openSourceDialog(title, site, src, opts) {
         if (!this.hasEnabledRules()) { warnToast('尚未启用任何 Kazumi 规则'); return; }
@@ -1941,7 +2459,11 @@ const Kazumi = {
             this._rules.filter((r) => r.enabled !== false && r.validity !== 'invalid').forEach((r) => {
                 plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
             });
-            this._dlgState = { title, token, keyword: title, plugins, expanded: pluginName };
+            const st = { title, token, keyword: title, plugins, expanded: pluginName };
+            this._dlgState = st;
+            // 直达分支不检索，但别名状态照常预热：选集视图「← 返回选源」后头部计数
+            // 与别名管理入口才有数据。不 await：别让 settingsGet 挡剧集解析。
+            this._aliasPrepare(st, opts);
             await this._loadChapters(pluginName, src, title, token);
             return;
         }
@@ -1954,26 +2476,17 @@ const Kazumi = {
         this._rules.filter((r) => r.enabled !== false && r.validity !== 'invalid').forEach((r) => {
             plugins[r.name] = { status: 'pending', results: [], captchaUrl: '', msg: '', searching: false };
         });
-        this._dlgState = { title, token, keyword: title, plugins, expanded: null };
+        const st = { title, token, keyword: title, plugins, expanded: null };
+        this._dlgState = st;
+        // 别名表异步预热（不 await：settingsGet 是 IPC，不能让选源首屏等它）。
+        // 标题轮至少要跑一轮源站网络往返，别名状态通常早就绪；st.aliasReady
+        // 是回落决策处的握手点，真慢了也只是把决策等到它到为止，不会漏。
+        this._aliasPrepare(st, opts);
         this._renderSourceSheet();
 
-        // 并发流式搜索全部源
-        this._closeDlgStream();
-        const es = new EventSource(apiUrl('/search/kazumi-stream?word=' + encodeURIComponent(title)));
-        this._dlgStream = es;
-        es.onmessage = (ev) => {
-            let payload;
-            try { payload = JSON.parse(ev.data); } catch (e) { return; }
-            if (token !== this._dlgToken) return;
-            this._applySourceResult(payload);
-        };
-        const finish = () => {
-            if (token !== this._dlgToken) return;
-            this._closeDlgStream();
-            this._updateSheetHeader();
-        };
-        es.addEventListener('done', finish);
-        es.onerror = () => { if (token === this._dlgToken) finish(); };
+        // 第一轮：按原标题检索全部启用源。有别名也绝不跳过标题——别名可能过期/
+        // 是错译名，顶替标题会让本来能命中的整页直接空白；别名只做标题无果时的兜底。
+        this._startDlgSearch(st, token, title, 0);
     },
 
     /** 关闭选源弹窗的 SSE 流。 */
@@ -1991,29 +2504,479 @@ const Kazumi = {
         this._dlgState = null;
     },
 
-    /** 应用一条源搜索结果到弹窗状态并刷新对应卡片。 */
-    _applySourceResult(payload) {
+    // ---------------------------------------------------------------- 别名检索
+
+    /**
+     * 「别名检索」数据与策略。用户在「手动检索」里换词搜出结果后，那个词被沉淀成
+     * 该番剧的别名（settings 键 kazumiAliasMap，随设置持久化）；下次打开选源弹窗时
+     * 先按原标题检索，**标题轮一个可用源都没有**才顺序拿别名重试。
+     *
+     * 为什么不跳过标题直接用别名：别名可能过期/是错译名，有别名就顶替标题会让本来
+     * 能命中的整页变空白；别名只是标题失败的兜底，标题检索的既有行为完全不变。
+     *
+     * 键的取舍：优先 `bgm:<subjectId>`——仅当调用方经 opts.subjectId 显式传入才用；
+     * 否则 `t:<归一化片名>`。不自动去抓当前详情页的 _bgmId：历史/搜索页直接开选源
+     * 弹窗时，当前详情页可能还停在别的作品（Detail._bgmId 残留），会把 A 番的别名
+     * 记到 B 番头上；片名键最差只是同一部番的不同译名各存一份别名，不会串味。
+     */
+    _aliasKeyOf(title, subjectId) {
+        const raw = String(subjectId == null ? '' : subjectId).trim();
+        if (/^\d+$/.test(raw) && Number(raw) > 0) return 'bgm:' + raw;
+        return 't:' + this._aliasNormTitle(title);
+    },
+
+    /** 片名归一化（仅用于键与相等比较）：压空白 + 去首尾 + 拉丁字母小写。 */
+    _aliasNormTitle(title) {
+        return String(title == null ? '' : title).replace(/\s+/g, ' ').trim().toLowerCase();
+    },
+
+    /** 别名归一化（展示与检索都用它）：压空白 + 去首尾，保留用户输入的大小写。 */
+    _aliasNorm(alias) {
+        return String(alias == null ? '' : alias).replace(/\s+/g, ' ').trim();
+    },
+
+    /** 别名可用性：非空、≤60 字符、无控制字符（防超长/换行把设置文件与弹窗文案打脏）。 */
+    _aliasValid(alias) {
+        if (!alias || alias.length > 60) return false;
+        return !/[\u0000-\u001f\u007f]/.test(alias);
+    },
+
+    /** 数值容错：非有限数一律回落 fallback（settings 可能被手改/被旧版本写成 null 字符串）。 */
+    _aliasNum(v, fallback) {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fallback;
+    },
+
+    /** 单番别名列表清洗：字符串/对象两种形态都收，去重（大小写不敏感），上限 8 条
+     *  （靠前的条目优先被尝试，溢出丢尾部）。脏数据一律丢，绝不抛错——别名是增强
+     *  能力，settings 里任何形态的垃圾都不该把选源弹窗打挂。
+     *  只认字符串本身的项：数字/布尔/null 不 `String()` 强转，否则 [42] 会变成
+     *  一个别名「42」被真的拿去检索。 */
+    _aliasSanitizeList(raw) {
+        const src = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []);
+        const out = [];
+        const seen = new Set();
+        for (const item of src) {
+            if (out.length >= 8) break;
+            const obj = (item && typeof item === 'object') ? item : null;
+            const alias = obj ? (typeof obj.alias === 'string' ? this._aliasNorm(obj.alias) : '')
+                : (typeof item === 'string' ? this._aliasNorm(item) : '');
+            if (!this._aliasValid(alias)) continue;
+            const low = alias.toLowerCase();
+            if (seen.has(low)) continue;
+            seen.add(low);
+            out.push({
+                alias,
+                ts: this._aliasNum(obj && obj.ts, 0),
+                hits: Math.max(0, Math.trunc(this._aliasNum(obj && obj.hits, 0))),
+            });
+        }
+        return out;
+    },
+
+    /** 键数量上限（LRU）：按每个键下最大的 ts 排序，保留最新的 limit 个。别名表
+     *  随使用无界增长（每个搜过的番一个键），落盘前收敛，settings.json 不会膨胀。 */
+    _aliasTrimMap(map, limit) {
+        const keys = Object.keys(map);
+        if (keys.length <= limit) return map;
+        const rank = keys.map((k) => {
+            const list = Array.isArray(map[k]) ? map[k] : [];
+            return { k, ts: list.reduce((m, it) => Math.max(m, this._aliasNum(it && it.ts, 0)), 0) };
+        });
+        rank.sort((a, b) => b.ts - a.ts); // V8 的 sort 稳定：同 ts 保持原插入序
+        const out = {};
+        rank.slice(0, limit).forEach((r) => { out[r.k] = map[r.k]; });
+        return out;
+    },
+
+    /** 别名表清洗 + 规模上限（500 个番剧键）。读侧兜底：旧版本/手改/WebDAV 合并
+     *  进来的任意形态都按「不认识就丢」处理，返回新对象，不动 settings 原值。 */
+    _aliasSanitizeMap(raw) {
+        const out = {};
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+        Object.keys(raw).forEach((k) => {
+            if (!/^(bgm:\d+|t:.+)$/.test(k)) return; // 键形态不认识：丢（防任意键注入设置文件）
+            const list = this._aliasSanitizeList(raw[k]);
+            if (list.length) out[k] = list;
+        });
+        return this._aliasTrimMap(out, 500);
+    },
+
+    /**
+     * 检索候选词：原标题永远第一顺位（见上方「别名不顶替标题」），随后按别名表
+     * 顺序（表内顺序 = 优先级，新沉淀置顶）去重、最多再取 3 个。
+     * 为什么截断到 3：每轮都是「一个词打全部启用源」，别名轮最多再拉 3 轮；
+     * 不设上限时一条脏别名表能把一次选源变成十几轮请求，且后端搜索线程池是
+     * 全局共享（16 线程），会把其它页面的检索一起拖慢。
+     */
+    _aliasCandidates(title, aliases) {
+        const words = [];
+        const out = [];
+        const seen = new Set();
+        const push = (w) => {
+            const v = this._aliasNorm(w);
+            if (!this._aliasValid(v)) return false;
+            const low = v.toLowerCase();
+            if (seen.has(low)) return false;
+            seen.add(low);
+            words.push(v);
+            return true;
+        };
+        push(title); // 标题非法/为空时不占位，也不会混进 aliases
+        const list = Array.isArray(aliases) ? aliases : [];
+        for (const a of list) {
+            if (out.length >= 3) break;
+            const v = this._aliasNorm(a && typeof a === 'object' ? a.alias : a);
+            if (push(v)) out.push(v);
+        }
+        return { words, aliases: out };
+    },
+
+    /** 新增别名：新词置顶（最近搜出来的词最可能仍是对的）；已存在的只更新 ts，
+     *  不重排——用户手动排过的优先级不该被一次重复命中打乱。上限 8 条丢尾部。 */
+    _aliasUpsert(list, alias, ts) {
+        const v = this._aliasNorm(alias);
+        if (!this._aliasValid(v)) return this._aliasSanitizeList(list);
+        const out = this._aliasSanitizeList(list);
+        const low = v.toLowerCase();
+        const i = out.findIndex((it) => it.alias.toLowerCase() === low);
+        if (i >= 0) { out[i] = { ...out[i], ts: this._aliasNum(ts, out[i].ts) }; return out; }
+        out.unshift({ alias: v, ts: this._aliasNum(ts, 0), hits: 0 });
+        return out.slice(0, 8);
+    },
+
+    /** 删除别名（大小写不敏感）。 */
+    _aliasRemoveItem(list, alias) {
+        const low = this._aliasNorm(alias).toLowerCase();
+        return this._aliasSanitizeList(list).filter((it) => it.alias.toLowerCase() !== low);
+    },
+
+    /** 设为优先：移到表首 = 下次检索最先尝试（表内顺序即尝试顺序）。 */
+    _aliasPromoteItem(list, alias) {
+        const low = this._aliasNorm(alias).toLowerCase();
+        const clean = this._aliasSanitizeList(list);
+        const hit = clean.find((it) => it.alias.toLowerCase() === low);
+        if (!hit) return clean;
+        return [hit, ...clean.filter((it) => it.alias.toLowerCase() !== low)];
+    },
+
+    /** 该词是否为「别名轮词」（与原标题归一化后不同）：合并策略、命中标注、
+     *  别名计数都以它为准，保证标题轮行为与改造前逐字一致。 */
+    _isAliasWord(st, word) {
+        const w = this._aliasNorm(word);
+        if (!w || !st || !st.title) return false;
+        return w.toLowerCase() !== this._aliasNormTitle(st.title);
+    },
+
+    /**
+     * 是否该把这次手动检索词沉淀为别名：与原标题不同（归一化比较）+ 词合法 +
+     * 该次检索确实产出了可用源。失败/空结果的词绝不入表——否则一次错别字会被
+     * 永久记住，之后每次检索都替用户"重试"这个错词，越修越乱。
+     */
+    _aliasShouldRecord(title, word, usable) {
+        if (!usable) return false;
+        const w = this._aliasNorm(word);
+        if (!this._aliasValid(w)) return false;
+        return w.toLowerCase() !== this._aliasNormTitle(title);
+    },
+
+    /** 读别名表（容错解析，任何异常 = 空表）。不做会话级内存缓存：settings 是
+     *  WebDAV 恢复/其它窗口也会改的唯一真相，每次开弹窗读一次（一个 IPC）比
+     *  读回过期内存表更安全，代价相对随后的全源网络检索可忽略。 */
+    async _aliasLoadMap() {
+        try {
+            if (!window.yuki || typeof window.yuki.settingsGet !== 'function') return {};
+            const s = (await window.yuki.settingsGet()) || {};
+            return this._aliasSanitizeMap(s.kazumiAliasMap);
+        } catch (e) { return {}; }
+    },
+
+    /** 别名表落盘（整表写；本键只有本模块写）。失败返回 false，调用方只做轻提示。 */
+    async _aliasPersist(map) {
+        try {
+            if (!window.yuki || typeof window.yuki.settingsSet !== 'function') return false;
+            // 写侧也收敛一次键数：读侧 sanitize 只保证开弹窗那一刻的规模，长会话里
+            // 逐个新番加键会慢慢越过上限，落盘前统一按 LRU 截到 500
+            await window.yuki.settingsSet('kazumiAliasMap', this._aliasTrimMap(map, 500));
+            return true;
+        } catch (e) { return false; }
+    },
+
+    /**
+     * 初始化弹窗的别名状态（不 await，见 openSourceDialog 注释）。
+     * st.aliasReady 是标题轮结束时的握手点；st.aliasMap 保存本次会话的清洗后整表，
+     * 增删改都在它上面做读-改-写，避免"读一次写一次"把并发写丢失。
+     */
+    _aliasPrepare(st, opts) {
+        if (!st) return Promise.resolve();
+        st.aliasKey = this._aliasKeyOf(st.title, opts && opts.subjectId);
+        st.aliases = [];
+        st.aliasMap = {};
+        st.aliasChain = [];
+        st.aliasTry = 0;
+        st.attempt = 0;
+        st.aliasPhase = false;
+        st.aliasEdit = false;
+        st.aliasHitWords = [];
+        const ready = (async () => {
+            const map = await this._aliasLoadMap();
+            const list = this._aliasSanitizeList(map[st.aliasKey]);
+            st.aliasMap = map;
+            st.aliases = list;
+            st.aliasChain = this._aliasCandidates(st.title, list).aliases;
+        })().catch(() => { /* 别名载入失败按「无别名」处理 */ });
+        st.aliasReady = ready;
+        return ready;
+    },
+
+    /**
+     * 起一轮整词检索（SSE）：一个 word 打全部启用源。attempt=0 标题轮，>0 别名轮。
+     * 每轮一个 word，与服务端「整词索引 + 单源缓存重放」的粒度对齐：别名轮若正是
+     * 用户此前手动检索过的那个词，后端直接重放缓存行（零网络请求，秒回）。
+     * 故意不碰 DOM（除状态重置）：别名轮的整页重绘由 _maybeTryAlias 负责，
+     * 标题轮的首屏由 openSourceDialog 负责。
+     */
+    _startDlgSearch(st, token, word, attempt) {
+        this._closeDlgStream();
+        st.keyword = word;
+        st.attempt = attempt || 0;
+        st.aliasPhase = st.attempt > 0;
+        Object.keys(st.plugins).forEach((n) => {
+            const p = st.plugins[n];
+            p.searching = false;
+            p.status = 'pending';
+            p.results = [];
+            p.captchaUrl = '';
+            p.msg = '';
+            p.solveHint = '';
+            p.hitWord = '';
+        });
+        const es = new EventSource(apiUrl('/search/kazumi-stream?word=' + encodeURIComponent(word)));
+        this._dlgStream = es;
+        es.onmessage = (ev) => {
+            let payload;
+            try { payload = JSON.parse(ev.data); } catch (e) { return; }
+            if (token !== this._dlgToken) return;
+            this._applySourceResult(payload, word);
+        };
+        const finish = () => {
+            if (token !== this._dlgToken) return;
+            // 同一轮可能先 done 再收到关闭流触发的 onerror：只在「当前流仍是本轮」
+            // 时收尾，别名轮已启动后上一轮的迟到事件全部作废
+            if (this._dlgStream !== es) return;
+            this._closeDlgStream();
+            this._maybeTryAlias(st, token);
+        };
+        es.addEventListener('done', finish);
+        es.onerror = () => { finish(); };
+    },
+
+    /** 本轮可用源数（状态 success 且至少 1 条结果）。 */
+    _usableCount(st) {
+        return Object.keys(st.plugins)
+            .filter((n) => st.plugins[n].status === 'success' && (st.plugins[n].results || []).length)
+            .length;
+    },
+
+    /**
+     * 是否回落到别名：本轮可用源为 0（有结果就该收工，多打一轮纯属浪费），且不是
+     * 「全源 error」——整层网络/后端故障换任何词都不会好，白白把失败请求翻几倍。
+     * noresult / captcha / 混合结果都算「值得换词一试」。
+     */
+    _aliasFallbackWanted(st) {
+        const names = Object.keys(st.plugins);
+        if (!names.length) return false;
+        const sts = names.map((n) => st.plugins[n].status);
+        if (sts.some((s) => s === 'pending')) return false;
+        if (this._usableCount(st) > 0) return false;
+        return !sts.every((s) => s === 'error');
+    },
+
+    /**
+     * 一轮检索结束后的去向：还有可用别名就换词再试，否则收尾。
+     * 顺序试而非并行——命中即停，最坏 3 轮；并行会把「第一个别名就命中」也变成
+     * 3 倍请求，源站与后端共享搜索池都吃不消（且结果合并反而更难解释）。
+     */
+    async _maybeTryAlias(st, token) {
+        if (token !== this._dlgToken || this._dlgState !== st) return;
+        const hit = this._usableCount(st);
+        try { await st.aliasReady; } catch (e) { /* 别名载入失败 = 无别名 */ }
+        if (token !== this._dlgToken || this._dlgState !== st) return;
+        if (hit > 0) this._aliasNoteHit(st, st.keyword); // 命中计数（只对别名轮有意义）
+        const next = (st.aliasChain || [])[st.aliasTry || 0];
+        if (!next || hit > 0 || !this._aliasFallbackWanted(st)) {
+            st.aliasPhase = false;
+            this._aliasFlush(st); // 本轮命中的别名计数一次性落盘
+            this._updateSheetHeader();
+            return;
+        }
+        st.aliasTry = (st.aliasTry || 0) + 1;
+        this._aliasFlush(st); // 上一轮若有命中先计数落盘（一次检索最多写一次 settings）
+        this._startDlgSearch(st, token, next, st.aliasTry);
+        this._renderSourceSheet(); // 整页重绘：所有卡回到「检索中」+ 头部标出别名词
+    },
+
+    /** 记下「这个词这轮搜出了可用源」（只有别名轮的词需要计数；内存累积，
+     *  链路收尾时一次落盘——逐源写 settings 会把 IPC 打爆）。 */
+    _aliasNoteHit(st, word) {
+        if (!st || !Array.isArray(st.aliasChain) || st.aliasChain.indexOf(word) < 0) return;
+        if (!st.aliasHitWords) st.aliasHitWords = [];
+        if (st.aliasHitWords.indexOf(word) < 0) st.aliasHitWords.push(word);
+    },
+
+    /** 别名命中计数落盘（一次检索最多写一次）。失败静默：丢一次计数无伤大雅。 */
+    _aliasFlush(st) {
+        const words = st && st.aliasHitWords;
+        if (!words || !words.length) return;
+        const map = st.aliasMap || {};
+        let list = this._aliasSanitizeList(map[st.aliasKey]);
+        const now = Date.now();
+        words.forEach((w) => {
+            const low = String(w).toLowerCase();
+            list = list.map((it) => (it.alias.toLowerCase() === low
+                ? { ...it, hits: it.hits + 1, ts: now } : it));
+        });
+        if (list.length) map[st.aliasKey] = list;
+        st.aliasMap = map;
+        st.aliases = list;
+        st.aliasHitWords = [];
+        this._aliasPersist(map);
+    },
+
+    /** 别名管理面板（选源弹窗内）：查看/添加/删除/设为优先，操作即时落盘。 */
+    _aliasPanelHtml(st) {
+        const list = st.aliases || [];
+        const chips = list.length
+            ? list.map((a, i) => `<span class="kazumi-alias-chip">
+                    <span class="kazumi-alias-chip-txt" title="${escHtml(a.alias)}">${escHtml(a.alias)}</span>
+                    ${a.hits ? `<span class="kazumi-alias-hits" title="别名检索命中次数">${a.hits}</span>` : ''}
+                    ${i ? '<button class="kazumi-alias-act" data-alias-action="front" data-alias="' + escHtml(a.alias) + '" title="设为优先（下次检索最先尝试这个别名）">↑</button>' : '<span class="kazumi-alias-first" title="已是最优先">优先</span>'}
+                    <button class="kazumi-alias-act" data-alias-action="del" data-alias="${escHtml(a.alias)}" title="删除该别名">×</button>
+                </span>`).join('')
+            : '<span class="tip-line">暂无别名。在源卡「手动检索」里换个关键词搜出结果后，会自动记成别名。</span>';
+        return `<div class="kazumi-alias-panel">
+            <div class="kazumi-alias-head">别名检索<span class="kazumi-alias-sub">标题没有可用结果时按顺序自动重试，最多 ${this._aliasCandidates(st.title, st.aliases).aliases.length} 个</span></div>
+            <div class="kazumi-alias-chips">${chips}</div>
+            <div class="kazumi-alias-add">
+                <input class="md-input kazumi-alias-input" type="text" maxlength="60" placeholder="添加别名，回车确认" />
+                <button class="md-btn md-btn-tonal md-btn-sm kazumi-alias-add-btn">添加</button>
+            </div>
+        </div>`;
+    },
+
+    /** 从面板添加别名（输入框 → 校验 → 入库）。 */
+    _aliasAddFromPanel(st) {
+        const v = this._aliasNorm($('#kazumi-dialog-body .kazumi-alias-input').val());
+        if (!this._aliasValid(v)) { warnToast('别名需为 1-60 个字符'); return; }
+        if (v.toLowerCase() === this._aliasNormTitle(st.title)) { warnToast('别名与标题相同，无需添加'); return; }
+        this._aliasMutate(st, 'add', v);
+        warnToast(`已添加别名「${v}」`);
+    },
+
+    /** 别名管理操作（add/del/front）：改内存表 → 立即落盘 → 重绘面板。
+     *  即时持久化（不做「保存」按钮）：别名是随手维护的小数据，操作即生效最省心。 */
+    _aliasMutate(st, op, alias) {
+        if (!st || !alias) return;
+        const map = st.aliasMap || {};
+        // 表里没有该键时回落到 st.aliases（面板渲染用的同一份列表）：两者理论上
+        // 同步，但这里不赌状态一致性——读空了会把「删除」点成 NO-OP、把「置顶」
+        // 点成清空。
+        let list = this._aliasSanitizeList(map[st.aliasKey] || st.aliases);
+        if (op === 'add') list = this._aliasUpsert(list, alias, Date.now());
+        else if (op === 'del') list = this._aliasRemoveItem(list, alias);
+        else if (op === 'front') list = this._aliasPromoteItem(list, alias);
+        else return;
+        if (list.length) map[st.aliasKey] = list; else delete map[st.aliasKey];
+        st.aliasMap = map;
+        st.aliases = list;
+        st.aliasChain = this._aliasCandidates(st.title, list).aliases;
+        this._aliasPersist(map);
+        this._renderSourceSheet();
+    },
+
+    /** 手动检索成功后的别名沉淀：置顶 + 落盘 + 刷新头部/该卡（不重绘整页——
+     *  用户可能已点进选集视图，整页重绘会把人家拽回源列表）。 */
+    _aliasRecord(st, word, pluginName) {
+        if (!st || this._dlgState !== st) return; // 弹窗已关/已换：丢弃
+        if (!this._aliasShouldRecord(st.title, word, 1)) return;
+        const map = st.aliasMap || {};
+        const list = this._aliasUpsert(this._aliasSanitizeList(map[st.aliasKey] || st.aliases), word, Date.now());
+        if (!list.length) return;
+        map[st.aliasKey] = list;
+        st.aliasMap = map;
+        st.aliases = list;
+        st.aliasChain = this._aliasCandidates(st.title, list).aliases;
+        this._aliasPersist(map).then((ok) => {
+            if (ok) warnToast(`已把「${this._aliasNorm(word)}」记为别名，标题无结果时自动重试`);
+        });
+        if ($('#kazumi-dialog-body .kazumi-sheet-head').length) {
+            this._updateSheetHeader();
+            if (pluginName) this._renderSourceCard(pluginName);
+        }
+    },
+
+    /** 结果合并（别名轮用）：按 源页URL+标题 去重，保留原标题轮的条目顺序，
+     *  别名新条目追加在后——用户能同时看到"哪个词搜到哪条"。 */
+    _mergeResults(prev, next) {
+        const out = Array.isArray(prev) ? prev.slice() : [];
+        const seen = new Set(out.map((it) => this._resultKey(it)));
+        (Array.isArray(next) ? next : []).forEach((it) => {
+            const k = this._resultKey(it);
+            if (seen.has(k)) return;
+            seen.add(k);
+            out.push(it);
+        });
+        return out;
+    },
+
+    _resultKey(it) {
+        return String((it && it.src) || '') + '\u0000' + String((it && it.name) || '');
+    },
+
+    /** 应用一条源搜索结果到弹窗状态并刷新对应卡片。
+     *  word 为该结果所属检索轮次的整词（缺省取当前轮次词）：别名轮要按词标注命中来源，
+     *  并且不覆盖原标题轮已搜到的结果。 */
+    _applySourceResult(payload, word) {
         const st = this._dlgState;
         if (!st) return;
         const name = String(payload.name || '');
         if (!name || !st.plugins[name]) return;
         const p = st.plugins[name];
-        if (payload.captcha) { p.status = 'captcha'; p.captchaUrl = payload.captchaUrl || ''; p.results = []; }
-        else if (payload.error) { p.status = 'error'; p.msg = payload.msg || ''; p.results = []; }
-        else if (payload.status === 'noresult' || !(payload.list || []).length) { p.status = 'noresult'; p.results = []; }
-        else { p.status = 'success'; p.results = payload.list || []; }
+        const w = this._aliasNorm(word || st.keyword || '');
+        const isAlias = this._isAliasWord(st, w);
+        // 别名轮结果不覆盖原标题轮的好结果（真出现同源两轮都有结果时按 源+标题 去重
+        // 追加）：换词重试只为「补空缺」，不能把已搜到的条目换成新词的子集。
+        const keep = isAlias && p.status === 'success' && (p.results || []).length > 0;
+        if (payload.captcha) {
+            if (!keep) { p.status = 'captcha'; p.captchaUrl = payload.captchaUrl || ''; p.results = []; }
+        } else if (payload.error) {
+            if (!keep) { p.status = 'error'; p.msg = payload.msg || ''; p.results = []; }
+        } else if (payload.status === 'noresult' || !(payload.list || []).length) {
+            if (!keep) { p.status = 'noresult'; p.results = []; }
+        } else {
+            const list = payload.list || [];
+            p.results = keep ? this._mergeResults(p.results, list) : list;
+            p.status = p.results.length ? 'success' : 'noresult';
+        }
+        // 命中词标注：卡片上标出「别名「x」」，用户能一眼分清哪条是换词换来的
+        p.hitWord = (p.status === 'success' && isAlias) ? w : '';
         p.searching = false;
         if (p.status === 'success' && !st.expanded) st.expanded = name; // 自动展开首个有结果源
         this._renderSourceCard(name);
         this._updateSheetHeader();
     },
 
-    /** 单源重查（重试/别名/手动检索/验证后重试）。 */
+    /** 单源重查（重试/别名/手动检索/验证后重试）。
+     *  返回 {ok, status}：ok=这次真查到了可用源。手动检索据此沉淀别名
+     *  （失败的词不入别名表）；其余调用方忽略返回值，行为不变。 */
     async _queryPlugin(keyword, pluginName, token) {
         const st = this._dlgState;
-        if (!st) return;
+        if (!st) return { ok: false, status: 'stale' };
         const p = st.plugins[pluginName];
-        if (!p) return;
+        if (!p) return { ok: false, status: 'stale' };
+        // 命中词标注在重查前定：结果属于哪个词与查询结果无关，先算好免得
+        // 中间分支提前 return 时漏标
+        const isAlias = this._isAliasWord(st, keyword);
         p.searching = true;
         p.status = 'pending';
         this._renderSourceCard(pluginName);
@@ -2022,28 +2985,31 @@ const Kazumi = {
             // 必须实时查源，不能被会话缓存挡住（否则「点了没反应」/验证白做）；
             // 后端跳过读缓存但仍照常回写。
             const rsp = await doAction('kazumiSearch', { keyword, plugin: pluginName, refresh: '1' }, '/kazumi/action');
-            if (token !== this._dlgToken) return;
+            if (token !== this._dlgToken) return { ok: false, status: 'stale' };
             const r = ((rsp && rsp.results) || []).find((x) => x.pluginName === pluginName) || null;
             if (!r) { p.status = 'noresult'; p.results = []; }
             else if (r.captcha) { p.status = 'captcha'; p.captchaUrl = r.captchaUrl || ''; p.results = []; }
             else if (r.error) { p.status = 'error'; p.msg = r.msg || ''; p.results = []; }
             else { p.status = (r.data && r.data.length) ? 'success' : 'noresult'; p.results = r.data || []; }
         } catch (e) {
-            if (token !== this._dlgToken) return;
+            if (token !== this._dlgToken) return { ok: false, status: 'stale' };
             p.status = 'error'; p.msg = '查询失败'; p.results = [];
         }
+        p.hitWord = (p.status === 'success' && isAlias) ? this._aliasNorm(keyword) : '';
         p.searching = false;
         if (p.status === 'success' && !st.expanded) st.expanded = pluginName;
         this._renderSourceCard(pluginName);
         this._updateSheetHeader();
+        return { ok: p.status === 'success' && (p.results || []).length > 0, status: p.status };
     },
 
-    /** 渲染整个选源弹窗（头部 + 全部源卡片）。 */
+    /** 渲染整个选源弹窗（头部 + 别名管理面板 + 全部源卡片）。 */
     _renderSourceSheet() {
         const st = this._dlgState;
         if (!st) return;
         const box = $('#kazumi-dialog-body');
         let html = this._sheetHeaderHtml(st);
+        if (st.aliasEdit) html += this._aliasPanelHtml(st);
         const names = Object.keys(st.plugins);
         if (!names.length) html += '<div class="tip-line">尚未启用任何 Kazumi 规则</div>';
         names.forEach((n) => { html += this._sourceCardHtml(n, st.plugins[n], st.expanded === n); });
@@ -2064,15 +3030,24 @@ const Kazumi = {
         this._bindSheetEvents();
     },
 
-    /** 弹窗头部：标题 + 进度（检索中 X/Y 或 共 N 条）。 */
+    /** 弹窗头部：标题 + 进度（检索中 X/Y 或 共 N 条）+ 别名管理入口。
+     *  标题用原标题（st.title）而非当前检索词：别名轮时另起一条提示标出
+     *  「这一轮在用哪个别名」，用户才能分清"还是原标题在检索"和"换词了"。 */
     _sheetHeaderHtml(st) {
         const names = Object.keys(st.plugins);
         const done = names.filter((n) => st.plugins[n].status !== 'pending').length;
         const found = names.reduce((s, n) => s + (st.plugins[n].results || []).length, 0);
         const busy = done < names.length;
+        const aliasN = (st.aliases || []).length;
+        const chainN = (st.aliasChain || []).length;
+        const aliasTip = st.aliasPhase
+            ? `<span class="kazumi-alias-hit">别名「${escHtml(st.keyword)}」 ${Math.min(st.aliasTry || 1, chainN)}/${chainN}</span>`
+            : '';
         return `<div class="kazumi-sheet-head">
-            <div class="kazumi-sheet-title">「${escHtml(st.keyword)}」</div>
+            <div class="kazumi-sheet-title">「${escHtml(st.title || st.keyword)}」</div>
+            ${aliasTip}
             <div class="kazumi-sheet-progress">${busy ? `检索中 ${done}/${names.length}` : `共 ${found} 条结果`}</div>
+            <button class="md-btn md-btn-tonal md-btn-sm kazumi-alias-toggle" title="别名检索：标题没有可用结果时按别名自动重试；可在这里增删/排序">别名${aliasN ? ` ${aliasN}` : ''}</button>
         </div>`;
     },
 
@@ -2115,6 +3090,7 @@ const Kazumi = {
         const head = `<div class="kazumi-src-card" data-plugin="${escHtml(name)}">
             <div class="kazumi-src-row" tabindex="0" title="点击展开/收起">
                 <span class="kazumi-src-name">${escHtml(name)}</span>
+                ${p.hitWord ? `<span class="kazumi-alias-hit" title="该结果由别名检索命中">别名「${escHtml(p.hitWord)}」</span>` : ''}
                 ${this._statusBadge(p)}
                 <span class="kazumi-src-chev">${open ? '▾' : '▸'}</span>
             </div>`;
@@ -2170,6 +3146,36 @@ const Kazumi = {
             const pluginName = String($(e.currentTarget).data('plugin') || '');
             const action = String($(e.currentTarget).data('action') || '');
             this._handleSourceAction(action, pluginName, token);
+        });
+        // 别名管理（头部入口 + 面板内增删/置顶）：委托挂在稳定的 body 上，
+        // 头部/卡片重绘不丢绑定；头部开关不重绘整页也无妨（面板由整页重绘带出）。
+        box.on('click.ks', '.kazumi-alias-toggle', (e) => {
+            if (token !== this._dlgToken) return;
+            e.stopPropagation();
+            st.aliasEdit = !st.aliasEdit;
+            this._renderSourceSheet();
+        });
+        box.on('click.ks', '.kazumi-alias-act', (e) => {
+            if (token !== this._dlgToken) return;
+            e.stopPropagation();
+            const el = $(e.currentTarget);
+            const act = String(el.data('aliasAction') || '');
+            const alias = String(el.data('alias') || '');
+            this._aliasMutate(st, act, alias);
+            // 面板重绘本身就是反馈（chip 消失/换位），再补一句 toast 说明这次操作生效了
+            if (act === 'del') warnToast(`已删除别名「${alias}」`);
+            else if (act === 'front') warnToast(`「${alias}」已设为优先`);
+        });
+        box.on('click.ks', '.kazumi-alias-add-btn', (e) => {
+            if (token !== this._dlgToken) return;
+            e.stopPropagation();
+            this._aliasAddFromPanel(st);
+        });
+        box.on('keydown.ks', '.kazumi-alias-input', (e) => {
+            if (token !== this._dlgToken) return;
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            this._aliasAddFromPanel(st);
         });
     },
 
@@ -2274,7 +3280,19 @@ const Kazumi = {
         }
     },
 
-    /** 手动检索：弹关键词输入框，重查该源。 */
+    /**
+     * 手动检索：弹关键词输入框，重查该源；搜出可用源的关键词会沉淀成别名。
+     *
+     * 关窗判定（交互修复）：只有「按下与释放都落在遮罩本身」才算点击外部关闭。
+     * 旧实现只看 click 的 e.target——click 事件的 target 是 mousedown 与 mouseup 的
+     * 最近公共祖先：在弹窗里的标题/输入框上按下、把选中文本拖到弹窗外的遮罩上松手时，
+     * 公共祖先正好是遮罩（弹窗是遮罩的子节点），于是"拖选结束"被误判成"点了外部"
+     * 直接关窗（用户报告：选中标题拖到窗口外，手动检索弹窗自动关闭）。
+     * 现在改为记录按下起点：只有起点和终点都在遮罩上的完整点击才关窗；从弹窗内部
+     * 起始的拖选无论在哪里松手都不关（拖选输入框文本、快速双击同理不受影响）。
+     * 另补 Esc = 关闭本弹窗（capture 阶段消费：否则 app.js 的全局 Esc 会派发给
+     * dispatchEsc 把下面的选源弹窗一起关掉，留下一个孤立的输入框）。
+     */
     _showKeywordDialog(pluginName, token, title) {
         const kw = this._dlgState ? this._dlgState.keyword : '';
         const dlg = $('<div class="md-dialog-overlay" style="display:flex">'
@@ -2285,17 +3303,44 @@ const Kazumi = {
             + '<button class="md-dialog-btn" id="kazumi-kw-cancel">取消</button>'
             + '<button class="md-dialog-btn md-dialog-btn-primary" id="kazumi-kw-ok">确认</button>'
             + '</div></div></div>').appendTo(document.body);
-        const close = () => dlg.remove();
+        let downOnScrim = false; // 按下起点是否落在遮罩本身（见方法注释）
+        let onEsc = null;
+        const close = () => {
+            if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function' && onEsc) {
+                document.removeEventListener('keydown', onEsc, true);
+            }
+            dlg.remove();
+        };
+        onEsc = (e) => {
+            if (e.key !== 'Escape') return;
+            e.stopPropagation(); // 别让全局 Esc 派发再去关下面的选源弹窗
+            close();
+        };
         const submit = () => {
             const v = String(dlg.find('#kazumi-kw-input').val() || '').trim();
             if (!v) { warnToast('请输入关键词'); return; }
+            const st = this._dlgState;
             close();
-            this._queryPlugin(v, pluginName, token);
+            const done = this._queryPlugin(v, pluginName, token);
+            // 别名沉淀：换词且真搜出可用源才记（失败/空结果的词入表，之后每次检索
+            // 都替用户重试这个错词，越修越乱）
+            if (done && typeof done.then === 'function') {
+                done.then((r) => { if (r && r.ok) this._aliasRecord(st, v, pluginName); }).catch(() => { });
+            }
         };
-        dlg.on('click', (e) => { if (e.target === dlg[0]) close(); });
+        dlg.on('mousedown', (e) => { downOnScrim = (e.button === 0 && e.target === dlg[0]); });
+        dlg.on('mouseup', (e) => {
+            if (e.button !== 0) return;
+            const wasOnScrim = downOnScrim && e.target === dlg[0];
+            downOnScrim = false; // 任何一次释放都复位：残留状态会让下一次点击误判
+            if (wasOnScrim) close();
+        });
         dlg.find('#kazumi-kw-cancel').on('click', close);
         dlg.find('#kazumi-kw-ok').on('click', submit);
         dlg.find('#kazumi-kw-input').on('keydown', (e) => { if (e.key === 'Enter') submit(); }).trigger('focus').select();
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('keydown', onEsc, true);
+        }
     },
 
     /** 浏览器打开源的搜索页。 */
@@ -2985,12 +4030,32 @@ Kazumi.imageSearch = async function (imageFile) {
 const WEBDAV_SETTINGS_EXCLUDE = new Set([
     'favorites', 'history', 'watchStats',
     'webDavUrl', 'webDavUsername', 'webDavPassword',
+    // webDav* 其余键同理（本版补齐）：远程目录/证书跳过/定时同步/启动拉取/子开关
+    // 都是「本机同步哪些内容、怎么连远端」的机器绑定配置。随云端快照走等于让拿到
+    // 快照的人改写本机连接行为——恢复后自动开始往云端上传、把数据写去另一个远程
+    // 目录、或替本机决定"以后同步设置/规则"。WebDAV 自身配置只由设置页写入，
+    // 永不随同步往返（恢复允许表也不含这些键）。
+    'webDavRemoteDir', 'webDavSslSkip', 'webDavStartupPull',
+    'webDavAutoEnable', 'webDavAutoMinutes',
+    'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
+    'webDavEnableRules', 'webDavEnableSettings', 'webDavEnableStats',
     'bangumiToken', 'dandanAppSecret',
+    // bangumiLastSyncAt：「最新修改时间优先」同步的裁决基准 = 本机与远端上次对齐的
+    // 时刻。跨设备恢复它会让另一台机器的增量判定错位（明明没同步过却以为已对齐，
+    // 于是跳过本该上传的改动），属机器相关键：上传与恢复双向排除。
+    'bangumiLastSyncAt',
+    // 本机绝对路径（cacheDir/dlDir/wallpaper 同口径）：换台机器必然无意义，
+    // 播放器路径尤其会把另一端的起播指向不存在的可执行文件。
+    'mpvPath', 'externalPlayerPath',
+    // 首启状态与日志清理水位：只对本机这一次安装有意义
+    'onboarded', 'logLastCleanupAt',
     'cacheDir', 'dlDir', 'wallpaper', 'settingsCat',
     'webDavRestoreBackup', // 恢复前的本机备份快照，体积大且仅本机有意义
     // LLM 凭据：与 bangumiToken 同级别，绝不随设置快照上传远端。
     // 上传侧漏排的后果是明文密钥进用户自托管 WebDAV（可能还是自签名证书通道）；
     // 恢复侧 WEBDAV_RESTORE_ALLOWED 本就未放行 key，说明上传侧是遗漏而非设计。
+    // 注：*Base（服务地址）不在此列——它不是本机绑定键，保留上传便于诊断；
+    // 恢复侧照样不放行（见 WEBDAV_RESTORE_ALLOWED 里 captchaLLMBase 的说明）。
     'translateLLMKey', 'captchaLLMKey',
 ]);
 
@@ -3014,6 +4079,13 @@ Kazumi._webdavSettingsSnapshot = function (s) {
  *   bangumiMirrorRoot（镜像域名，恢复后会话直连攻击者域名）；
  * - 本机态：settingsCat/webDavRestoreBackup（只增不减的本地备份）。
  * 新增跨设备可迁移的偏好键时须显式加入此表。
+ *
+ * 与 WEBDAV_SETTINGS_EXCLUDE 的一致性口径（本版核对过的三条）：
+ * 1. 两表交集必须为空——交集非空即「既不上传又能恢复」的死键，或「不该上传却
+ *    被恢复」；单测 webdav-sync-payload 里有这条断言；
+ * 2. 排除表里的键（凭据/URL/路径/webDav* 自身/机器态）一律不进本表；
+ * 3. 本表允许 → 主进程 SETTINGS_SET_ALLOWED 必须放行（否则 settingsSet 被静默
+ *    ignored，恢复看着成功实则没落盘，H-1 同类）。已在 tests/js 单测里断言。
  */
 const WEBDAV_RESTORE_ALLOWED = new Set([
     // 观看行为
@@ -3046,13 +4118,184 @@ const WEBDAV_RESTORE_ALLOWED = new Set([
     // 把 safeStorage 解密的 captchaLLMKey 以 Bearer 发往该地址并附带验证码图片，
     // 云端快照即可劫持本机凭据，故不予恢复，base 由用户在本机重新填写。
     'captchaLLMEnable', 'captchaLLMModel', 'captchaLLMPrefer',
+    // ── 本版新增（同步内容对齐软件最新数据模型）──
+    // 搜索历史（search-history.js，[{word,source,ts}]）：纯用户数据，跨设备迁移
+    // 正是「我搜过什么」的正当诉求，纳入。
+    'searchHistory',
+    // Kazumi 别名检索表（kazumi.js，键 t:<片名>/bgm:<id> → [{alias,ts,hits}]）：
+    // 用户手工/半自动沉淀的检索词，属纯用户数据；已在写侧收敛到 500 键，体量可控。
+    'kazumiAliasMap',
+    // 收藏/历史页的排序与筛选偏好（records.js）：纯界面偏好。选择纳入——属用户配置、
+    // 体量小（一个字符串 + 一个小对象），且「我习惯按评分排序、只看某源」在换机后
+    // 仍然成立；不含 URL/路径/凭据，无恢复风险。
+    'favoritesSort', 'favoritesFilter', 'historySort', 'historyFilter',
+    // ── 补漏：此前上传了却恢复不了的纯偏好键 ──
+    // 这类键不在允许表时表现为「云端有值、恢复后开关不生效」，与 H-1（开关静默
+    // ignored）同类；均为无 URL/无凭据的本地偏好，恢复无风险。
+    'opEdSkip', 'opEdSave',              // 智能跳过片头/片尾与登记开关（记录在 localStorage，见报告）
+    'translateEnable', 'translateTrigger', 'translateTarget', // 划词翻译偏好（LLM key 绝不恢复）
+    'translateLLMEnable', 'translateLLMModel',                // 翻译 LLM 开关/模型名（base 属 URL 类，不放行）
+    'kazumiAutoUpdateOnStart',           // 启动自动更新规则
 ]);
+
+/**
+ * 恢复值的形态表：只对「形态错了会真出错」的键做硬校验——数组键拿到对象会让
+ * .map/.filter/.length 直接抛 TypeError 或渲染出空白页；对象键拿到标量则取不到字段。
+ * 未列出的键按「标量槽位」处理：收到数组/对象即跳过（标量键拿到容器必然是脏数据），
+ * null/字符串/数字/布尔一律放行。
+ * 取舍：宁可少拦（云端脏值最多让该项回落默认值）也不误拦——误拦等于用户数据静默
+ * 不恢复，比放行更伤。favorites/history 不在此表：它们走独立文件通道，调用方已用
+ * Array.isArray 判定；configHistory 等 URL 类键本身不进允许表（在拒绝表），无需形态表。
+ */
+const WEBDAV_RESTORE_ARRAY_KEYS = new Set([
+    'searchHistory', 'blockWords', 'recentWatches',
+    'probedSites', 'customLives',
+]);
+const WEBDAV_RESTORE_OBJECT_KEYS = new Set([
+    'watchStats', 'watchProgress', 'lastSourceMap', 'liveProbeCache',
+    'kazumiAliasMap', 'favoritesFilter', 'historyFilter', 'playerHotkeys',
+    'blockedReason', 'probedAt', 'probeFp',
+]);
+
+/** 值类型的中文名（恢复报告里的可诊断原因用）。 */
+function webdavTypeName(v) {
+    if (v === null || v === undefined) return '空值';
+    if (Array.isArray(v)) return '数组';
+    if (typeof v === 'object') return '对象';
+    if (typeof v === 'string') return '字符串';
+    if (typeof v === 'number') return '数字';
+    if (typeof v === 'boolean') return '布尔';
+    return typeof v;
+}
+
+/** 内网/本机/局域网主机名判定（仅用于提示文案，不参与放行/拦截决策）。 */
+function isPrivateWebdavHost(host) {
+    const h = String(host || '').replace(/^\[|\]$/g, '').toLowerCase();
+    if (!h) return false;
+    if (h === 'localhost' || h.endsWith('.localhost')
+        || h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home')) return true;
+    if (h.indexOf(':') >= 0) { // IPv6：回环 ::1 / 链路本地 fe80:: / 唯一本地 fc00::、fd00::
+        return h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd');
+    }
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) return false;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    return a === 127 || a === 10 || (a === 192 && b === 168)
+        || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254) || a === 0;
+}
+
+/**
+ * WebDAV 地址前置校验：返回 {ok, reason, hint}。渲染层是第一道，后端
+ * _webdav_url_guard 是第二道（同一语义，见 plugin_manager）。
+ * reason 是可直接弹给用户的完整中文句子（失败时调用方直接展示，不再套前缀）。
+ *
+ * 只允许 http/https：file://、dict://、gopher:// 在后端 requests 里没有适配器，
+ * 放行只会抛出英文 InvalidSchema（"No connection adapters were found"），用户
+ * 完全不知道错在哪；这里先给中文原因，省掉一次注定失败的往返。
+ *
+ * 内网/环回/保留地址一律**放行**——自建 NAS/内网 WebDAV 正是本功能的主流用法，
+ * 拦掉等于砍功能——只把可理解的提示放在 hint 里（不是拒绝理由，故与 ok 分开）。
+ */
+Kazumi._webdavUrlCheck = function (raw) {
+    const url = String(raw || '').trim();
+    if (!url) return { ok: false, reason: '请输入 WebDAV 地址', hint: '' };
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+        return { ok: false, reason: 'WebDAV 地址缺少协议前缀，请以 http:// 或 https:// 开头', hint: '' };
+    }
+    let u = null;
+    try {
+        u = new URL(url);
+    } catch (e) {
+        return { ok: false, reason: 'WebDAV 地址格式不正确，请检查是否有多余字符（如空格、中文标点）', hint: '' };
+    }
+    const scheme = String(u.protocol || '').replace(':', '').toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') {
+        return { ok: false, reason: `WebDAV 地址只支持 http/https，当前为 ${scheme}://（file://、ftp://、dict:// 等协议不被支持）`, hint: '' };
+    }
+    if (!u.hostname) return { ok: false, reason: 'WebDAV 地址缺少主机名（例如 https://nas.example/dav）', hint: '' };
+    let hint = '';
+    if (isPrivateWebdavHost(u.hostname)) {
+        hint = '内网/本机地址：只在你信任的网络内可达，请确认这是你的 NAS 或自建服务';
+    } else if (scheme === 'http') {
+        hint = '明文 http 传输：账号密码与同步数据在网络上可见，建议改用 https';
+    }
+    return { ok: true, hint: hint };
+};
+
+/**
+ * 「已知但**故意**不恢复」的设置键（默认拒绝的第二档）。
+ *
+ * 为什么需要第三张表：云端快照是「全量设置减去排除表」，所以自己的新备份里必然带着
+ * 一批「知道、但就是不恢复」的键（凭据/URL/本机路径…）。若把这些都算作「未知键」，
+ * 每次恢复都会冒出「N 项本机不识别已忽略」的提示——把正常的默认拒绝说成异常，
+ * 用户会以为备份坏了。分档后：本表 = 静默忽略（只进明细日志），真正的未知键
+ * （旧版遗留键、更高版本新增键）才计数上报。
+ *
+ * 各档判定顺序：WEBDAV_RESTORE_ALLOWED → 本表 → 都不在 = 未知（计入报告）。
+ */
+const WEBDAV_RESTORE_DENIED = new Set([
+    // 凭据类（与上传侧排除表同级别：dandanAppId 是应用标识，同属凭据包）
+    'bangumiToken', 'dandanAppSecret', 'dandanAppId', 'translateLLMKey', 'captchaLLMKey',
+    // URL / 配置源类：恢复即等于让云端快照改写本机的连接目标
+    // （lastConfigUrl 会在下次启动自动加载该配置源；LLM base 会把本机凭据发往该地址）
+    'lastConfigUrl', 'configHistory', 'probeSourceUrl', 'proxyUrl', 'proxyTestUrl',
+    'bangumiMirrorRoot', 'translateLLMBase', 'captchaLLMBase',
+    // 代理开关：URL 不恢复而开关恢复，等于把本机流量导去一个由别处决定的目标
+    // （且写入会即时重启后端），故一并拒绝
+    'proxyEnable',
+    // 本机绝对路径 / 本机状态
+    'cacheDir', 'dlDir', 'wallpaper', 'settingsCat', 'webDavRestoreBackup',
+    'mpvPath', 'externalPlayerPath', 'onboarded', 'logLastCleanupAt', 'bangumiLastSyncAt',
+    // WebDAV 自身配置（本机怎么连远端，见上传侧排除表同组注释）。
+    // 与本表/排除表的重叠是有意的：这些键不会被自己的快照携带（上传侧已排除），
+    // 列在这里是为了让「外来/被篡改快照」携带它们时同样静默拒绝，
+    // 而不是被当成「未知键」冒进提示里。
+    'webDavUrl', 'webDavUsername', 'webDavPassword', 'webDavRemoteDir', 'webDavSslSkip',
+    'webDavStartupPull', 'webDavAutoEnable', 'webDavAutoMinutes',
+    'webDavEnable', 'webDavEnableCollect', 'webDavEnableHistory',
+    'webDavEnableRules', 'webDavEnableSettings', 'webDavEnableStats',
+    // 下载/日志/性能类：与另一台机器的带宽、磁盘、调试需求强相关，不做跨设备搬运
+    'dlConcurrency', 'dlSplitConcurrency', 'panFastPath',
+    'logLevel', 'logAutoCleanup', 'logCleanupDays',
+]);
+
+/** 恢复值形态判定：返回 '' 表示可用，否则返回可诊断的中文原因（供恢复报告用）。 */
+Kazumi._webdavValueIssue = function (key, val) {
+    const k = String(key);
+    if (WEBDAV_RESTORE_ARRAY_KEYS.has(k) && !Array.isArray(val)) {
+        return `期望数组，实际是${webdavTypeName(val)}`;
+    }
+    if (WEBDAV_RESTORE_OBJECT_KEYS.has(k) && (!val || typeof val !== 'object' || Array.isArray(val))) {
+        return `期望对象，实际是${webdavTypeName(val)}`;
+    }
+    if (!WEBDAV_RESTORE_ARRAY_KEYS.has(k) && !WEBDAV_RESTORE_OBJECT_KEYS.has(k)
+        && val !== null && typeof val === 'object') {
+        return `期望单值，实际是${webdavTypeName(val)}`;
+    }
+    return '';
+};
+
+/** 比较两个值是否「JSON 等价」（备份差异判定用；循环引用等异常一律按不同处理）。 */
+Kazumi._webdavSameJson = function (a, b) {
+    try {
+        return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    } catch (e) {
+        return false;
+    }
+};
 
 /** WebDAV 同步：上传收藏/历史/规则/设置/观看统计到远程；按子开关决定包含哪些数据。
  *  webDavSslSkip 开启时通知后端跳过证书校验（自签名服务器）；
- *  remoteDirOverride 未传时用已保存的 webDavRemoteDir（自动同步走此路径）。 */
+ *  remoteDirOverride 未传时用已保存的 webDavRemoteDir（自动同步走此路径）。
+ *  载荷版本标识（_meta.json）由后端生成——单一真相在 plugin_manager，渲染层不需要
+ *  知道版本号，只需在恢复时读回 schemaVersion 用于提示。 */
 Kazumi.webdavSync = async function (url, username, password, remoteDirOverride) {
     try {
+        // 程序化入口（自动同步/启动拉取）持的是持久化设置，可能是历史遗留的非法地址：
+        // 这里先拦一次，省掉一次注定失败的往返（UI 入口已先校验，不会重复提示）
+        const urlCheck = this._webdavUrlCheck(url);
+        if (!urlCheck.ok) { warnToast(urlCheck.reason); return false; }
         const s = (await window.yuki.settingsGet()) || {};
         const data = {};
         // _rulesLoaded 只在 kazumiList 成功返回后置 true（失败时 _rules 被清空为 []）。
@@ -3087,6 +4330,9 @@ Kazumi.webdavSync = async function (url, username, password, remoteDirOverride) 
 /** WebDAV 恢复：从远程下载收藏/历史/规则/设置/观看统计；仅恢复子开关启用的数据。 */
 Kazumi.webdavRestore = async function (url, username, password, remoteDirOverride) {
     try {
+        // 同 webdavSync：程序化入口（启动静默恢复）先拦非法地址
+        const urlCheck = this._webdavUrlCheck(url);
+        if (!urlCheck.ok) { warnToast(urlCheck.reason); return false; }
         const s = (await window.yuki.settingsGet()) || {};
         const names = [];
         if (s.webDavEnableRules !== false) names.push('kazumiRules');
@@ -3101,42 +4347,80 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
             remoteDir: remoteDirOverride !== undefined ? remoteDirOverride : (s.webDavRemoteDir || ''),
         }, '/kazumi/action');
         const d = (rsp && typeof rsp === 'object') ? rsp.data : null;
+        // 云端版本标识（本版新增）：schemaVersion=1 = 旧版备份（云端没有 _meta.json），
+        // 2 = 本版。读不到/字段非法一律按 1 处理——用户的历史备份必须能继续恢复。
+        const cloudMeta = (rsp && typeof rsp === 'object' && rsp.meta && typeof rsp.meta === 'object') ? rsp.meta : {};
+        const cloudWarnings = (rsp && typeof rsp === 'object' && Array.isArray(rsp.warnings)) ? rsp.warnings : [];
+        const schemaVersion = Number(cloudMeta.schemaVersion) || 1;
         // 空数据/失败都必须走失败提示：后端失败返回 {code:500,msg}，此前空对象 {} 是
         // truthy 被当成功——网址输错时提示「恢复完成」实际什么都没恢复
         const gotAny = d && (d.favorites || d.history || d.kazumiRules || d.settings || d.watchStats);
         if (rsp && rsp.code === 200 && gotAny) {
+            // 恢复报告：跳过了什么、为什么。计数进 toast（明细刷屏），键名与原因进
+            // console 与 _lastWebdavRestoreReport（排障/单测读取）
+            const report = { schemaVersion: schemaVersion, skipped: [], denied: [], ignored: [], failed: [], warnings: cloudWarnings };
             // 覆盖前备份：恢复直接覆盖本机数据且不可撤销，先把将被覆盖且有差异的
-            // 本地原值存到 webDavRestoreBackup（仅本机、不参与同步快照），供误恢复后找回
+            // 本地原值存到 webDavRestoreBackup（仅本机、不参与同步快照），供误恢复后找回。
+            // 本版把设置通道的允许键全部纳入——此前只存 favorites/history/watchStats/
+            // watchProgress 四个，其余键被恢复改坏后无从找回（备份本身体量很小）。
             const backup = { ts: Date.now() };
             // watchProgress 走 settings 快照通道（云端新值在 d.settings 内，不在顶层 d[k]），
             // 其余键为独立通道（云端新值在 d[k]）；备份逻辑统一从对应通道取「云端新值」
             ['favorites', 'history', 'watchStats', 'watchProgress'].forEach((k) => {
                 const incoming = (k === 'watchProgress') ? d.settings && d.settings[k] : d[k];
-                if (incoming && JSON.stringify(s[k] ?? null) !== JSON.stringify(incoming)) backup[k] = s[k] ?? null;
+                if (incoming && !this._webdavSameJson(s[k], incoming)) backup[k] = s[k] ?? null;
             });
             if (d.kazumiRules && (this._rules || []).length) backup.kazumiRules = this._rules;
+            if (d.settings) {
+                for (const [key, val] of Object.entries(d.settings)) {
+                    if (!WEBDAV_RESTORE_ALLOWED.has(key)) continue; // 不落盘的键无需备份
+                    if (this._webdavSameJson(s[key], val)) continue; // 无差异不占体积
+                    backup[key] = (s && Object.prototype.hasOwnProperty.call(s, key)) ? s[key] : null;
+                }
+            }
             const backedUp = Object.keys(backup).length > 1;
             if (backedUp) await window.yuki.settingsSet('webDavRestoreBackup', backup);
             // 收藏/历史改走 recSet：写 settings 的同时经 FavHub.changed 广播给订阅者
             // （详情页收藏按钮/我的页/时间表），否则恢复后订阅者仍持有旧数据。
             // watchStats 无订阅者（FavHub 只认 favorites），保持 settingsSet 即可。
-            if (Array.isArray(d.favorites)) await recSet('favorites', d.favorites);
-            if (Array.isArray(d.history)) await recSet('history', d.history);
-            if (d.watchStats) await window.yuki.settingsSet('watchStats', d.watchStats);
-            if (d.kazumiRules) {
-                // 非 Array 直接按格式错误报出（此前 undefined.length 抛 TypeError，
-                // 落入外层 catch 提示「WebDAV 恢复失败：网址/账号有误」，误导排查）
-                if (!Array.isArray(d.kazumiRules)) { warnToast('WebDAV 恢复失败：云端规则数据格式不正确'); return false; }
-                // 规则逐个导入：单条损坏只跳过计数，不再中断整批
-                let okRules = 0, failRules = 0;
-                for (const rule of d.kazumiRules) {
-                    try {
-                        const r = await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
-                        if (r && r.code === 200) okRules++; else failRules++;
-                    } catch (err) { failRules++; }
+            // 每个通道独立判形态 + 独立 try/catch：单个键类型不符或写失败只记账跳过，
+            // 绝不拖垮其余键（规则导入尤其不能被坏掉的收藏数组连坐）。
+            if (d.favorites !== undefined) {
+                if (!Array.isArray(d.favorites)) report.skipped.push(`favorites（期望数组，实际是${webdavTypeName(d.favorites)}）`);
+                else {
+                    try { await recSet('favorites', d.favorites); } catch (e) { report.failed.push('favorites'); }
                 }
-                await this.refreshRuleList();
-                if (failRules) warnToast(`规则导入完成：${okRules} 成功，${failRules} 条失败已跳过`);
+            }
+            if (d.history !== undefined) {
+                if (!Array.isArray(d.history)) report.skipped.push(`history（期望数组，实际是${webdavTypeName(d.history)}）`);
+                else {
+                    try { await recSet('history', d.history); } catch (e) { report.failed.push('history'); }
+                }
+            }
+            if (d.watchStats !== undefined) {
+                const wsIssue = this._webdavValueIssue('watchStats', d.watchStats);
+                if (wsIssue) report.skipped.push(`watchStats（${wsIssue}）`);
+                else {
+                    try { await window.yuki.settingsSet('watchStats', d.watchStats); } catch (e) { report.failed.push('watchStats'); }
+                }
+            }
+            if (d.kazumiRules !== undefined) {
+                // 非 Array 不当格式错误整批失败（此前 warnToast 后 return false 会让
+                // 同一次恢复里的设置键一起被丢掉），改为跳过并记账，其余键照常恢复
+                if (!Array.isArray(d.kazumiRules)) {
+                    report.skipped.push(`kazumiRules（期望数组，实际是${webdavTypeName(d.kazumiRules)}）`);
+                } else {
+                    // 规则逐个导入：单条损坏只跳过计数，不再中断整批
+                    let okRules = 0, failRules = 0;
+                    for (const rule of d.kazumiRules) {
+                        try {
+                            const r = await doAction('kazumiAdd', { json: JSON.stringify(rule) }, '/kazumi/action');
+                            if (r && r.code === 200) okRules++; else failRules++;
+                        } catch (err) { failRules++; }
+                    }
+                    await this.refreshRuleList();
+                    if (failRules) warnToast(`规则导入完成：${okRules} 成功，${failRules} 条失败已跳过`);
+                }
             }
             let needRestartHint = false;
             if (d.settings) {
@@ -3147,8 +4431,33 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
                 // 等键（下次启动自动加载恶意配置源）。只恢复纯数据键：凭据、URL/
                 // 路径、以及不在表内的未知键一律不落本机（默认拒绝）。
                 for (const [key, val] of Object.entries(d.settings)) {
-                    if (!WEBDAV_RESTORE_ALLOWED.has(key)) continue;
-                    await window.yuki.settingsSet(key, val);
+                    if (!WEBDAV_RESTORE_ALLOWED.has(key)) {
+                        // 已知但故意不恢复的键（凭据/URL/本机路径/机器态/webDav*）→ 静默
+                        // 记账，不进 toast：这是设计内的默认拒绝，不是异常。排除表里的键
+                        // 正常不会出现在自己的快照里，一并归此档以覆盖外来/被篡改快照。
+                        if (WEBDAV_RESTORE_DENIED.has(key) || WEBDAV_SETTINGS_EXCLUDE.has(key)) {
+                            report.denied.push(key);
+                            continue;
+                        }
+                        // 真正的未知键（旧版遗留键/更高版本新增键）→ 明确忽略并计入报告：
+                        // 静默丢弃会让用户以为「云端就没有这项数据」，报告才能解释差异
+                        report.ignored.push(key);
+                        continue;
+                    }
+                    // 类型/结构不符 → 跳过该键并记原因，继续恢复其余键（单键失败不拖垮整批）
+                    const issue = this._webdavValueIssue(key, val);
+                    if (issue) { report.skipped.push(`${key}（${issue}）`); continue; }
+                    try {
+                        // 缺键不算问题：本循环只遍历云端携带的键，云端没带的键保持本地现状
+                        // （绝不用 undefined 覆盖本地值）
+                        const res = await window.yuki.settingsSet(key, val);
+                        // 主进程白名单未放行时静默返回 {ignored:true}（H-1 同类的静默失败），
+                        // 这里显式升级为「写入失败」报告，否则表现为「恢复成功但开关没变」
+                        if (res && res.ignored) { report.failed.push(`${key}（主进程未放行该设置键）`); continue; }
+                    } catch (e) {
+                        report.failed.push(key);
+                        continue;
+                    }
                     // 触发重启提示的键（真实键名，与 index.js setProxy/setPanFastPath 一致）：
                     // 代理键经 setProxy 写入时已即时重启后端，但恢复流程只写 settings，
                     // 环境变量/会话代理不会重建，故仍需提示重启；playerHotkeys 需重建快捷键。
@@ -3165,7 +4474,23 @@ Kazumi.webdavRestore = async function (url, username, password, remoteDirOverrid
                 // 外观类设置即时重放（主题/缩放/字体等），其余多数在使用时读取自然生效
                 if (typeof applySkin === 'function') applySkin(d.settings);
             }
-            warnToast(`WebDAV 恢复完成${backedUp ? '（覆盖前的本机数据已自动备份）' : ''}${needRestartHint ? '，部分设置重启应用后完全生效' : ''}`);
+            // 报告落 console（明细含键名，toast 只放计数防刷屏）；同时挂到实例上供
+            // 排障/单测读取，不改变 true/false 返回契约（调用方按真值判成功）。
+            // 默认拒绝的键单独用 log：那是设计内的，不该出现在 warn 里让人误以为出错。
+            this._lastWebdavRestoreReport = report;
+            if (report.skipped.length || report.ignored.length || report.failed.length || report.warnings.length) {
+                console.warn('[webdav] 恢复明细', report);
+            } else if (report.denied.length) {
+                console.log('[webdav] 已按默认拒绝跳过（设计内）', report.denied);
+            }
+            const notes = [];
+            if (schemaVersion === 1) notes.push('云端为旧版备份（无版本标识），已按 v1 兼容恢复');
+            if (backedUp) notes.push('覆盖前的本机数据已自动备份');
+            if (report.skipped.length) notes.push(`${report.skipped.length} 项类型不符已跳过`);
+            if (report.ignored.length) notes.push(`${report.ignored.length} 项本机不识别已忽略`);
+            if (report.failed.length) notes.push(`${report.failed.length} 项写入失败`);
+            if (needRestartHint) notes.push('部分设置重启应用后完全生效');
+            warnToast(`WebDAV 恢复完成${notes.length ? `（${notes.join('，')}）` : ''}`);
             return true;
         }
         warnToast(`WebDAV 恢复失败${rsp && rsp.msg ? `：${rsp.msg}` : '（云端无数据或地址/账号有误）'}`);
@@ -3182,12 +4507,15 @@ Kazumi.webdavSaveUI = async function () {
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
     const remoteDir = $('#webdav_remote_dir').val().trim();
-    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    // 保存前先校验：非法 scheme 存进去只会让后续同步/恢复逐一失败（且错误信息
+    // 来自 requests，指向性差），在这里就给出中文原因
+    const check = this._webdavUrlCheck(url);
+    if (!check.ok) { warnToast(check.reason); return; }
     window.yuki.settingsSet('webDavUrl', url);
     window.yuki.settingsSet('webDavUsername', username);
     window.yuki.settingsSet('webDavPassword', password);
     window.yuki.settingsSet('webDavRemoteDir', remoteDir);
-    warnToast('WebDAV 配置已保存');
+    warnToast(`WebDAV 配置已保存${check.hint ? `（${check.hint}）` : ''}`);
 };
 
 /** 手动同步/恢复后在状态行记录时间（与自动同步共用同一状态行）。 */
@@ -3203,7 +4531,9 @@ Kazumi.webdavSyncUI = async function () {
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
     const remoteDir = $('#webdav_remote_dir').val().trim();
-    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    const check = this._webdavUrlCheck(url);
+    if (!check.ok) { warnToast(check.reason); return; }
+    if (check.hint) console.log(`[webdav] ${check.hint}`);
     showLoading();
     const ok = await this.webdavSync(url, username, password, remoteDir);
     hideLoading();
@@ -3218,7 +4548,9 @@ Kazumi.webdavRestoreUI = async function () {
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
     const remoteDir = $('#webdav_remote_dir').val().trim();
-    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    const check = this._webdavUrlCheck(url);
+    if (!check.ok) { warnToast(check.reason); return; }
+    if (check.hint) console.log(`[webdav] ${check.hint}`);
     if (!await confirmDialog('从云端恢复将覆盖本地收藏、历史与规则（覆盖前会自动备份本机数据），继续？', { okText: '恢复' })) return;
     showLoading();
     const ok = await this.webdavRestore(url, username, password, remoteDir);
@@ -3238,7 +4570,8 @@ Kazumi.webdavTestUI = async function () {
     const username = $('#webdav_username').val().trim();
     const password = $('#webdav_password').val();
     const remoteDir = $('#webdav_remote_dir').val().trim();
-    if (!url) { warnToast('请输入 WebDAV 地址'); return; }
+    const check = this._webdavUrlCheck(url);
+    if (!check.ok) { warnToast(check.reason); return; }
     showLoading();
     let rsp = null;
     try {
@@ -3248,8 +4581,11 @@ Kazumi.webdavTestUI = async function () {
         }, '/kazumi/action');
     } catch (e) { /* 下方统一处理 */ }
     hideLoading();
-    if (rsp && rsp.code === 200) warnToast('WebDAV 连接正常，地址与账号可用');
-    else warnToast(`连接失败${rsp && rsp.msg ? `：${String(rsp.msg).slice(0, 80)}` : ''}`);
+    // 后端 note：地址提示（内网/明文 http/地址内嵌凭据），成功时一并展示——
+    // 内网地址属正常用法，提示只需要让用户确认连的是哪类地址
+    const note = (rsp && rsp.note) ? String(rsp.note) : check.hint;
+    if (rsp && rsp.code === 200) warnToast(`WebDAV 连接正常，地址与账号可用${note ? `（${note}）` : ''}`);
+    else warnToast(`连接失败${rsp && rsp.msg ? `：${String(rsp.msg).slice(0, 120)}` : ''}`);
 };
 
 // ---------------------------------------------------------------- WebDAV 启动时自动恢复

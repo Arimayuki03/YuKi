@@ -5,8 +5,8 @@
  *   - 本周在播：POST /kazumi/action do=kazumiBangumiCalendar → 星期桶 [{weekday:{id}, items}]
  *   - 历史季度：do=kazumiBangumiSeason(start,end) → 同形状星期桶（v0/search/subjects 按 air_date 过滤分桶）
  * 功能：近 20 年季节索引、排序（热度/评分/播出时间）、收藏过滤（token 降级）、评分/排名展示、
- *       封面悬停收藏状态徽标（六态，默认隐藏）。
- * 卡片点击进二级详情弹窗（Kazumi.openBangumiDetail）。
+ *       封面徽标行（话数徽章 + 主要分类徽标 + 悬停收藏状态徽标，六态默认隐藏）。
+ * 卡片点击进二级详情弹窗（Kazumi.openBangumiInfoPage）。
  */
 /* global $, doAction, escHtml, warnToast, renderPagerBox, pageSizeOf, bangumiCard, bangumiNetGuide, Kazumi, fitVodTitles, playCardsEnter, recGet, FavHub, localCacheGet, localCacheSet, localCacheDel, UIState, showLoading, hideLoading, DetailSnap, Home, guardedLoad, loadBlockWords, filterBlocked, onBlockWordsChange */
 
@@ -24,6 +24,87 @@ const TIMELINE_COL_TTL = 5 * 60 * 1000;           // Bangumi 账号收藏集合�
 // My 页同步账号收藏后 invalidateColCache 会连持久层一并作废，保证过滤与账号状态一致。
 const TIMELINE_COL_PERSIST_KEY = 'timeline::collections::v1';
 const TIMELINE_COL_PERSIST_TTL = 30 * 60 * 1000;  // 30 分钟
+// Bangumi 单批详情 id 上限（后端 server.py kazumiBangumiInfoBatch 与
+// plugin_manager.bangumi_info_batch 均按 [:60] 静默截断，前端必须同口径分批）。
+const BGM_INFO_BATCH_MAX = 60;
+
+// ---------------------------------------------------------------- 番剧「主要分类」识别表
+// 用途：时间表封面卡片的中部徽标（集数徽标与收藏徽标之间）取「哪个标签作为主要分类」。
+// 形态：[规范分类名, [站内常见写法（别名）…]]，表序 = 并列 count 时的优先级
+// （越靠前越常见），保证同 count 的取值确定、可单测。
+//
+// 来源与取舍（本环境无外网，未能联网抓取：表由仓库内既有 Bangumi 标签口径归纳：
+// ① popular.js POPULAR_TAGS 与 index.html #bgm-tag-presets 的 15 项「对齐上游
+//    Kazumi defaultAnimeTags」清单（既有已验证的主流题材集合）；
+// ② 该清单基础上补齐同义写法与站内常见题材：异世界/轮回/穿越/超能力/魔法少女/
+//    末世/家庭/美食/职场/战争/耽美/逆后宫/恐怖/推理/动作/冒险/战斗/青春/历史/偶像）。
+// 明确排除、且注释留痕的「非类型」标签（放进来必然把徽标选成元信息——这类标签在
+// 每个条目上都存在且 count 往往最高，如 TV/日本 常是第一二名）：
+//   · 媒介/放送形式：TV / OVA / OAD / ONA / WEB / 剧场版 / 剧场版动画 / 泡面番 /
+//     短片 / 3D（泡面番是时长规格不是题材，用户口径同此）；
+//   · 地域：日本 / 中国 / 国产 / 欧美 / 韩国；
+//   · 放送季与年份：2026年10月 / 2025年1月 之类（逐季变动，不构成分类）；
+//   · 来源：漫画改 / 漫改 / 轻小说改 / 轻改 / 游戏改 / 小说改 / 原创；
+//   · 连载状态：连载 / 完结 / 续作 / 第N季 / 系列；
+//   · 受众人群：女性向 / 男性向 / 子供向 / 少年漫 / 少女漫；
+//   · 分级：里番 / R-18 / NSFW；
+//   · 制作方 / 声优 / 系列名（芳文社 / 京阿尼 / 高达 …）：无法穷举；白名单只认
+//     列出项，这类标签天然不会命中；
+//   · 情绪与玩梗 fan 标签（致郁 / 催泪 / 猎奇 / 废萌）与音乐子类型（摇滚 / 爵士）：
+//     与「类型/题材」不同层级或过于具体，宁缺毋滥（有「音乐」档兜住音乐番）。
+// 别名归一示例：爱情→恋爱、喜剧/幽默→搞笑、SF/科学幻想→科幻、魔法/幻想→奇幻、
+// 机甲/机器人→机战、竞技/体育→运动、轻百合→百合、时间旅行→穿越、时间循环→轮回。
+// 无命中（典型：只有 TV/日本/2026年10月 这类元信息标签的冷门条目）→ 不显示徽标，
+// 绝不回退「TV」——这是用户明确要求的降级行为。
+const MAIN_TAG_TABLE = [
+    ['恋爱', ['恋爱', '爱情', '恋爱喜剧']],
+    ['搞笑', ['搞笑', '喜剧', '幽默', '欢乐', '沙雕']],
+    ['日常', ['日常']],
+    ['校园', ['校园', '学院', '学园', '学校', '社团']],
+    ['奇幻', ['奇幻', '幻想', '魔幻', '魔法', '剑与魔法']],
+    ['科幻', ['科幻', 'SF', '科学幻想', '硬科幻', '软科幻', '赛博朋克']],
+    ['异世界', ['异世界', '异界', '转生']],
+    ['热血', ['热血', '燃']],
+    ['战斗', ['战斗', '对战']],
+    ['动作', ['动作']],
+    ['冒险', ['冒险', '探险']],
+    ['悬疑', ['悬疑', '惊悚']],
+    ['推理', ['推理', '侦探', '刑侦']],
+    ['恐怖', ['恐怖', '丧尸', '僵尸']],
+    ['机战', ['机战', '机甲', '机器人']],
+    ['运动', ['运动', '竞技', '体育']],
+    ['音乐', ['音乐', '乐队']],
+    ['偶像', ['偶像']],
+    ['治愈', ['治愈', '温馨', '治愈系']],
+    ['百合', ['百合', '轻百合', 'GL']],
+    ['耽美', ['耽美', 'BL', '蔷薇']],
+    ['后宫', ['后宫']],
+    ['逆后宫', ['逆后宫']],
+    ['历史', ['历史']],
+    ['战争', ['战争', '军事', '军武']],
+    ['青春', ['青春', '成长']],
+    ['家庭', ['家庭', '亲子', '亲情']],
+    ['美食', ['美食', '料理']],
+    ['职场', ['职场', '工作']],
+    ['穿越', ['穿越', '时间旅行', '时空穿越']],
+    ['轮回', ['轮回', '时间轮回', '循环', '时间循环']],
+    ['超能力', ['超能力', '异能', '超自然']],
+    ['魔法少女', ['魔法少女']],
+    ['末世', ['末世', '末日', '废土']],
+];
+// 别名 → { category: 规范名, order: 表序 }。原始词与全小写词都建键：
+// 站内 ASCII 标签大小写写法混用（SF/sf、GL/gl、BL/bl），不建小写键会漏命中。
+const MAIN_TAG_LOOKUP = (() => {
+    const m = new Map();
+    MAIN_TAG_TABLE.forEach(([category, aliases], order) => {
+        aliases.forEach((alias) => {
+            if (!m.has(alias)) m.set(alias, { category, order });
+            const lower = alias.toLowerCase();
+            if (lower !== alias && !m.has(lower)) m.set(lower, { category, order });
+        });
+    });
+    return m;
+})();
 
 const Timeline = {
     _inited: false,
@@ -51,6 +132,9 @@ const Timeline = {
     _maskShown: false,
     _loadToken: 0,      // 加载令牌：快速切季度后旧响应不得覆盖新数据（对齐 home.js）
     _loadAbort: null,   // 与 _loadToken 同代的 AbortController：切季度中止在途请求
+    // 整页条目详情批量结果的单槽缓存 { key: 排序后 id 串, promise: Promise<Map<id,info>> }：
+    // 同一页的 tags 徽标与话数徽章共享一次回源；换集合即换键自然作废（见 _fetchInfos）
+    _infosMemo: null,
 
     async init() {
         if (this._inited) return;
@@ -658,12 +742,16 @@ const Timeline = {
             fitVodTitles(grid);
             // 入场错峰：整格重写后重触发（common.js playCardsEnter，glass 模式下 CSS 端自动跳过）
             playCardsEnter(grid);
-            // 封面徽标行（话数徽章常驻 + 收藏徽标悬停显形，样式见 .vod-fav-row）：
+            // 封面徽标行（话数徽章常驻 + 主要分类徽标 + 收藏徽标悬停显形，样式见 .vod-fav-row）：
             // 需在 _attachEpBadges 之前挂行——话数徽章补拉回来后 prepend 进同一行。
             this._attachFavBadges(grid, slice);
             // 封面左下角进度徽章（排名徽章 #N 的对角）：补拉条目详情拿总话数（bangumiInfo
             // 30 分钟缓存，同条目跨页/跨视图复用），放送完结→「N话」；连载中→「N/总话数」。
             this._attachEpBadges(grid, slice).catch(() => { /* 徽章补齐失败不外溢成全局未捕获 */ });
+            // 主要分类徽标（集数徽标与收藏徽标之间）：与话数徽章共用同一批详情
+            //（_fetchInfos 同一渲染代次内共享在途请求），首屏不等它——卡片先上屏，
+            // 徽标后到；补齐失败静默（不外溢、不空占位）。
+            this._attachTagBadges(grid, slice).catch(() => { /* 分类徽标补齐失败静默 */ });
         }
         renderPagerBox($('#timeline-pager'), {
             page: this._page,
@@ -674,6 +762,149 @@ const Timeline = {
 
     _renderCard(item) {
         return bangumiCard(item);
+    },
+
+    /** 取「番剧主要分类」纯函数（可单测，无副作用）：输入 Bangumi tags
+     *  （`[{name,count}]`，退化写法如裸字符串数组也兼容），输出 `{tag, category}`
+     *  或 `''`（无任何类型标签命中 → 不显示徽标）。
+     *  规则（用户口径「标签最多的一种分类，只用一个」）：
+     *   · 只在 MAIN_TAG_TABLE 白名单内取候选（非类型标签天然不命中，见该表注释）；
+     *   · count 取最高者（count 缺失/非数字按 0，字符串数字转数值）；
+     *   · count 并列 → 白名单优先级（表序，即站内常见度）→ 名称字典序，保证确定；
+     *   · 展示名为归一后的分类名（如别名「爱情」→「恋爱」），宽度可控；
+     *     tag 保留命中时的原始写法，供 title 提示。
+     *  入参非数组 → ''（调用方数据缺失/畸形时静默降级）。 */
+    pickMainTag(tags) {
+        if (!Array.isArray(tags)) return '';
+        let best = null;
+        for (const raw of tags) {
+            const isObj = raw && typeof raw === 'object';
+            const rawName = isObj ? raw.name : raw;
+            const name = String(rawName == null ? '' : rawName).trim();
+            if (!name) continue;
+            const hit = MAIN_TAG_LOOKUP.get(name) || MAIN_TAG_LOOKUP.get(name.toLowerCase());
+            if (!hit) continue;
+            const n = isObj ? Number(raw.count) : 0;
+            const count = Number.isFinite(n) ? n : 0;
+            if (!best
+                || count > best.count
+                || (count === best.count && (hit.order < best.order
+                    || (hit.order === best.order && name < best.tag)))) {
+                best = { tag: name, category: hit.category, count, order: hit.order };
+            }
+        }
+        return best ? { tag: best.tag, category: best.category } : '';
+    },
+
+    /** 整页条目详情批量补齐（话数徽章与主要分类徽标共用的唯一回源口）：
+     *  复用 Kazumi.bangumiInfoBatch（两级 30 分钟缓存：前端 localStorage 逐 id +
+     *  后端磁盘逐 id，两级都 miss 才网络并发回源），不新增接口、不逐卡请求。
+     *  · ids 去重后按 BGM_INFO_BATCH_MAX 分批：后端对单批 >60 静默截断，不分批
+     *    第 61 条起永远拿不到数据（话数徽章此前同此隐患，此处一并收口）；
+     *  · 分批串行，避免一次涌出多包并发请求；
+     *  · 同一渲染代次内按「排序后的 id 集合」共享在途 Promise：_attachEpBadges
+     *    与 _attachTagBadges 因此只回源一次（零重复请求），且两者入参集合相同；
+     *  · 任一批失败静默（保留已拿到的部分）：徽标缺失好过拖垮列表渲染。
+     *  返回 Map<id, info>（缺值 id 不入 Map）。 */
+    _fetchInfos(ids) {
+        const uniq = [];
+        const seen = new Set();
+        for (const raw of (ids || [])) {
+            const id = String(raw == null ? '' : raw).trim();
+            if (id && !seen.has(id)) { seen.add(id); uniq.push(id); }
+        }
+        if (!uniq.length) return Promise.resolve(new Map());
+        const key = uniq.slice().sort().join(',');
+        if (this._infosMemo && this._infosMemo.key === key) return this._infosMemo.promise;
+        const promise = (async () => {
+            const out = new Map();
+            for (let i = 0; i < uniq.length; i += BGM_INFO_BATCH_MAX) {
+                const part = uniq.slice(i, i + BGM_INFO_BATCH_MAX);
+                let batch = null;
+                try {
+                    batch = (typeof Kazumi !== 'undefined' && Kazumi.bangumiInfoBatch)
+                        ? await Kazumi.bangumiInfoBatch(part)
+                        : null;
+                } catch (e) { /* 单批失败：保留已到的部分，徽标缺失优于列表卡死 */ }
+                if (batch) for (const [id, info] of Object.entries(batch)) if (info) out.set(id, info);
+            }
+            return out;
+        })();
+        this._infosMemo = { key, promise };
+        promise.then((m) => {
+            // 全空结果不驻留（网络失败/后端无数据）：同一集合下次渲染重试，
+            // 否则一次抖动会在本会话内把该页徽标永久钉成缺失。
+            if (m.size === 0 && this._infosMemo && this._infosMemo.promise === promise) this._infosMemo = null;
+        });
+        return promise;
+    },
+
+    /** 主要分类徽标（封面徽标行中部，插入位置见 _insertTagBadge）：
+     *  · 条目自带 tags（季度检索走 v0/search/subjects，响应自带 tags）→ 就地取材零网络；
+     *  · 其余（本周在播日历条目无 tags）合并成 _fetchInfos 批量回源——与话数徽章
+     *    共享同一批数据与缓存，不重复请求；
+     *  · 无命中/补齐失败 → 不产生任何节点（绝不空占位、绝不回退 TV）。
+     *  与话数徽章一样是「先渲染卡片、徽标后到」的异步补挂，不阻塞首屏。 */
+    async _attachTagBadges(grid, items) {
+        const picked = new Map(); // id → { tag, category }（先收集再统一落 DOM，避免半量插入）
+        const needFetch = [];
+        for (const it of (items || [])) {
+            const id = String((it && (it.id || (it.subject && it.subject.id))) || '');
+            if (!id) continue;
+            if (Array.isArray(it.tags) && it.tags.length) {
+                const p = this.pickMainTag(it.tags);
+                if (p) picked.set(id, p);
+                continue;
+            }
+            needFetch.push(id);
+        }
+        if (needFetch.length) {
+            const infos = await this._fetchInfos(needFetch);
+            for (const [id, info] of infos) {
+                const p = this.pickMainTag(info && info.tags);
+                if (p) picked.set(id, p);
+            }
+        }
+        picked.forEach((p, id) => this._insertTagBadge(grid, id, p));
+    },
+
+    /** 把分类徽标插进封面徽标行，DOM 顺序必须是「集数徽标 → 分类徽标 → 收藏徽标」
+     *  （用户指定的位置）。三种落位场景：
+     *  · 行已存在（收藏徽标先挂 / bangumiCard 直出话数徽章）→ 插到 .vod-fav-badge
+     *    之前（收藏徽标的悬停显形（塌缩 → 展开）动画不受影响）；行内暂无收藏徽标
+     *    时追加到行尾，后续插入的位置天然仍在其左侧。
+     *  · 行不存在（未收藏且话数徽章还没补上来）→ 自建行，并把已直挂 .vod-cover
+     *    的话数/源徽章吸回行首（与 _attachFavBadges 同款口径）：两枚徽章都是
+     *    absolute 定位在同一坐标，不归行会同位重叠。
+     *  重挂去重：先删同卡既有分类徽标，防重复调用叠标签。 */
+    _insertTagBadge(grid, id, pick) {
+        const $card = grid.find(`.bangumi-card[data-id="${id}"] .vod-cover`);
+        if (!$card.length) return;
+        // 原始标签与规范分类不同（别名命中）时在 title 里附上原始写法，便于核对取值来源
+        const tip = pick.tag === pick.category
+            ? `Bangumi 主要分类：${pick.category}`
+            : `Bangumi 主要分类：${pick.category}（标签「${pick.tag}」）`;
+        const html = `<span class="timeline-tag-badge" title="${escHtml(tip)}">${escHtml(pick.category)}</span>`;
+        $card.find('.timeline-tag-badge').remove();
+        const $row = $card.find('.vod-fav-row');
+        if ($row.length) {
+            const $fav = $row.find('.vod-fav-badge');
+            if ($fav.length) $fav.before(html);
+            else $row.append(html);
+            return;
+        }
+        const $oldEp = $card.find('.timeline-ep-badge');
+        let epHtml = ($oldEp.length && $oldEp[0] && $oldEp[0].outerHTML) ? $oldEp[0].outerHTML : '';
+        if (!epHtml) {
+            const $oldEps = $card.find('.rec-eps');
+            if ($oldEps.length && $oldEps[0] && $oldEps[0].outerHTML) epHtml = $oldEps[0].outerHTML;
+        }
+        const $oldKz = $card.find('.kazumi-badge');
+        const kzHtml = ($oldKz.length && $oldKz[0] && $oldKz[0].outerHTML) ? $oldKz[0].outerHTML : '';
+        $oldEp.remove();
+        $card.find('.rec-eps').remove();
+        $oldKz.remove();
+        $card.append(`<div class="vod-fav-row">${kzHtml}${epHtml}${html}</div>`);
     },
 
     /** 封面左下角徽标行：挂 .vod-fav-row 容器（话数徽章常驻其行首），仅当前页里
@@ -717,6 +948,12 @@ const Timeline = {
             // 与话数徽章一起回归行内（时间表/推荐页无此徽章，取空串零影响）。
             const $oldKz = $card.find('.kazumi-badge');
             const kzHtml = ($oldKz.length && $oldKz[0] && $oldKz[0].outerHTML) ? $oldKz[0].outerHTML : '';
+            // 分类徽标（.timeline-tag-badge，时间表卡）同模式吸回：它也是行内成员，
+            // 删行重建会连带销毁（同步收藏返回后徽标成批消失），且必须回到
+            // 「收藏徽标之前」的指定位置（下方 before 插回，不随话数徽章 prepend）。
+            const $oldTag = $card.find('.timeline-tag-badge');
+            const tagHtml = ($oldTag.length && $oldTag[0] && $oldTag[0].outerHTML) ? $oldTag[0].outerHTML : '';
+            $oldTag.remove(); // 兜底：万一它不在行内（直挂封面），先摘除，避免下方插回时重复
             $card.find('.vod-fav-row').remove();
             // bangumiCard 直出的话数徽章可能直挂 .vod-cover（无行）：一并吸进行内
             const $staleEps = $card.find('.rec-eps');
@@ -733,14 +970,22 @@ const Timeline = {
                 $oldKz.remove();
                 $card.find('.vod-fav-row').prepend(kzHtml + oldEpHtml);
             }
+            // 分类徽标插回收藏徽标之前（行内序：源徽章 → 话数徽章 → 分类徽标 → 收藏徽标）
+            if (tagHtml) {
+                const $newRow = $card.find('.vod-fav-row');
+                const $fav = $newRow.find('.vod-fav-badge');
+                if ($fav.length) $fav.before(tagHtml);
+                else $newRow.append(tagHtml);
+            }
         });
     },
 
     /** 封面左下角话数徽章（bangumi-rank-badge 的对角）：完结态分两式——
      *  已完结显示「N话」（对齐 Bangumi 搜索卡徽章口径），连载中显示
      *  「N/总话数」（N=当前已播出话数，按每周一话从放送日推算；无总话数的条目
-     *  不显示）。整页缺总话数的条目合并成一次 bangumiInfoBatch 批量回源（30 分钟
-     *  双层缓存：前端 localStorage 逐 id + 后端磁盘逐 id，页内切换/重复开页零网络），
+     *  不显示）。整页缺总话数的条目合并成一次 _fetchInfos 批量回源（复用
+     *  Kazumi.bangumiInfoBatch：前端 localStorage 逐 id + 后端磁盘逐 id 双层
+     *  30 分钟缓存，页内切换/重复开页零网络；并与「主要分类徽标」共享同一次请求），
      *  徽章就绪一枚挂一枚；换页/切周时由 grid 重渲染自然作废。
      *  快捷分支：条目已带 eps/air_date 字段（推荐页趋势/榜单接口响应自带）时直接用，
      *  整页免回源（复用方 传 itemsFull=true 声明条目完整）；时间表日历/搜索条目
@@ -761,13 +1006,9 @@ const Timeline = {
         const infos = new Map();
         for (const id of direct) infos.set(id, byId.get(id));
         if (needFetch.length) {
-            let batch = null;
-            try {
-                batch = (typeof Kazumi !== 'undefined' && Kazumi.bangumiInfoBatch)
-                    ? await Kazumi.bangumiInfoBatch(needFetch)
-                    : null;
-            } catch (e) { /* 批量失败整体跳过（单条路径也已下线） */ }
-            if (batch) for (const [id, info] of Object.entries(batch)) if (info) infos.set(id, info);
+            // 批量详情走 _fetchInfos：与「主要分类徽标」同一渲染代次共享在途请求
+            //（同页只回源一次），并统一按后端单批 60 上限分批，避免超限被静默截断。
+            for (const [id, info] of await this._fetchInfos(needFetch)) infos.set(id, info);
         }
         for (const [id, info] of infos) {
             const eps = Number(info.eps || info.total_episodes) || 0;

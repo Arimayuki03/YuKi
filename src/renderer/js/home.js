@@ -8,7 +8,7 @@
  * /sites 预发（feed 的 doAction 只消费源 key，与站点列表枚举无数据依赖）；
  * loadSites 与预发并行拉 /sites，返回后按代接管（跳过重复 loadHome）、只刷源下拉。
  */
-/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, localCacheDel, errorTextOf, playCardsEnter, stageAppendedCards, DetailSnap, vodPlaceholder, guardedLoad, prefetchDetail, loadBlockWords, filterBlocked, onBlockWordsChange */
+/* global $, doAction, getJson, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, renderPagerBox, pageSizeOf, fillMissingCovers, fitVodTitles, UIState, renderStatusBar, localCacheGet, localCacheSet, localCacheDel, errorTextOf, playCardsEnter, stageAppendedCards, DetailSnap, vodPlaceholder, guardedLoad, prefetchDetail, loadBlockWords, filterBlocked, onBlockWordsChange, SearchHistory */
 
 // T60：分类空态探测结果新鲜期（该源上次探测完成后在此窗口内不再重复探测，防每次启动全量重探）
 const EMPTY_CLS_TTL = 24 * 3600 * 1000;
@@ -178,9 +178,15 @@ const Home = {
             const busy = this._configBusyText();
             if (busy) { warnToast(busy); return; } // 恢复窗口期：请求必然落空，直接提示
             if (this.mode === 'home') this.loadHome(this.page || 1, { userRefresh: true });
-            else if (this.mode === 'search') this.searchCurrent(this.page);
+            // 搜索态刷新：输入框有内容就是用户当前意图（优先）；重启恢复后输入框不再被回填
+            // 而搜索态仍在（searchWord 记住），此时退回该词——否则「刷新」会莫名退回首页 feed
+            else if (this.mode === 'search') this.searchCurrent(this.page, ($('#home-search').val() || '').trim() || this.searchWord);
             else this.loadCategory(this.tid, this.page, true); // 刷新绕过缓存重拉当前页
         });
+        // 搜索历史面板须先于下方回车绑定：键盘上下+回车要能先一步拦下回车（同元素先绑先跑）
+        if (typeof SearchHistory !== 'undefined' && SearchHistory.attach) {
+            SearchHistory.attach('#home-search', 'home');
+        }
         // 当前源搜索：回车触发；清空后回车回首页
         $('#home-search').on('keydown', (e) => {
             if (e.key === 'Enter') this.searchCurrent();
@@ -537,7 +543,8 @@ const Home = {
         // 缓存缺失或分类已不存在时退回「全部」feed，不为恢复多发一次阻塞请求。
         const savedView = this._viewState();
         const savedWord = (savedView && savedView.mode === 'search') ? String(savedView.word || '').trim() : '';
-        if (savedWord) $('#home-search').val(savedWord);
+        // 恢复搜索态不再把关键词写回输入框（需求：持久化的词改由搜索历史面板呈现），
+        // 而是把词作为参数直接交给 searchCurrent——输入框留空，结果照旧恢复。
         if (savedView && savedView.mode === 'category' && savedView.tid !== '') {
             const cls = this._loadClassCache(this.site);
             const match = Array.isArray(cls) ? cls.find((c) => String(c.type_id) === String(savedView.tid)) : null;
@@ -549,7 +556,7 @@ const Home = {
                 await this.loadHome(undefined, { silent });
             }
         } else if (savedView && savedView.mode === 'search' && savedWord) {
-            await this.searchCurrent(Number(savedView.page) || 1);
+            await this.searchCurrent(Number(savedView.page) || 1, savedWord);
         } else if (!bootTakeOver) {
             await this.loadHome(undefined, { silent });
         } // else：B-12 接管——预发 loadHome 已渲染当前源「全部」feed，跳过重复请求
@@ -1659,7 +1666,9 @@ const Home = {
                 mode: this.mode || 'home',
                 tid: String(this.tid == null ? '' : this.tid),
                 page: this.page || 1,
-                word: this.mode === 'search' ? String($('#home-search').val() || '').trim() : '',
+                // 记 searchWord（模式状态）而不是输入框的值：搜索态恢复已不再回填输入框，
+                // 读输入框会在重启后把词记成空、把上次的搜索态丢掉
+                word: this.mode === 'search' ? String(this.searchWord || '').trim() : '',
             });
         } catch (e) { /* 持久化失败不影响主流程 */ }
     },
@@ -1672,14 +1681,17 @@ const Home = {
         if (!this._pageSizeDirty) return;
         this._pageSizeDirty = false;
         if (this.mode === 'category') this.loadCategory(this.tid, this.page || 1);
-        else if (this.mode === 'search') this.searchCurrent(this.page || 1);
+        // 同上：输入框空（恢复路径不回填）时用模式记住的词重载，而不是把搜索态丢掉
+        else if (this.mode === 'search') this.searchCurrent(this.page || 1, ($('#home-search').val() || '').trim() || this.searchWord);
         else this.loadHome(this.page || 1);
     },
 
     /** 当前源搜索：走站点自身 searchContent（CMS 源 wd 参数），仅搜当前选中源。
-     *  支持真分页（pg 参数）；输入清空后回车回到首页推荐位。 */
-    async searchCurrent(pg) {
-        const wd = String($('#home-search').val() || '').trim();
+     *  支持真分页（pg 参数）；输入清空后回车回到首页推荐位。
+     *  wdOpt：显式关键词（仅重启恢复路径传）——恢复不再把持久化的词写回输入框，
+     *  改由参数直传，输入框保持空白。 */
+    async searchCurrent(pg, wdOpt) {
+        const wd = String(wdOpt || $('#home-search').val() || '').trim();
         if (!wd) { if (this.mode === 'search') this.loadHome(); return; }
         if (!this.site) return;
         const busy = this._configBusyText();
@@ -1689,6 +1701,8 @@ const Home = {
         this.searchWord = wd;
         this.page = pg || 1;
         this._saveView(); // 状态快照：源 + 搜索模式 + 关键词 + 页码
+        // 搜索历史：真正发起检索才记（输入过程不写盘）。重启恢复也走这里——同词只上移时间，无副作用
+        if (typeof SearchHistory !== 'undefined' && SearchHistory.record) SearchHistory.record(wd, 'home');
         const token = this._nextLoadToken();
         showLoading();
         try {

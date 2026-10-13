@@ -9,8 +9,21 @@
  * Bangumi 收藏卡内嵌「★ 评分」按钮与「我的 N★」徽章（recCard 直接渲染，覆盖一切重建路径；
  * 点击事件由 my.js 在 document 级委托打开 BgmRate 对话框——独立收藏页 #view-favorites
  * 与「我的」页内嵌网格两处 Bangumi 卡都生效）。
+ *
+ * 排序与筛选（文件中部「纯函数层」）：两页共用 makeRecordView 内的同一条管线
+ * （_applyFilter/_applySort → recFavCompare / recHistoryCompare / matchFavFilter /
+ * matchHistoryFilter），状态持久化在 favoritesSort/favoritesFilter/historySort/historyFilter。
+ * 收藏页维度对齐 Bangumi 搜索工作台（标签 AND / 季度或日期区间 / 评分 / 排名 / 星期），
+ * 历史页为日期（单日 + 区间）/ 来源 / 评分档位。需要 Bangumi 字段的维度先批量回填元数据
+ * （recPrefetchBgmMeta：≤60/批、30 分钟缓存、单渲染有条数上限），匹配不到的条目算「未知」，
+ * 排序一律排最后、筛选默认排除但可经「含未知/未评分」开关保留（历史评分档位另有「未评分」档）。
+ *
+ * 卡片追加动作：历史卡右上角「▶ 续播」（仅 kind='play'，恢复上次线路/集数直接起播，见
+ * resumePlayRecord）与右下角「⋯ 收藏」（六态菜单，构建/写入函数 buildFavMenuHtml /
+ * applyRecFavMenu 与收藏页共用）。两者都是 .vod-card 的直接子元素——不能放进 .vod-cover：
+ * 封面补拉（common.js _coverFillOne）对 Kazumi 卡会整格重写 .vod-cover 内容。
  */
-/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter, fmtCommentTimeFull, DetailSnap, prefetchDetail, Home, loadBlockWords, filterBlocked, onBlockWordsChange */
+/* global $, escHtml, normalizePic, warnToast, showLoading, hideLoading, Detail, Kazumi, bangumiCover, confirmDialog, openDialog, closeDialog, vodCoverImg, bangumiCoverImg, isBangumiCoverUrl, fillMissingCovers, renderPagerBox, pageSizeOf, fitVodTitles, truncateTitle, localPlayToast, playCardsEnter, fmtCommentTimeFull, DetailSnap, prefetchDetail, Home, loadBlockWords, filterBlocked, onBlockWordsChange, doAction, Player, Timeline */
 
 async function recGet(key) {
     try {
@@ -136,6 +149,17 @@ const Records = {
             totalEps: v.totalEps || 0,   // 该源总集数，历史卡「共 N 集」显示用
         };
         const key = String(v.name || '').trim().toLowerCase();
+        // 评分落盘（用户拍板方案）：新记录尽量把 Bangumi 元数据随记录存下来，之后「按评分
+        // 筛选」不必每次都回源匹配。recMetaOf 是纯读（记录自带 → 片名匹配缓存 → 批量回填
+        // 缓存），拿不到就留空——绝不在写路径发网络请求：这条路径在每个播放会话收尾时执行，
+        // 为评分拖慢收尾不值得，而详情页/列表页的匹配缓存通常已经预热。
+        try {
+            const meta = recMetaOf(entry);
+            if (Number(meta.score) > 0) entry.bgmScore = Number(meta.score);
+            if (Number(meta.rank) > 0) entry.bgmRank = Number(meta.rank);
+            if (meta.date) entry.airDate = meta.date;
+            if (meta.id) entry.bangumiId = String(meta.id);
+        } catch (e) { /* 元数据缺失/缓存异常不影响历史记录写入 */ }
         list = list.filter((x) => String(x.name || '').trim().toLowerCase() !== key || x.kind === 'play');
         list.unshift(entry);
         if (list.length > 200) list = list.slice(0, 200);
@@ -265,6 +289,544 @@ const TAG_ORDER = ['want', 'watching', 'seen', 'hold', 'dropped']; // 标签循�
 /** 标签 → 展示文案（未知标签回退「想看」）。 */
 function tagLabel(t) { return TAG_LABEL[t] || '想看'; }
 
+// ================================================================
+// 排序与筛选（纯函数层）
+//
+// 收藏页与历史页共用同一条管线（makeRecordView 的 render → 过滤 → 排序），规则全部落在
+// 下面的纯函数上：无 DOM、无网络、无模块状态，便于 vm 沙箱单测锁边界（缺字段/空值/
+// 中文名/区间端点/非法区间/跨年/未评分归类）。
+//
+// Bangumi 字段的取值优先级（筛选与排序共用 recMetaOf）：
+//   ① 记录自带字段（远端收藏映射 my.js、评分补齐回写的 bgmScore/bgmRank）
+//   ② Kazumi 片名匹配缓存（localStorage 持久，封面补拉管线已填 score/rank/air_date，同步零网络）
+//   ③ _recBgmMeta 批量回填缓存（bangumiInfoBatch，≤60/批，30 分钟 TTL，见 recPrefetchBgmMeta）
+// 匹配不到 Bangumi 数据的条目在评分/排名/开播/标签/星期维度记为空（未知）：排序一律排最后；
+// 筛选默认不通过，但收藏页「含未知/未评分」开关可让它们留在结果里，历史页评分档位另有
+// 「未评分」档直接查看——未知条目只会被明确筛选条件排除，不会因缺字段被静默删掉。
+// ================================================================
+
+/** 记录时间戳数值化：非有限数/负数一律 0（0 在排序里代表「缺字段」）。 */
+function recTsNum(v) {
+    const n = Number(v);
+    return (Number.isFinite(n) && n > 0) ? n : 0;
+}
+
+/** 「最近变更」取值优先级（用户裁决）：本记录 ts → 远端同步数据的 updated_at/updatedAt
+ *  → lastPlayTs。本地收藏的写入点（加入收藏、标签循环、进度更新置顶）只维护 ts 一个
+ *  时间戳，故它是「该条目最近被动过」的既有唯一权威；Bangumi 远端条目若带 updated_at
+ *  则优先于我们自己的 ts（远端账号上的改动才是真正的状态变更时间）。
+ *  全部缺失返回 0（排序统一排最后，不因缺字段乱序或丢项）。 */
+function recRecentTs(v) {
+    if (!v) return 0;
+    return recTsNum(v.ts) || recTsNum(v.updated_at) || recTsNum(v.updatedAt) || recTsNum(v.lastPlayTs) || 0;
+}
+
+/** 展示名（中文优先，用户裁决）：name_cn（Bangumi 条目自带）→ name。 */
+function recDisplayName(v) {
+    return String((v && (v.name_cn || v.name)) || '').trim();
+}
+
+/** 片名比较：本地化排序（localeCompare('zh')，中文按拼音/笔画不成段的稳定序）；
+ *  缺名一律排最后。等名返回 0，稳定性交给 Array.prototype.sort（ES2019 起规范保证）。 */
+function recNameCompare(a, b) {
+    const na = recDisplayName(a);
+    const nb = recDisplayName(b);
+    if (!na && !nb) return 0;
+    if (!na) return 1;
+    if (!nb) return -1;
+    try { return na.localeCompare(nb, 'zh'); } catch (e) { return na < nb ? -1 : (na > nb ? 1 : 0); }
+}
+
+/** 数值比较：null/非数值视为缺字段一律排最后；有值之间按 desc 定方向。 */
+function recNumCompare(a, b, desc) {
+    const na = (a === null || a === undefined || !Number.isFinite(Number(a))) ? null : Number(a);
+    const nb = (b === null || b === undefined || !Number.isFinite(Number(b))) ? null : Number(b);
+    if (na === null && nb === null) return 0;
+    if (na === null) return 1;
+    if (nb === null) return -1;
+    return desc ? nb - na : na - nb;
+}
+
+/** 日期串（YYYY-MM-DD，字典序即时间序）比较：空值一律排最后，新 → 旧。 */
+function recDateCompareDesc(a, b) {
+    const hasA = !!a;
+    const hasB = !!b;
+    if (!hasA && !hasB) return 0;
+    if (!hasA) return 1;
+    if (!hasB) return -1;
+    return a < b ? 1 : (a > b ? -1 : 0);
+}
+
+/** 条目 → Bangumi subject id：显式 bangumiId 优先，其次 Bangumi 托管条目的数字化 vodId。
+ *  无法定位返回 ''（该条目在评分/排名/开播/标签/星期维度记为空/未知）。 */
+function recBgmId(v) {
+    if (!v) return '';
+    const bid = String(v.bangumiId || '').trim();
+    if (/^\d+$/.test(bid)) return bid;
+    if (isBangumiItem(v)) {
+        const id = String(v.vodId || '').trim();
+        if (/^\d+$/.test(id)) return id;
+    }
+    return '';
+}
+
+// Bangumi 元数据批量回填缓存：subjectId → { info, ts }。
+// 成功条目 30 分钟 TTL（与 Kazumi.bangumiInfo 的 localStorage 口径一致），失败条目 60 秒
+// 负缓存（同 bangumiInfoBatch 内部负缓存节奏）——同一 id 一旦回填，本会话后续渲染
+// （切页/翻页/改排序/改筛选）零网络；失败也不会把条目冻死半小时。
+const REC_BGM_META_TTL = 30 * 60 * 1000;
+const REC_BGM_META_FAIL_TTL = 60 * 1000;
+const REC_BGM_META_BATCH = 60;      // 每批 id 上限（对齐 bangumiInfoBatch 单批 ≤60）
+const REC_BGM_META_MAX_IDS = 120;   // 单次渲染回填上限：超出部分本渲染按未知处理，下次渲染补
+const _recBgmMeta = new Map();
+let _recBgmMetaPending = null;      // Map<subjectId, Promise>（在途去重；懒建）
+
+/** 缓存条目是否仍在有效期内（成功/失败两档 TTL）。 */
+function recBgmMetaFresh(hit) {
+    if (!hit) return false;
+    const ttl = hit.info ? REC_BGM_META_TTL : REC_BGM_META_FAIL_TTL;
+    return (Date.now() - hit.ts) < ttl;
+}
+
+/** 同步读条目 → Bangumi 展示元数据 { id, score, rank, date, tags }：
+ *  ① 记录自带 → ② Kazumi 片名匹配缓存 → ③ 批量回填缓存。
+ *  纯读、不触发网络（回填由 recPrefetchBgmMeta 在过滤/排序前统一发起）。
+ *  片名匹配缓存只在「记录没有已知 subject id，或缓存 id 与记录 id 一致」时采信——
+ *  同名不同部（不同 subject）的元数据不得串到另一条记录上。 */
+function recMetaOf(v) {
+    const out = { id: '', score: 0, rank: 0, date: '', tags: [] };
+    if (!v) return out;
+    const ownScore = (v.bgmScore === 0 || v.bgmScore) ? Number(v.bgmScore) : 0;
+    const ownRank = (v.bgmRank === 0 || v.bgmRank) ? Number(v.bgmRank) : 0;
+    if (Number.isFinite(ownScore) && ownScore > 0) out.score = ownScore;
+    if (Number.isFinite(ownRank) && ownRank > 0) out.rank = ownRank;
+    const ownDate = String(v.airDate || v.air_date || v.date || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(ownDate)) out.date = ownDate.slice(0, 10);
+    (Array.isArray(v.tags) ? v.tags : []).forEach((t) => {
+        const nm = (t && typeof t === 'object') ? t.name : t;
+        if (nm && String(nm).trim()) out.tags.push(String(nm).trim());
+    });
+    const id = recBgmId(v);
+    if (id) out.id = id;
+    if (!out.score || !out.rank || !out.date) {
+        try {
+            const m = (typeof Kazumi !== 'undefined' && Kazumi.getCachedBangumiMatch)
+                ? Kazumi.getCachedBangumiMatch(String(v.name || '')) : null;
+            const mid = String((m && m.id) || '');
+            if (m && (!out.id || !mid || mid === out.id)) {
+                const s = Number(m.score) || 0;
+                const r = Number(m.rank) || 0;
+                if (!out.score && s > 0) out.score = s;
+                if (!out.rank && r > 0) out.rank = r;
+                const d = String(m.air_date || '').trim();
+                if (!out.date && /^\d{4}-\d{2}-\d{2}/.test(d)) out.date = d.slice(0, 10);
+                if (!out.id && mid) out.id = mid;
+            }
+        } catch (e) { /* 匹配缓存读取失败：该维度按未知处理 */ }
+    }
+    const hit = out.id ? _recBgmMeta.get(out.id) : null;
+    const info = hit ? hit.info : null;
+    if (info && recBgmMetaFresh(hit)) {
+        const rs = Number((info.rating && info.rating.score) || info.score) || 0;
+        const rr = Number((info.rating && info.rating.rank) || info.rank) || 0;
+        if (!out.score && rs > 0) out.score = rs;
+        if (!out.rank && rr > 0) out.rank = rr;
+        const d = String(info.date || info.air_date || '').trim();
+        if (!out.date && /^\d{4}-\d{2}-\d{2}/.test(d)) out.date = d.slice(0, 10);
+        if (!out.tags.length && Array.isArray(info.tags)) {
+            info.tags.forEach((t) => {
+                const nm = (t && typeof t === 'object') ? t.name : t;
+                if (nm && String(nm).trim()) out.tags.push(String(nm).trim());
+            });
+        }
+    }
+    return out;
+}
+
+/** 需要回填元数据的 subject id（记录自带 id + 片名匹配缓存命中的 id）：
+ *  默认只补「评分/排名/开播」有缺口的条目——三项齐全的条目回填也拿不到新信息，
+ *  白打一批接口；needTags=true（标签筛选启用）时额外包含「无标签」的条目，因为标签
+ *  只存在于 bangumiInfo 响应里（片名匹配缓存只有 score/rank/air_date），
+ *  不专门为它回源会让标签筛选永远筛空。 */
+function recMetaIdsOf(list, needTags) {
+    const ids = [];
+    (Array.isArray(list) ? list : []).forEach((v) => {
+        const m = recMetaOf(v);
+        if (!m.id) return;
+        if (m.score && m.rank && m.date && !(needTags && !m.tags.length)) return;
+        if (ids.indexOf(m.id) < 0) ids.push(m.id);
+    });
+    return ids;
+}
+
+/** 批量回填 Bangumi 元数据：只对缓存缺失/过期且不在途的 id 发请求，按 REC_BGM_META_BATCH
+ *  分批（≤60/批），单次渲染最多 REC_BGM_META_MAX_IDS 个。无 Kazumi 引擎（沙箱/降级）
+ *  或请求失败一律静默——相关条目按未知处理，不影响列表渲染与其它筛选维度。 */
+async function recPrefetchBgmMeta(ids) {
+    if (typeof Kazumi === 'undefined' || typeof Kazumi.bangumiInfoBatch !== 'function') return;
+    const pending = _recBgmMetaPending || (_recBgmMetaPending = new Map());
+    const need = [];
+    for (const raw of (ids || [])) {
+        const id = String(raw || '').trim();
+        if (!id || need.indexOf(id) >= 0) continue;
+        if (recBgmMetaFresh(_recBgmMeta.get(id))) continue;
+        if (pending.has(id)) continue;
+        need.push(id);
+        if (need.length >= REC_BGM_META_MAX_IDS) break;
+    }
+    for (let i = 0; i < need.length; i += REC_BGM_META_BATCH) {
+        const chunk = need.slice(i, i + REC_BGM_META_BATCH);
+        const p = Kazumi.bangumiInfoBatch(chunk).catch(() => ({}));
+        // 在途登记：同一批 id 在并发渲染（多视图实例/连点翻页）里只发一次请求
+        chunk.forEach((id) => pending.set(id, p));
+        const out = await p.catch(() => ({}));
+        chunk.forEach((id) => {
+            _recBgmMeta.set(id, { info: (out && out[id]) || null, ts: Date.now() });
+            pending.delete(id);
+        });
+    }
+}
+
+/** 公共评分（0-10）：记录自带 bgmScore（含补齐回写）→ 元数据 → null（未评分/未知）。 */
+function recScore(v, meta) {
+    const own = (v && (v.bgmScore === 0 || v.bgmScore)) ? Number(v.bgmScore) : 0;
+    if (Number.isFinite(own) && own > 0) return own;
+    const s = Number(meta && meta.score) || 0;
+    return s > 0 ? s : null;
+}
+
+/** Bangumi 排名（#N，数字越小越好）：记录自带 bgmRank → 元数据 → null（无排名/未知）。 */
+function recRank(v, meta) {
+    const own = (v && (v.bgmRank === 0 || v.bgmRank)) ? Number(v.bgmRank) : 0;
+    if (Number.isFinite(own) && own > 0) return own;
+    const r = Number(meta && meta.rank) || 0;
+    return r > 0 ? r : null;
+}
+
+/** 开播日期（YYYY-MM-DD）：记录自带 airDate/air_date/date → 元数据 → ''（未知）。 */
+function recAirDate(v, meta) {
+    const own = String((v && (v.airDate || v.air_date || v.date)) || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(own)) return own.slice(0, 10);
+    const m = String((meta && meta.date) || '').trim();
+    return /^\d{4}-\d{2}-\d{2}/.test(m) ? m.slice(0, 10) : '';
+}
+
+/** 放送星期（1=周一 … 7=周日，对齐 Bangumi 搜索 weekday: 与时间表的星期口径）：
+ *  由开播日期推算（Bangumi subject 详情不含 air_weekday，只有日期）；非法/缺失返回 0。 */
+function recWeekday(v, meta) {
+    const m = recAirDate(v, meta).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return 0;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return 0;
+    return d.getDay() === 0 ? 7 : d.getDay();
+}
+
+const REC_FAV_SORTS = ['recent', 'name', 'score', 'airdate', 'rank'];
+const REC_HISTORY_SORTS = ['time-desc', 'time-asc', 'score-desc', 'score-asc', 'count-desc'];
+
+/** 排序键归一化：未知/缺失/脏值钳回默认（收藏=最近变更；历史=时间倒序，即既有落盘顺序）。 */
+function normFavSort(v) {
+    const s = String(v || '');
+    return REC_FAV_SORTS.indexOf(s) >= 0 ? s : 'recent';
+}
+
+function normHistorySort(v) {
+    const s = String(v || '');
+    return REC_HISTORY_SORTS.indexOf(s) >= 0 ? s : 'time-desc';
+}
+
+/** 收藏排序比较器：缺字段（评分/排名/开播缺失）一律排最后；同值返回 0 交由稳定排序。 */
+function recFavCompare(a, b, sortKey, metaOf) {
+    const key = normFavSort(sortKey);
+    if (key === 'name') return recNameCompare(a, b);
+    const mOf = (x) => (typeof metaOf === 'function' ? (metaOf(x) || null) : null);
+    if (key === 'score') return recNumCompare(recScore(a, mOf(a)), recScore(b, mOf(b)), true);
+    if (key === 'rank') return recNumCompare(recRank(a, mOf(a)), recRank(b, mOf(b)), false); // #1 最前
+    if (key === 'airdate') return recDateCompareDesc(recAirDate(a, mOf(a)), recAirDate(b, mOf(b)));
+    return recNumCompare(recRecentTs(a), recRecentTs(b), true);
+}
+
+/** 历史展示时间（日期筛选/排序共用）：播放卡（kind='play'）用 lastPlayTs → ts；
+ *  浏览卡用 ts → lastPlayTs。用户裁决的日期语义，与卡面日期行同源。 */
+function recHistoryTs(v) {
+    if (!v) return 0;
+    const isPlay = v.kind === 'play' || (Number(v.playCount) || 0) > 0;
+    return isPlay ? (recTsNum(v.lastPlayTs) || recTsNum(v.ts) || 0) : (recTsNum(v.ts) || recTsNum(v.lastPlayTs) || 0);
+}
+
+/** 历史排序比较器：time-* 用展示时间；score-* 用 Bangumi 评分（两个方向都未评分排最后）；
+ *  count-desc 用播放次数（0/缺失排最后）。 */
+function recHistoryCompare(a, b, sortKey, metaOf) {
+    const key = normHistorySort(sortKey);
+    if (key === 'time-asc') return recNumCompare(recHistoryTs(a), recHistoryTs(b), false);
+    if (key === 'score-desc' || key === 'score-asc') {
+        const mOf = (x) => (typeof metaOf === 'function' ? (metaOf(x) || null) : null);
+        return recNumCompare(recScore(a, mOf(a)), recScore(b, mOf(b)), key === 'score-desc');
+    }
+    if (key === 'count-desc') return recNumCompare(Number(a && a.playCount) || 0, Number(b && b.playCount) || 0, true);
+    return recNumCompare(recHistoryTs(a), recHistoryTs(b), true);
+}
+
+/** 排序入口（不修改入参，返回新数组）：两页共用，kind='history' 走历史比较器。
+ *  排序只影响展示顺序，不改动落盘顺序——存储仍是「新记录头插 + 上限 200」（addHistory/recordPlay），
+ *  排序键与筛选条件都不落盘到记录本身，避免同一份数据被两套顺序语义撕扯。 */
+function applyRecSort(list, sortKey, metaOf, kind) {
+    const arr = Array.isArray(list) ? list.slice() : [];
+    const cmp = (kind === 'history') ? recHistoryCompare : recFavCompare;
+    arr.sort((a, b) => cmp(a, b, sortKey, metaOf));
+    return arr;
+}
+
+/** 日期串合法性（YYYY-MM-DD 且真实存在）：非法返回 ''。
+ *  反查年月日拦下 2026-02-30 这类被 Date 归一化成 3 月 2 日的非法输入。 */
+function recValidDate(s) {
+    const str = String(s || '').trim();
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return '';
+    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+    const dt = new Date(y, mo, d);
+    if (Number.isNaN(dt.getTime())) return '';
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo || dt.getDate() !== d) return '';
+    return str;
+}
+
+/** 时间戳 → 本地日期串 YYYY-MM-DD（筛选按用户本地「某天」语义，不用 UTC 切日）。 */
+function recTsToDate(ts) {
+    const n = recTsNum(ts);
+    if (!n) return '';
+    const d = new Date(n);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 日期区间归一化：非法端点剔空、颠倒端点自动交换（用户从后往前选日期不该筛出空列表）；
+ *  两端皆无效返回 null。返回的是「闭区间」语义（见 recDateInRange）。 */
+function normDateRange(from, to) {
+    let a = recValidDate(from);
+    let b = recValidDate(to);
+    if (!a && !b) return null;
+    if (a && b && a > b) { const t = a; a = b; b = t; }
+    return { from: a, to: b };
+}
+
+/** 日期是否落在闭区间内（端点含）：端点缺失 = 该侧无界；日期非法/区间空返回 false。 */
+function recDateInRange(date, range) {
+    const d = recValidDate(date);
+    if (!d || !range) return false;
+    if (range.from && d < range.from) return false;
+    if (range.to && d > range.to) return false;
+    return true;
+}
+
+/** 数值区间归一化（评分 0-10 / 排名 ≥1 用上下限钳制）：非数值剔除、min>max 自动交换、
+ *  皆空返回 null。单侧给值即单侧开区间。 */
+function normNumRange(min, max, lo, hi) {
+    const num = (x) => {
+        if (x === null || x === undefined || x === '') return null;
+        const n = Number(x);
+        return Number.isFinite(n) ? n : null;
+    };
+    let a = num(min);
+    let b = num(max);
+    if (a !== null && lo !== undefined) a = Math.max(lo, a);
+    if (b !== null && hi !== undefined) b = Math.min(hi, b);
+    if (a === null && b === null) return null;
+    if (a !== null && b !== null && a > b) { const t = a; a = b; b = t; }
+    return { min: a, max: b };
+}
+
+/** 数值是否落在闭区间内（端点含）：值缺省/非法返回 false（未知条目不满足具体数值条件）。 */
+function recNumInRange(value, range) {
+    const v = (value === null || value === undefined || value === '') ? NaN : Number(value);
+    if (!Number.isFinite(v) || !range) return false;
+    if (range.min !== null && range.min !== undefined && v < range.min) return false;
+    if (range.max !== null && range.max !== undefined && v > range.max) return false;
+    return true;
+}
+
+/** 标签串 → 标签数组：按逗号/全角逗号/顿号/空白切分、去重、上限 16 个。
+ *  对齐 Bangumi 搜索 tag: 的「多标签同时满足（AND）」语义。 */
+function parseRecTagQuery(str) {
+    const out = [];
+    String(str || '').split(/[,，、\s]+/).forEach((t) => {
+        const s = t.trim();
+        if (s && out.indexOf(s) < 0 && out.length < 16) out.push(s);
+    });
+    return out;
+}
+
+/** 季度（YYYYQn）→ 开播日期区间：半开 [首月 1 日, 首月+3 月 1 日)，与 Bangumi 搜索工作台
+ *  同款季度语义（bangumi-search.js BangumiSearchParser.seasonToDateRange，L-32 已从 Kazumi
+ *  的偏移实现改为标准季度区间）。此处独立实现而非直读对方的顶层词法绑定：BangumiSearchParser
+ *  未挂到 YUKI 导出面，跨文件直读会随对方重排/重命名静默失效（对方正在改该文件的筛选区块）。 */
+function recSeasonRange(season) {
+    const m = /^(\d{4})Q([1-4])$/i.exec(String(season || '').trim());
+    if (!m) return null;
+    const year = parseInt(m[1], 10);
+    const startMonth = (parseInt(m[2], 10) - 1) * 3 + 1;
+    const start = recTsToDate(new Date(year, startMonth - 1, 1).getTime());
+    const end = recTsToDate(new Date(year, startMonth + 2, 1).getTime());
+    if (!start || !end) return null;
+    return { start, end };
+}
+
+/** 收藏筛选状态归一化（favoritesFilter）：任何脏输入（缺字段/字符串/越界/脏数组）
+ *  都收敛为完整对象——持久化读回、控件回填、状态回显都只看它。
+ *  必须幂等（两种输入形状都认）：外部输入用 scoreMin/scoreMax/dateFrom/dateTo，
+ *  归一化结果用 scoreRange/rankRange/dateRange；matchFavFilter → favFilterActive →
+ *  normFavFilter 会把同一对象再走一遍，不认已归一化形状就会把区间整个丢掉。 */
+function normFavFilter(obj) {
+    const s = (obj && typeof obj === 'object') ? obj : {};
+    const season = /^\d{4}Q[1-4]$/i.test(String(s.season || '')) ? String(s.season).toUpperCase() : '';
+    const weekdays = [];
+    (Array.isArray(s.weekdays) ? s.weekdays : []).forEach((n) => {
+        const w = parseInt(n, 10);
+        if (w >= 1 && w <= 7 && weekdays.indexOf(w) < 0) weekdays.push(w);
+    });
+    weekdays.sort((a, b) => a - b);
+    const scR = (s.scoreRange && typeof s.scoreRange === 'object') ? s.scoreRange : { min: s.scoreMin, max: s.scoreMax };
+    const rkR = (s.rankRange && typeof s.rankRange === 'object') ? s.rankRange : { min: s.rankMin, max: s.rankMax };
+    const dtR = (s.dateRange && typeof s.dateRange === 'object') ? s.dateRange : { from: s.dateFrom, to: s.dateTo };
+    return {
+        tags: parseRecTagQuery(Array.isArray(s.tags) ? s.tags.join(' ') : s.tags),
+        // 季度与日期区间互斥（对齐 Bangumi 搜索工作台：选定其一清掉另一）
+        season,
+        dateRange: season ? null : normDateRange(dtR.from, dtR.to),
+        scoreRange: normNumRange(scR.min, scR.max, 0, 10),
+        rankRange: normNumRange(rkR.min, rkR.max, 1, undefined),
+        weekdays,
+        // 含未知/未评分：缺对应 Bangumi 数据的条目不因该筛选被丢弃（用户裁决的归类规则）
+        includeUnknown: s.includeUnknown === true,
+    };
+}
+
+/** 收藏高级筛选是否启用（决定是否回填元数据、空态文案口径）。 */
+function favFilterActive(f) {
+    const s = normFavFilter(f);
+    return !!(s.tags.length || s.season || s.dateRange || s.scoreRange || s.rankRange || s.weekdays.length);
+}
+
+/** 收藏筛选谓词：与 Bangumi 搜索同款维度，各维度 AND，未启用时恒真。
+ *  季度按 [首日, 下季首日) 半开（季度边界必须归入下一季）；显式日期区间按闭区间（含端点，
+ *  用户选的起止两天都应留下）。缺对应数据的条目：includeUnknown=true 时视为通过
+ * （归入「未知/未评分」），否则按不满足处理。 */
+function matchFavFilter(v, filter, meta) {
+    const f = normFavFilter(filter);
+    if (!favFilterActive(f)) return true;
+    if (!v) return false;
+    const m = (meta && typeof meta === 'object') ? meta : {};
+    if (f.tags.length) {
+        const own = (Array.isArray(m.tags) ? m.tags : []).map((t) => String(t).toLowerCase());
+        if (!own.length) { if (!f.includeUnknown) return false; }
+        else {
+            for (const t of f.tags) if (own.indexOf(String(t).toLowerCase()) < 0) return false;
+        }
+    }
+    const air = recAirDate(v, m);
+    if (f.season) {
+        const r = recSeasonRange(f.season);
+        if (!air || !r) { if (!f.includeUnknown) return false; }
+        else if (!(air >= r.start && air < r.end)) return false;
+    } else if (f.dateRange) {
+        if (!air) { if (!f.includeUnknown) return false; }
+        else if (!recDateInRange(air, f.dateRange)) return false;
+    }
+    if (f.scoreRange) {
+        const sc = recScore(v, m);
+        if (sc === null) { if (!f.includeUnknown) return false; }
+        else if (!recNumInRange(sc, f.scoreRange)) return false;
+    }
+    if (f.rankRange) {
+        const rk = recRank(v, m);
+        if (rk === null) { if (!f.includeUnknown) return false; }
+        else if (!recNumInRange(rk, f.rankRange)) return false;
+    }
+    if (f.weekdays.length) {
+        const w = recWeekday(v, m);
+        if (!w) { if (!f.includeUnknown) return false; }
+        else if (f.weekdays.indexOf(w) < 0) return false;
+    }
+    return true;
+}
+
+// 历史评分档位：半开区间 [min, max)，两端档为 9 分以上 / 6 分以下；'none' 专收未评分/未知
+// （含匹配不到 Bangumi 的记录）——缺数据不消失，而是归到这个档里可查。
+const REC_SCORE_TIERS = ['', 'gte9', '8-9', '7-8', '6-7', 'lt6', 'none'];
+
+/** 评分是否落在档位内：tier 空 = 不限；未知档位不筛（防脏设置把列表筛成空）。 */
+function scoreInTier(score, tier) {
+    const t = String(tier || '');
+    if (!t) return true;
+    const s = (score === null || score === undefined || score === '') ? null : Number(score);
+    const has = Number.isFinite(s) && s > 0;
+    if (t === 'none') return !has;
+    if (!has) return false;
+    if (t === 'gte9') return s >= 9;
+    if (t === 'lt6') return s < 6;
+    const m = /^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$/.exec(t);
+    if (!m) return true;
+    return s >= Number(m[1]) && s < Number(m[2]);
+}
+
+/** 历史筛选状态归一化（historyFilter）：非法日期剔空、非法档位回落「不限」、
+ *  颠倒的区间自动交换端点（加载持久化状态时也纠正——控件回填后用户能直接看到纠正结果，
+ *  而不是输入框里留着反的日期、靠内部再交换一次兜着）。两种形状同名同义，天然幂等。 */
+function normHistoryFilter(obj) {
+    const s = (obj && typeof obj === 'object') ? obj : {};
+    const tier = String(s.score || '');
+    let from = recValidDate(s.from);
+    let to = recValidDate(s.to);
+    if (from && to && from > to) { const t = from; from = to; to = t; }
+    return {
+        date: recValidDate(s.date),
+        from,
+        to,
+        site: String(s.site || ''),
+        score: REC_SCORE_TIERS.indexOf(tier) >= 0 ? tier : '',
+    };
+}
+
+/** 历史筛选是否启用（空态文案/是否需要回填元数据）。 */
+function historyFilterActive(f) {
+    const s = normHistoryFilter(f);
+    return !!(s.date || s.from || s.to || s.site || s.score);
+}
+
+/** 历史筛选谓词：日期（单日 + 区间，均闭区间含端点）AND 来源 AND 评分档位。
+ *  日期取自 recHistoryTs（播放卡 lastPlayTs / 浏览卡 ts），按本地时区取日。 */
+function matchHistoryFilter(v, filter, meta) {
+    const f = normHistoryFilter(filter);
+    if (!historyFilterActive(f)) return true;
+    if (!v) return false;
+    const day = recTsToDate(recHistoryTs(v));
+    if (f.date && day !== f.date) return false;
+    const range = normDateRange(f.from, f.to);
+    if (range) {
+        if (!day) return false;
+        if (range.from && day < range.from) return false;
+        if (range.to && day > range.to) return false;
+    }
+    if (f.site && String(v.site || '') !== f.site) return false;
+    if (f.score && !scoreInTier(recScore(v, meta), f.score)) return false;
+    return true;
+}
+
+/** 历史来源下拉项：按现有记录聚合 site → 展示名（siteName 优先）。值用 site 原值
+ *  （kazumi:规则名 原样保留，与 matchHistoryFilter 的等式口径一致）；无 site 的记录不建项。 */
+function collectHistorySites(list) {
+    const map = new Map();
+    (Array.isArray(list) ? list : []).forEach((v) => {
+        if (!v) return;
+        const key = String(v.site || '');
+        if (!key || map.has(key)) return;
+        map.set(key, String(v.siteName || '').trim() || key);
+    });
+    const out = [];
+    map.forEach((label, value) => out.push({ value, label }));
+    out.sort((a, b) => (a.label === b.label ? 0 : (a.label < b.label ? -1 : 1)));
+    return out;
+}
+
 /** 秒数 → 可读时长（"X 分钟" / "X 小时 Y 分"）。 */
 function fmtDur(sec) {
     sec = Math.max(0, Math.round(sec || 0));
@@ -281,6 +843,11 @@ function fmtDur(sec) {
 function fmtTime(ts) {
     return fmtCommentTimeFull(ts);
 }
+
+// 卡片动作图标（内联 SVG，fill 由 CSS 给 currentColor）：用图形而非文字符号，
+// 24px 圆钮里的小字号文字在不同主题色下基线不稳，SVG 缩放与配色都可控。
+const REC_PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z"/></svg>';
+const REC_FAV_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm6 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm6 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg>';
 
 /** 收藏/历史共用卡片（带 site 标识、移除/编辑按钮与多选勾选框；editable 时附编辑按钮；withTags 时封面徽章组带状态标签）。
  *  历史卡按次记录（T73）：每次播放一条，显示 集名 · 时长 · 播放时间，不再显示「已播 N 集」。
@@ -340,6 +907,18 @@ function recCard(v, editable, withTags, playCountByName) {
         : '';
     const del = isBgm ? '' : `<button class="rec-del" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>`;
     const edit = (editable && !isBgm) ? `<button class="rec-edit" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="编辑标题">✎</button>` : '';
+    // 历史卡右上角「▶ 续播」（仅播放类记录）：直接回到上次线路/集数起播，不进详情页。
+    // 与既有 ✕/✎ 同排——CSS 里 .has-play 把这两个左移，避免三方叠在同一坐标；
+    // 按钮是 .vod-card 的直接子元素（不能进 .vod-cover：封面补拉会整格重写封面内容）。
+    const playBtn = (v.kind === 'play' && !isBgm)
+        ? `<button type="button" class="rec-play-btn" data-uid="${uid}" title="继续播放（回到上次线路与集数）" aria-label="继续播放">${REC_PLAY_ICON}</button>`
+        : '';
+    // 历史卡右下角「⋯ 收藏」（仅历史页 = withTags 为假时；收藏页用点击循环切换的 .rec-tag 徽章）：
+    // 需要稳定身份（site+vodId）才能收藏——Kazumi 源 vodId 恒空，其收藏入口在选源/详情链路，
+    // 此处不渲染（避免写出一条 site=kazumi:xxx|vodId='' 的孤儿收藏）。
+    const favBtn = (!withTags && !isBgm && String(v.site || '') && String(v.vodId || ''))
+        ? `<button type="button" class="rec-fav-btn" data-uid="${uid}" title="收藏（展开状态菜单）" aria-label="收藏" aria-haspopup="menu">${REC_FAV_ICON}</button>`
+        : '';
     // Bangumi 卡「★ 评分」按钮已挪到详情页 hero 操作行（T80）：评分是详情级操作，
     // 挤在收藏卡封面上既遮挡封面又让每张卡背一份按钮。卡片上只保留「我的 N★」
     // 徽章（myRate）作已评分展示；评分/吐槽入口见 detail.js #detail-bgm-rate。
@@ -380,10 +959,12 @@ function recCard(v, editable, withTags, playCountByName) {
         : '';
     // 封面左下角徽章组：源徽章 + 状态徽章 + 集数徽章并排（状态在源右侧，集数在状态右侧，用户要求）
     const coverBadges = (srcBadge || tagBadge || epBadge) ? `<div class="rec-cover-badges">${srcBadge}${tagBadge}${epBadge}</div>` : '';
-    return `<div class="vod-card" data-uid="${uid}" data-site="${escHtml(isBgm ? 'bangumi' : v.site)}" data-source="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" data-kazumi-src="${escHtml(v.kazumiSrc || '')}" data-name="${escHtml(v.name)}" tabindex="0">
+    return `<div class="vod-card${playBtn ? ' has-play' : ''}${favBtn ? ' has-fav' : ''}" data-uid="${uid}" data-site="${escHtml(isBgm ? 'bangumi' : v.site)}" data-source="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" data-kazumi-src="${escHtml(v.kazumiSrc || '')}" data-name="${escHtml(v.name)}" tabindex="0">
         ${check}
         ${del}
         ${edit}
+        ${playBtn}
+        ${favBtn}
         <div class="vod-cover"${isLocal ? ` data-local-path="${escHtml(v.vodId || '')}"` : ''}>${coverHtml}${coverBadges}${myBadge}${rankBadge}</div>
         <div class="vod-name" title="${escHtml(v.name)}">${escHtml(truncateTitle(v.name))}</div>
         ${isPlay ? '' : '<div class="vod-remarks"></div>'}
@@ -583,6 +1164,368 @@ function mergeExtraRecords(list, extra) {
     return list.concat(fresh);
 }
 
+// ================================================================
+// 记录级动作：直连播放 / 续播 / 收藏状态菜单
+// 这些动作只依赖「一条记录」，与视图实例无关，故放在工厂之外——makeRecordView 的
+// 三个实例（收藏页、历史页、「我的→收藏」）与卡片点击委托共用同一实现。
+// ================================================================
+
+/** preload 命名空间对象取值（如 'download'）：`window.yuki.download` 这种「裸写命名空间」
+ *  后面紧跟 `.`/`;`/`)` 会被 tests/js/ipc-handlers-blackbox 的静态正则当成一次
+ *  `download` API 调用而误报（preload 暴露的是 download.play 等成员，没有裸 download）；
+ *  守卫一律经本函数取对象，真实调用保持 `window.yuki.<命名空间>.<成员>(...)` 字面形态，
+ *  静态契约扫描仍能统计到实际用到的 API。 */
+function yukiNamespace(name) {
+    const api = (typeof window !== 'undefined' && window.yuki) ? window.yuki : null;
+    return api ? (api[name] || null) : null;
+}
+
+/** 直连类记录（本地文件/下载文件/直链）的播放入口：卡片点击与右上角续播按钮共用。
+ *  成功时已就地弹提示，失败只返回 { ok:false, reason }（文案由调用方统一给，见 directPlayFailToast）。 */
+async function playDirectRecord(v) {
+    const site = String((v && v.site) || '');
+    const id = String((v && v.vodId) || '');
+    const title = String((v && v.name) || '');
+    if (!id) return { ok: false, reason: 'stale' };
+    try {
+        if (site === 'local') {
+            if (!window.yuki || typeof window.yuki.filePush !== 'function') return { ok: false, reason: 'mpv-missing' };
+            const r = await window.yuki.filePush(id);
+            if (r && r.ok) { localPlayToast(r); return { ok: true }; }
+            return { ok: false, reason: (r && r.reason) || 'fail' };
+        }
+        if (site === 'download') {
+            const dl = yukiNamespace('download');
+            if (!dl || typeof dl.play !== 'function') return { ok: false, reason: 'mpv-missing' };
+            const r = await window.yuki.download.play(id);
+            if (r && r.ok) { localPlayToast(r); return { ok: true }; }
+            return { ok: false, reason: (r && r.reason) || 'fail' };
+        }
+        if (site === 'direct') {
+            if (!window.yuki || typeof window.yuki.playUrl !== 'function') return { ok: false, reason: 'mpv-missing' };
+            const r = await window.yuki.playUrl(id, { title: title || '直链播放' });
+            if (r && r.ok) { localPlayToast(r); return { ok: true }; }
+            return { ok: false, reason: (r && r.reason) || 'fail' };
+        }
+    } catch (e) { /* 播放 IPC 抛错按播放失败处理 */ }
+    return { ok: false, reason: site ? 'fail' : 'stale' };
+}
+
+/** 续播/直连播放失败原因 → 用户可读提示（三种必须区分：未检测到播放器 / 记录已失效 / 播放失败；
+ *  「需要重新选源」由调用方在 Kazumi 分支单独提示并打开选源弹窗）。 */
+function directPlayFailToast(reason) {
+    if (reason === 'not-video') { warnToast('仅支持直接播放视频/音频文件'); return; }
+    if (reason === 'mpv-missing') { warnToast('未检测到播放器'); return; }
+    if (reason === 'stale') { warnToast('记录已失效，请在详情页重新打开'); return; }
+    warnToast('播放失败');
+}
+
+/** CatVod 详情响应 → 线路列表：与 detail.js parsePlay 同口径（vod_play_from/vod_play_url
+ *  按 $$$ 分线路、# 分集、每集 name$url）。抽成纯函数便于单测与后续复用。 */
+function parseRecSources(vod) {
+    const froms = String((vod && vod.vod_play_from) || '').split('$$$').filter(Boolean);
+    const urls = String((vod && vod.vod_play_url) || '').split('$$$');
+    return froms.map((from, i) => ({
+        from,
+        episodes: String(urls[i] || '').split('#').filter(Boolean).map((e) => {
+            const k = e.indexOf('$');
+            return k > 0 ? { name: e.slice(0, k), url: e.slice(k + 1) } : { name: e, url: e };
+        }),
+    })).filter((s) => s.episodes.length);
+}
+
+/** 在集列表里定位「上次看的那一集」下标：集名精确匹配优先（历史记录的 lastEpisode 就是
+ *  起播时的集名），其次按集号（watchProgress.currentEp，1 起）。都没命中返回 -1，
+ *  由调用方决定回退策略（CatVod 回第一集，Kazumi 交回选源弹窗）。 */
+function locateRecEpisode(episodes, epName, currentEp) {
+    const list = Array.isArray(episodes) ? episodes : [];
+    const want = String(epName || '').trim();
+    if (want) {
+        for (let i = 0; i < list.length; i++) {
+            if (list[i] && String(list[i].name || '').trim() === want) return i;
+        }
+    }
+    const n = parseInt(currentEp, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= list.length) return n - 1;
+    return -1;
+}
+
+/** Kazumi 规则源续播：按记录里的源页 URL（kazumiSrc）重新解析该源剧集，用上次集名定位后起播。
+ *  任何需要人工介入的情形（验证码 / 剧集为空 / 集名对不上）都返回 need-source|captcha，
+ *  由调用方打开既有选源弹窗——不猜源、不静默换线路（用户裁决的默认策略）。 */
+async function resumeKazumiRecord(v) {
+    const site = String((v && v.site) || '');
+    const pluginName = site.slice(7);
+    const srcUrl = String((v && v.kazumiSrc) || '');
+    if (!pluginName || !srcUrl || typeof Kazumi === 'undefined') return { ok: false, reason: 'need-source' };
+    let roads = [];
+    try {
+        const rsp = await doAction('kazumiChapters', { pluginName, src: srcUrl }, '/kazumi/action');
+        if (rsp && rsp.captcha) return { ok: false, reason: 'captcha' };
+        roads = (rsp && rsp.roads) || [];
+    } catch (e) { return { ok: false, reason: 'need-source' }; }
+    const want = String((v && v.lastEpisode) || '').trim();
+    if (!want) return { ok: false, reason: 'need-source' };
+    for (const road of roads) {
+        if (!road) continue;
+        // 集名组装与选源弹窗同口径：规则 identifier 优先，缺失回落「第N集」；
+        // Bangumi 分集名的合并只在弹窗里做（需要它的 _bgmEpsCache），宁可对不上而回退选源
+        const episodes = ((road.data) || []).map((u, i) => ({ name: (road.identifier || [])[i] || `第${i + 1}集`, url: u }));
+        const idx = locateRecEpisode(episodes, want, 0);
+        if (idx < 0) continue;
+        if (typeof Player === 'undefined' || typeof Player.play !== 'function') return { ok: false, reason: 'mpv-missing' };
+        await Player.play(site, road.name, episodes[idx].url, String(v.name || ''), episodes[idx].name, episodes, idx, srcUrl);
+        return { ok: true };
+    }
+    return { ok: false, reason: 'need-source' };
+}
+
+/** 历史卡「▶ 续播」主入口：按记录身份恢复上次线路与集数直接起播，不经过详情页。
+ *  分层复用各引擎既有入口（不新增解析链路）：
+ *   · local/download/direct → playDirectRecord（各自既有直连链路）
+ *   · kazumi:规则名 → resumeKazumiRecord（kazumiChapters 解析 → Player.play）
+ *   · CatVod → detailContent 取线路 → lastSourceMap 记忆的线路号 + 集名/watchProgress
+ *     定位集数 → Player.play（参数形状与详情页 _playEpisode 完全一致，播放/连播/记账
+ *     都走同一条链路）。集名与进度都对不上时退回该线路第一集：仍然免进详情页。 */
+async function resumePlayRecord(v) {
+    if (!v) return { ok: false, reason: 'stale' };
+    const site = String(v.site || '');
+    const vodId = String(v.vodId || '');
+    if (site === 'local' || site === 'download' || site === 'direct') return playDirectRecord(v);
+    if (site.startsWith('kazumi:')) return resumeKazumiRecord(v);
+    if (!site || !vodId) return { ok: false, reason: 'stale' };
+    let sources = [];
+    try {
+        const rsp = await doAction('detailContent', { site, ids: JSON.stringify([vodId]), refresh: '' });
+        sources = parseRecSources((rsp && rsp.list && rsp.list[0]) || null);
+    } catch (e) { /* 网络失败按记录失效处理 */ }
+    if (!sources.length) return { ok: false, reason: 'stale' };
+    let srcIdx = 0;
+    try {
+        const s = (await window.yuki.settingsGet()) || {};
+        const map = (s.lastSourceMap && typeof s.lastSourceMap === 'object') ? s.lastSourceMap : {};
+        const saved = map[`${site}|${vodId}`];
+        if (Number.isInteger(saved) && saved >= 0 && saved < sources.length) srcIdx = saved;
+    } catch (e) { /* 线路记忆读取失败用第一条线路 */ }
+    const src = sources[srcIdx];
+    let prog = null;
+    try { prog = await Records.getWatchProgress(site, vodId); } catch (e) { prog = null; }
+    let epIdx = locateRecEpisode(src.episodes, v.lastEpisode, prog && prog.currentEp);
+    if (epIdx < 0) epIdx = 0;
+    const ep = src.episodes[epIdx];
+    if (typeof Player === 'undefined' || typeof Player.play !== 'function') return { ok: false, reason: 'mpv-missing' };
+    await Player.play(site, src.from, ep.url, String(v.name || ''), ep.name, src.episodes, epIdx);
+    return { ok: true };
+}
+
+// ---------------------------------------------------------------- 收藏状态菜单（收藏/历史共用）
+// 收藏页卡片仍用「点击循环切换」的 .rec-tag 徽章（保留原交互）；历史卡右下角「⋯」按钮展开
+// 六态菜单。两页共用本节的构建函数（buildFavMenuHtml）与写入链路（Records.setFavTag /
+// Records.toggleFavorite → recSet → FavHub.changed），状态文案与广播语义不会两处漂移。
+const REC_FAV_MENU_ID = 'rec-fav-menu';
+let _favMenuCtx = null;      // { item, cur, $btn }（打开中的菜单上下文）
+let _favMenuCloseAt = 0;     // 最近一次关闭时间：抑制「关闭瞬间的同一击」再次打开
+
+/** 六态菜单项：TAG_ORDER 五态 + 取消收藏（tag='' 走 toggleFavorite 删除条目）。 */
+function favMenuItems() {
+    return TAG_ORDER.map((t) => ({ tag: t, label: TAG_LABEL[t] }))
+        .concat([{ tag: '', label: '取消收藏' }]);
+}
+
+/** 六态菜单 HTML（纯函数，便于单测锁文案与高亮）：cur 为当前状态（''=未收藏）。 */
+function buildFavMenuHtml(cur) {
+    const c = String(cur || '');
+    return favMenuItems().map((it) => {
+        const on = it.tag === c;
+        return `<button type="button" role="menuitemradio" class="rec-fav-menu-item${on ? ' active' : ''}"`
+            + ` data-tag="${escHtml(it.tag)}" aria-checked="${on ? 'true' : 'false'}">`
+            + `<span class="rec-fav-menu-label">${escHtml(it.label)}</span>`
+            + `<span class="rec-fav-menu-check">${on ? '✓' : ''}</span></button>`;
+    }).join('');
+}
+
+/** 菜单单例元素（懒建，挂 document.body：卡片会被整格重写，菜单不能挂在卡片里）。 */
+function favMenuEl() {
+    let el = document.getElementById(REC_FAV_MENU_ID);
+    if (!el) {
+        el = document.createElement('div');
+        el.id = REC_FAV_MENU_ID;
+        el.className = 'rec-fav-menu';
+        el.setAttribute('role', 'menu');
+        el.style.display = 'none';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+/** 关闭六态菜单（幂等；同时解绑一次性监听）。 */
+function closeRecFavMenu() {
+    _favMenuCtx = null;
+    _favMenuCloseAt = Date.now();
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById(REC_FAV_MENU_ID);
+    if (el) el.style.display = 'none';
+    $(document).off('click.recfavmenu keydown.recfavmenu');
+    $(window).off('scroll.recfavmenu resize.recfavmenu');
+}
+
+/** 打开六态菜单：$btn 为触发按钮（历史卡「⋯」），item 为该条记录。
+ *  当前状态异步读出后回填高亮（getFavTag 走本地 settings，无网络）。 */
+async function openRecFavMenu($btn, item) {
+    if (!item || !String(item.site || '')) return;
+    let cur = '';
+    try { cur = await Records.getFavTag(String(item.site || ''), String(item.vodId || '')); } catch (e) { cur = ''; }
+    const el = favMenuEl();
+    const $el = $(el);
+    _favMenuCtx = { item, cur: String(cur || '') };
+    $el.html(buildFavMenuHtml(_favMenuCtx.cur)).css('display', 'block');
+    // 定位：贴着按钮右缘向上展开（历史卡「⋯」在右下角，菜单向上弹避免被视口裁掉）；
+    // 视口左右越界时夹回可视区（菜单宽度受控 156px，夹取足够）。
+    const node = ($btn && $btn.length) ? $btn[0] : null;
+    if (node && node.getBoundingClientRect) {
+        const r = node.getBoundingClientRect();
+        const mw = el.offsetWidth || 156;
+        const mh = el.offsetHeight || 0;
+        let left = Math.round(r.right - mw);
+        left = Math.max(8, Math.min(left, (window.innerWidth || 1024) - mw - 8));
+        let top = Math.round(r.top - mh - 6);
+        if (top < 8) top = Math.round(Math.min((window.innerHeight || 768) - mh - 8, r.bottom + 6));
+        $el.css({ position: 'fixed', left: left + 'px', top: Math.max(8, top) + 'px' });
+    }
+    // 菜单项点击：写状态（stopPropagation 防被「点外部关闭」先吃掉）
+    $el.off('click.recfav').on('click.recfav', '.rec-fav-menu-item', (e) => {
+        e.stopPropagation();
+        applyRecFavMenu(String($(e.currentTarget).data('tag') || ''));
+    });
+    // 外部点击/Esc/滚动关闭：绑定延后一帧，避免把「打开菜单的这一击」本身当作外部点击
+    const openedAt = Date.now();
+    setTimeout(() => {
+        if (!_favMenuCtx || _favMenuCloseAt > openedAt) return;
+        $(document).on('click.recfavmenu', (e) => {
+            if ($(e.target).closest('#' + REC_FAV_MENU_ID + ', .rec-fav-btn').length) return;
+            closeRecFavMenu();
+        }).on('keydown.recfavmenu', (e) => { if (e.key === 'Escape') closeRecFavMenu(); });
+        $(window).on('scroll.recfavmenu resize.recfavmenu', () => closeRecFavMenu());
+    }, 0);
+}
+
+/** 应用菜单选择：'' = 取消收藏（删除条目），其余 = 六态标签。
+ *  与当前状态相同则直接关闭不写盘——避免一次无意义的 recSet + 全页面广播。
+ *  写入后 FavHub.changed 广播，其它页面（详情页按钮/我的收藏/时间表过滤集合/搜索页徽标）自会刷新。 */
+async function applyRecFavMenu(tag) {
+    const ctx = _favMenuCtx;
+    closeRecFavMenu();
+    if (!ctx) return;
+    const { item, cur } = ctx;
+    const next = String(tag || '');
+    if (next === cur) return;
+    const v = {
+        site: String(item.site || ''), siteName: String(item.siteName || ''),
+        vodId: String(item.vodId || ''), name: String(item.name || ''),
+        pic: String(item.pic || ''), remarks: String(item.remarks || ''),
+        bangumiId: item.bangumiId ? String(item.bangumiId) : '',
+    };
+    try {
+        if (!next) {
+            // 「取消收藏」只在确实已收藏时执行删除：菜单打开到点击之间条目可能已被别处删掉，
+            // toggleFavorite 对「未收藏」是反向加入——先确认一次，避免取消动作变成收藏动作。
+            const still = await Records.isFavorite(v.site, v.vodId);
+            if (still) await Records.toggleFavorite(v);
+            warnToast('已取消收藏');
+            return;
+        }
+        await Records.setFavTag(v, next);      // 未收藏先加入收藏再置标签（Records 内建语义）
+        warnToast(`已标记为${tagLabel(next)}`);
+    } catch (e) { warnToast('收藏操作失败'); }
+}
+
+/** 视图控制条（排序 + 筛选）HTML：插到网格前。
+ *  为什么不写进 index.html：同一视图工厂服务 #view-favorites / #view-history /
+ *  #my-panel-favorites 三个容器，而 app.js 把 favorites 路由重定向到「我的→我的收藏」
+ *  （实际可达的收藏入口），静态标记只能覆盖前两个容器；由工厂统一注入才能保证三个
+ *  入口的控件、事件与状态完全一致（单一样本，不存在两份标记漂移）。 */
+function recToolbarHtml(viewName, isHistory) {
+    if (isHistory) {
+        return `<div class="rec-bar rec-filter-bar">
+            <select id="${viewName}-sort" class="md-select rec-select" title="排序方式">
+                <option value="time-desc">时间倒序</option>
+                <option value="time-asc">时间正序</option>
+                <option value="score-desc">评分高 → 低</option>
+                <option value="score-asc">评分低 → 高</option>
+                <option value="count-desc">播放次数</option>
+            </select>
+            <select id="${viewName}-sites" class="md-select rec-select" title="按来源筛选"><option value="">全部来源</option></select>
+            <input id="${viewName}-date" class="md-input rec-input rec-date" type="date" title="只看这一天的记录（按播放/浏览时间）">
+            <span class="rec-filter-sep" title="日期区间（含起止两天）">~</span>
+            <input id="${viewName}-from" class="md-input rec-input rec-date" type="date" title="起始日期（含当天）">
+            <input id="${viewName}-to" class="md-input rec-input rec-date" type="date" title="结束日期（含当天）">
+            <select id="${viewName}-score" class="md-select rec-select" title="按 Bangumi 评分档位筛选">
+                <option value="">评分不限</option>
+                <option value="gte9">9 分以上</option>
+                <option value="8-9">8 ~ 9 分</option>
+                <option value="7-8">7 ~ 8 分</option>
+                <option value="6-7">6 ~ 7 分</option>
+                <option value="lt6">6 分以下</option>
+                <option value="none">未评分</option>
+            </select>
+            <button id="${viewName}-filter-reset" class="md-btn md-btn-sm md-btn-tonal" title="重置历史排序与筛选">重置筛选</button>
+        </div>`;
+    }
+    const wd = [[1, '周一'], [2, '周二'], [3, '周三'], [4, '周四'], [5, '周五'], [6, '周六'], [7, '周日']]
+        .map(([n, lb]) => `<span class="class-tab" data-weekday="${n}">${lb}</span>`).join('');
+    return `<div class="rec-bar rec-filter-bar">
+        <select id="${viewName}-sort" class="md-select rec-select" title="排序方式">
+            <option value="recent">最近变更</option>
+            <option value="name">番剧名称</option>
+            <option value="score">评分最高</option>
+            <option value="airdate">开播时间</option>
+            <option value="rank">排名最高</option>
+        </select>
+        <button id="${viewName}-filter-btn" class="md-btn md-btn-sm md-btn-tonal" title="筛选（标签 / 季度 / 开播日期 / 评分 / 排名 / 星期）" aria-label="筛选" aria-expanded="false">筛选</button>
+        <div id="${viewName}-chips" class="rec-chips" style="display:none"></div>
+    </div>
+    <div id="${viewName}-filter-panel" class="rec-filter-panel" style="display:none">
+        <div class="rec-filter-row">
+            <label class="rec-filter-label" for="${viewName}-f-tag">标签</label>
+            <input id="${viewName}-f-tag" class="md-input rec-input rec-input-wide" type="text"
+                placeholder="多个标签用空格/逗号分隔（须同时满足）" title="按 Bangumi 标签筛选，多个标签须同时满足">
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label" for="${viewName}-f-season">季度</label>
+            <select id="${viewName}-f-season" class="md-select rec-select" title="按放送季度筛选（与日期区间互斥）"></select>
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label">开播日期</label>
+            <input id="${viewName}-f-date-from" class="md-input rec-input rec-date" type="date" title="开播日期下限（含）">
+            <span class="rec-filter-sep">~</span>
+            <input id="${viewName}-f-date-to" class="md-input rec-input rec-date" type="date" title="开播日期上限（含）">
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label">评分</label>
+            <input id="${viewName}-f-score-min" class="md-input rec-input rec-num" type="number" min="0" max="10" step="0.1" placeholder="最低" title="Bangumi 评分下限（0-10，含）">
+            <span class="rec-filter-sep">-</span>
+            <input id="${viewName}-f-score-max" class="md-input rec-input rec-num" type="number" min="0" max="10" step="0.1" placeholder="最高" title="Bangumi 评分上限（0-10，含）">
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label">排名</label>
+            <input id="${viewName}-f-rank-min" class="md-input rec-input rec-num" type="number" min="1" placeholder="最好名次" title="Bangumi 排名下限（名次数值小 = 名次高）">
+            <span class="rec-filter-sep">-</span>
+            <input id="${viewName}-f-rank-max" class="md-input rec-input rec-num" type="number" min="1" placeholder="最差名次" title="Bangumi 排名上限">
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label">星期</label>
+            <div id="${viewName}-f-weekdays" class="rec-tags">${wd}</div>
+        </div>
+        <div class="rec-filter-row rec-filter-actions">
+            <label class="rec-filter-inline" title="缺少 Bangumi 数据的条目（未匹配 / 未评分 / 无开播日期 / 无标签）不因这些筛选被丢弃">
+                <input type="checkbox" id="${viewName}-f-unknown"> 含未知/未评分条目
+            </label>
+            <button id="${viewName}-filter-reset" class="md-btn md-btn-sm md-btn-tonal">重置</button>
+            <button id="${viewName}-filter-apply" class="md-btn md-btn-sm md-btn-filled">应用</button>
+        </div>
+    </div>`;
+}
+
 /** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。多选（T40）：收藏支持批量删除/标记想看/标记已看且保留全选；历史仅批量删除且无全选；清空按钮仅历史保留。containerSel 覆盖事件委托根（默认 #${viewName}，供「我的」页内嵌面板复用）。 */
 function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSizeKey, containerSel) {
     const root = containerSel || `#${viewName}`;
@@ -594,10 +1537,20 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         _src: '', // 来源筛选（''=全部 / catvod=本地收藏 / bangumi=Bangumi 账号收藏；仅收藏视图，见 isBangumiItem）
         _page: 1, // 客户端分页当前页（T6：超过每页条数时分页展示）
         _extra: null, // 可选异步扩展数据源（如 Bangumi 收藏），返回 [{site,name,pic,remarks,tag,bangumi,...}] 追加渲染
+        // 排序键与高级筛选状态（''/null = 尚未从 settings 载入；enter() 与首次 render() 会补读）：
+        // 与控件、持久化键一一对应（favoritesSort/favoritesFilter 或 historySort/historyFilter），
+        // 归一化一律走纯函数，内存里的值恒为规范形态。
+        _sort: '',
+        _filter: null,
+        _filterOpen: false, // 收藏筛选面板展开态（纯 UI，不持久化——重新进入页面收起更清爽）
+        _sitesSig: '', // 历史来源下拉的选项签名（只在选项集合变化时重建 DOM）
+        _itemsByUid: null, // 本渲染条目回查表（续播/收藏菜单按 uid 定位记录，含字段而非只靠 DOM data-*）
+        _resumeBusy: false, // 续播在途标志（防重复点击；按钮另有 loading 态）
 
         init() {
             if (this._inited) return;
             this._inited = true;
+            this._ensureToolbar();
             $(root)
                 .on('click', '.rec-del', (e) => {
                     e.stopPropagation();
@@ -608,6 +1561,21 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     e.stopPropagation();
                     const el = $(e.currentTarget);
                     this.edit(String(el.data('uid')));
+                })
+                // 续播按钮（历史卡右上角 ▶）：查记录后直接起播；stopPropagation 保证
+                // 卡片点击仍是「进详情」的原有语义、也不会被选择模式吃掉
+                .on('click', '.rec-play-btn', (e) => {
+                    e.stopPropagation();
+                    const $btn = $(e.currentTarget);
+                    const uid = String($btn.closest('.vod-card').data('uid') || '');
+                    this.resumePlay(uid, $btn);
+                })
+                // 收藏按钮（历史卡右下角 ⋯）：展开六态菜单；同上阻断冒泡
+                .on('click', '.rec-fav-btn', (e) => {
+                    e.stopPropagation();
+                    const $btn = $(e.currentTarget);
+                    const uid = String($btn.closest('.vod-card').data('uid') || '');
+                    this.openFavMenu(uid, $btn);
                 })
                 // 多选勾选框：阻止冒泡避免与卡片点击重复切换
                 .on('click', '.rec-check', (e) => {
@@ -681,34 +1649,18 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                         return;
                     }
                     const site = String(el.data('site') || '');
-                    if (site === 'local' && window.yuki && window.yuki.filePush) {
-                        window.yuki.filePush(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) localPlayToast(r);
-                            else if (r && r.reason === 'not-video') warnToast('仅支持直接播放视频/音频文件');
-                            else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
-                            else warnToast('播放失败');
-                        }).catch(() => warnToast('播放失败'));
+                    // 本地文件/下载文件/直链：走各自既有直连链路（playDirectRecord 与右上角
+                    // 续播按钮共用）。仍按 API 是否可用分支——API 缺席时保持旧行为继续往下
+                    // 尝试 Detail.open，不在这里新造一条「播放不可用」的死路。
+                    const directRecord = { site: site, vodId: String(el.data('id') || ''), name: String(el.data('name') || '') };
+                    // 下载命名空间经 yukiNamespace 取（裸写 window.yuki.download 会被静态契约扫描误报）
+                    const dlNs = yukiNamespace('download');
+                    const canDirect = (site === 'local' && window.yuki && window.yuki.filePush)
+                        || (site === 'download' && dlNs && dlNs.play)
+                        || (site === 'direct' && window.yuki && window.yuki.playUrl && directRecord.vodId);
+                    if (canDirect) {
+                        playDirectRecord(directRecord).then((r) => { if (!r.ok) directPlayFailToast(r.reason); });
                         return;
-                    }
-                    if (site === 'download' && window.yuki && window.yuki.download && window.yuki.download.play) {
-                        window.yuki.download.play(String(el.data('id') || '')).then((r) => {
-                            if (r && r.ok) localPlayToast(r);
-                            else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
-                            else warnToast('播放失败');
-                        }).catch(() => warnToast('播放失败'));
-                        return;
-                    }
-                    // 直链记录：vodId 存播放 URL，重新交给播放链路（无本地文件可 filePush）
-                    if (site === 'direct' && window.yuki && window.yuki.playUrl) {
-                        const directUrl = String(el.data('id') || '');
-                        if (directUrl) {
-                            window.yuki.playUrl(directUrl, { title: String(el.data('name') || '直链播放') }).then((r) => {
-                                if (r && r.ok) localPlayToast(r);
-                                else if (r && r.reason === 'mpv-missing') warnToast('未检测到播放器');
-                                else warnToast('播放失败');
-                            }).catch(() => warnToast('播放失败'));
-                            return;
-                        }
                     }
                     // A-01 写入侧：收藏/历史卡快照（fire-and-forget；备注卡片 DOM 不展示，按缺字段跳过）。
                     // 必须守卫：快照是纯优化，DetailSnap/Home 任一缺席（脚本加载失败、
@@ -727,7 +1679,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 // 护栏把用户真想开的影片挤掉，还往后端 spider 池打无用 detailContent
                 // 并把结果塞进大池 30min 挤占真实详情缓存。
                 const opensDetail = (e) => !this._selectMode
-                    && !$(e.target).closest('.rec-del, .rec-edit, .rec-check, .rec-tag').length;
+                    && !$(e.target).closest('.rec-del, .rec-edit, .rec-check, .rec-tag, .rec-play-btn, .rec-fav-btn').length;
                 $(`#${viewName}-grid`)
                     .off('mouseover.recprefetch').off('pointerdown.recprefetch')
                     .on('mouseover.recprefetch', '.vod-card', (e) => {
@@ -826,11 +1778,277 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             }
         },
 
+        /** 控制条注入（幂等）：网格前插入「排序 + 筛选」控件，选址理由见 recToolbarHtml。
+         *  jQuery 桩/无 DOM 环境（length=0）下静默跳过——单测只需视图方法与纯函数。 */
+        _ensureToolbar() {
+            const gridSel = `#${viewName}-grid`;
+            if ($(gridSel).length && !$(`#${viewName}-sort`).length) {
+                $(gridSel).before(recToolbarHtml(viewName, storeKey === 'history'));
+            }
+            this._bindToolbar();
+        },
+
+        /** 绑定控制条事件：控件值只作为「用户意图」入口，状态一律以本实例字段 + settings 为准。 */
+        _bindToolbar() {
+            const isHist = storeKey === 'history';
+            $(`#${viewName}-sort`).on('change', (e) => {
+                this._sort = isHist ? normHistorySort(e.currentTarget.value) : normFavSort(e.currentTarget.value);
+                this._page = 1;
+                this._saveSort();
+                this.render();
+            });
+            if (isHist) {
+                // 历史筛选是「即时生效」语义（无草稿态）：每个控件对应一个明确维度，
+                // 不存在需要攒起来一起应用的组合输入。归一化后回写控件，非法区间/档位
+                // 被纠正的效果用户当场可见（如把结束日期选到开始日期之前）。
+                $(`#${viewName}-sites, #${viewName}-date, #${viewName}-from, #${viewName}-to, #${viewName}-score`)
+                    .on('change', () => {
+                        this._filter = normHistoryFilter({
+                            site: $(`#${viewName}-sites`).val(),
+                            date: $(`#${viewName}-date`).val(),
+                            from: $(`#${viewName}-from`).val(),
+                            to: $(`#${viewName}-to`).val(),
+                            score: $(`#${viewName}-score`).val(),
+                        });
+                        this._page = 1;
+                        this._saveFilter();
+                        this._syncControls();
+                        this.render();
+                    });
+                $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
+                return;
+            }
+            $(`#${viewName}-filter-btn`).on('click', () => this._toggleFilterPanel());
+            // 星期 chip 只切选中态，统一在「应用」时读走（面板是草稿态，应用才生效）
+            $(`#${viewName}-f-weekdays`).on('click', '.class-tab', (e) => {
+                $(e.currentTarget).toggleClass('active');
+            });
+            $(`#${viewName}-filter-apply`).on('click', () => this._applyFilterDraft());
+            $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
+            // 已生效条件 chip 的 ×：删单个维度后立即重筛（对齐 Bangumi 搜索的 chip 交互）
+            $(`#${viewName}-chips`).on('click', '.rec-chip-del', (e) => {
+                e.stopPropagation();
+                this._removeFilterChip(String($(e.currentTarget).data('kind') || ''));
+            });
+        },
+
+        /** 从 settings 载入排序/筛选状态（enter 与首次 render 各读一次）。
+         *  两处收藏入口（独立视图 / 「我的」页签）是两个实例，切页各自重读 → 状态一致。 */
+        async _loadViewState() {
+            let s = {};
+            try { s = (await window.yuki.settingsGet()) || {}; } catch (e) { s = {}; }
+            if (storeKey === 'history') {
+                this._sort = normHistorySort(s.historySort);
+                this._filter = normHistoryFilter(s.historyFilter);
+            } else {
+                this._sort = normFavSort(s.favoritesSort);
+                this._filter = normFavFilter(s.favoritesFilter);
+            }
+            this._syncControls();
+        },
+
+        /** 持久化排序键（写入失败只影响下次进入时的默认值，不阻断当前渲染）。 */
+        async _saveSort() {
+            try { await window.yuki.settingsSet(storeKey === 'history' ? 'historySort' : 'favoritesSort', this._sort); } catch (e) { /* 忽略 */ }
+        },
+
+        /** 持久化筛选状态（对象形态；读回时一律经 norm*Filter 归一化）。 */
+        async _saveFilter() {
+            try { await window.yuki.settingsSet(storeKey === 'history' ? 'historyFilter' : 'favoritesFilter', this._filter); } catch (e) { /* 忽略 */ }
+        },
+
+        /** 状态 → 控件回填（载入/重置/归一化纠正后调用）。无 DOM 时全体空转。 */
+        _syncControls() {
+            $(`#${viewName}-sort`).val(this._sort);
+            if (storeKey === 'history') {
+                const f = normHistoryFilter(this._filter);
+                this._filter = f;
+                $(`#${viewName}-sites`).val(f.site);
+                $(`#${viewName}-date`).val(f.date);
+                $(`#${viewName}-from`).val(f.from);
+                $(`#${viewName}-to`).val(f.to);
+                $(`#${viewName}-score`).val(f.score);
+                return;
+            }
+            const f = normFavFilter(this._filter);
+            this._filter = f;
+            $(`#${viewName}-f-tag`).val(f.tags.join(' '));
+            // 季度选项对齐 Bangumi 搜索工作台：当前季度往前 20 年（更早的季度对收藏筛选无意义）
+            if (!$(`#${viewName}-f-season option`).length) {
+                const opts = ['<option value="">不限季度</option>'];
+                const now = new Date();
+                const names = ['冬', '春', '夏', '秋'];
+                for (let y = now.getFullYear(); y >= now.getFullYear() - 19; y--) {
+                    for (let q = 4; q >= 1; q--) {
+                        if (now > new Date(y, (q - 1) * 3, 1)) opts.push(`<option value="${y}Q${q}">${y} ${names[q - 1]}季</option>`);
+                    }
+                }
+                $(`#${viewName}-f-season`).html(opts.join(''));
+            }
+            $(`#${viewName}-f-season`).val(f.season);
+            $(`#${viewName}-f-date-from`).val(f.dateRange ? f.dateRange.from : '');
+            $(`#${viewName}-f-date-to`).val(f.dateRange ? f.dateRange.to : '');
+            $(`#${viewName}-f-score-min`).val(f.scoreRange && f.scoreRange.min !== null ? f.scoreRange.min : '');
+            $(`#${viewName}-f-score-max`).val(f.scoreRange && f.scoreRange.max !== null ? f.scoreRange.max : '');
+            $(`#${viewName}-f-rank-min`).val(f.rankRange && f.rankRange.min !== null ? f.rankRange.min : '');
+            $(`#${viewName}-f-rank-max`).val(f.rankRange && f.rankRange.max !== null ? f.rankRange.max : '');
+            $(`#${viewName}-f-weekdays .class-tab`).each(function () {
+                const d = parseInt($(this).data('weekday'), 10);
+                $(this).toggleClass('active', f.weekdays.indexOf(d) >= 0);
+            });
+            $(`#${viewName}-f-unknown`).prop('checked', f.includeUnknown);
+            this._syncChips();
+        },
+
+        /** 已生效筛选条件 chip（点 × 删单个维度）：一眼看出「列表为什么变了」。
+         *  kind 带上标签值（tag:xxx），删除时无需回读 DOM。 */
+        _syncChips() {
+            if (storeKey === 'history' || !this._filter) return;
+            const f = normFavFilter(this._filter);
+            const chips = [];
+            const mk = (kind, label) => chips.push(
+                `<span class="rec-chip">${escHtml(label)}<span class="rec-chip-del" data-kind="${escHtml(kind)}" title="移除该条件">×</span></span>`);
+            f.tags.forEach((t) => mk('tag:' + t, `标签: ${t}`));
+            if (f.season) mk('season', `季度: ${f.season}`);
+            else if (f.dateRange) mk('date', `开播: ${f.dateRange.from || '不限'} ~ ${f.dateRange.to || '不限'}`);
+            if (f.scoreRange) mk('score', `评分: ${f.scoreRange.min === null ? '不限' : f.scoreRange.min} ~ ${f.scoreRange.max === null ? '不限' : f.scoreRange.max}`);
+            if (f.rankRange) mk('rank', `排名: ${f.rankRange.min === null ? '不限' : f.rankRange.min} ~ ${f.rankRange.max === null ? '不限' : f.rankRange.max}`);
+            if (f.weekdays.length) mk('weekday', `星期: ${f.weekdays.join(',')}`);
+            if (f.includeUnknown) mk('unknown', '含未知');
+            $(`#${viewName}-chips`).html(chips.join('')).toggle(chips.length > 0);
+        },
+
+        /** 删除单个筛选维度（chip ×）：标签按值删，其余维度整维清空。 */
+        _removeFilterChip(kind) {
+            const f = Object.assign({}, this._filter || {});
+            if (kind.indexOf('tag:') === 0) {
+                const want = kind.slice(4);
+                f.tags = (Array.isArray(f.tags) ? f.tags : []).filter((t) => t !== want);
+            } else if (kind === 'season') f.season = '';
+            else if (kind === 'date') { f.dateFrom = ''; f.dateTo = ''; }
+            else if (kind === 'score') { f.scoreMin = ''; f.scoreMax = ''; }
+            else if (kind === 'rank') { f.rankMin = ''; f.rankMax = ''; }
+            else if (kind === 'weekday') f.weekdays = [];
+            else if (kind === 'unknown') f.includeUnknown = false;
+            this._filter = normFavFilter(f);
+            this._page = 1;
+            this._saveFilter();
+            this._syncControls();
+            this.render();
+        },
+
+        /** 展开/收起筛选面板（面板内容是草稿态，点「应用」才写入并重筛）。 */
+        _toggleFilterPanel() {
+            this._filterOpen = !this._filterOpen;
+            $(`#${viewName}-filter-panel`).toggle(!!this._filterOpen);
+            $(`#${viewName}-filter-btn`).attr('aria-expanded', this._filterOpen ? 'true' : 'false');
+        },
+
+        /** 应用筛选面板：草稿控件 → 归一化状态 → 持久化 → 重筛。
+         *  归一化会纠正非法区间（交换颠倒端点）/越界数值，回填控件让纠正结果可见。
+         *  季度与日期区间互斥（选季度清日期，反之亦然），与 Bangumi 搜索工作台一致。 */
+        _applyFilterDraft() {
+            const season = String($(`#${viewName}-f-season`).val() || '');
+            const dateFrom = String($(`#${viewName}-f-date-from`).val() || '');
+            const dateTo = String($(`#${viewName}-f-date-to`).val() || '');
+            this._filter = normFavFilter({
+                tags: $(`#${viewName}-f-tag`).val(),
+                season,
+                // 草稿里日期有值而季度也选着：以最后填写的日期为准（不清季度会让用户困惑），
+                // normFavFilter 内部按「季度优先、有季度则丢日期」处理，这里显式对齐同一语义
+                dateFrom: season ? '' : dateFrom,
+                dateTo: season ? '' : dateTo,
+                scoreMin: $(`#${viewName}-f-score-min`).val(),
+                scoreMax: $(`#${viewName}-f-score-max`).val(),
+                rankMin: $(`#${viewName}-f-rank-min`).val(),
+                rankMax: $(`#${viewName}-f-rank-max`).val(),
+                weekdays: $(`#${viewName}-f-weekdays .class-tab.active`)
+                    .map(function () { return parseInt($(this).data('weekday'), 10); }).get(),
+                includeUnknown: $(`#${viewName}-f-unknown`).prop('checked') === true,
+            });
+            this._page = 1;
+            this._saveFilter();
+            this._syncControls();
+            this.render();
+        },
+
+        /** 重置排序与筛选（恢复默认并覆盖持久化状态；历史页「重置筛选」同入口）。 */
+        _resetAdvanced() {
+            if (storeKey === 'history') {
+                this._sort = normHistorySort('');
+                this._filter = normHistoryFilter(null);
+            } else {
+                this._sort = normFavSort('');
+                this._filter = normFavFilter(null);
+            }
+            this._page = 1;
+            this._saveSort();
+            this._saveFilter();
+            this._syncControls();
+            this.render();
+        },
+
+        /** 刷新历史来源下拉：按「全量记录」聚合（不是当前筛选结果，否则选中项会把自己筛掉后
+         *  从下拉里消失）；选项集合无变化时不重写 DOM，避免打断用户正在进行的操作。
+         *  选中值由 _syncControls 回填（值已消失时回落「全部来源」）。 */
+        _syncSiteOptions(list) {
+            if (storeKey !== 'history') return;
+            const $sel = $(`#${viewName}-sites`);
+            if (!$sel.length) return;
+            const items = collectHistorySites(list);
+            const html = ['<option value="">全部来源</option>']
+                .concat(items.map((it) => `<option value="${escHtml(it.value)}">${escHtml(it.label)}</option>`)).join('');
+            const cur = String((this._filter && this._filter.site) || '');
+            // 用自存签名比对（不用 $sel.html() 回读：DOM 序列化会规范化属性引号，
+            // 与源串不等 → 每渲染必重建，白掉一次下拉框 DOM）
+            if (this._sitesSig !== html) {
+                this._sitesSig = html;
+                $sel.html(html);
+            }
+            if (String($sel.val() || '') !== cur) $sel.val(cur);
+        },
+
+        /** 续播（历史卡 ▶）：按 uid 取回记录 → 分层定位线路与集数 → 起播（见 resumePlayRecord）。
+         *  防抖：在途期间忽略重复点击（按钮同时进入 loading 态并禁用）；失败按原因给明确提示，
+         *  Kazumi 源需要人工介入时打开既有选源弹窗。 */
+        async resumePlay(uid, $btn) {
+            if (this._resumeBusy) return;
+            const item = (this._itemsByUid && this._itemsByUid.get(String(uid))) || null;
+            if (!item) { warnToast('记录已失效，请在详情页重新打开'); return; }
+            const $b = ($btn && $btn.length) ? $btn : $(`#${viewName}-grid .rec-play-btn[data-uid="${uid}"]`);
+            this._resumeBusy = true;
+            try { $b.addClass('loading').prop('disabled', true).attr('aria-busy', 'true'); } catch (e) { /* 按钮态失败不影响起播 */ }
+            let r = { ok: false, reason: 'fail' };
+            try { r = await resumePlayRecord(item); } catch (e) { r = { ok: false, reason: 'fail' }; }
+            this._resumeBusy = false;
+            try { $b.removeClass('loading').prop('disabled', false).removeAttr('aria-busy'); } catch (e) { /* 同上 */ }
+            if (r && r.ok) return;
+            const reason = (r && r.reason) || 'fail';
+            // Kazumi 源需要人工介入（验证码 / 剧集为空 / 集名对不上）：打开既有选源弹窗，
+            // 由弹窗链路起播——不猜源、不静默换线路（用户裁决的默认策略）
+            if (reason === 'need-source' || reason === 'captcha') {
+                warnToast(reason === 'captcha' ? '该源需要验证码，请重新选源' : '未匹配到可用线路，请重新选源');
+                if (typeof Kazumi !== 'undefined' && Kazumi.openSourceDialog) {
+                    Kazumi.openSourceDialog(String(item.name || ''), String(item.site || ''), String(item.kazumiSrc || ''));
+                }
+                return;
+            }
+            directPlayFailToast(reason);
+        },
+
+        /** 打开六态收藏菜单（历史卡 ⋯）：按 uid 取记录，当前状态由 getFavTag 读出后高亮。 */
+        async openFavMenu(uid, $btn) {
+            const item = (this._itemsByUid && this._itemsByUid.get(String(uid))) || null;
+            if (!item) return;
+            await openRecFavMenu($btn, item);
+        },
+
         /** 视图切入时渲染最新列表。 */
         async enter() {
             this.init();
             // 首渲前把词表读进内存：否则第一帧按「无屏蔽」渲染，用户会看到本该屏蔽的卡片闪一下
             if (typeof loadBlockWords === 'function') await loadBlockWords();
+            await this._loadViewState();
             await this.render();
         },
 
@@ -856,6 +2074,10 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                     list = mergeExtraRecords(list, extra);
                 } catch (e) { /* 合并失败不影响本地列表 */ }
             }
+            // 来源下拉的选项集取自「合并后、过滤前」的清单：若用过滤结果重建，用户一边搜索
+            // 一边选来源时选中项会从下拉里消失，select 视觉回落「全部来源」而内部状态仍在筛选
+            // （之后任何一次控件改动都会悄悄带上这个已不可见的来源条件）。
+            const listForSites = (storeKey === 'history') ? list.slice() : null;
             // 搜索 + 来源 + 标签过滤（不改存储顺序）
             if (this._q) list = list.filter((v) => `${v.name || ''}${v.remarks || ''}${v.siteName || ''}`.toLowerCase().includes(this._q));
             if (withTags && this._src === 'bangumi') list = list.filter((v) => isBangumiItem(v));
@@ -866,14 +2088,38 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             // 删掉屏蔽词后记录照常回来）
             list = (typeof filterBlocked === 'function')
                 ? filterBlocked(list, (v) => String((v && v.name) || '')) : list;
+            // ---- 高级筛选 + 排序（两页共用管线，规则见文件上方「纯函数层」）----
+            // 直接调 render（翻页/标签变更/广播重绘）时状态可能尚未载入，这里兜底读一次。
+            if (!this._sort) await this._loadViewState();
+            const advancedOn = storeKey === 'history'
+                ? (historyFilterActive(this._filter) || /^score-/.test(this._sort))
+                : (favFilterActive(this._filter) || /^(score|rank|airdate)$/.test(this._sort));
+            // 需要 Bangumi 字段时才回填元数据：批量（≤60/批）、有 30 分钟缓存、单渲染有上限，
+            // 命中缓存与片名匹配缓存的条目零网络——翻页/改排序不会重复打接口。
+            if (advancedOn) {
+                await recPrefetchBgmMeta(recMetaIdsOf(list, storeKey !== 'history' && normFavFilter(this._filter).tags.length > 0));
+            }
+            if (storeKey === 'history') {
+                this._syncSiteOptions(listForSites || list);
+                list = list.filter((v) => matchHistoryFilter(v, this._filter, recMetaOf(v)));
+            } else if (favFilterActive(this._filter)) {
+                list = list.filter((v) => matchFavFilter(v, this._filter, recMetaOf(v)));
+            }
+            list = applyRecSort(list, this._sort, recMetaOf, storeKey);
+            // 卡片动作（续播 ▶ / 收藏 ⋯）按 uid 回查记录：DOM data-* 只有身份字段，
+            // 续播还缺 lastEpisode/kazumiSrc 等，回查表让动作层拿到完整记录（含 pic）。
+            this._itemsByUid = new Map();
+            list.forEach((v) => { if (v && v.uid) this._itemsByUid.set(String(v.uid), v); });
             const grid = $(`#${viewName}-grid`).empty();
             grid.toggleClass('selecting', this._selectMode);
             if (!list.length) {
                 if (this._selectMode) this.toggleSelectMode(); // 列表空时退出选择模式
                 $(`#${viewName}-pager`).empty();
-                // P3-18：_q/_tag/_src/emptyTip 当前均为静态字面量或本地输入回显，
-                // 统一转义插值不改行为，仅堵「外部数据流入 emptyTip」的回归源
-                grid.html(`<div class="tip-line">${(this._q || this._tag || this._src) ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
+                // 高级筛选也算「有筛选」：空态必须提示「没有匹配」而不是「暂无收藏」，
+                // 否则用户会以为收藏被清空（P3-18：插值统一 escHtml，堵外部数据流入回归源）
+                const filtered = !!(this._q || this._tag || this._src
+                    || (storeKey === 'history' ? historyFilterActive(this._filter) : favFilterActive(this._filter)));
+                grid.html(`<div class="tip-line">${filtered ? '没有匹配的记录' : escHtml(emptyTip)}</div>`);
                 return;
             }
             // 客户端分页（T39）：每页条数取本页单独设置（收藏默认 10、历史默认 24），超过即出底部分页器
@@ -1105,19 +2351,35 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             if (nBgm && typeof Kazumi !== 'undefined' && Kazumi.setBangumiCollection) {
                 const type = (Kazumi._favTagToBangumiType && Kazumi._favTagToBangumiType[tag]) || 0;
                 if (type) {
+                    // 批量标记期间抑制逐条 toast（kazumi.js 读这个开关）；
+                    // try/finally：中途抛错也必须复位，否则后续所有单条收藏操作全部静默
                     Kazumi._bgmBatchActive = true;
-                    for (const id of bgmIds) {
-                        try { if (await Kazumi.setBangumiCollection(id, type)) bgmOk++; else bgmFail++; }
-                        catch (e) { bgmFail++; }
+                    try {
+                        for (const id of bgmIds) {
+                            try { if (await Kazumi.setBangumiCollection(id, type)) bgmOk++; else bgmFail++; }
+                            catch (e) { bgmFail++; }
+                        }
+                    } finally {
+                        Kazumi._bgmBatchActive = false;
+                        // Bangumi 账号收藏缓存（my.js 的 MY_BGMCOL_KEY / Timeline 的过滤集合）失效：
+                        // 走 FavHub 广播交给各订阅者统一处理，与本地标签路径同一条链路（见下方广播）。
+                        if (typeof Timeline !== 'undefined' && Timeline.invalidateColCache) Timeline.invalidateColCache();
                     }
-                    Kazumi._bgmBatchActive = false;
-                    // Bangumi 收藏缓存失效由 Favorites.changed → My 订阅统一处理
                 }
+            }
+            // 纯 Bangumi 批量标记（nLocal === 0）此前不经过 recSet → 没有 FavHub.changed 广播：
+            // 本页卡片徽标停在旧状态（render 里 _extra() 命中的是「我的」页那份未失效的
+            // Bangumi 收藏缓存），详情页按钮 / 时间表过滤集合 / 搜索页徽标也都不知道账号
+            // 收藏已变。这里统一补一次广播，让订阅方（my.js 失效并重拉 + 本页就地重绘）
+            // 与本地标签路径行为一致；nLocal>0 时 recSet 已广播，不重复发。
+            if (nBgm && !nLocal && typeof FavHub !== 'undefined' && FavHub.changed) {
+                FavHub.changed({ key: 'favorites', bgm: true });
             }
             this._selectMode = false;
             this._syncSelToolbar();
             await this.render();
-            // 收藏状态变更已由 recSet → Favorites.changed 统一广播给详情页/我的收藏/时间表
+            // 本次标记的状态广播由 recSet（本地路径）或上方统一补发（纯 Bangumi 路径）完成，
+            // 订阅方各自刷新；此处的 toast 只负责本页结果回执。
             const bits = [];
             if (nLocal) bits.push(`${nLocal} 条本地`);
             if (nBgm) bits.push(`${bgmOk} 条 Bangumi${bgmFail ? `（${bgmFail} 失败）` : ''}`);
