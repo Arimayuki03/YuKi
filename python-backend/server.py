@@ -3401,11 +3401,22 @@ def dispatch_kazumi_action(form):
         if do == 'kazumiBangumiSync':
             # 生成同步计划：拉远端全量收藏 → 与本地收藏三方合并 → {upload,pull,conflict,skipped}
             token = form.get('token', '')
-            priority = form.get('priority', 'local')
-            try:
-                last_sync_at = float(form.get('lastSyncAt', '0') or 0)
-            except (TypeError, ValueError):
-                last_sync_at = 0
+            # 优先级白名单（T46 增强）：仅 local|remote|newest；旧前端写入的 '0'/'1' 按语义迁移，
+            # 其余非法值回落默认 local 并 warning——拼错时静默变成另一种语义最危险。
+            raw_priority = form.get('priority', 'local')
+            priority = kazumi_mgr.normalize_sync_priority(raw_priority)
+            if not kazumi_mgr.sync_priority_is_known(raw_priority):
+                logger.warning('[kazumi] kazumiBangumiSync priority=%r 非法，已回落 %s', raw_priority, priority)
+            # lastSyncAt：接受 unix 时间戳（秒/毫秒）或 ISO-8601 字符串；缺失/非法一律当未提供（0）。
+            # 解析失败不猜值：增量判定宁可退化为「本地未改动不可知」，也不能拿错基准判谁更新。
+            raw_last = form.get('lastSyncAt')
+            last_sync_at = 0
+            if raw_last is not None and str(raw_last).strip() not in ('', 'null', 'undefined', 'None'):
+                last_dt = kazumi_mgr.parse_sync_time(raw_last)
+                if last_dt is not None:
+                    last_sync_at = last_dt.timestamp()
+                else:
+                    logger.warning('[kazumi] kazumiBangumiSync lastSyncAt=%r 非法，按未提供处理', raw_last)
             try:
                 local_favorites = json.loads(form.get('favorites', '[]'))
             except Exception:
@@ -3553,6 +3564,12 @@ def dispatch_kazumi_action(form):
                 data = json.loads(data_str)
             except Exception:
                 data = {}
+            # 地址校验前置：webdav_sync 只回 bool，非法 scheme/缺主机名的中文原因会被
+            # 吞成一句「同步失败」；这里先校验并把原因原样回给渲染层（内网地址放行）
+            try:
+                kazumi_mgr.validate_webdav_url(url)
+            except ValueError as e:
+                return 400, json.dumps({'code': 400, 'msg': str(e)}, ensure_ascii=False)
             ok = kazumi_mgr.webdav_sync(url, username, password, data,
                                         ssl_verify=ssl_verify, remote_dir=remote_dir)
             return (200 if ok else 500), json.dumps({'code': 200 if ok else 500, 'msg': 'sync ok' if ok else 'sync failed'}, ensure_ascii=False)
@@ -3575,7 +3592,14 @@ def dispatch_kazumi_action(form):
             if not result.get('ok'):
                 msg = str(result.get('error') or 'restore failed')
                 return 500, json.dumps({'code': 500, 'msg': msg}, ensure_ascii=False)
-            return 200, json.dumps({'code': 200, 'data': result.get('files') or {}}, ensure_ascii=False)
+            # meta = 云端版本标识（_meta.json，旧备份缺失时为 schemaVersion=1）；
+            # warnings = 版本文件读取/解析异常等诊断信息，渲染层用于提示「为什么有键没恢复」
+            return 200, json.dumps({
+                'code': 200,
+                'data': result.get('files') or {},
+                'meta': result.get('meta') or {},
+                'warnings': result.get('warnings') or [],
+            }, ensure_ascii=False)
 
         if do == 'kazumiWebdavTest':
             url = form.get('url', '')
@@ -3588,7 +3612,7 @@ def dispatch_kazumi_action(form):
             if not result.get('ok'):
                 msg = str(result.get('error') or 'connect failed')
                 return 500, json.dumps({'code': 500, 'msg': msg}, ensure_ascii=False)
-            return 200, json.dumps({'code': 200}, ensure_ascii=False)
+            return 200, json.dumps({'code': 200, 'note': result.get('note') or ''}, ensure_ascii=False)
 
         return 400, json.dumps({'code': 400, 'msg': f'unknown do: {do}'}, ensure_ascii=False)
     except _FormValueError as e:

@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 
 import hoststate
 import http_client
@@ -57,6 +57,18 @@ DANDAN_KEY = os.environ.get('DANDANAPI_KEY', '')
 
 # WebDAV 同步（对齐 Kazumi webdav_client）
 WEBDAV_SYNC_ROOT = '/YuKiSync'
+# 同步载荷版本标识（内容升级：把新版数据键纳入同步范围）：
+#   1 = 旧版载荷：目录下只有 <name>.json 数据文件，无任何版本信息；
+#   2 = 本版载荷：额外写 _meta.json（schemaVersion/app/appVersion/createdAt/files）。
+# 读取口径见 webdav_restore：_meta.json 缺失或不可解析一律按 v1 兼容恢复——
+# 用户的历史备份必须继续可用，绝不因为读不到版本就拒绝恢复。
+# 为什么用独立 _meta.json 而不是把版本塞进每个数据文件：数据文件保持原样
+# （数组/对象顶层形态不变），老版本客户端读 favorites.json 等仍是原来那个形状，
+# 新旧备份双向可读；塞进 payload 会让老客户端拿到一层信封而解析失败。
+WEBDAV_PAYLOAD_VERSION = 2
+WEBDAV_META_FILE = '_meta.json'
+# 数据文件名保留字：payload 里出现同名键时跳过，避免与版本文件互相覆盖
+WEBDAV_META_STEM = '_meta'
 
 
 # Bangumi 收藏写接口的评分/吐槽字段边界（官方 OpenAPI UserSubjectCollectionModifyPayload）：
@@ -129,12 +141,96 @@ def normalize_bgm_comment(value):
     return text or None
 
 
+def _webdav_host_hint(webdav_url):
+    """环回/私网/保留地址的可读提示（'' = 公网地址或无法判定）。
+
+    本场景**必须放行**内网地址：自建 NAS/内网 WebDAV 正是主流用法，拦掉等于砍功能。
+    提示只用于 UI/日志，作用是让用户确认「连的是内网」而不是误把公网地址当内网盘。
+    """
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(str(webdav_url or '')).hostname or '').strip('[]').lower()
+    except Exception:
+        return ''
+    if not host:
+        return ''
+    if host == 'localhost' or host.endswith('.localhost'):
+        return '检测到本机地址（localhost）：仅当 WebDAV 服务运行在本机时可用，数据不会离开本机'
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # 非 IP 字面量：只做局域网命名约定启发（.local/.lan/.home 等），不猜公网域名
+        if host.endswith(('.local', '.lan', '.home', '.internal', '.localdomain')):
+            return '检测到局域网主机名：自建 NAS/内网服务属正常用法，请确认只在信任的网络内可达'
+        return ''
+    if ip.is_loopback:
+        return '检测到本机回环地址：仅当 WebDAV 服务运行在本机时可用，数据不会离开本机'
+    if ip.is_link_local:
+        return '检测到链路本地地址（169.254.x / fe80::）：通常不是 WebDAV 服务器地址，请确认'
+    if ip.is_private:
+        return '检测到内网地址：自建 NAS/内网服务属正常用法，请确认只在信任的网络内可达'
+    if ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        return '检测到保留/组播地址：请确认这是你实际部署的 WebDAV 服务器地址'
+    return ''
+
+
+def _webdav_url_guard(webdav_url):
+    """WebDAV 地址合法性校验：返回 (地址, 提示列表)；非法地址抛 ValueError。
+
+    为什么只允许 http/https：file://、dict://、gopher:// 等 scheme 在 requests 里
+    没有适配器，放行只会抛出英文 InvalidSchema（"No connection adapters were found"），
+    用户完全不知道错在哪；而 file:// 语义上还能被误当成读本地文件。所以这里显式
+    拒绝并给出中文原因。内网/环回/保留地址**全部放行**（见 _webdav_host_hint），
+    仅返回提示文案。
+    """
+    raw = str(webdav_url or '').strip()
+    if not raw:
+        raise ValueError('WebDAV 地址不能为空')
+    if '://' not in raw:
+        raise ValueError('WebDAV 地址缺少协议前缀，请以 http:// 或 https:// 开头')
+    from urllib.parse import urlsplit
+    parts = urlsplit(raw)
+    scheme = (parts.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise ValueError(
+            f'WebDAV 地址只支持 http/https，当前为 {scheme or "未知"}://'
+            '（file://、ftp://、dict:// 等协议不被支持）')
+    if not parts.hostname:
+        raise ValueError('WebDAV 地址缺少主机名（例如 https://nas.example/dav）')
+    hints = []
+    host_hint = _webdav_host_hint(raw)
+    if host_hint:
+        hints.append(host_hint)
+    if parts.username or parts.password:
+        hints.append('地址里带了用户名/密码：建议改用账号/密码框填写，避免凭据出现在同步日志中')
+    if scheme == 'http':
+        hints.append('使用明文 http 传输：账号密码与同步数据在网络上可见，建议改用 https')
+    return raw, hints
+
+
+def _webdav_hints(webdav_url):
+    """只取提示列表（地址非法时返回空表，不抛错）——供日志/UI 复用。"""
+    try:
+        return _webdav_url_guard(webdav_url)[1]
+    except Exception:
+        return []
+
+
+def _log_webdav_hints(webdav_url):
+    """把地址提示写日志（内网/明文传输等），失败不影响主流程。"""
+    for h in _webdav_hints(webdav_url):
+        logger.info('[kazumi] webdav 地址提示: %s', h)
+
+
 def _webdav_sync_dir(webdav_url, remote_dir=''):
     """拼接远程同步根目录。
 
     remote_dir 为用户自定义子路径：空值回退默认 WEBDAV_SYNC_ROOT；
     自动补前导斜杠、去尾斜杠；含 '..' 直接拒绝（防路径穿越写穿到盘根）。
+    地址合法性（scheme/主机名）在这里统一校验，sync/restore/test 三处共用。
     """
+    url, _ = _webdav_url_guard(webdav_url)
     rd = str(remote_dir or '').strip()
     if '..' in rd:
         raise ValueError('远程目录不能包含 ".."')
@@ -143,7 +239,52 @@ def _webdav_sync_dir(webdav_url, remote_dir=''):
         rd = WEBDAV_SYNC_ROOT
     elif not rd.startswith('/'):
         rd = '/' + rd
-    return f'{str(webdav_url or "").rstrip("/")}{rd}'
+    return f'{url.rstrip("/")}{rd}'
+
+
+def _webdav_read_meta(sync_dir, auth, ssl_verify):
+    """读取云端版本标识 _meta.json，返回 (meta, warnings)。
+
+    兼容口径（本任务的硬约束）：文件缺失（旧备份，404）/读取异常/JSON 非法/结构异常
+    一律退回 {'schemaVersion': 1, 'legacy': True} 并只记 warning——用户的历史备份
+    必须继续可用，绝不因为读不到版本就拒绝恢复。meta 解析失败也绝不写进 error，
+    因为它不是恢复过程本身的一部分。
+    """
+    meta = {'schemaVersion': 1, 'legacy': True}
+    warnings = []
+    try:
+        rsp = http_client.get(f'{sync_dir}/{WEBDAV_META_FILE}', auth=auth, timeout=15,
+                              verify=ssl_verify)
+    except Exception as e:
+        warnings.append(f'版本标识读取失败，按旧版备份（v1）恢复：{e}')
+        return meta, warnings
+    if rsp.status_code == 404:
+        return meta, warnings  # 正常路径：v1 备份本来就没有版本文件
+    if rsp.status_code != 200:
+        warnings.append(f'版本标识返回 HTTP {rsp.status_code}，按旧版备份（v1）恢复')
+        return meta, warnings
+    try:
+        parsed = rsp.json()
+    except Exception as e:
+        warnings.append(f'版本标识不是有效 JSON，按旧版备份（v1）恢复：{e}')
+        return meta, warnings
+    if not isinstance(parsed, dict):
+        warnings.append('版本标识结构异常（期望对象），按旧版备份（v1）恢复')
+        return meta, warnings
+    ver = parsed.get('schemaVersion')
+    # bool 是 int 的子类：JSON true 不能当成版本号 1
+    if isinstance(ver, bool) or not isinstance(ver, int) or ver < 1:
+        warnings.append('版本标识缺少有效 schemaVersion，按旧版备份（v1）恢复')
+        out = dict(parsed)
+        out['schemaVersion'] = 1
+        out['legacy'] = True
+        return out, warnings
+    out = dict(parsed)
+    out['legacy'] = False
+    if ver > WEBDAV_PAYLOAD_VERSION:
+        # 不拒绝：拒绝恢复会让用户彻底拿不到数据；未知键由渲染层允许表兜底丢弃
+        warnings.append(f'云端备份由更高版本（schema v{ver}）生成：本机不认识的数据项会被忽略，建议升级后再恢复')
+    return out, warnings
 
 
 # 镜像根域名合法性（如 bangumi.vip）：至少两段、每段字母数字连字符，防把
@@ -1884,24 +2025,259 @@ class PluginManager:
                 time.sleep(page_delay)  # Kazumi 风格页间限速
         return list(merged.values())
 
+    # ---------------------------------------------------------------- 同步优先级 / 时间基准 / 出口校验
+
+    # 同步优先级白名单：'local' 本地优先（默认）/ 'remote' Bangumi 优先 / 'newest' 最新修改时间优先。
+    SYNC_PRIORITIES = ('local', 'remote', 'newest')
+    # 旧版设置页下拉写的是 '0'/'1'（value 直接落盘）：白名单校验前必须先按语义迁移，
+    # 否则 '1'（用户明确选了 Bangumi 优先）会被当成非法值回落成 'local'——语义正好相反，
+    # 静默反转用户意图比报错更危险。
+    LEGACY_SYNC_PRIORITY = {'0': 'local', '1': 'remote'}
+    # 可用于裁决的时间区间：低于 2000 年/高于 2100 年的一律视为脏数据（单位误判、
+    # 「0 = 未记录」占位、时钟错乱）。宁可回落既有规则，也不让一条脏时间顶成永远较新。
+    BGM_SYNC_TIME_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    BGM_SYNC_TIME_CEIL = datetime(2100, 1, 1, tzinfo=timezone.utc)
+    # 物理上不可能由用户手工配置、也不该由后端去打的保留域名（字面量判定，见 check_bangumi_url）
+    _BLOCKED_SYNC_HOSTS = ('localhost', 'localhost.localdomain')
+    _BLOCKED_SYNC_SUFFIXES = ('.localhost', '.local', '.internal', '.home.arpa')
+
+    @staticmethod
+    def normalize_sync_priority(value, default='local'):
+        """归一化同步优先级取值：白名单 + 旧值（'0'/'1'）迁移；非法/空值回落 default 并 warning。"""
+        v = str(value if value is not None else '').strip().lower()
+        if v in PluginManager.SYNC_PRIORITIES:
+            return v
+        legacy = PluginManager.LEGACY_SYNC_PRIORITY.get(v)
+        if legacy:
+            return legacy
+        if v:
+            logger.warning('[kazumi] 未知同步优先级 %r，回落到 %s', value, default)
+        return default
+
+    @staticmethod
+    def sync_priority_is_known(value):
+        """取值是否在（新值 + 旧值）白名单内——供 server.py 记录「非法值已回落」告警。"""
+        v = str(value if value is not None else '').strip().lower()
+        return v in PluginManager.SYNC_PRIORITIES or v in PluginManager.LEGACY_SYNC_PRIORITY
+
+    @staticmethod
+    def parse_sync_time(value):
+        """把「本地收藏 ts」或「Bangumi updated_at」统一成可比较的 UTC aware datetime；
+        缺失/非法/超出 BGM_SYNC_TIME_FLOOR..CEIL 返回 None（调用方据此回落既有规则）。
+
+        - 数值时间戳：>= 1e11 视为毫秒（records.js 的 favorites.ts 写的是 Date.now()），
+          否则视为秒；<=0 视为缺失（Bangumi 章节收藏 updated_at 用 0 表示「未记录」）。
+        - 字符串：ISO-8601（官方示例 `2022-06-19T18:44:13.6140127+08:00`），容忍 'Z' 后缀、
+          小数秒位数任意（补/截到 6 位，3.11 前的 fromisoformat 只吃 3/6 位）、空格分隔、
+          纯数字串（镜像把 updated_at 返回成 int64 unix 秒）。
+        - 缺时区：按本机时区解释后再转 UTC（官方恒带 +08:00；被剥掉时区的镜像只能猜，
+          本机时区对桌面用户误差最小）。绝不按字符串直接比较（跨时区会得出错误的大小关系）。
+        """
+        dt = PluginManager._sync_time_raw(value)
+        if dt is None:
+            return None
+        if not (PluginManager.BGM_SYNC_TIME_FLOOR <= dt <= PluginManager.BGM_SYNC_TIME_CEIL):
+            return None
+        return dt
+
+    @staticmethod
+    def _sync_time_raw(value):
+        """仅做格式解析（不判合理区间）：归一成 UTC aware datetime，失败返回 None。"""
+        num = None
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            num = float(value)
+        elif isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            if re.match(r'^[+-]?\d+(?:\.\d+)?$', s):
+                num = float(s)
+            else:
+                return PluginManager._parse_iso_time(s)
+        if num is None or num <= 0:
+            return None
+        if num > 1e11:  # 毫秒时间戳（秒级要到公元 5138 年才到 1e11，不会误判）
+            num /= 1000.0
+        try:
+            return datetime.fromtimestamp(num, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_iso_time(s):
+        """ISO-8601 → UTC aware datetime；非法返回 None，缺时区按本机时区补齐后转 UTC。"""
+        text = str(s).strip()
+        if text.endswith(('Z', 'z')):
+            text = text[:-1] + '+00:00'
+        # 小数秒统一到 6 位：官方实际返回 7 位小数（.6140127），旧版 fromisoformat 直接抛 ValueError
+        m = re.match(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(\.\d+)?(.*)$', text)
+        if m:
+            frac = (m.group(2) or '')
+            if frac:
+                text = f'{m.group(1)}.{(frac[1:] + "000000")[:6]}{m.group(3)}'
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.astimezone()  # naive：按本机时区解释（唯一可用的上下文）
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def resolve_sync_conflict(priority, local_ts, remote_updated_at, last_sync_at=0):
+        """冲突裁决纯函数（不触网、不改状态）：返回 (resolved, resolved_by, local_dt, remote_dt)。
+
+        resolved_by 取值（新增字段，供前端提示与排障，既有 resolved 字段语义不变）：
+          'local'    优先级 local 的默认规则（本地胜）
+          'remote'   优先级 remote（远端胜）
+          'lastSync' 优先级 local 且既有增量规则命中：本地 ts < lastSyncAt → 远端胜
+          'newest'   优先级 newest 且双方时间可比且不等 → 时间较新者胜
+          'fallback' 优先级 newest 但时间缺失/非法/完全相等 → 回落既有规则（谁胜看 resolved）
+        """
+        # 防御性归一：本函数是公开纯函数，可能被直接调用（旧值 '0'/'1'、拼写错误都应
+        # 与主流程同一口径处理，而不是把 '1' 当成非 remote 从而静默按 local 裁决）
+        priority = PluginManager.normalize_sync_priority(priority)
+        local_dt = PluginManager.parse_sync_time(local_ts)
+        remote_dt = PluginManager.parse_sync_time(remote_updated_at)
+        if priority == 'remote':
+            return 'remote', 'remote', local_dt, remote_dt
+        if priority == 'newest' and local_dt is not None and remote_dt is not None:
+            if local_dt > remote_dt:
+                return 'local', 'newest', local_dt, remote_dt
+            if remote_dt > local_dt:
+                return 'remote', 'newest', local_dt, remote_dt
+        # 走到这里只有两种情况：priority=local（含 lastSyncAt 增量规则），
+        # 或 priority=newest 但无法用时间判别（缺时间/非法/完全相等）→ 回落既有规则
+        fallback = 'fallback' if priority == 'newest' else 'local'
+        return PluginManager._legacy_conflict_winner(local_ts, last_sync_at, local_dt, remote_dt, fallback)
+
+    @staticmethod
+    def _legacy_conflict_winner(local_ts, last_sync_at, local_dt, remote_dt, default_by):
+        """既有规则原样保留：默认本地胜；仅当「本地 ts < lastSyncAt」时远端胜。
+
+        default_by='fallback' 表示这是 priority=newest 因时间不可判而回落：此时 resolvedBy
+        固定为 'fallback'，哪怕最终是 lastSyncAt 规则判的远端胜——「本次没能用时间裁决、
+        已回退既有规则」这件事必须能从结果里读出来（最终谁胜看 resolved）。
+
+        注意这里沿用原始 ts 与 lastSyncAt 的裸比较（老代码口径，两者单位约定为同一口径）。
+        渲染端目前从不传 lastSyncAt（没有可靠的落盘键），故该分支实际不生效；
+        保留原样是为了不改变既有 'local' 语义——修单位口径属于另一件事，需 lead 决策。"""
+        try:
+            ts = float(local_ts or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        try:
+            last = float(last_sync_at or 0)
+        except (TypeError, ValueError):
+            last = 0
+        remote_wins = bool(last and ts and ts < last)
+        if remote_wins:
+            return 'remote', ('fallback' if default_by == 'fallback' else 'lastSync'), local_dt, remote_dt
+        return 'local', default_by, local_dt, remote_dt
+
+    @staticmethod
+    def check_bangumi_url(url):
+        """同步链路出口 URL 安全验收：放行返回 None，否则返回中文诊断串。
+
+        只允许 http/https；host 为环回/私有/链路本地/保留/未指定/组播的 IP 字面量，
+        或 localhost / *.localhost / *.local / *.internal / *.home.arpa 这类保留名字时拒绝。
+
+        为什么只做字面量判定、不做 DNS 解析：解析会把「离线/镜像不可达」变成新的失败点，
+        还给每条请求加一次 DNS 延迟。因此「域名 A 记录指向 127.0.0.1 / nip.io 之类」拦不住——
+        这是本验收的已知边界（见报告）。另外镜像根域名是用户可配置项：这里既不静默放行
+        也不悄悄改写，而是明确拒绝并交由用户改回可公开解析的域名（策略取舍见报告）。"""
+        try:
+            from urllib.parse import urlsplit
+            parts = urlsplit(str(url or ''))
+        except Exception as e:
+            return f'Bangumi 请求地址无法解析：{url!r}（{e}）'
+        scheme = (parts.scheme or '').lower()
+        if scheme not in ('http', 'https'):
+            return f'Bangumi 请求地址仅允许 http/https，已拒绝：{url!r}'
+        host = (parts.hostname or '').strip().strip('[]').lower()
+        if not host:
+            return f'Bangumi 请求地址缺少主机名，已拒绝：{url!r}'
+        return PluginManager._sync_host_block_reason(host)
+
+    @staticmethod
+    def _sync_host_block_reason(host):
+        """host 命中本机/内网/保留地址时返回中文诊断串，否则 None。"""
+        # 保留名字判定要连带父域：镜像基址是 `api.{root}`/`next.{root}` 形式，
+        # 用户把根域名写成 localhost 之类时真实 host 是 'api.localhost'（父域才是保留名）。
+        if (host in PluginManager._BLOCKED_SYNC_HOSTS
+                or host.endswith(PluginManager._BLOCKED_SYNC_SUFFIXES)
+                or any(host.endswith('.' + name) for name in PluginManager._BLOCKED_SYNC_HOSTS)):
+            return (f'镜像地址 {host} 属于本机/内网保留域名，已拒绝请求'
+                    f'（如需自建镜像请改用可公开解析的域名）')
+        for candidate in PluginManager._sync_host_ip_candidates(host):
+            try:
+                import ipaddress
+                ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            mapped = getattr(ip, 'ipv4_mapped', None)
+            if mapped is not None:
+                ip = mapped  # ::ffff:127.0.0.1 这类 IPv4-mapped 必须还原后再判
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                    or ip.is_unspecified or ip.is_multicast):
+                return (f'镜像地址 {host} 命中环回/私有/保留地址段（{candidate}），已拒绝请求'
+                        f'（如需自建镜像请改用可公开解析的域名）')
+        return None
+
+    @staticmethod
+    def _sync_host_ip_candidates(host):
+        """host 里「看起来是 IP 字面量」的候选串：整串，以及尾部全数字标签段。
+
+        尾部标签段是为 `api.192.168.1.5` 这种形态准备的——镜像根域名被写成裸 IP 时
+        真实 host 会带 `api.`/`next.` 前缀，整串已不是 IP 字面量，只靠整串判定会漏。
+        """
+        out = [host]
+        labels = host.split('.')
+        for i in range(1, len(labels)):
+            if all(lbl.isdigit() for lbl in labels[i:]):
+                out.append('.'.join(labels[i:]))
+                break
+        return out
+
     def bangumi_sync_collections(self, token, local_favorites, priority='local', last_sync_at=0):
         """Kazumi 风格三方合并（collect_sync_merger.dart planBangumi）：拉取远端全量收藏，
         与本地收藏（已在渲染端解析出 subjectId + type）比对，生成同步计划。
 
-        local_favorites: list[{subjectId|bangumiId, type(1-5), ts(unix), name}]
-        priority: 冲突时优先方（'local' 本地覆盖远端 / 'remote' 远端保留）。
-        last_sync_at: unix 秒；本地 ts < last_sync_at 且远端已存在的冲突视为「本地未改动」→ 远端胜（跳过上传）。
+        local_favorites: list[{subjectId|bangumiId, type(1-5), ts(unix 毫秒), name}]
+        priority: 冲突时优先方（白名单 SYNC_PRIORITIES，非法/旧值经 normalize_sync_priority 归一）
+          'local'  本地覆盖远端（默认）。例外：本地 ts < last_sync_at（视为自上次同步未改动）时远端胜。
+          'remote' 远端保留（冲突项一律跳过上传）。
+          'newest' 最新修改时间优先：本地 ts 与远端 UserSubjectCollection.updated_at 统一成
+                   UTC 后比较，较新者胜（本地新 → upload；远端新 → 只 pull，不覆盖远端）。
+                   任一侧时间缺失/非法/完全相等 → 回落既有规则，conflict[].resolvedBy='fallback'。
+        last_sync_at: unix 秒；仅参与既有「本地未改动 → 远端胜」判定（见 _legacy_conflict_winner）。
 
         返回 plan:
           upload   本地新增 + 冲突且本地胜（需上传的 {subjectId,type,name}）
-          pull     远端独有（渲染端合并进网格用的原始远端条目）
-          conflict 双方都有但 type 不同的明细（含 resolved: local/remote）
+          pull     远端独有 + 冲突且远端胜 的原始远端条目。远端胜出的冲突项此前只计 skipped、
+                   本地展示会一直停在旧收藏类型，现在一并进 pull 供渲染端覆盖本地展示/状态
+                   （seen_local 去重后追加，不会与「远端独有」部分重复）。
+          conflict 双方都有但 type 不同的明细：{subjectId, localType, remoteType,
+                   resolved: local/remote, resolvedBy, localTs, localTsSec,
+                   remoteUpdatedAt, remoteTsSec, name}
           skipped  已同步一致 + 冲突且远端胜 的计数（去重/增量的核心）"""
         token = self._normalize_bangumi_token(token)
+        priority = self.normalize_sync_priority(priority)
         if not token:
             return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
                     'remoteTotal': 0, 'localTotal': len(local_favorites or []),
-                    'error': '缺少 Bangumi token'}
+                    'priority': priority, 'error': '缺少 Bangumi token'}
+        # 安全验收：出口 URL 仅 http/https 且拒绝环回/私有/保留地址（含用户自建镜像根域名）。
+        # 在发请求前拦下，避免把 token 明/暗发往本机或内网服务；
+        # 拒绝时把可诊断原因作为 error 返回（前端按「同步计划失败：...」提示）。
+        url_error = self.check_bangumi_url(self._base_api())
+        if url_error:
+            logger.warning('[kazumi] bangumi sync 出口地址被拒：%s', url_error)
+            return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
+                    'remoteTotal': 0, 'localTotal': len(local_favorites or []),
+                    'priority': priority, 'error': url_error}
         remote_list = self._bangumi_all_collections(token)
         # 若远端拉取因 401 返回空且 token 经校验无效，补 error 提示（_bangumi_all_collections 已在 401 时直接返回 []）
         # 为保证测试中 mock _bangumi_all_collections 时不误判，仅当 remote 为空且用户名确实获取失败时附加错误
@@ -1911,22 +2287,29 @@ class PluginManager:
             if local_favorites and not self._bangumi_username(token):
                 return {'upload': [], 'pull': [], 'conflict': [], 'skipped': 0,
                         'remoteTotal': 0, 'localTotal': len(local_favorites or []),
-                        'error': self._bangumi_token_error_msg()}
+                        'priority': priority, 'error': self._bangumi_token_error_msg()}
+        # 远端索引：subject_id → {type, updated_at}。updated_at 取自
+        # GET /v0/users/{u}/collections 的 UserSubjectCollection.updated_at（ISO-8601 带时区字符串）
+        # ——官方没有单独的「收藏时间」字段，updated_at 是最接近「最近修改」的时间。
+        # 官方文档同时声明：改评分/吐槽/章节观看状态时该时间不更新是一个已知 bug（勿依赖其精度），
+        # 但收藏类型（本案裁决的对象 type 1-5）变更会更新它，故仍作为 'newest' 的远端时间依据。
         remote = {}
         for it in remote_list:
             sid = it.get('subject_id')
             if sid is None:
                 continue
             try:
-                remote[str(sid)] = int(it.get('type') or 0)
+                rtype = int(it.get('type') or 0)
             except (TypeError, ValueError):
-                remote[str(sid)] = 0
+                rtype = 0
+            remote[str(sid)] = {'type': rtype, 'updated_at': it.get('updated_at')}
         try:
             last_sync_at = float(last_sync_at or 0)
         except (TypeError, ValueError):
             last_sync_at = 0
         upload, conflict = [], []
         skipped = 0
+        remote_won = []  # 远端胜出的 subjectId：除计入 skipped 外还要进 pull（覆盖本地展示/状态）
         seen_local = set()
         for f in (local_favorites or []):
             sid = str(f.get('subjectId') or f.get('bangumiId') or '').strip()
@@ -1940,27 +2323,36 @@ class PluginManager:
                 continue
             seen_local.add(sid)
             name = f.get('name', '')
-            rtype = remote.get(sid)
-            try:
-                ts = float(f.get('ts') or 0)
-            except (TypeError, ValueError):
-                ts = 0
-            if rtype is None:
+            ritem = remote.get(sid)
+            raw_ts = f.get('ts')
+            if ritem is None:
                 upload.append({'subjectId': sid, 'type': ltype, 'name': name})  # 本地独有
-            elif rtype == ltype:
+            elif ritem['type'] == ltype:
                 skipped += 1  # 已同步且一致 → 跳过（去重）
             else:
-                # 冲突：默认本地胜；但「本地未改动（ts<last_sync_at）」或 priority=remote 时远端胜
-                local_wins = priority != 'remote' and not (last_sync_at and ts and ts < last_sync_at)
-                conflict.append({'subjectId': sid, 'localType': ltype, 'remoteType': rtype,
-                                 'resolved': 'local' if local_wins else 'remote'})
-                if local_wins:
+                # 冲突裁决：priority=remote → 远端；newest → 时间较新者（缺时间回落既有规则）；
+                # local（默认）→ 既有规则（默认本地胜，ts<lastSyncAt 时远端胜）
+                resolved, resolved_by, local_dt, remote_dt = self.resolve_sync_conflict(
+                    priority, raw_ts, ritem.get('updated_at'), last_sync_at)
+                conflict.append({'subjectId': sid, 'localType': ltype, 'remoteType': ritem['type'],
+                                 'resolved': resolved, 'resolvedBy': resolved_by,
+                                 'localTs': raw_ts,
+                                 'localTsSec': local_dt.timestamp() if local_dt else None,
+                                 'remoteUpdatedAt': ritem.get('updated_at'),
+                                 'remoteTsSec': remote_dt.timestamp() if remote_dt else None,
+                                 'name': name})
+                if resolved == 'local':
                     upload.append({'subjectId': sid, 'type': ltype, 'name': name})
                 else:
                     skipped += 1
+                    remote_won.append(sid)
         pull = [it for it in remote_list if str(it.get('subject_id')) not in seen_local]
+        if remote_won:
+            won = set(remote_won)
+            pull += [it for it in remote_list if str(it.get('subject_id')) in won]
         return {'upload': upload, 'pull': pull, 'conflict': conflict, 'skipped': skipped,
-                'remoteTotal': len(remote_list), 'localTotal': len(local_favorites or [])}
+                'remoteTotal': len(remote_list), 'localTotal': len(local_favorites or []),
+                'priority': priority}
 
     def _bangumi_set_one(self, subject_id, ctype, headers, bases, usernames, rate=None, comment=None, tags=None):
         """单条收藏写入（并发上传内部用）：沿用 bangumi_update_collection 的
@@ -2025,14 +2417,29 @@ class PluginManager:
         uploads = list(uploads or [])
         if not uploads:
             return {'uploaded': 0, 'failed': 0, 'results': []}
+        # 安全验收先行：逐个校验候选基址（仅 http/https + 拒绝环回/私有/保留地址），不合格的剔除并记日志。
+        # 放在 username 解析之前——_bangumi_username 自身就会发 /v0/me 请求，
+        # 若先解析用户名，被拒地址还是会收到一次带 token 的请求（校验就形同虚设）。
+        # 双基址兜底里只要还有一个可用就继续（自建镜像被拒但官方仍可用时应照常同步），
+        # 全部被拒才整体失败：错误信息保留可诊断原因，不静默放行、也不静默改写用户配置。
+        bases, blocked = [], []
+        for candidate in (self._base_api(),
+                          BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()):
+            if candidate in bases:
+                continue
+            err = self.check_bangumi_url(candidate)
+            if err:
+                blocked.append(err)
+                logger.warning('[kazumi] bangumi sync 上传跳过地址：%s', err)
+            else:
+                bases.append(candidate)
+        if not bases:
+            return {'uploaded': 0, 'failed': len(uploads), 'results': [],
+                    'error': blocked[0] if blocked else '无可用的 Bangumi 请求地址'}
         username = self._bangumi_username(token)
         if not username:
             return {'uploaded': 0, 'failed': len(uploads), 'results': [], 'error': self._bangumi_token_error_msg()}
         headers = self._bangumi_auth_headers(token)
-        bases = [self._base_api()]
-        alt = BANGUMI_API if self._base_api() != BANGUMI_API else self._mirror_api()
-        if alt not in bases:
-            bases.append(alt)
         usernames = ['-', username] if username != '-' else ['-']
 
         def _apply(item):
@@ -2188,11 +2595,24 @@ class PluginManager:
 
     # ---------------------------------------------------------------- WebDAV 同步
 
+    def validate_webdav_url(self, webdav_url):
+        """WebDAV 地址校验（供 server 层在调用 sync 前给出中文原因）。
+
+        合法返回提示列表（内网/明文 http/地址内嵌凭据）；非法（空地址、缺协议前缀、
+        非 http/https、缺主机名）抛 ValueError。sync 只返回 bool，非法 scheme 的原因
+        会被吞成「同步失败」，故需要在调用方前置校验。
+        """
+        _url, hints = _webdav_url_guard(webdav_url)
+        return hints
+
     def webdav_sync(self, webdav_url, username, password, data, ssl_verify=True, remote_dir=''):
         """WebDAV 同步（收藏/历史/规则上传到远程）。
 
         ssl_verify=False 时跳过 HTTPS 证书校验（自签名证书的自建服务器）；
         remote_dir 为自定义远程子目录（空则用 WEBDAV_SYNC_ROOT）。
+        写入顺序：先数据文件、最后 _meta.json（版本标识）——中途失败时云端不会出现
+        「元信息自称新版、数据文件却残缺」的错配；老客户端也不认识这个文件，读到的
+        仍是原来那些数据文件。
         """
         import requests
         from requests.auth import HTTPBasicAuth
@@ -2200,12 +2620,17 @@ class PluginManager:
             auth = HTTPBasicAuth(username, password) if username else None
             # 确保同步目录存在
             sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
+            _log_webdav_hints(webdav_url)
             try:
                 requests.request('MKCOL', sync_dir, auth=auth, timeout=10, verify=ssl_verify)
             except Exception:
                 pass  # 目录可能已存在
-            # 上传数据文件
+            # 上传数据文件（保留字 _meta 过滤：版本文件由本方法统一生成，防数据键覆盖它）
+            written = []
             for name, content in data.items():
+                if str(name) == WEBDAV_META_STEM:
+                    logger.warning('[kazumi] webdav sync: 保留键 %s 被跳过（版本文件由后端生成）', name)
+                    continue
                 file_url = f'{sync_dir}/{name}.json'
                 rsp = requests.put(
                     file_url,
@@ -2216,7 +2641,26 @@ class PluginManager:
                     verify=ssl_verify,
                 )
                 rsp.raise_for_status()
-            logger.info('[kazumi] webdav sync ok: %d files', len(data))
+                written.append(str(name))
+            # 版本标识：让新备份可被识别（旧备份没有本文件，读取侧按 v1 兼容）
+            meta = {
+                'app': 'YuKi',
+                'schemaVersion': WEBDAV_PAYLOAD_VERSION,
+                'appVersion': os.environ.get('YUKI_APP_VERSION', '') or '',
+                'createdAt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'files': sorted(written),
+            }
+            rsp = requests.put(
+                f'{sync_dir}/{WEBDAV_META_FILE}',
+                data=json.dumps(meta, ensure_ascii=False).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                auth=auth,
+                timeout=15,
+                verify=ssl_verify,
+            )
+            rsp.raise_for_status()
+            logger.info('[kazumi] webdav sync ok: %d files (schema v%d)',
+                        len(written), WEBDAV_PAYLOAD_VERSION)
             return True
         except Exception as e:
             logger.warning('[kazumi] webdav sync failed: %s', e)
@@ -2225,17 +2669,24 @@ class PluginManager:
     def webdav_restore(self, webdav_url, username, password, names, ssl_verify=True, remote_dir=''):
         """WebDAV 恢复（从远程下载收藏/历史/规则）。
 
-        返回 {'files': {name: data}, 'ok': bool, 'error': str}：
+        返回 {'files': {name: data}, 'meta': {...}, 'warnings': [...], 'ok': bool, 'error': str}：
         - 单个文件 404 视为「云端没有该数据」（从未同步过对应项），不算失败；
         - 连接失败/DNS 错误/非 404 的 HTTP 错误 → ok=False + error 原因。
         此前逐文件吞异常、空结果也当成功返回，网址输错时渲染层提示「恢复完成」。
         ssl_verify=False 时跳过 HTTPS 证书校验；remote_dir 为自定义远程子目录。
+        meta['schemaVersion'] 为 1 表示旧版备份（无 _meta.json）——照常恢复，不拒绝；
+        meta 里的 files 列表只作诊断用，真正的数据仍以逐个下载的同名文件为准。
         """
         from requests.auth import HTTPBasicAuth
-        result = {'files': {}, 'ok': False, 'error': ''}
+        result = {'files': {}, 'ok': False, 'error': '', 'meta': {}, 'warnings': []}
         try:
             auth = HTTPBasicAuth(username, password) if username else None
             sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
+            _log_webdav_hints(webdav_url)
+            # 版本标识（旧备份读不到 → v1 兼容，只记 warning，绝不中断恢复）
+            meta, meta_warnings = _webdav_read_meta(sync_dir, auth, ssl_verify)
+            result['meta'] = meta
+            result['warnings'].extend(meta_warnings)
             for name in names:
                 file_url = f'{sync_dir}/{name}.json'
                 try:
@@ -2278,14 +2729,18 @@ class PluginManager:
         - 其他状态码（多为 404）→ 先 MKCOL 建目录再复测一次，与 webdav_sync 行为一致；
         - 网络/DNS/SSL 异常 → ok=False + 异常原因。
         ssl_verify=False 跳过证书校验；remote_dir 为自定义远程子目录。
-        返回 {'ok': bool, 'error': str}。
+        返回 {'ok': bool, 'error': str, 'note': str}：note 为地址提示（内网/明文 http/
+        地址内嵌凭据），仅在地址合法时给出，用于渲染层提示而非判定失败。
         """
         import requests
         from requests.auth import HTTPBasicAuth
-        result = {'ok': False, 'error': ''}
+        result = {'ok': False, 'error': '', 'note': ''}
         try:
             auth = HTTPBasicAuth(username, password) if username else None
+            # 地址校验（scheme/主机名）在这里抛中文原因：非 http/https 直接失败
             sync_dir = _webdav_sync_dir(webdav_url, remote_dir)
+            result['note'] = '；'.join(_webdav_hints(webdav_url))
+            _log_webdav_hints(webdav_url)
             rsp = requests.request('PROPFIND', sync_dir, auth=auth, timeout=10,
                                    headers={'Depth': '0'}, verify=ssl_verify)
             if rsp.status_code in (200, 207):
