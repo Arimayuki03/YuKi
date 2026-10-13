@@ -977,3 +977,25 @@ test('recordPlay：拿不到元数据时不写空字段（不让记录里出现 
     assert.equal('bangumiId' in entry, false);
     assert.equal('airDate' in entry, false);
 });
+
+test('卡片右上角三枚动作按钮坐标档位互不重叠（CSS 契约：6/36/66；禁止 has-play 位移）', () => {
+    const css = fs.readFileSync(path.join(__dirname, '../../src/renderer/css/ui.css'), 'utf8');
+    const rightOf = (cls) => {
+        const m = new RegExp(`\\${cls}\\s*\\{[^}]*?right:\\s*(\\d+)px`).exec(css);
+        return m ? Number(m[1]) : NaN;
+    };
+    const del = rightOf('.rec-del');
+    const edit = rightOf('.rec-edit');
+    const play = rightOf('.rec-play-btn');
+    assert.ok([del, edit, play].every((n) => Number.isFinite(n)), `三档坐标必须显式声明：del=${del} edit=${edit} play=${play}`);
+    assert.equal(del, 6);
+    assert.equal(edit, 36);
+    assert.equal(play, 66);
+    // 间距必须 ≥ 按钮直径（24px），否则矩形相交 → 后者盖住前者，点击落到错误动作上
+    assert.ok(edit - del >= 24 && play - edit >= 24, `档位间距不足：${del}/${edit}/${play}`);
+    // 「有播放记录的卡」不得再位移删除/编辑按钮：历史上这两条位移把编辑按钮精确压在
+    // 续播按钮上（同坐标同 z-index、DOM 里续播在后）——✎ 既看不见也点不到，点"编辑标题"
+    // 实际触发续播（无头渲染 elementFromPoint 实测复现，历史/收藏的播放卡全中招）。
+    assert.doesNotMatch(css, /\.vod-card\.has-play\s+\.rec-(?:del|edit)\s*\{/,
+        '不得为 has-play 卡位移 del/edit：默认 6/36/66 已是目标视觉顺序「▶ ✎ ✕」');
+});

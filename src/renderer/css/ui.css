@@ -2793,6 +2793,9 @@ html.glass-on .bgm-rate-tags-block {
    （#view-favorites / #view-history / #my-panel-favorites），静态标记覆盖不到
    「我的→我的收藏」这个 app.js 路由实际落点。控件规格对齐既有 .view-toolbar（36px 高）。 */
 .rec-filter-bar { gap:8px; }
+/* 工具条按钮与同排控件等高：重置按钮用的是 `.md-btn-sm`（自带 32px），混在 36px 的
+   下拉/输入之间会矮一截（无头渲染几何断言实测 32 vs 36，同一基线上看着没对齐）。 */
+.rec-filter-bar .md-btn { height: 36px; }
 .rec-select { height:36px; min-width:118px; max-width:190px; flex:0 0 auto; font-size:13px; border-radius:var(--radius-md); }
 .rec-input { height:36px; font-size:13px; border-radius:var(--radius-md); min-width:0; }
 .rec-input-wide { flex:1 1 240px; max-width:420px; }
@@ -2843,10 +2846,13 @@ html.glass-on .bgm-rate-tags-block {
 .rec-play-btn:hover svg, .rec-fav-btn:hover svg { fill:var(--md-on-primary); }
 /* 续播常驻显示（历史页主操作入口，悬停才出现等于把功能藏起来）；收藏钮同样常驻 */
 .rec-play-btn { top:6px; right:66px; }
+/* 不要为「有播放记录的卡」额外位移删除/编辑按钮：三枚按钮的默认档位（删除 6 /
+   编辑 36 / 续播 66，间隔 30px）已经构成注释里写的视觉顺序「▶ ✎ ✕」，无需再挪。
+   曾经存在的 `.has-play .rec-del{right:36}` + `.has-play .rec-edit{right:66}` 位移把
+   编辑按钮**精确压在续播按钮上**（同坐标、同 z-index，DOM 里续播在后 → ✎ 既看不见
+   也点不到，点"编辑标题"实际触发续播）——历史/收藏里凡有播放记录的卡都中招（无头
+   渲染 elementFromPoint 命中测试实测：✎ 中心落在 .rec-play-btn 的 path 上）。 */
 .rec-fav-btn { bottom:6px; right:6px; }
-/* 播放卡把既有 ✕/✎ 左移一档，三方不叠在同一坐标（视觉顺序：▶ ✎ ✕） */
-.vod-card.has-play .rec-del { right:36px; }
-.vod-card.has-play .rec-edit { right:66px; }
 /* 右下角收藏钮与最后一行信息文字同高：给信息行右侧留位，文字不被按钮遮住 */
 .vod-card.has-fav .rec-playinfo, .vod-card.has-fav .rec-epline { padding-right:34px; }
 /* 续播加载态：图标降透明 + 旋转（重复点击另有 js 的 _resumeBusy 兜底） */
