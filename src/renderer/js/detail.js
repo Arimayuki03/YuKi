@@ -1053,36 +1053,133 @@ const Detail = {
         el.classList.add('show');
     },
 
+    /** 保存失败原因 → 可诊断文案（B 修复）：主进程各失败分支都带 reason，旧实现一律
+     *  提示「保存图片失败」，用户分不清网络失败/非图片/权限/取消。取消由调用方单独
+     *  处理（保存对话框语义，不算失败），不经过本函数。 */
+    _saveImageFailText(reason) {
+        const r = String(reason || '');
+        if (/^http-\d/.test(r)) {
+            const code = r.slice(5);
+            return (/^(401|403|404|410)$/.test(code))
+                ? `保存图片失败：服务器拒绝访问（HTTP ${code}）`
+                : `保存图片失败：服务器返回错误（HTTP ${code}）`;
+        }
+        if (r === 'timeout') return '保存图片失败：下载超时';
+        if (r === 'network') return '保存图片失败：网络请求失败';
+        if (r === 'too-many-redirects') return '保存图片失败：跳转次数过多';
+        if (/^bad-content-type/.test(r)) return '保存图片失败：返回内容不是图片';
+        if (r === 'too-large') return '保存图片失败：图片超过 25MB 上限';
+        if (r === 'empty-body') return '保存图片失败：图片内容为空';
+        if (r === 'private-address') return '保存图片失败：地址指向本机或内网';
+        if (r === 'unsupported-url' || r === 'invalid-url') return '保存图片失败：该图片地址无法下载';
+        if (r === 'permission-denied') return '保存图片失败：没有写入权限';
+        if (r === 'no-space') return '保存图片失败：磁盘空间不足';
+        if (r === 'file-locked') return '保存图片失败：目标文件被占用';
+        if (r === 'write-failed') return '保存图片失败：写入文件出错';
+        return '保存图片失败';
+    },
+
+    /** 本地封面代理 URL → 原始远程 URL（B 根因修复）。详情 hero 封面等经
+     *  bangumiCoverImg 代理链渲染，src 是后端自己发的 /kazumi/cover?url=…（host 为
+     *  http://127.0.0.1:<port>）；直接把它交主进程会被 L12 私网拦截判成
+     *  private-address，保存必然失败。这里拆回 url 参数里的原始地址。
+     *  仅当外层 host 是本机回环（本应用后端形态）才拆，避免误伤外部站点的同名路径；
+     *  内层不是 http(s) 时原样返回（主进程仍会再拦一道，不构成绕过）。 */
+    _unwrapCoverProxyUrl(u) {
+        const s = String(u || '');
+        if (!/^https?:\/\//i.test(s)) return s;
+        let p;
+        try { p = new URL(s); } catch (e) { return s; }
+        const host = String(p.hostname || '').toLowerCase();
+        const loopback = host === 'localhost' || host === '::1' || host === '[::1]' || /^127\./.test(host);
+        if (!loopback || !/\/kazumi\/cover$/.test(p.pathname)) return s;
+        const inner = p.searchParams.get('url') || '';
+        return /^https?:\/\//i.test(inner) ? inner : s;
+    },
+
+    /** blob: → data: URL（页面内对象 URL 主进程无法按 URL 取流；编码后体积按 4/3
+     *  放大，故先按字节数卡 25MB 上限防内存放大）。取不到（跨源/超大/已失效）
+     *  返回空串，由调用方按失败提示。 */
+    async _blobUrlToDataUrl(u) {
+        const MAX = 25 * 1024 * 1024;
+        try {
+            const r = await fetch(u);
+            const bytes = new Uint8Array(await r.arrayBuffer());
+            if (!bytes.length || bytes.length > MAX) return '';
+            let bin = '';
+            const CHUNK = 0x8000; // 分块：String.fromCharCode 一次传太多会栈溢出
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+            }
+            const mime = String((r.headers && r.headers.get && r.headers.get('content-type')) || 'image/png').split(';')[0] || 'image/png';
+            return `data:${mime};base64,${btoa(bin)}`;
+        } catch (e) { return ''; }
+    },
+
     /** 图片放大浮层「保存图片」：文件名从 URL 提取，交主进程弹系统保存对话框 +
-     * 拉图写盘（渲染层 fetch 跨域图片受 CORS 限制）。结果 toast 反馈。 */
+     *  拉图写盘（渲染层 fetch 跨域图片受 CORS 限制）。结果 toast 反馈。
+     *  B 修复：先拆本地代理 URL（见 _unwrapCoverProxyUrl，否则必被私网校验拦下），
+     *  blob: 转 data: 再交；data: 由主进程按页面自带字节处理（限额解码）。 */
     async _saveImageAs(src) {
+        let target = this._unwrapCoverProxyUrl(String(src || ''));
+        if (/^blob:/i.test(target)) {
+            const dataUrl = await this._blobUrlToDataUrl(target);
+            if (!dataUrl) { warnToast(this._saveImageFailText('unsupported-url')); return; }
+            target = dataUrl;
+        }
+        if (!/^https?:\/\//i.test(target) && !/^data:/i.test(target)) {
+            // 相对路径/file:// 等（如链耗尽后的占位图）主进程无法取流，提前给明确提示
+            warnToast(this._saveImageFailText('unsupported-url'));
+            return;
+        }
         let name = 'image';
-        try { name = decodeURIComponent(String(src).split('/').pop().split('?')[0]) || 'image'; } catch (e) { /* ignore */ }
+        if (/^data:/i.test(target)) {
+            // data: 无「尾段文件名」可言，按 mime 定名（避免把整串 base64 当文件名）
+            const m = target.match(/^data:image\/([a-z0-9.+-]+)/i);
+            const ext = (m && /^(png|jpeg|jpg|gif|webp|bmp|avif)$/i.test(m[1])) ? m[1].toLowerCase() : 'png';
+            name = 'image.' + (ext === 'jpeg' ? 'jpg' : ext);
+        } else {
+            try { name = decodeURIComponent(target.split('/').pop().split('?')[0]) || 'image'; } catch (e) { /* 非法编码：退回默认名 */ }
+        }
         if (!/\.(jpg|jpeg|png|gif|webp|bmp|avif|svg)$/i.test(name)) name += '.jpg';
         try {
-            const r = await window.yuki.saveImage(src, name);
+            const r = await window.yuki.saveImage(target, name);
             if (r && r.ok) warnToast(`已保存图片：${name}`);
-            else if (r && r.reason !== 'cancelled') warnToast('保存图片失败');
+            else if (r && r.reason !== 'cancelled') warnToast(this._saveImageFailText(r && r.reason));
         } catch (e) { warnToast('保存图片失败'); }
     },
 
-    /** 封面放大浮层工具栏重置：缩放回 1、旋转归 0（打开新图/点复位时调用）。 */
+    /** 封面放大浮层工具栏重置：缩放回 1、旋转归 0、平移到原点（打开新图/点复位时调用）。 */
     _resetCoverFloatTransform() {
         const wrap = document.getElementById('cover-float');
         if (!wrap) return;
         const img = wrap.querySelector('img');
-        if (img) { img.style.width = ''; img.style.transform = ''; }
+        if (img) {
+            img.style.width = '';
+            img.style.transform = '';
+            if (img.classList) img.classList.remove('dragging');
+        }
         this._coverZoom = 1;
         this._coverRotate = 0;
+        this._coverPanX = 0;
+        this._coverPanY = 0;
+        this._coverDragMoved = false;
     },
 
-    /** 封面放大浮层：按当前 zoom/rotate 应用 img transform。缩放乘旋转
-     * （rotate 在前 scale 在后，效果与先转后放一致）；正交角度下无需平移补偿。 */
+    /** 封面放大浮层：按当前 pan/zoom/rotate 应用 img transform。单一出口——
+     *  平移/缩放/旋转共用一条 compose，避免两套状态各写一次 transform 互相覆盖。
+     *  translate 放最前（位移不随缩放倍率放大）；rotate/scale 顺序与既有实现一致
+     *  （rotate 前 scale 后，正交角度下无需平移补偿，保持既有缩放观感不变）。 */
     _applyCoverFloatTransform() {
         const wrap = document.getElementById('cover-float');
         if (!wrap) return;
         const img = wrap.querySelector('img');
-        if (img) img.style.transform = `rotate(${this._coverRotate || 0}deg) scale(${this._coverZoom == null ? 1 : this._coverZoom})`;
+        if (!img) return;
+        const tx = this._coverPanX || 0;
+        const ty = this._coverPanY || 0;
+        const rot = this._coverRotate || 0;
+        const zoom = this._coverZoom == null ? 1 : this._coverZoom;
+        img.style.transform = `translate(${tx}px, ${ty}px) rotate(${rot}deg) scale(${zoom})`;
     },
 
     _openCoverFloat(src) {
@@ -1093,7 +1190,9 @@ const Detail = {
             wrap.id = 'cover-float';
             // 图包一层 .cover-float-stage：floatIn 入场动画的 transform:none 终态会
             // 覆盖 img 自身 transform（旋转/缩放丢一步），动画与操作 transform 分层互不踩
-            wrap.innerHTML = '<div class="cover-float-stage"><img referrerpolicy="no-referrer" alt=""></div>'
+            // draggable="false"：禁原生图片拖拽（否则按住拖动会拖出系统级幽灵图，
+            // 与自实现的平移抢手势）
+            wrap.innerHTML = '<div class="cover-float-stage"><img draggable="false" referrerpolicy="no-referrer" alt=""></div>'
                 + '<div class="cover-float-toolbar">'
                 + '<button type="button" data-cf="zoom-out" title="缩小">−</button>'
                 + '<button type="button" data-cf="zoom-in" title="放大">+</button>'
@@ -1109,6 +1208,10 @@ const Detail = {
             // 点遮罩空白处关闭；点图本身不关（图上可能想右键/拖拽查看）。
             // stopPropagation：工具栏/stage 内点击不冒泡到遮罩关闭分支
             wrap.addEventListener('click', (ev) => {
+                // 拖动后松手不应判为「点遮罩关闭」：pointer 捕获（见下方 pointerdown）
+                // 通常已把 click 重定向到 img（stage 分支吞掉），此处兜底不依赖捕获
+                // 行为；标记只吃紧接其后的一次 click。
+                if (this._coverDragMoved) { this._coverDragMoved = false; return; }
                 if (ev.target.closest('.cover-float-toolbar')) return; // 按钮分支处理
                 if (ev.target.closest('.cover-float-stage')) return;   // 点图不关浮层
                 this._hideDetailFloat(wrap);
@@ -1141,6 +1244,49 @@ const Detail = {
                 this._coverZoom = Math.max(0.2, Math.min(8, (this._coverZoom == null ? 1 : this._coverZoom) * (ev.deltaY < 0 ? 1.12 : 1 / 1.12)));
                 this._applyCoverFloatTransform();
             }, { passive: false });
+            // 按住拖动平移（A 需求）：pointer 事件统一鼠标/触摸/笔。捕获设在 img 上——
+            // 捕获期间 Chromium 会把随后的 click 重定向到捕获元素，拖到遮罩上松手时
+            // click 落在 img（stage 分支吞掉），不会误判成「点遮罩关闭」；click 分支里
+            // 另留 _coverDragMoved 兜底，不依赖捕获在各环境的一致行为。
+            // 4px 阈值：小于阈值视为点击（手抖不位移），避免与「点击查看」语义打架。
+            let drag = null; // { id, x, y, tx, ty, moved }
+            const DRAG_SLOP_PX = 4;
+            wrap.addEventListener('pointerdown', (ev) => {
+                const img = wrap.querySelector('img');
+                if (!img) return;
+                if (drag) return; // 拖动进行中：忽略第二根手指/其它按键的按下，不被重新锚定
+                if (ev.target && ev.target.closest && ev.target.closest('.cover-float-toolbar')) return; // 工具栏不参与拖动
+                // 鼠标只认左键（中/右键留给原生菜单与另存）；触摸/笔 pointerType 恒无按键，放行
+                if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+                drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, tx: this._coverPanX || 0, ty: this._coverPanY || 0, moved: false };
+                this._coverDragMoved = false;
+                try { if (img.setPointerCapture) img.setPointerCapture(ev.pointerId); } catch (e) { /* 环境不支持捕获：仍按普通拖动工作 */ }
+                if (ev.preventDefault) ev.preventDefault(); // 禁原生拖拽/文本选择
+            });
+            wrap.addEventListener('pointermove', (ev) => {
+                if (!drag || ev.pointerId !== drag.id) return;
+                const dx = ev.clientX - drag.x;
+                const dy = ev.clientY - drag.y;
+                if (!drag.moved) {
+                    if (Math.abs(dx) < DRAG_SLOP_PX && Math.abs(dy) < DRAG_SLOP_PX) return;
+                    drag.moved = true;
+                    this._coverDragMoved = true;
+                    const img = wrap.querySelector('img');
+                    if (img && img.classList) img.classList.add('dragging');
+                }
+                this._coverPanX = drag.tx + dx;
+                this._coverPanY = drag.ty + dy;
+                this._applyCoverFloatTransform();
+            });
+            const endCoverDrag = (ev) => {
+                if (!drag || (ev && ev.pointerId !== drag.id)) return;
+                const img = wrap.querySelector('img');
+                try { if (img && img.releasePointerCapture) img.releasePointerCapture(drag.id); } catch (e) { /* 未捕获：忽略 */ }
+                if (img && img.classList) img.classList.remove('dragging');
+                drag = null;
+            };
+            wrap.addEventListener('pointerup', endCoverDrag);
+            wrap.addEventListener('pointercancel', endCoverDrag);
             // 右键：保存图片（原「另存」改走主进程保存对话框，CORS 免疫）
             wrap.addEventListener('contextmenu', (ev) => {
                 ev.preventDefault();
@@ -2957,6 +3103,9 @@ const Detail = {
             // 基本信息：把名称类字段（简体中文名 → 第二中文名 → 日文名 → 别名…）排到最前，
             // 其余字段按原顺序跟随；数组值（如「别名」多条）展开为多行。
             const infoStr = Detail._buildCharInfoStr(info);
+            // CV（配音）行（C 需求）：与列表卡同源同口径（_charCvText：actors 优先、
+            // actor 字符串兜底、多 CV 用「 / 」连接）；无数据时不渲染该行，不留空行。
+            const cvText = Detail._charCvText(info);
             const metaBits = [
                 info.blood_type ? '血型 ' + info.blood_type : '',
                 info.height ? '身高 ' + info.height + 'cm' : '',
@@ -2983,6 +3132,7 @@ const Detail = {
                             ${img ? `<img class="char-float-img" src="${escHtml(img)}" referrerpolicy="no-referrer" title="点击放大查看" onerror="this.style.display='none'">` : ''}
                             <div class="char-float-info-text">
                                 ${metaBits ? `<div class="char-float-meta">${escHtml(metaBits)}</div>` : ''}
+                                ${cvText ? `<div class="char-float-cv">CV：${escHtml(cvText)}</div>` : ''}
                                 ${infoStr ? `<div class="detail-section-heading">基本信息</div><div class="char-float-summary">${escHtml(infoStr)}</div>` : ''}
                                 ${info.summary ? `<div class="detail-section-heading">角色简介</div><div class="char-float-summary">${escHtml(stripHtml(info.summary))}</div>` : (infoStr ? '' : '<div class="tip-line">暂无角色简介</div>')}
                             </div>

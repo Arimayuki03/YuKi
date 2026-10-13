@@ -34,6 +34,7 @@
     <script src="js/detail-snap.js" defer></script><!-- A-01 详情页列表快照写入侧（第二阶段 detail.js 接线由后续代理做） -->
     <script src="js/ui-state.js" defer></script>
     <script src="js/settings-snapshot.js" defer></script><!-- A-27 设置快照层：须先于 detail/player -->
+    <script src="js/search-history.js" defer></script><!-- 搜索历史（searchHistory 设置键 + 搜索框下方历史面板） -->
     <script src="js/panels.js" defer></script>
     <script src="js/home.js" defer></script>
     <script src="js/search.js" defer></script>
@@ -970,13 +971,24 @@
                         <div class="tip-line pad0 info-tip">
                             <button class="info-dot" type="button" title="展开详细说明">ⓘ</button>
                             <div class="info-body"><span class="info-label">说明</span>
-                                <div class="info-detail">规则启用后可在详情页「Kazumi 规则源」与聚合搜索中使用，禁用后即不再出现；下方还可检测规则有效性或批量更新。</div>
+                                <div class="info-detail">规则启用后可在详情页「Kazumi 规则源」与聚合搜索中使用，禁用后即不再出现；下方还可检测规则有效性或批量更新。按住规则卡片可拖动排序（也可用 ↑/↓ 按钮），「批量管理」可对勾选的规则批量更新或删除。</div>
                             </div>
                         </div>
                         <label class="md-switch"  title="启动应用时自动检查已安装规则的更新，有更新则后台批量更新"><input type="checkbox" id="set_kazumi_autoupdate"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动检查规则更新</span></label>
                         <div class="wall-row" >
                             <button id="kazumi_rule_check" class="md-btn md-btn-tonal">检测有效性</button>
                             <button id="kazumi_rule_update" class="md-btn md-btn-tonal">批量更新</button>
+                            <button id="kazumi_rule_batch" class="md-btn md-btn-tonal">批量管理</button>
+                        </div>
+                        <!-- 批量管理操作条（任务2）：仅批量模式下显示；勾选框渲染在每张规则卡左侧 -->
+                        <div class="kazumi-batch-ops" id="kazumi_batch_ops" style="display:none;">
+                            <span class="tip-line pad0" id="kazumi_batch_count">已选 0 项</span>
+                            <button id="kazumi_batch_all" class="md-btn md-btn-tonal md-btn-sm">全选</button>
+                            <button id="kazumi_batch_invert" class="md-btn md-btn-tonal md-btn-sm">反选</button>
+                            <button id="kazumi_batch_clear" class="md-btn md-btn-tonal md-btn-sm">清空选择</button>
+                            <button id="kazumi_batch_update" class="md-btn md-btn-tonal md-btn-sm">批量更新</button>
+                            <button id="kazumi_batch_del" class="md-btn md-btn-danger-tonal md-btn-sm">批量删除</button>
+                            <button id="kazumi_batch_exit" class="md-btn md-btn-tonal md-btn-sm">退出</button>
                         </div>
                         <div class="search-status" id="kazumi_rule_task" style="display:none;"></div>
                         <div id="kazumi_rule_list" class="history-list" ></div>
@@ -992,11 +1004,11 @@
                         </div>
                         <label class="md-switch"  title="主开关：开启后允许同步；关闭联动关闭子开关"><input type="checkbox" id="webdav_enable"><span class="md-switch-track"></span><span class="md-switch-label">启用 WebDAV 同步</span></label>
                         <div id="webdav_fields" style="display:none;">
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_settings"><span class="md-switch-track"></span><span class="md-switch-label">设置同步</span></label>
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_stats"><span class="md-switch-track"></span><span class="md-switch-label">观看统计同步</span></label>
-                            <label class="md-switch"><input type="checkbox" id="webdav_enable_rules"><span class="md-switch-track"></span><span class="md-switch-label">规则同步</span></label>
+                            <label class="md-switch" title="观看历史：浏览与播放记录（含播放次数/进度等统计字段）"><input type="checkbox" id="webdav_enable_history"><span class="md-switch-track"></span><span class="md-switch-label">观看记录同步</span></label>
+                            <label class="md-switch" title="收藏列表：影片、来源、评分标签与备注"><input type="checkbox" id="webdav_enable_collect"><span class="md-switch-track"></span><span class="md-switch-label">收藏同步</span></label>
+                            <label class="md-switch" title="设置快照：搜索历史、Kazumi 别名检索表、收藏/历史页的排序与筛选、观看进度、屏蔽词、自定义直播源、界面与播放偏好等。凭据（Bangumi Token 等）、WebDAV 自身配置、本机路径不参与同步与恢复"><input type="checkbox" id="webdav_enable_settings"><span class="md-switch-track"></span><span class="md-switch-label">设置同步</span></label>
+                            <label class="md-switch" title="观看统计：总时长、会话数与按片名/来源的计数"><input type="checkbox" id="webdav_enable_stats"><span class="md-switch-track"></span><span class="md-switch-label">观看统计同步</span></label>
+                            <label class="md-switch" title="Kazumi 播放规则列表（逐条导入，单条损坏只跳过该条）"><input type="checkbox" id="webdav_enable_rules"><span class="md-switch-track"></span><span class="md-switch-label">规则同步</span></label>
                             <label class="md-switch" title="开启后按所选间隔自动「同步到云端」（需已保存地址与账号）"><input type="checkbox" id="webdav_auto_enable"><span class="md-switch-track"></span><span class="md-switch-label">定时自动同步</span></label>
                             <label class="md-switch" title="开启后应用启动约 5 秒后自动「从云端恢复」一次（多设备场景先取云端数据）；失败仅提示不重试"><input type="checkbox" id="webdav_startup_pull"><span class="md-switch-track"></span><span class="md-switch-label">启动时自动从云端恢复</span></label>
                             <label class="md-switch" title="自签名证书的 NAS/自建 WebDAV 握手会失败；开启后跳过 HTTPS 证书校验（仅建议自建服务使用，公共网盘勿开）"><input type="checkbox" id="webdav_ssl_skip"><span class="md-switch-track"></span><span class="md-switch-label">跳过 HTTPS 证书校验（自签名服务器）</span></label>
@@ -1045,8 +1057,9 @@
                             <div>
                                 <div class="tip-line pad0">同步优先级</div>
                                 <select id="bangumi_sync_priority" class="md-select" >
-                                    <option value="0">本地优先</option>
-                                    <option value="1">Bangumi 优先</option>
+                                    <option value="local">本地优先</option>
+                                    <option value="remote">Bangumi 优先</option>
+                                    <option value="newest">最新修改时间优先</option>
                                 </select>
                             </div>
                         </div>
@@ -1106,6 +1119,8 @@
                             <div class="md-field" >
                                 <input id="set_proxy_test_url" class="md-input" type="text" placeholder="https://www.google.com/generate_204" />
                             </div>
+                            <!-- 代理地址提示行：环回/私网放行但告知、含凭据提醒（由 panels.js 按需写入并揭掉 hidden） -->
+                            <div id="set_proxy_hint" class="tip-line pad0" style="font-size:12px;" hidden></div>
                             <div class="wall-row" >
                                 <button id="set_proxy_test" class="md-btn md-btn-tonal">测试代理</button>
                                 <button id="set_proxy_save" class="md-btn md-btn-tonal">保存代理</button>
@@ -1526,7 +1541,8 @@
     <div id="bangumiFilterDialog" class="md-dialog-overlay">
         <div class="md-dialog md-dialog-wide">
             <div class="md-dialog-title">筛选条件</div>
-            <div class="md-dialog-body" id="bangumi-filter-body" style="max-height:64vh;overflow-y:auto;">
+            <!-- 内容区是弹窗内唯一滚动容器（标题/底部按钮固定）：窄窗不撑破视口 -->
+            <div class="md-dialog-body bgm-filter-body" id="bangumi-filter-body">
                 <div class="bgm-filter-section">
                     <div class="bgm-filter-heading">排序</div>
                     <div class="class-tabs">
@@ -1538,7 +1554,7 @@
                 </div>
                 <div class="bgm-filter-section">
                     <div class="bgm-filter-heading">标签</div>
-                    <div class="tip-line pad0" style="margin-bottom:6px;">选择多个标签时，优先寻找同时包含这些标签的番剧。</div>
+                    <div class="bgm-filter-note">选择多个标签时，优先寻找同时包含这些标签的番剧。</div>
                     <div class="class-tabs" id="bgm-tag-presets">
                         <span class="class-tab bgm-tag-chip" data-tag="日常">日常</span>
                         <span class="class-tab bgm-tag-chip" data-tag="原创">原创</span>
@@ -1556,54 +1572,56 @@
                         <span class="class-tab bgm-tag-chip" data-tag="治愈">治愈</span>
                         <span class="class-tab bgm-tag-chip" data-tag="异世界">异世界</span>
                     </div>
-                    <div class="search-bar" style="margin-top:8px;">
+                    <div class="bgm-filter-inline">
                         <input id="bgm-tag-custom" class="md-input" type="text" placeholder="自定义标签" />
                         <button id="bgm-tag-custom-add" class="md-btn md-btn-tonal">添加</button>
                     </div>
-                    <div id="bgm-draft-tags" class="class-tabs" style="display:none;margin-top:8px;"></div>
+                    <div id="bgm-draft-tags" class="class-tabs" style="display:none;"></div>
                 </div>
                 <div class="bgm-filter-section">
                     <div class="bgm-filter-heading">季度与日期</div>
-                    <select id="bgm-season-select" class="md-select" style="width:100%;margin-bottom:8px;">
+                    <select id="bgm-season-select" class="md-select">
                         <option value="">不限季度</option>
                     </select>
-                    <div class="search-bar">
+                    <!-- 起止日期：任一为空时另一侧自动跟随（单日区间）；先后反序由 JS 夹取 -->
+                    <div class="bgm-filter-range bgm-date-range">
                         <input id="bgm-date-start" class="md-input" type="date" title="起始日期" />
-                        <span class="tip-line pad0">至</span>
+                        <span class="bgm-range-sep">至</span>
                         <input id="bgm-date-end" class="md-input" type="date" title="结束日期" />
                     </div>
                 </div>
                 <div class="bgm-filter-section">
-                    <div class="bgm-filter-heading">数值范围</div>
-                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-score-toggle"> 启用评分范围</label>
-                    <div id="bgm-score-range-row" style="display:none;margin:6px 0 12px;">
-                        <div class="search-bar">
-                            <input id="bgm-score-min" class="md-input" type="number" min="0" max="10" step="0.5" style="width:100px;" />
-                            <span class="tip-line pad0">-</span>
-                            <input id="bgm-score-max" class="md-input" type="number" min="0" max="10" step="0.5" style="width:100px;" />
-                            <span class="tip-line pad0" id="bgm-score-vals"></span>
-                        </div>
+                    <div class="bgm-filter-heading">评分与排名</div>
+                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-score-toggle"> 启用评分范围<span class="bgm-filter-note-inline">1-10，留空表示不限</span></label>
+                    <div id="bgm-score-range-row" class="bgm-filter-range" style="display:none;">
+                        <span class="bgm-range-label">最低</span>
+                        <input id="bgm-score-min" class="md-input bgm-num-input" type="number" min="1" max="10" step="0.5" inputmode="decimal" placeholder="1-10" />
+                        <span class="bgm-range-sep">至</span>
+                        <span class="bgm-range-label">最高</span>
+                        <input id="bgm-score-max" class="md-input bgm-num-input" type="number" min="1" max="10" step="0.5" inputmode="decimal" placeholder="1-10" />
+                        <span class="tip-line pad0 bgm-range-hint" id="bgm-score-vals"></span>
                     </div>
-                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-rank-toggle"> 启用排名范围</label>
-                    <div id="bgm-rank-range-row" style="display:none;margin-top:6px;">
-                        <div class="search-bar">
-                            <input id="bgm-rank-min" class="md-input" type="number" min="1" max="10000" step="1" style="width:100px;" />
-                            <span class="tip-line pad0">-</span>
-                            <input id="bgm-rank-max" class="md-input" type="number" min="1" max="10000" step="1" style="width:100px;" />
-                            <span class="tip-line pad0" id="bgm-rank-vals"></span>
-                        </div>
+                    <label class="bgm-filter-switch"><input type="checkbox" id="bgm-rank-toggle"> 启用排名范围<span class="bgm-filter-note-inline">1-10000，留空表示不限</span></label>
+                    <div id="bgm-rank-range-row" class="bgm-filter-range" style="display:none;">
+                        <span class="bgm-range-label">最低</span>
+                        <input id="bgm-rank-min" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" />
+                        <span class="bgm-range-sep">至</span>
+                        <span class="bgm-range-label">最高</span>
+                        <input id="bgm-rank-max" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" />
+                        <span class="tip-line pad0 bgm-range-hint" id="bgm-rank-vals"></span>
                     </div>
                 </div>
                 <div class="bgm-filter-section">
                     <div class="bgm-filter-heading">星期</div>
+                    <!-- data-weekday 仍是 1-7（取值/存储/请求参数口径不变），仅显示文案改为周X -->
                     <div class="class-tabs">
-                        <span class="class-tab bgm-weekday-chip" data-weekday="1">周1</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="2">周2</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="3">周3</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="4">周4</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="5">周5</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="6">周6</span>
-                        <span class="class-tab bgm-weekday-chip" data-weekday="7">周7</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="1">周一</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="2">周二</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="3">周三</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="4">周四</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="5">周五</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="6">周六</span>
+                        <span class="class-tab bgm-weekday-chip" data-weekday="7">周日</span>
                     </div>
                 </div>
             </div>

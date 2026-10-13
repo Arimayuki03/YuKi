@@ -1642,6 +1642,186 @@ function openSettingsPanel(cat) {
     if (window.yuki && window.yuki.settingsSet) window.yuki.settingsSet('settingsCat', resolved);
 }
 
+// ---------------------------------------------------------------- 网络代理：地址校验 / 草稿落盘（2.9）
+// 背景（用户反馈「代理设置的网址关闭后要还在」）：地址此前只在点「保存代理」时落盘，
+// 且关闭开关会把记录写成空串——「填了网址没保存就关应用」「关掉开关再打开」两条路径
+// 都会丢网址。这里把「地址记录」与「代理生效」拆成两件事：输入即防抖落盘（只记地址），
+// 只有点保存/切开关才注入环境变量 + 重启后端（生效）。
+// 纯函数集中在此段，便于 vm 沙箱单测（tests/js/proxy-persist.test.js）直接覆盖。
+
+/** 地址串长度上限：settings.json 与 process.env 的落点都不接受无限长串 */
+const PROXY_URL_MAX = 512;
+/** 非法字符：全部空白（含换行/制表/全角空格 \u00a0 属 \s）与 C0/DEL 控制字符 */
+const PROXY_BAD_CHARS_RE = /[\s\u0000-\u001f\u007f]/;
+/** 地址无效原因 → 人话（UI 提示与连通性门共用，避免两处文案漂移） */
+const PROXY_REASON_TEXT = {
+    empty: '请填写代理地址',
+    scheme: '仅支持 http:// / https:// / socks5:// ，或直接填 host:port',
+    host: '地址缺少主机名',
+    port: '需要显式端口（1-65535，如 127.0.0.1:7890）',
+    chars: '地址含空白或控制字符',
+    'too-long': `地址过长（上限 ${PROXY_URL_MAX} 字符）`,
+};
+function proxyReasonText(reason) { return PROXY_REASON_TEXT[reason] || '地址格式不正确'; }
+
+/** 环回/私网主机判定（纯函数）：命中时**只提示不拒绝**。
+ *  为什么不拒绝：Clash/v2ray 等本地代理客户端监听 127.0.0.1 是最主流用法，
+ *  「拒绝环回/私网」会直接打断用户核心功能；本场景的威胁模型是「用户自己填的地址」，
+ *  不是「被注入内容诱导去扫内网」，故放行 + 提示。 */
+function isPrivateProxyHost(host) {
+    const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+    if (!h) return false;
+    if (h === 'localhost' || h.endsWith('.localhost') || h === '::1' || h === '0.0.0.0') return true;
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (m) {
+        const a = Number(m[1]); const b = Number(m[2]);
+        if (a === 127 || a === 10 || a === 0) return true;                  // 环回 / 10.0.0.0-8 / 0.0.0.0-8
+        if (a === 192 && b === 168) return true;                            // 192.168/16
+        if (a === 172 && b >= 16 && b <= 31) return true;                   // 172.16/12
+        if (a === 169 && b === 254) return true;                            // 链路本地
+        return false;
+    }
+    if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h)) return true; // fc00::/7、fe80::/10
+    return false;
+}
+
+/** 代理地址解析/校验（纯函数）。返回
+ *  { ok, normalized, scheme, host, port, hasUserinfo, privateHost, reason }。
+ *  口径刻意与主进程 system-proxy.formatAndValidateProxyUrl 对齐（scheme 限 http/https/socks5、
+ *  裸 host:port 补 http://、必须显式端口 1..65535、IPv6 保留方括号），只有两处收紧：
+ *  拒绝内部空白/控制字符、拒绝超长——这两类在主进程只会静默失败（或污染 env/日志），
+ *  在渲染层拦掉才能给出可读原因。 */
+function parseProxyUrl(raw) {
+    const bad = (reason) => ({
+        ok: false, normalized: '', scheme: '', host: '', port: 0,
+        hasUserinfo: false, privateHost: false, reason,
+    });
+    if (typeof raw !== 'string') return bad('chars');
+    const s = raw.trim();
+    if (!s) return bad('empty');
+    if (s.length > PROXY_URL_MAX) return bad('too-long');
+    if (PROXY_BAD_CHARS_RE.test(s)) return bad('chars');
+    let scheme = 'http';
+    let rest = s;
+    const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(s);
+    if (m) {
+        const p = m[1].toLowerCase();
+        if (p === 'socks' || p === 'socks5') scheme = 'socks5';
+        else if (p === 'http' || p === 'https') scheme = p;
+        else return bad('scheme');   // file:///etc、ftp://、javascript:// 等一律拒绝
+        rest = s.slice(m[0].length);
+    } else if (!s.includes('@') && /^[A-Za-z][A-Za-z0-9+.-]*:(?![0-9]+$)/.test(s)) {
+        // 无 // 但形如 'file:/etc/passwd'、'javascript:alert(1)'：按 scheme 拒绝。
+        // 'localhost:7890' 冒号后是纯端口号，不走本分支（仍是合法裸 host:port）；
+        // 含 '@' 的 'user:pass@host:port' 同理放行（第一个冒号属于 userinfo，不是 scheme）。
+        return bad('scheme');
+    }
+    // host/port 分离：IPv6 用 ']' 定位，否则取最后一个 ':'（与主进程同口径）
+    let host = rest;
+    let portStr = '';
+    const closeB = rest.indexOf(']');
+    if (closeB >= 0) {
+        host = rest.slice(0, closeB + 1);
+        const after = rest.slice(closeB + 1);
+        if (after.startsWith(':')) portStr = after.slice(1);
+        else if (after) return bad('host');
+    } else {
+        const idx = rest.lastIndexOf(':');
+        if (idx < 0) return bad('port');
+        host = rest.slice(0, idx);
+        portStr = rest.slice(idx + 1);
+    }
+    const hasUserinfo = host.includes('@');
+    const hostCore = host.slice(host.lastIndexOf('@') + 1).replace(/^\[|\]$/g, '').trim();
+    if (!hostCore) return bad('host');
+    if (PROXY_BAD_CHARS_RE.test(hostCore)) return bad('chars');
+    if (!/^\d+$/.test(portStr)) return bad('port');
+    const port = Number(portStr);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return bad('port');
+    const hostOut = hostCore.includes(':') ? `[${hostCore}]` : hostCore;
+    const auth = hasUserinfo ? host.slice(0, host.lastIndexOf('@') + 1) : '';
+    return {
+        ok: true,
+        normalized: `${scheme}://${auth}${hostOut}:${port}`,
+        scheme, host: hostCore, port, hasUserinfo,
+        privateHost: isPrivateProxyHost(hostCore),
+        reason: '',
+    };
+}
+
+/** 草稿清洗（纯函数）：输入防抖落盘用，只保证「安全可落盘」——去首尾空白、
+ *  剔除控制字符、截断超长；空/非串/剔空 → ''（调用方据此跳过落盘，不清既有记录）。
+ *  为什么不在这里做 scheme/端口校验：半截输入（'127.0.0.1:'）也必须能存住——
+ *  「填了没保存就关应用」正是要救的场景；真正生效的校验在保存/开开关时做。 */
+function sanitizeProxyDraft(raw) {
+    if (typeof raw !== 'string') return '';
+    return raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, PROXY_URL_MAX);
+}
+
+/** 回填判定（纯函数）：current=输入框现值，persisted=settings 快照值，dirty=用户已编辑过。
+ *  只有「框是空的且用户没在编辑」才回填：非空一律不覆盖——它可能是用户刚敲的内容，
+ *  也可能是上次回填的结果，两种情况都无需重写（也避免无谓的 DOM 写入打断输入法）。 */
+function shouldRefillProxyInput(current, persisted, dirty) {
+    if (dirty) return false;
+    if (String(current == null ? '' : current) !== '') return false;
+    return String(persisted == null ? '' : persisted) !== '';
+}
+
+/** 代理表单展开判定（纯函数）：启用时必展开；未启用但已有地址记录时也展开——
+ *  否则「关闭后保留的网址」被折叠在开关后面，用户重开应用仍然看不到上次的记录
+ *（这正是本次修复要消灭的现象）。空记录时才随开关收起，保持既有观感。 */
+function proxyFieldsVisible(enable, url) {
+    return enable === true || sanitizeProxyDraft(url) !== '';
+}
+
+/** 防抖落盘器（纯逻辑，计时器可注入以便单测）：
+ *  schedule 合并 delay 内的连续输入只落最后一次值（敲键过程中只有末值有意义）；
+ *  flush 立即落盘（change 收口，缩小「敲完立刻关应用」的丢失窗口）；
+ *  cancel 丢弃待写值（紧接着会有显式写入的场合：点保存/切开关）。 */
+function makeDraftSaver({ delay, write, setTimer, clearTimer }) {
+    let timer = null;
+    let pending = null;   // { value }；null = 无待写
+    const saver = {
+        schedule(value) {
+            pending = { value };
+            if (timer) clearTimer(timer);
+            timer = setTimer(() => { timer = null; saver.flush(); }, delay);
+        },
+        flush() {
+            if (timer) { clearTimer(timer); timer = null; }
+            if (!pending) return null;
+            const v = pending.value;
+            pending = null;
+            try { return write(v); } catch (e) { return null; }
+        },
+        cancel() {
+            if (timer) { clearTimer(timer); timer = null; }
+            pending = null;
+        },
+        pendingValue: () => (pending ? pending.value : null),
+    };
+    return saver;
+}
+
+/** 代理地址提示行：环回/私网放行但要告知，含凭据要提醒；strict 时才报「无效」，
+ *  否则输入过程中每敲一个字符都弹一次「端口缺失」会抖动。 */
+function updateProxyHint(value, strict) {
+    const raw = String(value == null ? '' : value).trim();
+    const p = parseProxyUrl(raw);
+    const parts = [];
+    if (strict && raw && !p.ok) parts.push('地址无效：' + proxyReasonText(p.reason));
+    if (p.ok && p.privateHost) parts.push('环回/私网地址：仅本机可用（本机代理客户端的正常形态，已放行）');
+    if (p.ok && p.hasUserinfo) parts.push('地址含用户名/密码：带凭据代理在本项目支持有限，建议改用无凭据地址');
+    const msg = parts.join('；');
+    $('#set_proxy_hint').text(msg).prop('hidden', !msg);
+    return msg;
+}
+
+/** 代理两个输入框是否已被用户编辑过（回填守卫用，见 shouldRefillProxyInput）。
+ *  两个框各自独立：改测试地址不该挡住代理地址的回填（回填是一次性的，跳过就再也没有了）。 */
+let _proxyInputDirty = false;
+let _proxyTestUrlDirty = false;
+
 function initSettingsPanel() {
     // 设置一级菜单（T12）：点大类只显示对应二级详情卡片；记忆上次分类
     const showSetCat = (cat) => {
@@ -1780,13 +1960,21 @@ function initSettingsPanel() {
         $('#set_use_misans').prop('checked', s.useMisansFont !== false);
         // CatVod源设置：CatVod 详情页自动匹配 Bangumi 数据（T74 开关，默认关）
         $('#set_catvod_bgm_match').prop('checked', s.catvodBgmMatch === true);
-        // 系统：网络代理
-        $('#set_proxy_url').val(s.proxyUrl || '');
+        // 系统：网络代理——回填以 settings 为准，但只在「用户没在编辑」时写：
+        // settingsGet 是异步的（preload 还有 3s TTL 缓存），初始化回填可能晚于用户
+        // 已开始输入，无脑 val() 会把刚敲的内容抹成旧快照值（见 shouldRefillProxyInput）
+        if (shouldRefillProxyInput($('#set_proxy_url').val(), s.proxyUrl, _proxyInputDirty)) {
+            $('#set_proxy_url').val(s.proxyUrl || '');
+        }
         // 代理开关严格按持久化值回填（proxyEnable === true 才开），避免旧版本/脏数据下误显示为开
         $('#set_proxy_enable').prop('checked', s.proxyEnable === true);
-        $('#proxy_fields').toggle(s.proxyEnable === true); // 代理未启用时收起地址表单
-        // 系统：代理连通性测试：回填上次测试 URL
-        $('#set_proxy_test_url').val(s.proxyTestUrl || '');
+        // 表单展开：启用时必展开；未启用但有地址记录时也展开（否则记录被折叠在开关后面看不见）
+        $('#proxy_fields').toggle(proxyFieldsVisible(s.proxyEnable === true, s.proxyUrl));
+        // 系统：代理连通性测试：回填上次测试 URL（同样受编辑守卫）
+        if (shouldRefillProxyInput($('#set_proxy_test_url').val(), s.proxyTestUrl, _proxyTestUrlDirty)) {
+            $('#set_proxy_test_url').val(s.proxyTestUrl || '');
+        }
+        updateProxyHint($('#set_proxy_url').val(), false); // 回填后按需提示环回/私网/凭据
         // 系统：日志级别 + 定时清空日志
         $('#set_log_level').val(String(s.logLevel || 'INFO'));
         $('#set_log_autocleanup').prop('checked', s.logAutoCleanup === true);
@@ -2318,25 +2506,89 @@ function initSettingsPanel() {
     $('#set_catvod_bgm_match').on('change', function () {
         window.yuki.settingsSet('catvodBgmMatch', this.checked);
     });
+    // 网络代理（2.9）：地址「输入即落盘（防抖 500ms）+ 显式保存才生效」。
+    // 为什么拆开：地址此前只在点「保存代理」时落盘，填了没保存就关应用 → 下次打开网址为空
+    //（用户反馈的丢失场景）；而每次敲键都真正应用代理又会反复重启 Python 后端（打断播放/
+    // 下载）。故输入只写记录：persistOnly 草稿落盘，不注入环境变量、不重启后端。
+    const proxyDraft = makeDraftSaver({
+        delay: 500,
+        setTimer: (fn, ms) => setTimeout(fn, ms),
+        clearTimer: (t) => clearTimeout(t),
+        write: (v) => {
+            const draft = sanitizeProxyDraft(v);
+            // 空草稿不落盘：清空输入框不应抹掉既有记录（关闭开关同理，见主进程 handler）
+            if (!draft) return null;
+            try {
+                const p = window.yuki.setProxy({ url: draft, persistOnly: true });
+                if (p && typeof p.catch === 'function') p.catch(() => { }); // IPC 失败不能变成未捕获 rejection
+                return p;
+            } catch (e) { return null; }
+        },
+    });
+    $('#set_proxy_url').on('input', function () {
+        _proxyInputDirty = true;
+        updateProxyHint(this.value, false);   // 输入过程只给正向提示，不弹「端口缺失」抖动
+        proxyDraft.schedule(this.value);
+    }).on('change', function () {
+        _proxyInputDirty = true;
+        proxyDraft.flush();                   // 失焦即落盘：缩小「敲完立刻关应用」的丢失窗口
+        updateProxyHint(this.value, true);
+    });
+    // 测试地址同理输入即落盘（proxyTestUrl 在 settings-set 白名单内，无副作用）；
+    // 此前只在点「测试代理」时写入，填了没测就关应用 → 下次打开为空
+    const proxyTestUrlDraft = makeDraftSaver({
+        delay: 500,
+        setTimer: (fn, ms) => setTimeout(fn, ms),
+        clearTimer: (t) => clearTimeout(t),
+        write: (v) => {
+            const draft = sanitizeProxyDraft(v);
+            if (!draft) return null;
+            try {
+                const p = window.yuki.settingsSet('proxyTestUrl', draft);
+                if (p && typeof p.catch === 'function') p.catch(() => { });
+                return p;
+            } catch (e) { return null; }
+        },
+    });
+    $('#set_proxy_test_url').on('input', function () {
+        _proxyTestUrlDirty = true;
+        proxyTestUrlDraft.schedule(this.value);
+    }).on('change', function () {
+        _proxyTestUrlDirty = true;
+        proxyTestUrlDraft.flush();
+    });
     // 代理开关：关闭方向立即生效（直连无前置条件，无需「保存代理」——此前拨开关
     // 只收起表单，proxyEnable 落盘仍是 true，WebDAV 等继续走已死的代理端口）；
     // 启用方向仍走「保存代理」按钮（连通性测试通过才生效）。
+    // 关闭只禁用、不清空记录：带上当前网址让主进程更新记录（空值=不改动，见 handler），
+    // 此前写死 url:'' 会把用户上次填的网址一并抹掉——正是「关闭后再打开就没了」。
     $('#set_proxy_enable').on('change', async function () {
-        $('#proxy_fields').toggle(this.checked);
+        // 展开条件带上地址记录：关闭开关时若已有记录，表单保持可见（记录还在，不该被折叠藏起来）
+        $('#proxy_fields').toggle(proxyFieldsVisible(this.checked, $('#set_proxy_url').val()));
         if (this.checked) return;
+        proxyDraft.cancel();   // 紧接着的 setProxy 已带最新值，待写草稿不再单独落盘
         try {
-            const r = await window.yuki.setProxy({ url: '', enable: false });
+            const r = await window.yuki.setProxy({ url: sanitizeProxyDraft($('#set_proxy_url').val()), enable: false });
             warnToast(r && r.ok ? '代理已关闭并生效（后端已重启）' : '代理关闭失败');
         } catch (e) { warnToast('代理关闭失败'); }
     });
     // 网络代理：保存并应用（先连通性测试，通过才启用 —— 仿 Kazumi proxyConfigured 门；重启后端使 Python requests 生效）
     $('#set_proxy_save').on('click', async () => {
-        const url = $('#set_proxy_url').val().trim();
+        const url = String($('#set_proxy_url').val() || '').trim();
         const enable = $('#set_proxy_enable').prop('checked');
+        proxyDraft.cancel();   // 本次显式保存即记录，待写草稿无需再单独落盘
         if (enable && !url) { warnToast('请填写代理地址'); return; }
         if (enable) {
+            // 先本地格式校验：省掉一次注定失败的连通性测试等待，并给出可读原因
+            const pv = parseProxyUrl(url);
+            if (!pv.ok) {
+                const msg = '地址无效：' + proxyReasonText(pv.reason);
+                $('#set_proxy_test_result').text(msg).css('color', 'var(--md-error)');
+                warnToast(msg);
+                return;
+            }
             // 开启前先走连通性测试：失败则不启用（避免保存一个不可用代理，与 Kazumi 一致）
-            const testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
+            const testUrl = String($('#set_proxy_test_url').val() || '').trim() || 'https://www.google.com/generate_204';
             $('#set_proxy_test_result').text('测试中…').css('color', 'var(--md-on-surface-variant)');
             let r;
             try { r = await window.yuki.testProxy({ proxyUrl: url, url: testUrl }); } catch (e) { r = null; }
@@ -2350,14 +2602,27 @@ function initSettingsPanel() {
         }
         try {
             const r = await window.yuki.setProxy({ url, enable });
-            warnToast(r && r.ok ? '代理已保存并应用（后端已重启）' : (r && r.reason ? `保存失败：${r.reason}` : '保存失败'));
+            // 未启用时只说「已记录」：旧文案在关闭方向也报「已应用（后端已重启）」，与实际语义不符
+            if (r && r.ok) warnToast(enable ? '代理已保存并应用（后端已重启）'
+                : (url ? '代理地址已保存（代理未启用）' : '代理已关闭，地址记录保留'));
+            else warnToast(r && r.reason ? `保存失败：${r.reason}` : '保存失败');
         } catch (e) { warnToast('保存失败'); }
     });
     // 代理连通性测试：用「代理地址」走一次 HEAD；结果就地显示并记测试 URL
     $('#set_proxy_test').on('click', async () => {
-        const proxyUrl = $('#set_proxy_url').val().trim();
-        let testUrl = $('#set_proxy_test_url').val().trim() || 'https://www.google.com/generate_204';
+        const proxyUrl = String($('#set_proxy_url').val() || '').trim();
+        const testUrl = String($('#set_proxy_test_url').val() || '').trim() || 'https://www.google.com/generate_204';
         if (!proxyUrl) { warnToast('请先填写代理地址'); return; }
+        // 本地格式先行：无效地址不必等一次注定失败的往返，直接给可读原因
+        const pv = parseProxyUrl(proxyUrl);
+        if (!pv.ok) {
+            const msg = '地址无效：' + proxyReasonText(pv.reason);
+            $('#set_proxy_test_result').text(msg).css('color', 'var(--md-error)');
+            warnToast(msg);
+            return;
+        }
+        proxyDraft.flush();          // 用户已确认要用的地址：立即落盘，不等防抖
+        proxyTestUrlDraft.flush();
         $('#set_proxy_test_result').text('测试中…');
         window.yuki.settingsSet('proxyTestUrl', testUrl);
         try {

@@ -13,10 +13,12 @@
  * 打开流程（即时开窗）：入口点击同步 openRateDialog 先弹窗，当前评分/吐槽/标签由
  * fetchCurrent 后台补查、mergeFetched 合并进已开的对话框（用户已编辑则丢弃）。
  *
- * 纯逻辑函数（clampRate / starsFor / fmtRateLabel / normalizeTagInput /
- * buildRatingPayload）导出到 YUKI.bgmRate 供 tests/js/bgm-rate.test.js 在 VM 中直接单测。
+ * 纯逻辑函数（clampRate / starsFor / fmtRateLabel / normalizeTagInput / buildRatingPayload /
+ * hasUnsavedChanges）导出到 YUKI.bgmRate 供 tests/js/bgm-rate.test.js 在 VM 中直接单测。
+ * 取消关闭：按「本次是否有未保存改动」（初始快照 vs 当前值）决定要不要二次确认——
+ * 无改动直接关，有改动弹 confirmDialog（确认=放弃改动，取消=留在弹窗）。
  */
-/* global $, doAction, warnToast, openDialog, closeDialog, FavHub, Kazumi, Detail, escHtml */
+/* global $, doAction, warnToast, openDialog, closeDialog, confirmDialog, FavHub, Kazumi, Detail, escHtml */
 
 // 模块加载时保存的原始 closeDialog（common.js 顶层函数声明）。_close 关闭对话框时
 // 直调它而非全局符号：全局符号已被底部 IIFE 包装，wrapped 检测到挂起的 _resolve 会
@@ -51,13 +53,17 @@ const BGM_RATE_KAMOJI = [
 const BgmRate = {
     // 提交防抖：同一 subject 在途时不重复弹窗提交
     _inFlightId: '',
+    // 「放弃编辑」确认框是否已在前台：防止确认期间再次触发关闭（连点取消/Esc）递归弹确认
+    _closeConfirming: false,
     // 当前对话框上下文（subjectId/name/当前评分/当前吐槽/标签状态）
     _ctx: null,
     // 对话框会话序号：每次 openRateDialog 递增并写入 _ctx.fetchId，用于区分同一
     // 条目先后开的两次对话框（晚到补查只归属它自己的那一次会话）
     _fetchSeq: 0,
     // 用户在补查数据合并前是否已编辑过对话框（星级/吐槽/标签/颜文字任一交互置位）：
-    // 置位后 mergeFetched 丢弃晚到的远端数据，避免覆盖用户输入；开窗时复位
+    // 置位后 mergeFetched 丢弃晚到的远端数据，避免覆盖用户输入；开窗时复位。
+    // 只服务「补查合并」这一件事：关闭前的脏检查走快照对比（hasUnsavedChanges），
+    // 因为触碰标记表达不了「改了又改回原值」（那种情况不该弹丢弃确认）。
     _touched: false,
     // 热门标签展开态：每次打开对话框重置为收起
     _showAllPopular: false,
@@ -122,11 +128,60 @@ const BgmRate = {
     fmtRateLabel(rate) {
         const n = this.clampRate(rate);
         if (!n) return '未评分';
+        // 5 分文案：原表照抄 Kazumi 时误写成「不过不去」（错字），按用户要求改「一般」
         const labels = {
-            1: '不忍直视', 2: '很差', 3: '差', 4: '较差', 5: '不过不去',
+            1: '不忍直视', 2: '很差', 3: '差', 4: '较差', 5: '一般',
             6: '还行', 7: '推荐', 8: '力荐', 9: '神作', 10: '超神作',
         };
         return `${n} 分 · ${labels[n] || ''}`;
+    },
+
+    /**
+     * 关闭前脏检查（纯函数）：对比「打开弹窗时的初始快照」与当前编辑状态，
+     * 判断是否存在本次未保存改动（有无改动决定取消要不要二次确认）。
+     * 不用 _touched 触碰标记：触碰标记表达不了「改了又改回原值」——那种情况
+     * 什么都不丢、不该弹确认，只有值对比能做到。
+     *  - rate：null 与 0 同义（对话框里都展示「未评分」、星级全灭、label 文案一致），
+     *    统一按「未评分」比较，避免「拨到 0 又拨回未评分」被判成改动；
+     *  - comment / tagDraft：原文比较，不套提交前的 trim（纯空格也是用户敲进去的内容，
+     *    关闭会一起丢，宁可多问一次）；
+     *  - tags：逐项比序（提交语义是整体覆盖，顺序变化同样会写远端）。
+     */
+    hasUnsavedChanges(init, current) {
+        const a = init || {};
+        const b = current || {};
+        const unrated = (v) => v === null || v === 0;
+        const ra = this.clampRate(a.rate);
+        const rb = this.clampRate(b.rate);
+        if (unrated(ra) !== unrated(rb)) return true;
+        if (!unrated(ra) && ra !== rb) return true;
+        if (String(a.comment || '') !== String(b.comment || '')) return true;
+        const ta = Array.isArray(a.tags) ? a.tags : [];
+        const tb = Array.isArray(b.tags) ? b.tags : [];
+        if (ta.length !== tb.length) return true;
+        for (let i = 0; i < ta.length; i++) {
+            if (ta[i] !== tb[i]) return true;
+        }
+        return String(a.tagDraft || '') !== String(b.tagDraft || '');
+    },
+
+    /** 编辑状态快照：初始快照（_ctx.snap）与关闭前当前值共用同一形状，保证两侧口径一致
+     *  （评分/吐槽/标签 + 输入框里未入列的自定义标签草稿）。 */
+    _snapshotState() {
+        const c = this._ctx || {};
+        return {
+            rate: this.clampRate(c.rate),
+            comment: String(c.comment || ''),
+            tags: Array.isArray(c.tags) ? c.tags.slice() : [],
+            tagDraft: this._readTagDraft(),
+        };
+    },
+
+    /** 自定义标签输入框草稿：打进去但还没回车/点「添加」的文本也是「本次填写的内容」，
+     *  关闭会一起丢掉，故纳入脏检查（提交时草稿另有「尝试入列」逻辑，与此无关）。 */
+    _readTagDraft() {
+        const v = $('#bgm-rate-tag-input').val();
+        return String(v === undefined || v === null ? '' : v);
     },
 
     /** 标签数组归一化（展示/状态共用）：字符串数组 → 去空白、剔空、保序去重；
@@ -190,6 +245,9 @@ const BgmRate = {
         if (this._resolve) this._close(false);
         this._showAllPopular = false;
         this._touched = false;
+        // 上一会话的确认框若还挂在前台，新会话重新开始脏检查：不复位会让取消按钮
+        // 被 requestClose 的防重入守卫永久吞掉（按钮看起来没反应）
+        this._closeConfirming = false;
         this._kamojiPinned = false;
         this._kamojiOpen = false;
         // 状态复位必须同步 DOM（面板/按钮是 index.html 常驻元素，重开不重建）：
@@ -218,6 +276,9 @@ const BgmRate = {
             popularTags: this.normalizeTags(opts.popularTags),
         };
         this._renderDialog();
+        // 初始快照：开窗后立刻记录（渲染之后取，标签草稿已被 _renderTags 清空），
+        // 取消关闭时与当前值对比决定要不要弹「放弃编辑」确认
+        this._ctx.snap = this._snapshotState();
         return new Promise((resolve) => {
             this._resolve = resolve;
             openDialog('bgmRateDialog');
@@ -255,6 +316,10 @@ const BgmRate = {
             c.tagsInit = c.tags.slice();
         }
         this._renderDialog();
+        // 补查数据落进对话框 = 用户看到的初始内容变了（此刻 _touched 必为 false，
+        // 即用户一个字都没改）：初始快照同步推进，否则「弹窗挂着不动再取消」
+        // 会被脏检查判成改动而白弹一次确认。
+        c.snap = this._snapshotState();
         return true;
     },
 
@@ -368,6 +433,9 @@ const BgmRate = {
             ? cur.slice(0, pos) + s + cur.slice(Number($ta.prop('selectionEnd') || pos))
             : cur + s;
         $ta.val(next);
+        // 正文同步进 _ctx：_renderDialog（星级/标签交互触发的重渲）以 _ctx.comment 回写
+        // 文本框，不同步会让「先插颜文字再点星」把刚插入的内容清掉，关闭脏检查也无从对比
+        if (this._ctx) this._ctx.comment = next;
         if (typeof document !== 'undefined' && document.activeElement !== $ta[0]) $ta.trigger('focus');
     },
 
@@ -503,6 +571,32 @@ const BgmRate = {
         }
     },
 
+    /**
+     * 用户主动关闭（取消按钮 / Esc / 点遮罩）的统一入口：先按快照对比做脏检查，
+     * 有本次未保存改动才弹 confirmDialog 二次确认——确认=放弃改动并关闭，
+     * 取消（按钮或 Esc）=留在弹窗继续编辑。无改动直接关闭（已有评分但没动、
+     * 什么都没填就关，都不打扰）。关闭语义与旧「取消」一致：resolve(false)。
+     * 提交成功后的关闭走 _close(true)，不经过这里（改完就提交不该再问一次）。
+     */
+    async requestClose() {
+        const ctx = this._ctx;
+        if (!ctx) return;                     // 会话已结束（提交成功/已关）：无待决 Promise
+        if (this._closeConfirming) return;    // 确认框已在前台：连点取消/Esc 不再叠一层确认
+        // 无初始快照的上下文（非本模块开窗路径）：无从对比，按旧行为直接关
+        if (!ctx.snap) { this._close(false); return; }
+        if (!this.hasUnsavedChanges(ctx.snap, this._snapshotState())) { this._close(false); return; }
+        this._closeConfirming = true;
+        let giveUp = false;
+        try {
+            giveUp = await confirmDialog('取消编辑会丢失本次填写的内容，确定放弃吗？',
+                { okText: '放弃修改', cancelText: '继续编辑' });
+        } finally {
+            this._closeConfirming = false;
+        }
+        // 确认期间会话可能已被换掉（提交成功关闭 / 同一条目重开）：只关仍属本次的会话
+        if (giveUp && this._ctx === ctx) this._close(false);
+    },
+
     /** 关闭对话框并 resolve 打开时的 Promise（submitted=是否已成功提交）。
      *  直调模块加载时保存的原始 closeDialog：全局符号已被 wrapped 覆写，
      *  若走全局符号，wrapped 见到挂起的 _resolve 会再次回调 _close → 无限递归。 */
@@ -628,9 +722,14 @@ function escHtmlAttr(s) {
         });
     }
     // 吐槽框/标签输入框打字：视为用户已编辑（_touched），后台补查数据到达时
-    // mergeFetched 不再覆盖输入内容（星级/标签/颜文字交互在各自函数内置位）
-    $('#bgm-rate-comment').on('input', () => {
-        if (typeof BgmRate !== 'undefined' && BgmRate._ctx) BgmRate._touched = true;
+    // mergeFetched 不再覆盖输入内容（星级/标签/颜文字交互在各自函数内置位）。
+    // 吐槽正文另同步进 _ctx（_touched 只是守卫标记，不带值）：_renderDialog 在星级/
+    // 标签交互触发重渲时按 _ctx.comment 回写文本框，不同步会把「先打字再点星」的
+    // 正文清掉，关闭脏检查也需要它有单一事实来源。
+    $('#bgm-rate-comment').on('input', function () {
+        if (typeof BgmRate === 'undefined' || !BgmRate._ctx) return;
+        BgmRate._touched = true;
+        BgmRate._ctx.comment = String(this.value === undefined ? '' : this.value);
     });
     $('#bgm-rate-tag-input').on('input', () => {
         if (typeof BgmRate !== 'undefined' && BgmRate._ctx) BgmRate._touched = true;
@@ -639,9 +738,17 @@ function escHtmlAttr(s) {
     $('#bgm-rate-submit').on('click', () => {
         if (typeof BgmRate !== 'undefined') BgmRate.submit();
     });
-    // 取消 / Esc 关闭走 closeDialog（common.js dialogStack 统一派发）→ resolve(false)
+    // 取消：先脏检查（有本次未保存改动 → confirmDialog 二次确认），确认/无改动才关；
+    // 确认=放弃改动关闭并 resolve(false)，取消=留在弹窗继续编辑
     $('#bgm-rate-cancel').on('click', () => {
-        if (typeof BgmRate !== 'undefined') BgmRate._close(false);
+        if (typeof BgmRate !== 'undefined') BgmRate.requestClose();
+    });
+    // 点遮罩关闭：目标必须是遮罩本体（卡片内点击 e.target !== e.currentTarget 不关）。
+    // 走全局 closeDialog 符号 → 已被下方包装成 wrapped → requestClose 脏检查，
+    // 与取消按钮/Esc 同一条路径，不给「点空白」留绕过确认的旁路。
+    $('#bgmRateDialog').on('click', (e) => {
+        if (e.target !== e.currentTarget) return;
+        if (typeof closeDialog === 'function') closeDialog('bgmRateDialog');
     });
     // Esc/overlay 关闭（closeDialog('bgmRateDialog')）时若有挂起 Promise 按取消处理。
     // 包装 closeDialog 与 confirmDialog 同款兜底（防 Promise 挂死）。
@@ -650,7 +757,9 @@ function escHtmlAttr(s) {
     if (origClose && !origClose._bgmRateWrapped) {
         const wrapped = function (id) {
             if (id === 'bgmRateDialog' && typeof BgmRate !== 'undefined' && BgmRate._resolve) {
-                BgmRate._close(false);
+                // 由 requestClose 决定立即关闭还是先弹确认；不 return（保持关闭入口无返回值的
+                // 既有语义）——requestClose 是 async，返回值泄漏给 closeDialog 调用方会改变契约
+                BgmRate.requestClose();
                 return;
             }
             return origClose(id);

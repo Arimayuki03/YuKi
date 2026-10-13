@@ -1249,6 +1249,10 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
     background-repeat:no-repeat; background-position:right 12px center; background-size:18px 18px;
     color:var(--md-on-surface); font-size:14px; line-height:20px; font-family:inherit; font-weight:500;
     outline:none; appearance:none; -webkit-appearance:none; cursor:pointer;
+    /* 收起态显示值超长时用省略号收尾：首页源名/推荐标签在工具条里宽度有限，
+       原生表现是硬裁掉半个字（无省略号）；text-overflow 需 overflow 非 visible 才生效，
+       Chromium 对 select 已由 UA 样式钉死 overflow:clip（!important），此处不必重复声明 */
+    white-space:nowrap; text-overflow:ellipsis;
     box-shadow:var(--shadow-xs);
     transition:border-color var(--dur-base) var(--ease), background-color var(--dur-base) var(--ease), box-shadow var(--dur-base) var(--ease);
 }
@@ -1258,7 +1262,11 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
 /* option 列表：Windows 下弹出层由系统绘制，尽量给出主题色（Chromium 支持处生效） */
 .md-select option, .md-select optgroup { background:var(--md-surface-container); color:var(--md-on-surface); font-family:inherit; padding:8px 12px; }
 .md-select option:checked { background:var(--md-primary); color:var(--md-on-primary); }
-.md-select-sm { height:34px; min-width:0; padding-right:32px; border-radius:10px; background-position:right 10px center; background-size:15px 15px; font-size:13px; }
+/* 禁用项与分组标题：Chromium 会让 option/optgroup 沿用这里的 color，
+   不指定则暗色下退回系统近黑文字叠深色底（不可读） */
+.md-select option:disabled { color:var(--md-on-surface-variant); }
+.md-select optgroup { color:var(--md-on-surface-variant); font-weight:600; }
+.md-select-sm { height:34px; min-width:0; padding-right:32px; border-radius:var(--radius-md); background-position:right 10px center; background-size:15px 15px; font-size:13px; }
 /* 隐藏下拉展开列表的滚动条（Chromium 绘制的 select popup 生效处）：时间表「本周」等长列表下拉 */
 .md-select { scrollbar-width:none; }
 .md-select::-webkit-scrollbar { width:0; height:0; display:none; }
@@ -1372,6 +1380,43 @@ html:not(.glass-on) .vod-grid.cards-enter > .vod-card { animation:vodCardIn var(
 /* 搜索（圆角输入框） */
 .search-bar { display:flex; gap:12px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
 .search-bar .md-input { flex:1; min-width:200px; height:44px; border-radius:var(--radius-md); }
+
+/* 搜索历史面板（search-history.js）：搜索框正下方浮层，按来源分组 + 单击即搜 + 单条删除/清空。
+   为什么用 fixed：面板挂在 body 下、坐标由 JS 按输入框 rect 推（search-history.js _place），
+   四个宿主输入框所在容器（.search-bar / .view-toolbar）全是 flex —— 插进去要么改各自的
+   DOM 结构、要么给它们加 position:relative 与 z-index，得不偿失；fixed 层对所有宿主一视同仁。
+   配色只用令牌（surface/outline/on-surface/error + accent-*），六套主题与 html.dark 自动联动。
+   z-index 取 90：压过页面内容（卡片 2 / 吸顶 tab 30 / 卡内浮层 80），又低于
+   .md-dialog-overlay(100) 与 #warnToast(200)——「清空历史」弹出的确认框必须在面板之上。 */
+.search-his-panel { position:fixed; z-index:90; display:none; overflow-y:auto;
+    max-height:min(52vh, 420px); padding:6px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-lg);
+    background:var(--md-surface-container-high); box-shadow:var(--shadow-lg);
+    animation:popIn var(--dur-fast) var(--ease); transform-origin:top center; }
+.search-his-panel.show { display:block; }
+.search-his-group { margin-bottom:4px; }
+.search-his-group:last-of-type { margin-bottom:0; }
+.search-his-group-title { padding:4px 8px 3px; font-size:11px; font-weight:700; letter-spacing:.4px;
+    color:var(--md-on-surface-variant); }
+.search-his-item { display:flex; align-items:center; gap:8px; padding:7px 8px; cursor:pointer;
+    border-radius:var(--radius-md); font-size:13px; color:var(--md-on-surface); }
+.search-his-item:hover, .search-his-item.active { background:var(--accent-hover-bg); }
+.search-his-item.active { box-shadow:inset 0 0 0 1px var(--accent-border); }
+.search-his-word { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.search-his-del { flex:none; width:20px; height:20px; line-height:18px; text-align:center;
+    border-radius:var(--radius-pill); font-size:14px; color:var(--md-on-surface-variant);
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.search-his-del:hover { background:var(--md-error-container); color:var(--md-on-error-container); }
+.search-his-more { padding:6px 8px; border-radius:var(--radius-md); font-size:12px;
+    color:var(--md-primary); cursor:pointer; }
+.search-his-more:hover { background:var(--accent-hover-bg); }
+.search-his-foot { display:flex; justify-content:flex-end; margin-top:4px; padding:6px 4px 2px;
+    border-top:1px solid var(--md-outline-variant); }
+.search-his-clear { padding:5px 12px; border-radius:var(--radius-pill); font-size:12px;
+    color:var(--md-on-surface-variant); cursor:pointer;
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.search-his-clear:hover { background:var(--md-error-container); color:var(--md-on-error-container); }
+
 /* 「Kazumi 源」筛选按钮：激活态用 primary 填充（区分于普通 tonal） */
 .search-toggle-filter.active { background: var(--md-primary); color: var(--md-on-primary); }
 .search-toggle-filter.active::after { background: var(--md-on-primary); }
@@ -1532,8 +1577,8 @@ body.frameless #view-detail { padding-top:0 !important; }
 /* 时间表/推荐卡片封面左下角徽标行：话数徽章常驻 + 收藏徽标悬停显形。
    · 行容器绝对定位于左下角（bangumi-rank-badge 对角），只做横向 flex 收纳；
      话数徽章在行内改走静态流式布局（.vod-fav-row 内解除 .detail-progress-badge
-     的 absolute 定位），行内顺序 = DOM 顺序 = [话数徽章][收藏徽标]，
-     收藏徽标天然出现在话数徽章右侧；
+     的 absolute 定位），行内顺序 = DOM 顺序 = [话数徽章][主要分类徽标][收藏徽标]，
+     收藏徽标天然出现在话数徽章右侧、分类徽标右侧；
    · 行本体常驻可见（pointer-events:none 不拦卡片点击）；只有收藏徽标默认
      宽度塌缩 + 左移 8px「藏」进话数徽章背后，悬停卡片时展开滑出——
      「从话数徽章右边钻出来」。只动 transform/opacity/max-width，不触发布局。 */
@@ -1543,7 +1588,7 @@ body.frameless #view-detail { padding-top:0 !important; }
    状态说明），必须显式恢复 auto——pointer-events 可继承，否则命中测试穿透到
    下层封面 img（无 title），悬停徽章时气泡永不出现。徽章本身无点击行为，auto
    不影响「点卡片进详情」（事件仍冒泡到卡片）。 */
-.vod-fav-row .rec-eps, .vod-fav-row .vod-fav-badge, .vod-fav-row .kazumi-badge, .vod-fav-row .timeline-ep-badge { pointer-events:auto; }
+.vod-fav-row .rec-eps, .vod-fav-row .vod-fav-badge, .vod-fav-row .kazumi-badge, .vod-fav-row .timeline-ep-badge, .vod-fav-row .timeline-tag-badge { pointer-events:auto; }
 /* 收藏徽标视觉对齐「我的」收藏卡 .rec-tag：radius-sm 小圆角、10.5px 不加粗、
    半透明黑底米白字+磨砂（显形态 padding:1px 8px 同款）；塌缩态 padding
    一并归零避免空胶囊占位。 */
@@ -1554,6 +1599,15 @@ body.frameless #view-detail { padding-top:0 !important; }
 @media (prefers-reduced-motion:reduce) {
     .vod-fav-badge { transition:none; transform:none; }
 }
+/* 主要分类徽标（时间表卡）：位于行内话数徽章与收藏徽标之间，常驻可见（唯一参与
+   悬停显形动画的是收藏徽标，它不受影响——仍塌缩在分类徽标右侧、悬停展开）。
+   视觉与两枚兄弟徽标同档：10.5px 不加粗、radius-sm 小圆角、半透明黑底米白字 +
+   磨砂（同一组值压在封面上，因此 html.dark 与 6 套主题色下可读性一致，无需按主题
+   覆写）；padding 比话数徽章更紧凑（1px 6px）以压低三徽章并排时的行宽。
+   max-width + 省略号兜底：规范分类名当前均 ≤4 字（表内最长「魔法少女/逆后宫」），
+   但表后续若扩词，徽标会截断而非撑破封面（完整名在 title 里）。flex 可收缩
+   （min-width:0）保证窄卡上不把收藏徽标挤出徽标行右缘。 */
+.timeline-tag-badge { flex:0 1 auto; min-width:0; max-width:64px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:1px 6px; border-radius:var(--radius-sm); font-size:10.5px; font-weight:400; color:#F2F1EB; background:rgba(0,0,0,.55); backdrop-filter:blur(2px); }
 /* 详情页签内的筛选条（角色/制作共用）：复用 class-tabs 视觉口径的轻量胶囊 */
 .detail-filter-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
 .detail-filter-item { padding:4px 12px; border-radius:var(--radius-pill); font-size:12px; cursor:pointer; color:var(--md-on-surface-variant); border:1px solid var(--md-outline-variant); transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
@@ -1956,6 +2010,9 @@ html:not(.glass-on) .detail-comment-list > .detail-comment.stagger-in { animatio
 .char-float-img { width:132px; flex:none; border-radius:var(--radius-md); object-fit:cover; background:var(--md-surface-container-high); }
 .char-float-info-text { flex:1; min-width:0; }
 .char-float-meta { color:var(--md-on-surface-variant); font-size:12px; margin-bottom:10px; }
+/* CV 行（C 需求）：与 .char-float-meta 同款次级信息样式（同一视觉层级的信息行）；
+   overflow-wrap:anywhere 兜住超长外文名/多 CV 连排，过长换行不溢出面板 */
+.char-float-cv { color:var(--md-on-surface-variant); font-size:12px; margin-bottom:10px; overflow-wrap:anywhere; }
 .char-float-summary { color:var(--md-on-surface); font-size:13px; line-height:22px; white-space:pre-line; overflow-wrap:anywhere; margin-bottom:12px; }
 @media (max-width:700px) {
     .detail-char-grid { grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); }
@@ -2128,6 +2185,45 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 /* 源卡展开区 */
 .kazumi-src-body { padding:4px 14px 12px; border-top:1px solid var(--md-outline-variant); }
 .kazumi-src-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+/* 别名检索（T86）：头部入口 + 别名轮提示 + 管理面板。
+   头部按钮用 margin-left:auto 靠右，不改动既有「标题 + 进度」靠左的排版 */
+.kazumi-sheet-head .kazumi-alias-toggle { flex:none; margin-left:auto; }
+.kazumi-alias-hit {
+    flex:none; font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600;
+    color:var(--md-on-tertiary-container); background:var(--md-tertiary-container);
+    max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* 别名管理面板：与源卡同底同边，插在头部与卡片列表之间 */
+.kazumi-alias-panel {
+    margin-bottom:12px; padding:10px 12px; border:1px solid var(--md-outline-variant);
+    border-radius:var(--radius-md); background:var(--md-surface-container);
+}
+.kazumi-alias-head { font-size:13px; font-weight:700; color:var(--md-on-surface); margin-bottom:8px; }
+.kazumi-alias-sub { margin-left:8px; font-size:11px; font-weight:400; color:var(--md-on-surface-variant); }
+.kazumi-alias-chips { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.kazumi-alias-chip {
+    display:inline-flex; align-items:center; gap:4px; padding:3px 6px 3px 10px;
+    border-radius:var(--radius-pill); font-size:12px;
+    border:1px solid var(--md-outline-variant); background:var(--md-surface-container-high);
+    color:var(--md-on-surface);
+}
+.kazumi-alias-chip-txt { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kazumi-alias-hits {
+    font-size:10px; padding:0 5px; border-radius:999px; font-weight:600;
+    color:var(--md-on-primary-container); background:var(--md-primary-container);
+}
+/* 表首那条就是当前优先项：用文字标出，不给「↑」按钮（点了也没有效果） */
+.kazumi-alias-first { font-size:10px; color:var(--md-on-surface-variant); }
+.kazumi-alias-act {
+    width:18px; height:18px; line-height:1; padding:0; cursor:pointer; font-size:11px;
+    border:none; border-radius:50%; color:var(--md-on-surface-variant); background:transparent;
+    transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.kazumi-alias-act:hover { background:var(--accent-hover-bg); color:var(--md-on-surface); }
+.kazumi-alias-add { display:flex; align-items:center; gap:8px; margin-top:10px; }
+/* 面板渲染在 #kazumi-dialog-body 内，.md-dialog-body .md-input 的 8px 顶距会把
+   输入框压得比「添加」按钮低半格，这里按行内对齐口径抹掉 */
+.kazumi-alias-add .kazumi-alias-input { flex:1; min-width:0; margin-top:0; }
 /* 选集视图返回栏 */
 .kazumi-road-toolbar { display:flex; align-items:center; gap:12px; padding:2px 0 10px;
     border-bottom:1px solid var(--md-outline-variant); margin-bottom:12px; }
@@ -2185,13 +2281,60 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 .kazumi-validity-captcha { color:var(--md-tertiary); background:var(--md-tertiary-container); }
 /* T55：规则行主块两行（名称+版本 / 安装·更新时间），右侧控件跨行对齐；
    覆盖 history-item 的误导 pointer 与 history-url 的 break-all 折名 */
-#kazumi_rule_list .kazumi-rule-row { cursor:default; }
+#kazumi_rule_list .kazumi-rule-row { cursor:default; position:relative; }
 #kazumi_rule_list .kazumi-rule-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
 #kazumi_rule_list .kazumi-rule-name { font-size:13px; color:var(--md-on-surface); word-break:normal; overflow-wrap:anywhere; }
 #kazumi_rule_list .kazumi-rule-times { font-size:11px; color:var(--md-on-surface-variant); }
 .kazumi-subver { color:var(--md-on-surface-variant); font-size:11px; }
 /* 编辑钮 hover 用次级容器色，与删除钮红色区分 */
 #kazumi_rule_list .kazumi-rule-edit:hover { background:var(--md-secondary-container); color:var(--md-on-secondary-container); }
+
+/* ---- 规则卡片：拖拽排序视觉反馈（任务1）----
+   拖动中：半透明 + 虚线上浮；插入位置：命中行 before/after 的 2px 主色指示线。
+   指示线用伪元素画在行间隙（不插占位节点），拖拽期不触发列表重排 */
+#kazumi_rule_list .kazumi-rule-row.dragging {
+    opacity:.45; outline:1px dashed var(--md-primary); outline-offset:-1px;
+    box-shadow:var(--shadow-md);
+}
+#kazumi_rule_list .kazumi-rule-row.kazumi-drop-before::before,
+#kazumi_rule_list .kazumi-rule-row.kazumi-drop-after::after {
+    content:''; position:absolute; left:6px; right:6px; height:2px; border-radius:2px;
+    background:var(--md-primary); box-shadow:0 0 6px var(--md-primary); z-index:1;
+}
+#kazumi_rule_list .kazumi-rule-row.kazumi-drop-before::before { top:-4px; }
+#kazumi_rule_list .kazumi-rule-row.kazumi-drop-after::after { bottom:-4px; }
+
+/* ---- 规则卡片：源网站行 + 批量管理（任务2/任务3）---- */
+#kazumi_rule_list .kazumi-rule-source {
+    font-size:11px; color:var(--md-on-surface-variant);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* 勾选框只在批量模式出现；原生 checkbox + accent-color 自动适配 6 套主题色 */
+#kazumi_rule_list .kazumi-rule-check { display:none; flex:none; align-items:center; cursor:pointer; }
+#kazumi_rule_list.batch-mode .kazumi-rule-check { display:inline-flex; }
+#kazumi_rule_list .kazumi-rule-checkbox {
+    width:16px; height:16px; margin:0; cursor:pointer; accent-color:var(--md-primary);
+}
+/* 批量模式下卡片其它控件禁用（禁用为视觉降级，handler 内另有状态兜底） */
+#kazumi_rule_list .kazumi-rule-row :disabled { opacity:.4; }
+#kazumi_rule_list .kazumi-rule-row button:disabled { pointer-events:none; }
+/* 已选行高亮（行本身无边框，用内阴影画一圈主色环），与列表刷新的选中集保持一致 */
+#kazumi_rule_list .kazumi-rule-row.kazumi-rule-checked {
+    background:color-mix(in srgb, var(--md-primary) 12%, transparent);
+    box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--md-primary) 45%, transparent);
+}
+/* 批量操作条：次级容器背景 + 细边框，和卡片内其它工具行区分 */
+.kazumi-batch-ops {
+    display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+    margin-top:8px; padding:8px 10px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    background:var(--md-surface-container-high);
+}
+.kazumi-batch-ops .tip-line { flex:none; }
+/* 0 选中时批量更新/删除为 disabled：与 pager/shop 同款降级观感 */
+#kazumi_batch_ops .md-btn:disabled { opacity:.4; pointer-events:none; }
+/* 入口按钮处于批量模式时的开关态 */
+#kazumi_rule_batch.active { background:var(--md-primary); color:var(--md-on-primary); }
 
 /* 规则商店 */
 .kazumi-shop-item { display:flex; align-items:center; gap:12px; padding:12px;
@@ -2316,12 +2459,48 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 #kazumiSourceDialog .md-dialog { width:560px; max-width:calc(100vw - 48px); }
 #kazumiSourceDialog .md-dialog-body { height:60vh; max-height:60vh; overflow-y:auto; }
 
-/* Bangumi 搜索筛选工作台弹窗（复刻 Kazumi _SearchWorkbenchSheet） */
-#bangumiFilterDialog .md-dialog { width:640px; max-width:calc(100vw - 48px); }
+/* Bangumi 搜索筛选工作台弹窗（复刻 Kazumi _SearchWorkbenchSheet）
+   分区顺序：排序 / 标签 / 季度与日期 / 评分与排名 / 星期。
+   结构：弹窗纵向 flex，标题与底部按钮固定，只有内容区滚动 → 窄窗不撑破视口，
+   重置/应用始终可见。 */
+#bangumiFilterDialog .md-dialog {
+    width:640px; max-width:calc(100vw - 48px);
+    display:flex; flex-direction:column; max-height:calc(100vh - 40px);
+}
+#bangumiFilterDialog .bgm-filter-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
+/* 控件统一高度/字号（与「规则编辑器」弹窗同口径）：56px 大输入框放进分区过于松散 */
+#bangumiFilterDialog .md-input,
+#bangumiFilterDialog .md-select { height:40px; font-size:13px; }
+#bangumiFilterDialog .md-select { width:100%; }
+/* chips 只换行、不挤压文字（数值/标签 chip 一多也不会溢出分区） */
+#bangumiFilterDialog .class-tabs { margin-bottom:0; }
+#bangumiFilterDialog .class-tab { flex:0 0 auto; }
 .bgm-filter-section { padding:14px 0; border-bottom:1px solid var(--md-outline-variant); }
-.bgm-filter-section:last-child { border-bottom:none; }
+.bgm-filter-section:first-child { padding-top:2px; }
+.bgm-filter-section:last-child { padding-bottom:2px; border-bottom:none; }
 .bgm-filter-heading { font-size:14px; font-weight:600; margin-bottom:8px; color:var(--md-on-surface); }
-.bgm-filter-switch { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin:4px 0; }
+.bgm-filter-note { font-size:12px; line-height:1.5; color:var(--md-on-surface-variant); margin-bottom:8px; }
+.bgm-filter-note-inline { margin-left:8px; font-size:12px; font-weight:400; color:var(--md-on-surface-variant); }
+.bgm-filter-switch { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin:6px 0 0; }
+.bgm-filter-range + .bgm-filter-switch { margin-top:14px; }
+/* 自定义标签行：输入框占满、按钮定宽（窄窗不溢出） */
+.bgm-filter-inline { display:flex; align-items:center; gap:8px; margin-top:10px; }
+.bgm-filter-inline .md-input { flex:1 1 auto; min-width:0; }
+.bgm-filter-inline .md-btn { flex:0 0 auto; }
+/* 已选自定义标签 chips（原内联 margin-top:8px 收敛进样式表） */
+#bangumiFilterDialog #bgm-draft-tags { margin-top:10px; }
+/* 区间行（评分/排名）：标签-输入框-至-输入框同行对齐；数字框统一宽度，
+   窄窗由 flex-wrap 换行，不横向溢出 */
+.bgm-filter-range { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:6px; }
+#bangumiFilterDialog .bgm-num-input { flex:0 0 92px; width:92px; min-width:0; }
+.bgm-range-label { flex:0 0 auto; font-size:13px; color:var(--md-on-surface-variant); }
+.bgm-range-sep { flex:0 0 auto; font-size:12px; color:var(--md-on-surface-variant); }
+.bgm-range-hint { flex:1 1 auto; min-width:0; }
+/* 日期行：两列等宽 + 中间「至」，始终同行且随窄窗收缩 */
+.bgm-date-range { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); margin-top:10px; }
+.bgm-date-range .md-input { min-width:0; }
+/* 底部动作条：与内容区分隔线，固定贴在弹窗底部 */
+#bangumiFilterDialog .md-dialog-actions { padding-top:14px; border-top:1px solid var(--md-outline-variant); }
 .bgm-tag-chip.active, .bgm-weekday-chip.active, .bgm-sort-seg.active {
     background:var(--md-primary); color:var(--md-on-primary); font-weight:600;
 }
@@ -2609,6 +2788,93 @@ html.glass-on .bgm-rate-tags-block {
 .rec-checkall { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--md-on-surface-variant); cursor:pointer; }
 .rec-checkall input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
 
+/* ===== 收藏/历史：排序与筛选工具条（records.js recToolbarHtml 注入到网格前） =====
+   为什么工具条由 JS 注入而非写进 index.html：同一视图工厂服务三个容器
+   （#view-favorites / #view-history / #my-panel-favorites），静态标记覆盖不到
+   「我的→我的收藏」这个 app.js 路由实际落点。控件规格对齐既有 .view-toolbar（36px 高）。 */
+.rec-filter-bar { gap:8px; }
+.rec-select { height:36px; min-width:118px; max-width:190px; flex:0 0 auto; font-size:13px; border-radius:var(--radius-md); }
+.rec-input { height:36px; font-size:13px; border-radius:var(--radius-md); min-width:0; }
+.rec-input-wide { flex:1 1 240px; max-width:420px; }
+/* 日期/数字输入：原生控件默认尺寸与 .md-input 不一致，统一压到 36px 与工具条基线对齐 */
+.rec-date { width:150px; flex:0 0 auto; }
+.rec-num { width:88px; flex:0 0 auto; }
+.rec-filter-sep { flex:0 0 auto; font-size:12px; color:var(--md-on-surface-variant); }
+.rec-filter-panel {
+    margin:0 0 12px; padding:12px 14px; border-radius:var(--radius-lg);
+    background:var(--md-surface-container); border:1px solid var(--md-outline-variant);
+    display:flex; flex-direction:column; gap:10px;
+}
+.rec-filter-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.rec-filter-label {
+    flex:0 0 auto; min-width:54px; font-size:13px; color:var(--md-on-surface-variant);
+}
+.rec-filter-inline {
+    display:inline-flex; align-items:center; gap:6px; font-size:13px;
+    color:var(--md-on-surface-variant); cursor:pointer;
+}
+.rec-filter-inline input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
+.rec-filter-actions { justify-content:flex-end; gap:8px; }
+.rec-filter-actions .rec-filter-inline { margin-right:auto; }
+
+/* 已生效条件 chip：点 × 删单个维度（观感对齐 Bangumi 搜索的 .bgm-chip） */
+.rec-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.rec-chip {
+    display:inline-flex; align-items:center; gap:6px; padding:2px 8px;
+    border-radius:999px; font-size:12px;
+    background:var(--md-surface-container-high); color:var(--md-on-surface-variant);
+    border:1px solid var(--md-outline-variant);
+}
+.rec-chip-del { cursor:pointer; opacity:.7; font-size:13px; line-height:1; }
+.rec-chip-del:hover { opacity:1; color:var(--md-primary); }
+
+/* ===== 收藏/历史卡片：右上角续播 ▶ 与右下角收藏 ⋯ =====
+   两者都是 .vod-card 的直接子元素（不进 .vod-cover：Kazumi 卡封面补拉会整格重写封面内容，
+   按钮会被一起擦掉）。观感对齐既有 .rec-del/.rec-edit（半透明黑底圆钮 + 白图标，
+   暗色与 6 套主题色下都是「深底白图标」，不依赖主题色本身）。 */
+.rec-play-btn, .rec-fav-btn {
+    position:absolute; z-index:2; width:24px; height:24px; padding:0; border:none; border-radius:50%;
+    background:rgba(0,0,0,.55); color:#fff; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    transition:background var(--dur-fast) var(--ease);
+}
+.rec-play-btn svg, .rec-fav-btn svg { width:14px; height:14px; fill:#fff; display:block; }
+.rec-play-btn:hover, .rec-fav-btn:hover { background:var(--md-primary); }
+.rec-play-btn:hover svg, .rec-fav-btn:hover svg { fill:var(--md-on-primary); }
+/* 续播常驻显示（历史页主操作入口，悬停才出现等于把功能藏起来）；收藏钮同样常驻 */
+.rec-play-btn { top:6px; right:66px; }
+.rec-fav-btn { bottom:6px; right:6px; }
+/* 播放卡把既有 ✕/✎ 左移一档，三方不叠在同一坐标（视觉顺序：▶ ✎ ✕） */
+.vod-card.has-play .rec-del { right:36px; }
+.vod-card.has-play .rec-edit { right:66px; }
+/* 右下角收藏钮与最后一行信息文字同高：给信息行右侧留位，文字不被按钮遮住 */
+.vod-card.has-fav .rec-playinfo, .vod-card.has-fav .rec-epline { padding-right:34px; }
+/* 续播加载态：图标降透明 + 旋转（重复点击另有 js 的 _resumeBusy 兜底） */
+.rec-play-btn.loading { opacity:.75; cursor:default; }
+.rec-play-btn.loading svg { animation:recSpin .9s linear infinite; }
+@keyframes recSpin { from { transform:rotate(0); } to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .rec-play-btn.loading svg { animation:none; }
+}
+
+/* ===== 六态收藏菜单（历史卡 ⋯ 展开；与收藏页共用 buildFavMenuHtml） =====
+   文档级单例 + fixed 定位（卡片会被整格重写，菜单不能挂在卡片里）；观感对齐详情页
+   .detail-col-menu（surface-container-high + radius-md + shadow-lg + popIn 入场）。 */
+.rec-fav-menu {
+    position:fixed; z-index:80; min-width:148px; padding:6px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    background:var(--md-surface-container-high); box-shadow:var(--shadow-lg);
+    animation:popIn var(--dur-fast) var(--ease); transform-origin:center bottom;
+}
+.rec-fav-menu-item {
+    display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%;
+    padding:7px 10px; border:none; border-radius:var(--radius-sm); background:transparent;
+    color:var(--md-on-surface); font-size:13px; text-align:left; cursor:pointer;
+}
+.rec-fav-menu-item:hover { background:var(--accent-hover-bg); }
+.rec-fav-menu-item.active { color:var(--md-primary); font-weight:600; }
+.rec-fav-menu-check { flex:none; font-size:12px; color:var(--md-primary); }
+
 /* ===== 「我的」页面：观看统计 + 最近观看 ===== */
 /* 概览磁贴：图标章 + 大数字 + 标签，每格独立主题色（与收藏分类色板同源） */
 .my-stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
@@ -2751,7 +3017,14 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
     transition:opacity var(--dur-fast) var(--ease);
     max-width:92vw; max-height:92vh;
     display:flex; align-items:center; justify-content:center;
+    /* 拖动平移（A 需求）：握持光标；touch-action:none 让触摸拖动不被浏览器
+       滚动/缩放手势抢走（触控板双指滚动仍走 wheel 缩放路径，不受影响） */
+    cursor:grab;
+    touch-action:none;
 }
+/* 拖动进行中（detail.js pointermove 过阈值后挂 .dragging，pointerup/cancel 摘除）：
+   摘掉 transform 过渡——过渡会让图追不上指针（橡皮筋拖尾），拖动期必须 1:1 跟手 */
+#cover-float img.dragging { cursor:grabbing; transition:none; }
 #cover-float img {
     width:min(520px, 90vw); max-height:92vh; border-radius:var(--radius-lg);
     object-fit:contain;
@@ -2854,6 +3127,13 @@ body.has-wallpaper .md-select { background-color:color-mix(in srgb, var(--md-sur
 /* 壁纸模式使用 background-color，保留 .md-select 的自定义 chevron。 */
 body.has-wallpaper .md-select { background-image:var(--md-select-chevron); background-repeat:no-repeat; background-position:right 14px center; background-size:16px 16px; }
 body.has-wallpaper .md-select-sm { background-position:right 10px center; background-size:14px 14px; }
+/* 壁纸模式 hover：常规底的 --accent-hover-bg 是不透明混合色，特异性和又高于上面的
+   veil 规则（0,4,0 > 0,2,1），会把下拉悬停时变成实心色块、穿透感瞬间断开；
+   而同排的 .md-input:hover 只换边框（无底色突变），下拉必须对齐这个口径。
+   这里以 veil 半透明底为基色再叠 primary 微染：hover 反馈保留，仍保持半透明。 */
+body.has-wallpaper .md-select:hover:not(:focus):not(:disabled) {
+    background-color:color-mix(in srgb, var(--md-primary) 7%, color-mix(in srgb, var(--md-surface) var(--wall-veil), transparent));
+}
 /* 壁纸模式下透明底小控件（页签/过滤 chip/设置导航/分页/进度条）补 veil 底，
    避免在花哨壁纸上失去可读性。注意 :not(.active) 排除激活态——本条特异性
    (0,2,1) 高于 .class-tab.active (0,2,0)，不排除会吃掉激活态的主色填充。
@@ -3241,6 +3521,9 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
     /* 时间表/推荐卡徽标随大屏同步放大（对齐 .rec-eps/.rec-site 的 13px 档） */
     .vod-cover .timeline-ep-badge { font-size:13px; }
     .vod-fav-badge { font-size:13px; }
+    /* 分类徽标跟 13px 档，max-width 同步放宽（64px 是按 10.5px 档「4 字 + 内边距」定的，
+       13px 下 4 字需 ~64px，不放宽会把表内最长的「魔法少女」截断） */
+    .timeline-tag-badge { font-size:13px; max-width:78px; }
     /* 通用控件 */
     .md-input { height:64px; font-size:19px; border-radius:var(--radius-md); }
     .search-bar .md-input { border-radius:var(--radius-md); }

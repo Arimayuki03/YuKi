@@ -240,12 +240,21 @@ test('_openCoverFloat：保存按钮调用主进程 saveImage（文件名取 URL
     assert.ok(context._toasts.some((t) => t.includes('已保存图片')));
 });
 
-test('_saveImageAs：无扩展名 URL 自动补 .jpg；失败 toast', async () => {
+test('_saveImageAs：无扩展名 URL 自动补 .jpg；失败 toast 带可诊断原因', async () => {
     const { Detail, context } = loadDetail({
         window: { yuki: { settingsGet: async () => ({}), saveImage: async () => ({ ok: false, reason: 'http-404' }) } },
     });
     await Detail._saveImageAs('https://example.com/img?x=1');
-    assert.ok(context._toasts.includes('保存图片失败'));
+    // B 修复：失败文案按 reason 细分（distinguish 网络/非图片/权限），不再是笼统一句
+    assert.ok(context._toasts.includes('保存图片失败：服务器拒绝访问（HTTP 404）'));
+    // 无扩展名 URL 仍自动补 .jpg（文件名兜底语义不变）
+    const calls = [];
+    const { Detail: D2, context: c2 } = loadDetail({
+        window: { yuki: { settingsGet: async () => ({}), saveImage: async (url, name) => { calls.push(name); return { ok: true }; } } },
+    });
+    await D2._saveImageAs('https://example.com/img?x=1');
+    assert.deepEqual(calls, ['img.jpg']);
+    assert.ok(c2._toasts.some((t) => t.includes('已保存图片：img.jpg')));
 });
 
 // ---------------------------------------------------------------- 遮罩/滚轮行为

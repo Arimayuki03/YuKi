@@ -338,7 +338,7 @@ test('closeDialog 递归：Esc/取消/提交成功三条路径 _close 均一次�
     // —— 路径一：Esc 全局派发（全局 closeDialog('bgmRateDialog') → wrapped → _close(false)）——
     // 模块加载后 IIFE 已把 window.closeDialog 覆写为 wrapped（window === context），
     // 因此 context.closeDialog 即 Esc 全局派发路径的实际派发入口（common.js dispatchEsc 同款；
-    // #bgmRateDialog 无遮罩关闭路径，Esc 是唯一的全局关闭入口）
+    // 点遮罩的委托处理同样调它 → 两条全局入口一致）
     const { R, context, calls } = loadBgmRateInteractive();
     const p1 = R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
     assert.ok(R._resolve, '打开后应有挂起的 Promise');
@@ -350,7 +350,9 @@ test('closeDialog 递归：Esc/取消/提交成功三条路径 _close 均一次�
     // 对话框根节点不经 $.hide() 隐藏（closeDialog 是唯一关闭路径）；hide 只允许打在状态行上
     assert.ok(!calls.hide.some((s) => /bgmRateDialog/.test(s)), '对话框根不走 $.hide()（closeDialog 专责）');
 
-    // —— 路径二：取消按钮（直接 _close(false) → 原始 closeDialog 直调，不走 wrapped）——
+    // —— 路径二：取消（_close(false) → 原始 closeDialog 直调，不走 wrapped）——
+    // 取消按钮/遮罩走 requestClose 脏检查，无改动时落到同一 _close(false)（本用例
+    // 直接调原语锁定「一次到位」语义；脏检查分支见下方「取消二次确认」用例组）
     const p2 = R.openRateDialog({ subjectId: '42', name: 'X' });
     R._close(false);
     assert.equal(await p2, false);
@@ -912,4 +914,332 @@ test('mergeFetched：超时无预填开窗后晚到补查合并，rate 缺省不
     assert.equal(R._ctx.comment, '还行');
     assert.deepEqual(JSON.parse(JSON.stringify(R._ctx.tags)), [], '无 tags 键时标签保持开窗初值');
     R._close(false);
+});
+
+// ---------------------------------------------------------------- 评分文案（T-A：5 分标签错字修正）
+
+test('fmtRateLabel：5 分标签为「一般」（错字「不过不去」修正），其余档位保持不动', () => {
+    const R = loadBgmRate();
+    assert.equal(R.fmtRateLabel(5), '5 分 · 一般');
+    // 邻档回归：只动 5 分，其它档位文案不得被顺手改掉
+    assert.equal(R.fmtRateLabel(1), '1 分 · 不忍直视');
+    assert.equal(R.fmtRateLabel(2), '2 分 · 很差');
+    assert.equal(R.fmtRateLabel(3), '3 分 · 差');
+    assert.equal(R.fmtRateLabel(4), '4 分 · 较差');
+    assert.equal(R.fmtRateLabel(6), '6 分 · 还行');
+    assert.equal(R.fmtRateLabel(7), '7 分 · 推荐');
+    assert.equal(R.fmtRateLabel(8), '8 分 · 力荐');
+    assert.equal(R.fmtRateLabel(9), '9 分 · 神作');
+    assert.equal(R.fmtRateLabel(10), '10 分 · 超神作');
+    assert.equal(R.fmtRateLabel(0), '未评分');
+    assert.equal(R.fmtRateLabel(null), '未评分');
+    // 文案表的唯一事实来源就是本函数（弹窗星级下方 #bgm-rate-label 与提交成功 toast
+    // 都经它渲染）：错字不能留在标签表里（注释说明历史错字不算）
+    const src = read('src/renderer/js/bgm-rate.js');
+    const table = src.match(/const labels = \{[\s\S]*?\};/)[0];
+    assert.ok(!table.includes('不过不去'), '错字「不过不去」应从标签表移除');
+    assert.match(table, /5: '一般'/, '5 分档位文案应为「一般」');
+    assert.match(src, /#bgm-rate-label'\)\.text\(this\.fmtRateLabel/, '弹窗徽标应经 fmtRateLabel 渲染（改一处即全局生效）');
+    // 渲染层其它评分展示不走文案表（列表卡/详情页是「我的 N★」纯数值徽章），
+    // 标签表若被复制他处会漏改——锁死它的唯一性
+    for (const f of ['src/renderer/js/common.js', 'src/renderer/js/records.js', 'src/renderer/js/detail.js', 'src/renderer/js/my.js']) {
+        assert.ok(!read(f).includes('超神作') && !read(f).includes('不忍直视'),
+            `${f} 不应复制评分文案表（统一走 BgmRate.fmtRateLabel）`);
+    }
+});
+
+// ---------------------------------------------------------------- 取消二次确认（快照对比脏检查）
+
+const tick = () => new Promise((r) => setImmediate(r));
+
+/**
+ * 取消确认交互级 VM 加载：$ 桩记录各选择器上的事件处理器（可模拟点取消按钮/点遮罩/
+ * 吐槽打字），confirmDialog 为可控 Promise 桩（记录文案与按钮文案，由测试决定确认/取消），
+ * 吐槽正文与标签草稿存进 vals 随 val() 读写往返（贴近真实文本框行为）。
+ */
+function loadBgmRateCancel() {
+    const source = read('src/renderer/js/bgm-rate.js');
+    const calls = { closeDialog: [], confirm: [] };
+    const handlers = {};
+    const vals = { '#bgm-rate-comment': '', '#bgm-rate-tag-input': '' };
+    const mk$ = (sel) => {
+        const api = {
+            on: (ev, fn) => {
+                if (typeof fn === 'function') {
+                    const k = `${String(sel)}|${String(ev)}`;
+                    (handlers[k] = handlers[k] || []).push(fn);
+                }
+                return api;
+            },
+            off: () => api, text: () => api, html: () => api,
+            show: () => api, hide: () => api, trigger: () => api,
+            toggleClass: () => api, attr: () => api,
+            val: (v) => {
+                if (v === undefined) return vals[sel] === undefined ? '' : vals[sel];
+                vals[sel] = v;
+                return api;
+            },
+            prop: () => api,
+            data: () => ({}),
+            find: () => ({ on: () => api, length: 0 }),
+            length: 0,
+        };
+        return api;
+    };
+    const context = {
+        console, Map, Set, Promise, Date, Math, JSON, String, Array, Object, Number,
+        setTimeout, clearTimeout,
+        $: mk$,
+        document: { activeElement: null },
+        doAction: async () => ({ code: 200, result: { uploaded: 1, failed: 0, results: [{ subjectId: '42', ok: true, msg: 'ok' }] } }),
+        warnToast: () => {},
+        escHtml: (s) => String(s),
+        openDialog: () => {},
+        closeDialog: (id) => { calls.closeDialog.push(id); },
+        confirmDialog: (msg, opts) => {
+            const call = { msg: String(msg), opts: opts || {} };
+            calls.confirm.push(call);
+            return new Promise((resolve) => { call.resolve = resolve; });
+        },
+        FavHub: { changed: () => {} },
+        Kazumi: { _getBangumiToken: async () => 'tok' },
+    };
+    context.globalThis = context;
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(`${source}\n;globalThis.__R = BgmRate;`, context, { filename: 'bgm-rate.js' });
+    // 触发选择器上记录到的事件处理器（this 带上 value，供吐槽框 input 监听读取 this.value）
+    const fire = (sel, ev, evt) => {
+        (handlers[`${sel}|${ev}`] || []).forEach((fn) => fn.call({ value: vals[sel] }, evt));
+    };
+    const closings = () => calls.closeDialog.filter((id) => id === 'bgmRateDialog').length;
+    // 结掉最后一个待决确认框（true=确认放弃，false=取消/留在弹窗）
+    const settleConfirm = async (v) => {
+        const c = calls.confirm[calls.confirm.length - 1];
+        assert.ok(c && c.resolve, '应存在一个待决的确认框');
+        c.resolve(v);
+        await tick();
+    };
+    return { R: context.__R, context, calls, vals, fire, closings, settleConfirm };
+}
+
+test('hasUnsavedChanges：快照对比口径（评分/未评分等价/吐槽/标签/标签草稿）', () => {
+    const R = loadBgmRate();
+    const E = { rate: null, comment: '', tags: [], tagDraft: '' };
+    // 全空（未评分未填）→ 无改动
+    assert.equal(R.hasUnsavedChanges(E, { rate: null, comment: '', tags: [], tagDraft: '' }), false);
+    assert.equal(R.hasUnsavedChanges(undefined, undefined), false, '两侧都缺省 = 无改动');
+    // 评分：同值/变化/清除
+    assert.equal(R.hasUnsavedChanges({ rate: 8 }, { rate: 8 }), false);
+    assert.equal(R.hasUnsavedChanges({ rate: 8 }, { rate: 3 }), true);
+    assert.equal(R.hasUnsavedChanges({ rate: 8 }, { rate: 0 }), true, '已有评分 → 清除评分 = 改动');
+    assert.equal(R.hasUnsavedChanges({ rate: 8 }, { rate: null }), true);
+    // 未评分与 0（清除评分）在对话框里展示一致（都「未评分」、星级全灭）：视为同一状态
+    assert.equal(R.hasUnsavedChanges({ rate: null }, { rate: 0 }), false, 'null/0 都展示未评分：不算改动');
+    assert.equal(R.hasUnsavedChanges({ rate: 0 }, { rate: null }), false);
+    // 吐槽：原文比较（不套提交前的 trim，纯空格也是敲进去的内容）
+    assert.equal(R.hasUnsavedChanges(E, { rate: null, comment: '好看' }), true);
+    assert.equal(R.hasUnsavedChanges({ comment: ' 好看 ' }, { comment: ' 好看 ' }), false);
+    assert.equal(R.hasUnsavedChanges({ comment: '' }, { comment: ' ' }), true);
+    // 标签：逐项比序（提交语义是整体覆盖）
+    assert.equal(R.hasUnsavedChanges({ tags: ['神作'] }, { tags: ['神作'] }), false);
+    assert.equal(R.hasUnsavedChanges({ tags: ['神作'] }, { tags: ['神作', 'TV'] }), true);
+    assert.equal(R.hasUnsavedChanges({ tags: ['神作'] }, { tags: [] }), true);
+    assert.equal(R.hasUnsavedChanges({ tags: ['神作', 'TV'] }, { tags: ['TV', '神作'] }), true, '顺序变化也会写远端');
+    // 标签草稿（未回车入列）：关闭会一起丢，算改动
+    assert.equal(R.hasUnsavedChanges(E, { rate: null, tagDraft: '科幻' }), true);
+    assert.equal(R.hasUnsavedChanges({ tagDraft: '科幻' }, { tagDraft: '科幻' }), false);
+});
+
+test('取消二次确认：无评分无改动 / 有评分无改动 → 不弹确认，直接关（resolve(false)）', async () => {
+    const h = loadBgmRateCancel();
+    // ① 什么都没填就关
+    const p1 = h.R.openRateDialog({ subjectId: '42', name: 'X' });
+    h.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h.calls.confirm.length, 0, '无改动不得弹确认');
+    assert.equal(await p1, false, '取消语义保持 resolve(false)');
+    assert.equal(h.R._ctx, null, '关闭后 _ctx 复位（待决 Promise 已 settle）');
+    assert.equal(h.R._resolve, null);
+    assert.equal(h.closings(), 1, '对话框关闭一次');
+    // ② 已有评分但没动任何东西
+    const p2 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8, comment: '原吐槽', tags: ['神作'] });
+    h.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h.calls.confirm.length, 0, '已有评分未改动同样不弹');
+    assert.equal(await p2, false);
+    // ③ 开窗后只等补查数据合并（快照同步推进）：仍不算改动
+    const h2 = loadBgmRateCancel();
+    const p3 = h2.R.openRateDialog({ subjectId: '42', name: 'X' });
+    assert.equal(h2.R.mergeFetched('42', { rate: 7, comment: '还行', tags: ['旧标签'] }), true);
+    h2.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h2.calls.confirm.length, 0, '补查合并只是「用户看到的初始内容」，不是本次改动');
+    assert.equal(await p3, false);
+});
+
+test('取消二次确认：无评分但填了内容 → 弹确认；取消=留在弹窗，再取消确认=放弃关闭', async () => {
+    const h = loadBgmRateCancel();
+    const p = h.R.openRateDialog({ subjectId: '42', name: 'X' });
+    // 吐槽框打字（input 事件同时置 _touched 与同步 _ctx.comment）
+    h.vals['#bgm-rate-comment'] = '期待第二季';
+    h.fire('#bgm-rate-comment', 'input');
+    h.fire('#bgm-rate-cancel', 'click');
+    await tick();
+    assert.equal(h.calls.confirm.length, 1, '有本次未保存改动应弹确认');
+    assert.match(h.calls.confirm[0].msg, /取消编辑会丢失本次填写的内容/, '文案应表达「取消编辑会丢失内容」');
+    assert.equal(h.calls.confirm[0].opts.okText, '放弃修改');
+    assert.equal(h.calls.confirm[0].opts.cancelText, '继续编辑');
+    assert.ok(h.R._resolve, '确认期间会话挂起未关闭');
+    assert.ok(h.R._ctx, '确认期间对话框仍在编辑态');
+    assert.equal(h.closings(), 0, '确认未回前不得关闭对话框');
+    // 取消确认 = 留在弹窗继续编辑：不关、Promise 不 settle
+    let settled = false;
+    p.then(() => { settled = true; });
+    await h.settleConfirm(false);
+    assert.equal(settled, false, '取消确认后打开 Promise 仍挂起');
+    assert.ok(h.R._resolve);
+    assert.equal(h.closings(), 0, '取消确认不得关闭对话框');
+    // 改动仍在：再次取消应再问一次；这次确认放弃 → 关闭并 resolve(false)
+    h.fire('#bgm-rate-cancel', 'click');
+    await tick();
+    assert.equal(h.calls.confirm.length, 2, '改动仍在：再次取消再问一次');
+    await h.settleConfirm(true);
+    assert.equal(await p, false, '放弃改动关闭：保持 resolve(false) 语义');
+    assert.equal(h.R._ctx, null);
+    assert.equal(h.R._resolve, null, '待决 Promise 已清理');
+    assert.equal(h.closings(), 1, '确认放弃只关闭一次');
+    assert.equal(h.R._closeConfirming, false, '确认结束复位防重入标记');
+});
+
+test('取消二次确认：有评分且本次改了数据 → 弹；改回原值 → 不弹（快照对比）', async () => {
+    const h = loadBgmRateCancel();
+    // ① 8 分 → 改 3 分 → 取消：弹
+    const p1 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._pickRate(3);
+    h.fire('#bgm-rate-cancel', 'click');
+    await tick();
+    assert.equal(h.calls.confirm.length, 1, '已有评分 + 本次改动 → 弹确认');
+    await h.settleConfirm(true);
+    assert.equal(await p1, false);
+    // ② 8 分 → 3 分 → 改回 8 分 → 取消：不弹（触碰标记表达不了，快照对比才行）
+    const p2 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._pickRate(3);
+    h.R._pickRate(8);
+    assert.equal(h.R._touched, true, '期间确实触碰过编辑（_touched 已置位）');
+    h.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h.calls.confirm.length, 1, '改回原值 = 无改动：不得弹确认');
+    assert.equal(await p2, false);
+    // ③ 标签「加了又删掉」同样是改回原值：不弹
+    const p3 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8, tags: ['神作'] });
+    h.R._toggleTag('科幻');
+    h.R._toggleTag('科幻');
+    h.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h.calls.confirm.length, 1, '标签改回原集合 = 无改动：不得弹');
+    assert.equal(await p3, false);
+    // ④ 已有评分 → 清除评分：是改动，弹
+    const p4 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._clearRate();
+    h.fire('#bgm-rate-cancel', 'click');
+    await tick();
+    assert.equal(h.calls.confirm.length, 2, '已有评分 → 清除评分 = 改动，应弹');
+    await h.settleConfirm(true);
+    assert.equal(await p4, false);
+    // ⑤ 未评分 → 拨到 0（清除评分）：视觉上仍是「未评分」，不算改动、不弹
+    const p5 = h.R.openRateDialog({ subjectId: '42', name: 'X' });
+    h.R._clearRate();
+    h.fire('#bgm-rate-cancel', 'click');
+    assert.equal(h.calls.confirm.length, 2, 'null/0 都是未评分：不视为改动');
+    assert.equal(await p5, false);
+});
+
+test('取消二次确认：编辑入口全覆盖（星级/清除评分/吐槽/标签/自定义草稿/颜文字）', async () => {
+    const h = loadBgmRateCancel();
+    const cases = [
+        ['星级点击', () => h.R._pickRate(6)],
+        ['清除评分', () => h.R._clearRate()],
+        ['吐槽打字', () => { h.vals['#bgm-rate-comment'] = '好看'; h.fire('#bgm-rate-comment', 'input'); }],
+        ['标签 toggle', () => h.R._toggleTag('科幻')],
+        ['自定义标签草稿（未回车）', () => { h.vals['#bgm-rate-tag-input'] = '科幻'; h.fire('#bgm-rate-tag-input', 'input'); }],
+        ['颜文字插入', () => h.R._insertKamoji('(￣▽￣)')],
+    ];
+    for (const [label, mutate] of cases) {
+        const before = h.calls.confirm.length;
+        const p = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8, tags: ['神作'] });
+        mutate();
+        h.fire('#bgm-rate-cancel', 'click');
+        await tick();
+        assert.equal(h.calls.confirm.length, before + 1, `${label}：应触发丢弃确认`);
+        await h.settleConfirm(true);
+        assert.equal(await p, false, `${label}：确认放弃后关闭`);
+        assert.equal(h.R._ctx, null, `${label}：会话已复位`);
+    }
+});
+
+test('取消二次确认：Esc（wrapped closeDialog）与点遮罩同一脏检查；确认在位不叠第二层', async () => {
+    const h = loadBgmRateCancel();
+    // ① Esc：无改动 → 直接关（wrapped 关闭入口保持无返回值契约）
+    const p1 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    assert.equal(h.context.closeDialog('bgmRateDialog'), undefined, 'wrapped 关闭入口无返回值');
+    assert.equal(h.calls.confirm.length, 0, '无改动不弹');
+    assert.equal(await p1, false);
+    // ② Esc：有改动 → 弹确认；确认在位时再按 Esc 不叠第二层（防递归死锁）
+    const p2 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._pickRate(4);
+    h.context.closeDialog('bgmRateDialog');
+    await tick();
+    assert.equal(h.calls.confirm.length, 1, 'Esc 同样按脏检查弹确认');
+    h.context.closeDialog('bgmRateDialog');
+    await tick();
+    assert.equal(h.calls.confirm.length, 1, '防重入：不叠第二层确认');
+    assert.ok(h.R._resolve, '确认在位期间会话不关');
+    let settled = false;
+    p2.then(() => { settled = true; });
+    await h.settleConfirm(false);            // 取消确认（等价于 Esc 关掉确认框）
+    assert.equal(settled, false, '取消确认后回到编辑态，会话继续挂起');
+    assert.ok(h.R._ctx, '对话框仍在编辑态');
+    h.R._close(false);                       // 收尾（走原始 closeDialog，不再弹）
+    assert.equal(await p2, false);
+    assert.equal(h.calls.confirm.length, 1, '收尾关闭不触发确认');
+    // ③ 点卡片内不关；点遮罩（无改动）直接关
+    const p3 = h.R.openRateDialog({ subjectId: '42', name: 'X' });
+    const inner = {};
+    h.fire('#bgmRateDialog', 'click', { target: inner, currentTarget: {} });
+    assert.ok(h.R._ctx, '卡片内点击不关闭');
+    assert.equal(h.calls.confirm.length, 1, '卡片内点击不触发确认');
+    const overlay = {};
+    h.fire('#bgmRateDialog', 'click', { target: overlay, currentTarget: overlay });
+    assert.equal(await p3, false, '点遮罩（无改动）直接关');
+    // ④ 点遮罩 + 有改动 → 弹确认，确认放弃后关闭
+    const p4 = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._toggleTag('科幻');
+    const overlay2 = {};
+    h.fire('#bgmRateDialog', 'click', { target: overlay2, currentTarget: overlay2 });
+    await tick();
+    assert.equal(h.calls.confirm.length, 2, '点遮罩同样按脏检查弹确认');
+    await h.settleConfirm(true);
+    assert.equal(await p4, false);
+});
+
+test('取消二次确认：提交成功关闭不弹（改完就提交不该再问一次）', async () => {
+    const h = loadBgmRateCancel();
+    const p = h.R.openRateDialog({ subjectId: '42', name: 'X', rate: 8 });
+    h.R._pickRate(3);
+    h.vals['#bgm-rate-comment'] = '好看';
+    h.fire('#bgm-rate-comment', 'input');
+    assert.equal(await h.R.submit(), true, '提交成功');
+    assert.equal(h.calls.confirm.length, 0, '提交路径不得弹「放弃编辑」确认');
+    assert.equal(await p, true, '提交成功 resolve(true) 一次到位');
+    assert.equal(h.R._ctx, null);
+});
+
+test('取消二次确认：接线形态（取消按钮/遮罩委托/closeDialog 包装统一转 requestClose）', () => {
+    const src = read('src/renderer/js/bgm-rate.js');
+    assert.match(src, /'#bgm-rate-cancel'\)\.on\('click'[\s\S]{0,120}?BgmRate\.requestClose\(\)/,
+        '取消按钮应走 requestClose（脏检查入口）');
+    assert.match(src, /'#bgmRateDialog'\)\.on\('click'/,
+        '点遮罩关闭应绑定在对话框根节点（overlay 本体）');
+    assert.match(src, /BgmRate\.requestClose\(\);\s*\n\s*return;/,
+        'wrapped closeDialog（Esc 全局派发）应转交 requestClose');
+    assert.match(src, /confirmDialog\('取消编辑会丢失本次填写的内容/,
+        '确认文案应表达「取消编辑会丢失本次填写内容」');
+    assert.ok(!/'#bgm-rate-cancel'\)\.on\('click'[\s\S]{0,120}?BgmRate\._close\(false\)/.test(src),
+        '取消按钮不得再直连 _close 绕过确认');
 });

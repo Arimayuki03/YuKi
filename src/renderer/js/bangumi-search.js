@@ -8,7 +8,7 @@
  *   详情页点 Bangumi 标签 → BangumiSearch.openWithTag(tag) → 切到本页签并以 tag: 过滤搜索。
  * 后端走 POST /kazumi/action do=kazumiBangumiSearchFilter（对齐 Kazumi buildBangumiSearchParams）。
  */
-/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, FavHub, Timeline, DetailSnap, Home, loadBlockWords, filterBlocked, onBlockWordsChange */
+/* global $, doAction, warnToast, showLoading, hideLoading, escHtml, bangumiCard, fitVodTitles, renderPagerBox, pageSizeOf, openDialog, closeDialog, App, FavHub, Timeline, DetailSnap, Home, loadBlockWords, filterBlocked, onBlockWordsChange, SearchHistory */
 
 // 对齐 Kazumi constants.dart defaultAnimeTags
 const BANGUMI_SEARCH_TAGS = [
@@ -203,6 +203,58 @@ const BANGUMI_SORT_LABELS = { heat: '热度', rank: '排名', score: '评分', m
 const BANGUMI_SEASON_LABELS = { 1: '冬季', 2: '春季', 3: '夏季', 4: '秋季' };
 const BANGUMI_SEARCH_PAGE_SIZE = 24; // 兜底值；实际取「搜索页每页条数」设置（默认 24）
 
+// 星期显示文案（1=周一 … 7=周日，与 detail.js _airWeekday 同口径）。
+// 只改显示：weekday 的取值/存储/请求参数仍是 1-7 数字（后端 weekday: 词元口径），
+// 已持久化在搜索框/存档里的旧条件不受影响。
+const BANGUMI_WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+/** 单个星期数字 → 「周X」；非法值返回空串（不猜、不默认周一）。 */
+function bgmWeekdayLabel(n) {
+    const i = parseInt(n, 10);
+    return (i >= 1 && i <= 7) ? BANGUMI_WEEKDAY_LABELS[i - 1] : '';
+}
+
+/** 星期列表 → 显示文案（分隔符沿用旧数值口径的逗号，只有数字换成「周X」）。 */
+function bgmWeekdaysText(list) {
+    return (list || []).map(bgmWeekdayLabel).filter(Boolean).join(',');
+}
+
+// ── 筛选区间硬限制（评分 1-10、排名 1-10000）────────────────────────────
+// 「空 = 不限」保留既有语义：空串（含 number 输入的 bad-input 态）解析为 null，
+// 该侧不参与请求参数；非空值一律夹取到边界，保证应用时不可能把 0/越界值发出去。
+const BGM_SCORE_LIMIT = { min: 1, max: 10, decimals: 1 };
+const BGM_RANK_LIMIT = { min: 1, max: 10000, decimals: 0 };
+
+/** 单侧边界：'' / 非法 → null（不限）；数值夹取到 [min,max] 并按 decimals 取整。 */
+function bgmClampBound(raw, limit) {
+    const s = (raw == null) ? '' : String(raw).trim();
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null; // 半截输入（bad-input 如 "1."）按空处理，不允许 NaN 流进参数
+    const p = Math.pow(10, limit.decimals);
+    return Math.round(Math.min(limit.max, Math.max(limit.min, n)) * p) / p;
+}
+
+/**
+ * 区间交叉约束（min ≤ max 恒成立）：编辑侧优先，另一侧被顶到同值。
+ * 任一侧为 null（不限）时不施加约束——「不限」按 ±∞ 处理。
+ * @param {'min'|'max'} edited 刚被编辑的一侧
+ */
+function bgmNormalizeRange(edited, min, max) {
+    if (min != null && max != null && min > max) {
+        if (edited === 'max') min = max;
+        else max = min;
+    }
+    return { min, max };
+}
+
+/** 区间提示文本（空态表示法）：'7 - 10' / '7 - 不限' / '不限'。 */
+function bgmRangeHint(min, max, fmt) {
+    const f = fmt || ((v) => (v == null ? '' : String(v)));
+    if (min == null && max == null) return '不限';
+    return `${min == null ? '不限' : f(min)} - ${max == null ? '不限' : f(max)}`;
+}
+
 /** 详情快照写入（纯优化路径，永不抛错）：DetailSnap/Home 任一缺席时静默跳过，
  *  不得在 openBangumiInfoPage 之前抛错把「打开详情」主流程打断。 */
 function _snapPutBgmSearch(site, id, $el) {
@@ -242,6 +294,10 @@ const BangumiSearch = {
             if (typeof loadBlockWords === 'function') loadBlockWords();
         }
         $('#bgm-search-go').on('click', () => this._submitFromInput());
+        // 搜索历史面板须先于下方回车绑定：键盘上下+回车要能先一步拦下回车（同元素先绑先跑）
+        if (typeof SearchHistory !== 'undefined' && SearchHistory.attach) {
+            SearchHistory.attach('#bgm-search-keyword', 'bangumi');
+        }
         $('#bgm-search-keyword').on('keydown', (e) => {
             if (e.key === 'Enter') { e.target.blur(); this._submitFromInput(); }
         });
@@ -284,6 +340,8 @@ const BangumiSearch = {
             warnToast('请输入关键字或选择筛选条件');
             return;
         }
+        // 搜索历史：只记用户真输入过的关键词（纯筛选条件没有「可点回的词」；输入过程不写盘）
+        if (raw && typeof SearchHistory !== 'undefined' && SearchHistory.record) SearchHistory.record(raw, 'bangumi');
         this.load(1);
     },
 
@@ -450,7 +508,10 @@ const BangumiSearch = {
         if (s.scoreRange && (s.scoreRange.min != null || s.scoreRange.max != null)) {
             chips.push(mk('score', '', `评分: ${bgmFmtNum(s.scoreRange.min)}..${bgmFmtNum(s.scoreRange.max)}`));
         }
-        if (s.weekdays && s.weekdays.length) chips.push(mk('weekday', '', `星期: ${s.weekdays.join(',')}`));
+        // 星期 chip 只换显示文案（周一…周日），删除仍走 kind='weekday'（data-value 为空）
+        if (s.weekdays && s.weekdays.length) {
+            chips.push(mk('weekday', '', `星期: ${bgmWeekdaysText(s.weekdays)}`));
+        }
         $('#bgm-search-chips').html(chips.join('')).toggle(chips.length > 0);
     },
 
@@ -523,36 +584,71 @@ const BangumiSearch = {
             if (this._draft.season) this._draft.dateRange = null;
             this._syncWorkbenchDate();
         });
-        dlg.on('change', '#bgm-date-start, #bgm-date-end', () => {
-            const start = $('#bgm-date-start').val();
-            const end = $('#bgm-date-end').val();
-            if (start && end) {
-                this._draft.dateRange = { start, end };
+        // input 事件回写：只回写「已解析出完整数字且与夹取结果不同」的一侧。
+        // 空串 / bad-input（用户正在打 "1." 这类半截小数）不回写，避免把小数点吃掉；
+        // 越界值立即回写夹取结果 → 硬限制在输入当下就可见。
+        const echoClamped = (sel, raw, want) => {
+            const s = String(raw == null ? '' : raw).trim();
+            if (!s || !Number.isFinite(Number(s)) || want == null) return;
+            if (Number(s) !== want) $(sel).val(String(want));
+        };
+        dlg.on('change', '#bgm-date-start, #bgm-date-end', (e) => {
+            // 起止必须同时有值才生效（既有语义）。只填一侧时对侧自动跟随（= 单日区间），
+            // 半截日期不再被静默丢弃；显式日期一旦触碰即优先于季度（清季度），
+            // 反之选季度会清空日期（见上方季度处理器），两者不会互相覆盖出错。
+            const edited = e.currentTarget.id === 'bgm-date-start' ? 'start' : 'end';
+            const r = this._readDateFromDom(edited);
+            this._draft.dateRange = r;
+            if (r) {
                 this._draft.season = '';
                 $('#bgm-season-select').val('');
             }
+            this._syncWorkbenchDate();
         });
         dlg.on('change', '#bgm-score-toggle', (e) => {
             this._draft.scoreRange = e.currentTarget.checked ? { min: 7, max: 10 } : null;
             this._syncWorkbenchScore();
         });
-        dlg.on('input', '#bgm-score-min, #bgm-score-max', () => {
-            let min = parseFloat($('#bgm-score-min').val());
-            let max = parseFloat($('#bgm-score-max').val());
-            if (min > max) { const t = min; min = max; max = t; }
-            this._draft.scoreRange = { min, max };
-            $('#bgm-score-vals').text(`${bgmFmtNum(min)} - ${bgmFmtNum(max)}`);
+        dlg.on('input', '#bgm-score-min, #bgm-score-max', (e) => {
+            const edited = e.currentTarget.id === 'bgm-score-min' ? 'min' : 'max';
+            const rawMin = $('#bgm-score-min').val();
+            const rawMax = $('#bgm-score-max').val();
+            const r = this._readScoreFromDom(edited); // 与控件同源，避免两套夹取逻辑漂移
+            this._draft.scoreRange = r;
+            echoClamped('#bgm-score-min', rawMin, r.min);
+            echoClamped('#bgm-score-max', rawMax, r.max);
+            $('#bgm-score-vals').text(bgmRangeHint(r.min, r.max, bgmFmtNum));
+        });
+        dlg.on('change', '#bgm-score-min, #bgm-score-max', (e) => {
+            // change（失焦/回车）时最终夹取并回写两侧：半截/空态在这里收敛
+            const edited = e.currentTarget.id === 'bgm-score-min' ? 'min' : 'max';
+            const r = this._readScoreFromDom(edited);
+            this._draft.scoreRange = r;
+            $('#bgm-score-min').val(r.min != null ? String(r.min) : '');
+            $('#bgm-score-max').val(r.max != null ? String(r.max) : '');
+            $('#bgm-score-vals').text(bgmRangeHint(r.min, r.max, bgmFmtNum));
         });
         dlg.on('change', '#bgm-rank-toggle', (e) => {
             this._draft.rankRange = e.currentTarget.checked ? { min: 1, max: 5000 } : null;
             this._syncWorkbenchRank();
         });
-        dlg.on('input', '#bgm-rank-min, #bgm-rank-max', () => {
-            let min = parseInt($('#bgm-rank-min').val(), 10);
-            let max = parseInt($('#bgm-rank-max').val(), 10);
-            if (min > max) { const t = min; min = max; max = t; }
-            this._draft.rankRange = { min, max };
-            $('#bgm-rank-vals').text(`${min} - ${max}`);
+        dlg.on('input', '#bgm-rank-min, #bgm-rank-max', (e) => {
+            const edited = e.currentTarget.id === 'bgm-rank-min' ? 'min' : 'max';
+            const rawMin = $('#bgm-rank-min').val();
+            const rawMax = $('#bgm-rank-max').val();
+            const r = this._readRankFromDom(edited);
+            this._draft.rankRange = r;
+            echoClamped('#bgm-rank-min', rawMin, r.min);
+            echoClamped('#bgm-rank-max', rawMax, r.max);
+            $('#bgm-rank-vals').text(bgmRangeHint(r.min, r.max));
+        });
+        dlg.on('change', '#bgm-rank-min, #bgm-rank-max', (e) => {
+            const edited = e.currentTarget.id === 'bgm-rank-min' ? 'min' : 'max';
+            const r = this._readRankFromDom(edited);
+            this._draft.rankRange = r;
+            $('#bgm-rank-min').val(r.min != null ? String(r.min) : '');
+            $('#bgm-rank-max').val(r.max != null ? String(r.max) : '');
+            $('#bgm-rank-vals').text(bgmRangeHint(r.min, r.max));
         });
         dlg.on('click', '.bgm-weekday-chip', (e) => {
             const wd = parseInt($(e.currentTarget).data('weekday'), 10);
@@ -567,6 +663,9 @@ const BangumiSearch = {
             this._renderWorkbench();
         });
         dlg.on('click', '#bgm-filter-apply', () => {
+            // 应用前从控件再读一次并夹取：即使用户停在未提交的编辑态（bad-input /
+            // 越界文本），也不可能把非法值写进筛选状态 → 请求参数恒合法
+            this._commitDraftFromDom();
             this._state = Object.assign({}, this._draft);
             this._setInputFromState();
             closeDialog('bangumiFilterDialog');
@@ -611,6 +710,46 @@ const BangumiSearch = {
         });
     },
 
+    /** 从控件读取评分范围：夹取到 1-10 + 交叉约束。 */
+    _readScoreFromDom(edited) {
+        return bgmNormalizeRange(edited,
+            bgmClampBound($('#bgm-score-min').val(), BGM_SCORE_LIMIT),
+            bgmClampBound($('#bgm-score-max').val(), BGM_SCORE_LIMIT));
+    },
+
+    /** 从控件读取排名范围：夹取到 1-10000（1 = 最靠前，语义不反转）+ 交叉约束。 */
+    _readRankFromDom(edited) {
+        return bgmNormalizeRange(edited,
+            bgmClampBound($('#bgm-rank-min').val(), BGM_RANK_LIMIT),
+            bgmClampBound($('#bgm-rank-max').val(), BGM_RANK_LIMIT));
+    },
+
+    /** 从控件读取日期区间：仅采纳合法 YYYY-MM-DD；两侧都空 → null（不限日期）。
+     *  只填一侧 → 对侧跟随编辑值（单日区间）；起止反序 → 编辑侧优先顶另一侧。 */
+    _readDateFromDom(edited) {
+        const iso = /^\d{4}-\d{2}-\d{2}$/;
+        let start = String($('#bgm-date-start').val() || '').trim();
+        let end = String($('#bgm-date-end').val() || '').trim();
+        if (start && !iso.test(start)) start = '';
+        if (end && !iso.test(end)) end = '';
+        if (!start && !end) return null;
+        if (!start) start = end;
+        else if (!end) end = start;
+        if (start > end) {
+            if (edited === 'end') start = end;
+            else end = start;
+        }
+        return { start, end };
+    },
+
+    /** 应用前把三个区间控件重新读入草稿（夹取 + 交叉约束）：开关关闭 = 不启用。 */
+    _commitDraftFromDom() {
+        const d = this._draft;
+        d.scoreRange = $('#bgm-score-toggle').prop('checked') ? this._readScoreFromDom('min') : null;
+        d.rankRange = $('#bgm-rank-toggle').prop('checked') ? this._readRankFromDom('min') : null;
+        d.dateRange = this._readDateFromDom('start');
+    },
+
     _syncWorkbenchTags() {
         const d = this._draft;
         const dlg = $('#bangumiFilterDialog');
@@ -625,8 +764,14 @@ const BangumiSearch = {
 
     _syncWorkbenchDate() {
         const d = this._draft;
-        $('#bgm-date-start').val(d.dateRange ? d.dateRange.start : '');
-        $('#bgm-date-end').val(d.dateRange ? d.dateRange.end : '');
+        const start = d.dateRange ? d.dateRange.start : '';
+        const end = d.dateRange ? d.dateRange.end : '';
+        $('#bgm-date-start').val(start);
+        $('#bgm-date-end').val(end);
+        // 原生选择器的下限/上限联动（起止先后约束在 UI 层可见）：
+        // 结束日期不可早于开始日期、开始日期不可晚于结束日期
+        $('#bgm-date-start').attr('max', end || null);
+        $('#bgm-date-end').attr('min', start || null);
     },
 
     _syncWorkbenchScore() {
@@ -634,11 +779,16 @@ const BangumiSearch = {
         const on = !!d.scoreRange;
         $('#bgm-score-toggle').prop('checked', on);
         $('#bgm-score-range-row').toggle(on);
-        if (on) {
-            $('#bgm-score-min').val(d.scoreRange.min != null ? d.scoreRange.min : 0);
-            $('#bgm-score-max').val(d.scoreRange.max != null ? d.scoreRange.max : 10);
-            $('#bgm-score-vals').text(`${bgmFmtNum(d.scoreRange.min)} - ${bgmFmtNum(d.scoreRange.max)}`);
-        }
+        if (!on) return;
+        // 草稿可能来自手输语法（如 score:0..15）：显示前按硬限制夹取并回写草稿，
+        // 避免「控件显示一套、应用生效另一套」。反序时以最低值为准顶高最高值。
+        const r = bgmNormalizeRange('min',
+            bgmClampBound(d.scoreRange.min == null ? '' : d.scoreRange.min, BGM_SCORE_LIMIT),
+            bgmClampBound(d.scoreRange.max == null ? '' : d.scoreRange.max, BGM_SCORE_LIMIT));
+        d.scoreRange = { min: r.min, max: r.max };
+        $('#bgm-score-min').val(r.min != null ? String(r.min) : '');
+        $('#bgm-score-max').val(r.max != null ? String(r.max) : '');
+        $('#bgm-score-vals').text(bgmRangeHint(r.min, r.max, bgmFmtNum));
     },
 
     _syncWorkbenchRank() {
@@ -646,11 +796,14 @@ const BangumiSearch = {
         const on = !!d.rankRange;
         $('#bgm-rank-toggle').prop('checked', on);
         $('#bgm-rank-range-row').toggle(on);
-        if (on) {
-            $('#bgm-rank-min').val(d.rankRange.min != null ? d.rankRange.min : 1);
-            $('#bgm-rank-max').val(d.rankRange.max != null ? d.rankRange.max : 5000);
-            $('#bgm-rank-vals').text(`${d.rankRange.min} - ${d.rankRange.max}`);
-        }
+        if (!on) return;
+        const r = bgmNormalizeRange('min',
+            bgmClampBound(d.rankRange.min == null ? '' : d.rankRange.min, BGM_RANK_LIMIT),
+            bgmClampBound(d.rankRange.max == null ? '' : d.rankRange.max, BGM_RANK_LIMIT));
+        d.rankRange = { min: r.min, max: r.max };
+        $('#bgm-rank-min').val(r.min != null ? String(r.min) : '');
+        $('#bgm-rank-max').val(r.max != null ? String(r.max) : '');
+        $('#bgm-rank-vals').text(bgmRangeHint(r.min, r.max));
     },
 };
 

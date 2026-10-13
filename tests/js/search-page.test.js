@@ -322,7 +322,7 @@ test('每页条数取自 pageSizeSearch 设置（T39：搜索页单独设置而�
     assert.equal((grid.match(/class="vod-card"/g) || []).length, 10);
 });
 
-test('关键词持久化到 UIState 的按页签 words（切页/重启回填搜索框）', async () => {
+test('关键词持久化到 UIState 的按页签 words（切页保留；输入框不再回填——回填已由搜索历史面板取代）', async () => {
     const h = loadSearch();
     const page = aggPage(h, '  持久化词  ');
     await page.run();
