@@ -204,14 +204,19 @@ test('未知 token → 404；活令牌下越界/畸形路径 → 空清单软响
     proxy.close();
 });
 
-test('kazumi 队列：预热仅轻量页面解析产出规则头（零抓流），拉取时才现场抓流', async () => {
+test('kazumi 队列：预热仅轻量页面解析（零抓流）；条目带抓流头时改走管道转发，不再 302 裸连', async () => {
+    const up = await makeUpstream([
+        { match: '/ep.m3u8', contentType: 'application/vnd.apple.mpegurl', body: '#EXTM3U\n#EXTINF:4,\n/seg1.ts\n' },
+        { match: '/seg1.ts', body: 'TSBYTES' },
+    ]);
     let captures = 0;
     const proxy = new PlaylistProxy({
         getBackend: () => ({ base: 'http://backend.test', token: 't' }),
         fetchFn: async () => ({ json: async () => ({ pageUrl: 'http://page/play', referer: 'http://page/' }) }),
         captureDirect: async () => {
             captures += 1;
-            return { ok: true, url: 'http://cdn/ep.m3u8', header: {} };
+            // 抓流头 = 隐藏窗口那次真实请求的头（Referer/Cookie/UA 都可能只在这里才有）
+            return { ok: true, url: `http://127.0.0.1:${up.port}/ep.m3u8`, header: { Cookie: 'sid=1' } };
         },
     });
     const reg = await proxy.register({
@@ -224,9 +229,47 @@ test('kazumi 队列：预热仅轻量页面解析产出规则头（零抓流）�
     assert.equal(proxy.getSessionHeaders(reg.token).Referer, 'http://page/');
     // 注册路径绝不抓流（隐藏窗口抓流 15s+ 曾致渲染层竞速超时"一直加载中"）
     assert.equal(captures, 0);
-    // 条目打开：现场抓流一次 → 命中缓存 → 302 直链
+    // 条目打开：现场抓流一次；条目带抓流头（Referer+Cookie）→ 管道转发，上游必须收到这些头。
+    // 旧实现恒走 302 直连 → 播放器裸连 CDN、抓流头整包丢失 → 需要防盗链头的 CDN 直接失败
+    // （实测用户机上 taobao CDN 条目因此被拒 HTTP 400）。
+    const rsp = await reqFull(reg.entries[0].url);
+    assert.equal(rsp.status, 200, '带抓流头的 kazumi 条目必须经管道转发而不是 302 裸连');
+    assert.equal(captures, 1);
+    const seen = up.seen[up.seen.length - 1];
+    assert.equal(seen.path, '/ep.m3u8');
+    assert.equal(seen.headers.referer, 'http://page/', '规则 Referer 必须到达上游');
+    assert.equal(seen.headers.cookie, 'sid=1', '条目级抓流 Cookie 必须到达上游（同域，不得被误剥）');
+    // 清单被重写成分片走 /seg 的形态；该端点原本只放行 sess.pipe 会话——kazumi 内置 mpv
+    // 会话 pipe=false，靠 pipedOnce 放行。若漏了这一步，表现是"清单能取、一分片就 404 断流"。
+    const segLine = rsp.body.split('\n').map((l) => l.trim()).find((l) => l.includes('/seg/'));
+    assert.ok(segLine, `清单应被重写为 /seg 分片行，实际：${rsp.body}`);
+    const rSeg = await reqFull(segLine);
+    assert.equal(rSeg.status, 200, '/seg 分片必须被放行（pipedOnce 门控）');
+    assert.equal(rSeg.body, 'TSBYTES');
+    assert.equal(up.seen[up.seen.length - 1].path, '/seg1.ts');
+    assert.equal(up.seen[up.seen.length - 1].headers.cookie, 'sid=1', '分片请求同样带条目级头');
+    await proxy.close();
+    await up.close();
+});
+
+test('kazumi 队列：条目完全无头（规则也不给头）→ 维持 302 直连快路径', async () => {
+    let captures = 0;
+    const proxy = new PlaylistProxy({
+        getBackend: () => ({ base: 'http://backend.test', token: 't' }),
+        // 规则不给头（用户机上 16/16 条规则的 userAgent、14/16 的 referer 就是空的）
+        fetchFn: async () => ({ json: async () => ({ pageUrl: 'http://page/play' }) }),
+        captureDirect: async () => {
+            captures += 1;
+            return { ok: true, url: 'http://cdn/ep.m3u8', header: {} };
+        },
+    });
+    const reg = await proxy.register({
+        kind: 'kazumi', site: 'kazumi:demo', pluginName: 'demo',
+        eps: [{ id: 'p1', name: '第01集' }], start: 0,
+    });
+    assert.ok(reg.ok, `register 失败：${reg.reason}`);
     const rsp = await req(`${reg.entries[0].url}`);
-    assert.equal(rsp.status, 302);
+    assert.equal(rsp.status, 302, '无头条目不得引入管道：保持 302 的零带宽/时长体验');
     assert.equal(rsp.location, 'http://cdn/ep.m3u8');
     assert.equal(captures, 1);
     proxy.close();

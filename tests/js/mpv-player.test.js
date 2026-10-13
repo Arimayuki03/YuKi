@@ -288,6 +288,69 @@ test('file-loaded 续播守卫：读 time-pos 期间会话已切换时不再对�
     assert.deepEqual(seeks, [], '旧会话的续播 seek 不得落在新会话头上');
 });
 
+// ---------------------------------------------------------------- 列表形状自检
+
+// 背景（用户实测回归）：mpv.conf 的 autocreate-playlist 会把「清单所在目录」里同扩展名的
+// 文件插到播放列表最前面，12 集清单变成 13 条、playlist-pos 整体 +1，集名/进度记账全跟着
+// 错，且完全无声。清单已移进独占目录（见 mpv-player.playlistDir），这里再留一道自检告警。
+test('file-loaded 列表形状自检：playlist-count 与交付条数不符时告警，一致则静默且每会话只查一次', async () => {
+    const mk = (count) => {
+        const p = Object.create(MpvPlayer.prototype);
+        p._pending = new Map();
+        p.command = (...args) => (args[0] === 'get_property' && args[1] === 'playlist-pos')
+            ? Promise.resolve(0) : Promise.resolve();
+        const state = { queries: 0 };
+        p.getProperty = (name) => {
+            if (name !== 'playlist-count') return Promise.resolve(null);
+            state.queries += 1;
+            return Promise.resolve(count);
+        };
+        p._activeSession = {
+            id: 70, ready: false, nativeQueue: true, expectedLen: 12, lenChecked: false,
+            itemStartMs: Date.now(), pendingSeekSec: null, queueIdx: 0,
+        };
+        return { p, state };
+    };
+    const warns = [];
+    const orig = console.warn;
+    console.warn = (...a) => warns.push(a.join(' '));
+    try {
+        // 列表被改写：12 集变 13 条（残留清单/同目录同扩展名文件被 mpv 并入）
+        const bad = mk(13);
+        bad.p._onEvent({ event: 'file-loaded' });
+        await new Promise((r) => setImmediate(r));
+        assert.equal(warns.length, 1, '条数不符必须告警（此前只能靠肉眼发现集数不对）');
+        assert.match(warns[0], /playlist-count=13/);
+        assert.match(warns[0], /autocreate-playlist/, '告警须点名最可能的成因');
+        // 原生队列逐集 file-loaded：每会话只查一次属性、不重复刷告警
+        bad.p._onEvent({ event: 'file-loaded' });
+        await new Promise((r) => setImmediate(r));
+        assert.equal(bad.state.queries, 1, '每会话只查一次 playlist-count');
+        assert.equal(warns.length, 1, '同一会话不重复告警');
+        // 条数一致：静默
+        const ok = mk(12);
+        ok.p._onEvent({ event: 'file-loaded' });
+        await new Promise((r) => setImmediate(r));
+        assert.equal(warns.length, 1, '条数一致不得告警');
+    } finally {
+        console.warn = orig;
+    }
+});
+
+// 单集会话不查：用户单文件播放时 mpv 的 autocreate-playlist 本来就会把目录内兄弟文件
+// 排队（用户自己的配置语义，如 B 站番剧「播一集整目录排队」），不是异常，不能刷告警。
+test('file-loaded 列表形状自检：单集会话不查 playlist-count（autocreate 于单文件是正常语义）', async () => {
+    const p = Object.create(MpvPlayer.prototype);
+    p._pending = new Map();
+    p.command = () => Promise.resolve(0);
+    let queries = 0;
+    p.getProperty = (name) => { if (name === 'playlist-count') queries += 1; return Promise.resolve(5); };
+    p._activeSession = { id: 71, ready: false, nativeQueue: false, expectedLen: 1, lenChecked: false, itemStartMs: Date.now() };
+    p._onEvent({ event: 'file-loaded' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(queries, 0, '非原生队列不做列表形状自检');
+});
+
 // ---------------------------------------------------------------- 真正起播确认
 
 test('waitForReady(): 收到 file-loaded/ready 事件后返回成功', async () => {
@@ -1009,4 +1072,65 @@ test('extractErrorReason(): 有其它模块错误行时丢弃 ytdl 噪音行', (
     const text = MpvPlayer.extractErrorReason(MPV_YTDL_SPAM_WITH_DEMUX);
     assert.doesNotMatch(text, /ytdl_hook|youtube-dl/);
     assert.match(text, /DEMUXER_ERROR_NO_VALID_DATA/);
+});
+
+// ------------------------------------------------------- curl HTTP/2 分帧故障特征
+//
+// 外置 curl 版 mpv（mpv.lite 等）对部分 CDN 的边缘节点起播必败：curl 经 ALPN 协商出
+// HTTP/2，服务器却把分帧搞坏。这两个纯函数是 index.js 兜底重试的判据——命中 h2 特征才
+// 带 --curl-http-version=1.1 重试；重试被 mpv 判为未知选项时据此收回注入。判定必须
+// 精确：普通 [curl] 连接失败不属于该故障，换 1.1 也救不了，不该触发重试。
+test('isHttp2StreamFailure(): 命中 curl HTTP/2 分帧故障（用户实报原文）', () => {
+    // index.js 展示给用户的错误串形态：extractErrorReason 以 ｜ 拼接关键行
+    const real = '[ 0.110][e][curl] error: Stream error in the HTTP/2 framing layer '
+        + '｜ [ 0.110][e][stream] Failed to open https://v.lzcdn31.com/a/index.m3u8?sign=x';
+    assert.equal(MpvPlayer.isHttp2StreamFailure(real), true);
+    // 单行形态（stderr 尾部直取时没有拼接符）
+    assert.equal(MpvPlayer.isHttp2StreamFailure(
+        '[ 0.110][e][curl] error: Stream error in the HTTP/2 framing layer'), true);
+    // 只给 "HTTP/2 framing layer" 也算（curl 版本措辞可能带前缀差异）
+    assert.equal(MpvPlayer.isHttp2StreamFailure('error: HTTP/2 framing layer broken'), true);
+});
+
+test('isHttp2StreamFailure(): 非 h2 故障与空输入一律不命中（避免无谓重试）', () => {
+    assert.equal(MpvPlayer.isHttp2StreamFailure(''), false);
+    assert.equal(MpvPlayer.isHttp2StreamFailure(null), false);
+    assert.equal(MpvPlayer.isHttp2StreamFailure(undefined), false);
+    // 连接类失败：换 HTTP/1.1 救不了，不该触发重试
+    assert.equal(MpvPlayer.isHttp2StreamFailure('[e][curl] error: Failed to connect to x port 443'), false);
+    assert.equal(MpvPlayer.isHttp2StreamFailure('[e][stream] Failed to open https://x/a.m3u8'), false);
+    assert.equal(MpvPlayer.isHttp2StreamFailure('HTTP error 403 Forbidden'), false);
+    // 提到了 HTTP/2 但不是分帧故障（例如仅协商信息）
+    assert.equal(MpvPlayer.isHttp2StreamFailure('[v][curl] Using HTTP/2'), false);
+});
+
+test('isUnknownOptionFailure(): 识别 mpv 拒收未知命令行选项（收回注入的判据）', () => {
+    assert.equal(MpvPlayer.isUnknownOptionFailure(
+        'Error parsing option curl-http-version (option not found)\nExiting... (Fatal error)'), true);
+    assert.equal(MpvPlayer.isUnknownOptionFailure('mpv: unknown option curl-http-version'), true);
+    assert.equal(MpvPlayer.isUnknownOptionFailure('[e][stream] Failed to open https://x/a.m3u8'), false);
+    assert.equal(MpvPlayer.isUnknownOptionFailure(''), false);
+    assert.equal(MpvPlayer.isUnknownOptionFailure(null), false);
+});
+
+// index.js 的 h2 兜底重试是主进程闭包逻辑（依赖 Electron app / settings / mpv 单例，
+// 无法直接单测），按仓库既有做法用源码断言锁定契约（同本文件首例 writeMpvAssets）。
+// 实测依据（v0.41.0-1050 + --no-terminal）：未知命令行选项的致命错误既不进 --log-file
+// 也不进 stderr，所以"靠报错文本回收"只能是尽力而为——真正的护栏是"每个二进制每次运行
+// 只盲试一次"，这两点都必须在源码里成立，否则用户会陷入反复弹窗重试。
+test('yuki:play HTTP/2 兜底契约：特征门控 / forceHttp11 重播 / 按二进制路径持久化 / 每次运行只盲试一次', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+    // 只在 curl h2 分帧特征命中时才重试（普通 [curl] 连接失败换 1.1 也救不了）
+    assert.ok(src.includes('MpvPlayer.isHttp2StreamFailure(r.error)'), '重试必须以 h2 特征为门控');
+    // 重试复用同一份 episodes/参数并经起播闭包注入 forceHttp11
+    assert.ok(src.includes('const launch = (extra) => {'), '起播须经统一闭包，避免重试时参数漂移');
+    assert.ok(src.includes('launch({ forceHttp11: true })'), '重试须注入 forceHttp11');
+    // 成功即持久化，且按二进制路径绑定（换播放器/重装后旧结论自动失效）
+    assert.ok(src.includes("settings.set('mpvForceHttp11', { path: String(mpv.binary || ''), at: Date.now() })"),
+        '成功后持久化 mpvForceHttp11 并绑定二进制路径');
+    assert.ok(src.includes("String(v.path || '') === cur"), '读取时校验路径一致，换播放器自动失效');
+    // 已有结论时首次起播就直接带 1.1，不再重演"先失败再重试"
+    assert.ok(src.includes('mpvHttp11Forced() ? { forceHttp11: true } : null'), '已有结论时首次起播即注入');
+    // --no-terminal 吞掉未知选项报错（实测）→ 必须靠"每二进制每次运行只盲试一次"兜底
+    assert.ok(src.includes("mpvHttp11RetriedFor !== String(mpv.binary || '')"), '必须以每二进制一次为护栏');
 });

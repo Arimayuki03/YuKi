@@ -233,6 +233,41 @@ function loadBgmRate(overrides = {}) {
 
 describe('player', () => {
 
+    test('_mpvFailure：把主进程自动修复结论（hint）拼进弹窗文案，且不吞掉原始原因', () => {
+        const { player, sink } = loadPlayer();
+        const r = player._mpvFailure({
+            reason: 'mpv-exited-before-playback',
+            error: '[e][curl] Stream error in the HTTP/2 framing layer',
+            url: 'https://cdn.test/a.m3u8',
+            hint: '已自动改用 HTTP/1.1 兼容模式重试，仍未成功',
+        }, { title: '片名' });
+        assert.equal(r.ok, false);
+        const note = sink.texts.filter((t) => t.sel === '#player-note').map((t) => t.v).join(' ');
+        // hint 是"应用已经试过什么"的说明：没有它用户只会看到干巴巴的失败
+        assert.match(note, /已自动改用 HTTP\/1\.1 兼容模式重试，仍未成功/);
+        // 原始原因（mpv stderr/日志提取）必须保留——hint 是补充说明而非替换
+        assert.match(note, /HTTP\/2 framing layer/);
+    });
+
+    test('_mpvFailure：无 hint 时不产生多余括号（既有文案不变）', () => {
+        const { player, sink } = loadPlayer();
+        player._mpvFailure({ reason: 'mpv-exited', url: 'https://cdn.test/a.m3u8' }, { title: '片名' });
+        const note = sink.texts.filter((t) => t.sel === '#player-note').map((t) => t.v).join(' ');
+        assert.doesNotMatch(note, /（）/, '空 hint 不得拼出空括号');
+    });
+
+    test('_mpvToast：自动修复成功时在 toast 里说明原因（HTTP/1.1 / 去掉规则头）', () => {
+        const { player, sink } = loadPlayer();
+        player._mpvToast({ ok: true, autoHttp11: true, sessionId: 1 }, '已在 mpv 窗口播放');
+        player._mpvToast({ ok: true, headerless: true, sessionId: 2 }, '已在 mpv 窗口播放');
+        player._mpvToast({ ok: true, sessionId: 3 }, '已在 mpv 窗口播放');
+        const joined = sink.toasts.join(' | ');
+        assert.match(joined, /已自动切换 HTTP\/1\.1 兼容模式/);
+        assert.match(joined, /已自动去掉 Referer\/UA/);
+        // 普通成功不附加任何修复说明（避免每次成功都多一段解释）
+        assert.equal(sink.toasts[sink.toasts.length - 1], '已在 mpv 窗口播放');
+    });
+
     test('_adSkip：AdSkip 缺失（单测只加载 player.js）返回 null，OP/ED 入口整体禁用', () => {
         const { ctx } = loadPlayer({ withAdSkip: false });
         assert.equal(ctx.__adSkip(), null, 'AdSkip 未定义时必须返回 null 而非抛错');

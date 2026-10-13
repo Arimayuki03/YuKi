@@ -113,7 +113,7 @@ const { ensureFfmpeg, isEnsuring: ffmpegEnsuring, thumb: ffmpegThumb, urlThumb: 
 const Settings = require('./settings');
 const PushServer = require('./push-server');
 const ParseWindow = require('./parse-window');
-const { probeMedia, isLocalProxyStreamUrl } = require('./media-probe');
+const { probeMedia, mergeHeaders, isLocalProxyStreamUrl } = require('./media-probe');
 const SyncplayClient = require('./syncplay-client');
 const DlnaCaster = require('./dlna-caster');
 const { RotatingLogWriter, installConsoleLogger, readRecentLogs, clearLogs, setLogLevel, startScheduledLogCleanup, stopScheduledLogCleanup } = require('./logger');
@@ -632,6 +632,34 @@ function raceWithTimeout(promise, timeoutMs, fallback) {
     ]);
 }
 
+// ---------------------------------------------------- mpv HTTP/1.1 兼容兜底状态
+//
+// curl 版 mpv（用户指定的外部 mpv，如 mpv.lite）对部分 CDN 的边缘节点起播必败：
+// curl 经 ALPN 协商出 HTTP/2，服务器/中间设备却把分帧搞坏 → `[e][curl] Stream error
+// in the HTTP/2 framing layer` + `Failed to open <url>`；同一地址换 HTTP/1.1 可播
+// （内置 vendor mpv 无 curl 后端，走 ffmpeg 的 1.1 实现，故只在换外部播放器后暴露）。
+// 两条状态：
+// - mpvHttp11Forced()：是否已确证「当前这份二进制」接受 --curl-http-version 且需要带上
+//   它。结论持久化在 settings.mpvForceHttp11 并**按二进制路径绑定**——用户换播放器/重新
+//   指定后旧结论自动失效，绝不把不支持的选项注入到新二进制（mpv 遇到未知命令行选项是
+//   致命错误，会整场起播失败）。
+// - mpvHttp11RetriedFor：本次运行内已经盲试过 HTTP/1.1 的二进制。**这是真正的护栏**：
+//   实测（mpv v0.41.0-1050 + 应用固定的 --no-terminal）未知命令行选项的致命错误既不进
+//   --log-file 也不进 stderr（mpv 在日志接管之后才发现该选项，而终端输出已被 --no-terminal
+//   关掉），所以"靠报错文本认出被拒收"只能尽力而为，不能当唯一防线。改为每个二进制每次
+//   运行最多盲试一次：不支持的构建最多多闪一次窗口，不会反复试探。
+//   该盲试在实践中是安全的：触发条件是 curl 的 h2 分帧报错，而它只可能来自带 curl 流
+//   后端的构建——这组 --curl-* 选项与流后端同源引入，有后端就有选项。
+let mpvHttp11RetriedFor = '';
+
+function mpvHttp11Forced() {
+    try {
+        const v = settings.get('mpvForceHttp11');
+        const cur = String(mpv.binary || '');
+        return !!(v && cur && String(v.path || '') === cur);
+    } catch (e) { return false; }
+}
+
 async function verifyMpvStart(result, timeoutMs = MPV_START_TIMEOUT_MS) {
     if (!result || !result.ok) return result || { ok: false, reason: 'mpv-start-failed' };
     const expectedGen = (typeof result.controlGen === 'number') ? result.controlGen : null;
@@ -1111,17 +1139,22 @@ app.whenReady().then(() => {
             const a4kInitial = anime4kMenuModeFromSettings();
             const scriptDir = path.join(app.getPath('userData'), 'mpv-scripts');
             fs.mkdirSync(scriptDir, { recursive: true });
-            // 清理全部遗留的临时清单/抓流产物（启动时尚无播放会话，可无条件删除）。
-            // 不保留、不复用——残留文件一旦被当作清单展开，会导致集数虚增与匹配错位。
+            // 清理抓流产物（启动时尚无播放会话，可无条件删除）。不保留、不复用——
+            // 残留文件一旦被当作清单展开，会导致集数虚增与匹配错位（kazumi 抓流产物
+            // 是 kazumi_stream_*.m3u8，与清单同类，见下）。
             try {
                 const tmpDir = os.tmpdir();
                 for (const f of fs.readdirSync(tmpDir)) {
-                    if (/^yuki-playlist-\d+-\d+\.m3u8$/.test(f)
-                        || /^kazumi_stream_\d+\.m3u8$/.test(f)) {
+                    if (/^kazumi_stream_\d+\.m3u8$/.test(f)) {
                         try { fs.rmSync(path.join(tmpDir, f), { force: true }); } catch (e) { /* 单个失败跳过 */ }
                     }
                 }
             } catch (e) { /* 清扫失败不影响播放 */ }
+            // 播放清单目录（现行布局的会话子目录 + 旧版遗留在临时目录根的清单文件）：
+            // 策略集中在 MpvPlayer.cleanPlaylists——清单必须独占目录，同目录任何同扩展名
+            // 残留都会在用户 mpv.conf 开 autocreate-playlist 时被 mpv 并入播放列表
+            // （集数虚增 + playlist-pos 整体错位，见 playlistDir 注释）。
+            MpvPlayer.cleanPlaylists();
             const lua = [
                 // 文件名即 script-binding 命名空间：mpv 对脚本名做非字母数字→_ 归一化，
                 // hints.lua → hints/，与 mpv-menu-conf.js 的 hints/a4k-<mode> 引用严格对应
@@ -1347,6 +1380,9 @@ app.whenReady().then(() => {
         return raceWithTimeout((async () => {
         let meta = (payload && payload.meta) || {};
         let requestedUrl = String(payload && payload.url || '');
+        // 规则头（Referer/UA）被 CDN 拒收后是否已降级为「无名头」：探测段与起播段共用
+        // （见探测段注释——这是 Kazumi 源"能解析却播不了"的主要形态）
+        let headersDropped = false;
         // L-1：URL 协议白名单——本地文件播放走 yuki:dl-play / yuki:file-push 专用通道，
         // 此处仅放行网络协议，拒绝 file://、edl:// 等可直接触碰本地文件的 scheme
         // （渲染层 playUrl 调用点已确认均为网络直链：站点剧集/直播源/直链播放）
@@ -1373,14 +1409,35 @@ app.whenReady().then(() => {
                     headers: meta.header, skipProbe: false,
                     signal: controller.signal, timeoutMs: 8000,
                 });
-                if (!probe.ok) {
-                    return withPlayerTrace({ ok: false, reason: `media-probe-${probe.reason}`,
-                        url: probe.finalUrl || requestedUrl, status: probe.status || 0,
+                // 规则头被 CDN 拒收 → 同一地址「不带头」往往反而是放行的：Kazumi 规则给的
+                // Referer 指向源站，而抓到的流常在另一个 CDN 上，带域外 Referer 被防盗链拦成
+                // 403 / 200+HTML 风控页；用户实报的形态正是「解析成功却播不了，把地址复制去
+                // 直链播放（不带头）却正常」——直链播放与 Kazumi 链路的唯一差别就是这组头。
+                // 故探测失败时先不判死刑：以无名头再探一次，通过就按无名头继续（headersDropped
+                // 同时管住下面的 mpv 起播段，避免又把头带回去）。
+                let effective = probe;
+                const hadHeader = Object.keys(mergeHeaders(meta.header)).length > 0;
+                if (!probe.ok && hadHeader) {
+                    const headerless = await probeMedia(requestedUrl, {
+                        headers: null, skipProbe: false, signal: controller.signal, timeoutMs: 8000,
+                    }).catch(() => null);
+                    if (headerless && headerless.ok) {
+                        effective = headerless;
+                        headersDropped = true;
+                        console.log(`[play] 规则头被拒（${probe.reason}${probe.status ? '/' + probe.status : ''}），`
+                            + '改以无名头探测通过——Referer/UA 触发了防盗链，本次按无名头播放');
+                    }
+                }
+                if (!effective.ok) {
+                    return withPlayerTrace({ ok: false, reason: `media-probe-${effective.reason}`,
+                        url: effective.finalUrl || requestedUrl, status: effective.status || 0,
                         source: meta.source || meta.site || '' }, meta);
                 }
-                requestedUrl = probe.finalUrl || requestedUrl;
-                meta = { ...meta, header: probe.headers || meta.header,
-                    probe: { via: probe.via || probe.reason || '', status: probe.status || 0 } };
+                requestedUrl = effective.finalUrl || requestedUrl;
+                meta = { ...meta,
+                    header: headersDropped ? null : (effective.headers || meta.header),
+                    probe: { via: effective.via || effective.reason || '', status: effective.status || 0,
+                        ...(headersDropped ? { headersDropped: true } : {}) } };
             } finally {
                 if (requestId && runtimeAborts.get(requestId) === marker) runtimeAborts.delete(requestId);
             }
@@ -1463,26 +1520,80 @@ app.whenReady().then(() => {
         mpv._queueSeriesTitle = String(title || '');
         // 不自动切换线路；只等待当前 URL 真正 file-loaded，再向渲染层返回成功。
         // 这样失败时会保留当前地址和错误原因，由用户手动选择其它线路。
-        const first = mpv.play(episodes, {
+        const playOpts = {
             title, header: meta.header, resume: true, speed: meta.speed,
             fullscreen: meta.fullscreen, format: meta.format,
             subs: meta.subs, position: meta.position,
             requestId: meta.requestId, playSessionId: meta.playSessionId,
             // 原生多集队列（meta.playlist≥2 的静态直链列表）从第 epIndex 项起播
             startIndex: Number.isFinite(Number(meta.epIndex)) ? Number(meta.epIndex) : 0,
-        });
-        // verifyMpvStart 需要在校验前就知道这是原生队列（代际抖动豁免，见其内注释）
-        first.nativeQueue = Array.isArray(meta.playlist) && meta.playlist.length > 1;
+        };
+        const isQueuePlay = Array.isArray(meta.playlist) && meta.playlist.length > 1;
+        // 起播闭包：HTTP/1.1 兜底重试要拿"同一份 episodes 与参数"再起一次，
+        // 抽成闭包避免重试时另抄一份参数造成两处漂移。
+        const launch = (extra) => {
+            const res = mpv.play(episodes, extra ? { ...playOpts, ...extra } : playOpts);
+            // verifyMpvStart 需要在校验前就知道这是原生队列（代际抖动豁免，见其内注释）
+            res.nativeQueue = isQueuePlay;
+            return res;
+        };
+        const first = launch(mpvHttp11Forced() ? { forceHttp11: true } : null);
         let r = first;
         if (first.ok) {
-            if (meta.playlist && meta.playlist.length > 1) {
+            if (isQueuePlay) {
                 console.log(`[mpv] 原生队列起播：entries=${episodes.length} start=${meta.epIndex || 0} m3u 已装载，等待首集就绪…`);
             }
             r = await verifyMpvStart(first, MPV_START_TIMEOUT_MS);
-            if (meta.playlist && meta.playlist.length > 1) {
+            if (isQueuePlay) {
                 console.log(`[mpv] 原生队列起播${r.ok ? '成功' : `失败：${r.reason}${r.error ? ' / ' + String(r.error).slice(0, 160) : ''}`}`);
                 if (!r.ok) { try { mpv.stop(); } catch (e) { /* ignore */ } }
             }
+        }
+        // curl HTTP/2 分帧故障兜底（特征与理由见 mpv-player.js isHttp2StreamFailure 注）：
+        // 带 --curl-http-version=1.1 原地重试一次，成功后把结论按二进制路径持久化——此后
+        // 每次起播直接带 1.1，不再重演"先失败再重试"。护栏是"每个二进制每次运行只盲试
+        // 一次"（见 mpvHttp11RetriedFor 注：未知选项的报错被 --no-terminal 吞掉，无法靠
+        // 文本回收，只能靠次数兜底）。
+        if (!r.ok && r.reason === 'mpv-exited-before-playback'
+            && String(mpv.binary || '') && mpvHttp11RetriedFor !== String(mpv.binary || '')
+            && MpvPlayer.isHttp2StreamFailure(r.error)) {
+            mpvHttp11RetriedFor = String(mpv.binary || '');
+            console.log('[mpv] 命中 curl HTTP/2 分帧故障，改用 HTTP/1.1 重试一次');
+            const retry = launch({ forceHttp11: true });
+            let r2 = retry;
+            if (retry.ok) r2 = await verifyMpvStart(retry, MPV_START_TIMEOUT_MS);
+            if (r2.ok) {
+                try { settings.set('mpvForceHttp11', { path: String(mpv.binary || ''), at: Date.now() }); } catch (e) { /* 持久化失败不影响本次播放 */ }
+                r2.autoHttp11 = true;
+                console.log('[mpv] HTTP/1.1 兼容模式起播成功，已记住该播放器需强制 HTTP/1.1');
+            } else if (MpvPlayer.isUnknownOptionFailure(r2.error)) {
+                // 尽力而为的回收：实测该报错通常被 --no-terminal 吞掉，命中即为额外收益
+                r2.hint = '该播放器不支持 HTTP/1.1 兼容选项，已跳过自动重试';
+                console.log('[mpv] 该播放器不支持 --curl-http-version，收回 HTTP/1.1 注入');
+            } else {
+                r2.hint = '已自动改用 HTTP/1.1 兼容模式重试，仍未成功';
+            }
+            r = r2;
+        }
+        // 无名头兜底（同探测段注释）：探测通过、但 mpv/curl 带规则头仍被 CDN 拒（防盗链
+        // 403、连接被重置）时，再以无名头起播一次。仅当本次确实带了头、且尚未降级时进行
+        // （探测段已降级的不重复）；成功后把主进程记录的"最近头"一并置空，断流重连沿用
+        // 同一口径，避免刚修好的地址在重连时又带回头。
+        if (!r.ok && r.reason === 'mpv-exited-before-playback' && !headersDropped
+            && Object.keys(mergeHeaders(meta.header)).length > 0) {
+            headersDropped = true;
+            console.log('[play] mpv 带规则头起播失败，改以无名头重试一次');
+            const retry = launch({ header: null });
+            let r2 = retry;
+            if (retry.ok) r2 = await verifyMpvStart(retry, MPV_START_TIMEOUT_MS);
+            if (r2.ok) {
+                mpv._lastHeader = null;
+                r2.headerless = true;
+                console.log('[play] 无名头起播成功——Referer/UA 触发了防盗链');
+            } else {
+                r2.hint = '已去掉 Referer/UA 重试，仍未成功';
+            }
+            r = r2;
         }
         // 队列会话（meta.queueCtx）的地址是本地代理：失败时再探测只会触发一次多余的
         // 重新解析，且 502 原因已由代理 toast 告知，跳过补探测。
@@ -2043,10 +2154,19 @@ app.whenReady().then(() => {
         'autoLineFallback', 'legacyParser', 'mediaProbe', 'uiStateMemory',
         'bangumiAutoSyncOnStart', 'bangumiAutoSyncStatus', 'bangumiImmediateSyncToastEnable',
         'bangumiMirrorRoot', 'bangumiProgressSync', 'bangumiSyncPriority', 'bangumiToken', 'bgPlay', 'blockedReason', 'blockedSites',
+        // bangumiLastSyncAt：「最新修改时间优先」同步的裁决基准——上次成功同步的墙钟
+        // 时间戳（kazumi.js 同步成功后写入，下次同步作为 lastSyncAt 传后端，用于判定
+        // 「本地自上次同步以来未改动」）。缺本表则该时间戳写不进去，后端永远按“无历史
+        // 同步时间”处理（既有增量规则保持惰性，newest 仍可用但少一条回退依据）。
+        'bangumiLastSyncAt',
         // 全局番剧屏蔽（common.js 屏蔽引擎 + panels.js 设置页）：blockWords 屏蔽词数组、
         // blockWordsEnable 总开关。缺本表则设置页写入被静默 ignored
         'blockWords', 'blockWordsEnable',
         'catvodBgmMatch', 'closeAction', 'colorMode', 'configHistory', 'customLives', 'customTheme',
+        // kazumiAliasMap：Kazumi 播放源「别名检索」表（kazumi.js 手动检索沉淀的
+        // 别名，键=t:<归一化片名> 或 bgm:<subjectId>，值=[{alias,ts,hits}]）。
+        // 缺本表则沉淀/管理写入全被静默 ignored，重启后别名全丢（H-1 同类）。
+        'kazumiAliasMap',
         // enableBangumiWebMirror：详情页「↗ Bangumi 页」条目页跳转跟随镜像开关（detail.js 跳转读取）
         'dandanAppId', 'dandanAppSecret', 'danmakuEnable', 'dlNotify', 'dlSeriesFolder', 'enableBangumiProxy', 'enableBangumiWebMirror', 'enableGitProxy',
         'errorToast', 'favorites', 'fontSize', 'glass', 'history', 'hlsAdFilter', 'incognito',
@@ -2056,8 +2176,13 @@ app.whenReady().then(() => {
         'kazumiAutoUpdateOnStart', 'lastConfigUrl', 'lastSourceMap', 'liveProbeCache', 'navCollapsed',
         // 各列表页每页条数（panels.js 动态 key 写入）
         'pageSizeFavorites', 'pageSizeHistory', 'pageSizeHome', 'pageSizeLive', 'pageSizePopular', 'pageSizeSearch',
+        // 收藏/历史页排序与筛选状态（records.js makeRecordView 读写：排序键字符串、
+        // 筛选条件对象；缺本表则选择无法持久化——重启后回退默认）
+        'favoritesSort', 'favoritesFilter', 'historySort', 'historyFilter',
         'playerAlang', 'playerHotkeys', 'playerSlang', 'playerSpeed', 'playerVolume',
         'probeSourceUrl', 'probeFailStreak', 'probedAt', 'probedSites', 'probeFp', 'proxyTestUrl', 'recentWatches', 'resumePos', 'settingsCat', 'sourceAutoDetect',
+        // searchHistory：搜索历史（search-history.js 经 settingsSet 写入，[{word,source,ts}]）
+        'searchHistory',
         // 划词翻译（translate-bubble.js；LLM 凭据按次传后端，key 本身在 SENSITIVE_KEYS 加密落盘）
         'translateEnable', 'translateTrigger', 'translateTarget',
         'translateLLMEnable', 'translateLLMBase', 'translateLLMKey', 'translateLLMModel',
@@ -2244,28 +2369,121 @@ app.whenReady().then(() => {
     // （误传网页 URL）与 application/json。(?!svg) 排除 image/svg+xml：SVG 可内嵌
     // script，落盘后打开即 XSS（L11），扩展名白名单同步移除 svg。
     const SAVE_IMAGE_CTYPE_RE = /^(image\/(?!svg)[\w.+-]+|application\/octet-stream)\s*(;|$)/i;
-    // L12 SSRF 拦截：本 handler 对渲染层传来的任意 http(s) URL 发起主进程 fetch
-    // （有 isTrustedIpcSender + 保存对话框两道门槛，仍构成私网探测面）。命中
-    // 私网/本机地址一律拒绝：localhost、127.x、10.x、172.16-31.x、192.168.x、
-    // 169.254.x（链路本地）、0.0.0.0、[::1]、[::]，以及 IPv4-mapped IPv6 中的
-    // 127.x（靠无锚点的 127\. 分支顺带覆盖）。轻量正则实现，不做 DNS 解析——
-    // 公网域名解析到内网的 advanced 绕过不在本门槛目标内（纵深另议）。
-    const SAVE_IMAGE_PRIVATE_HOST_RE = /^(localhost([:.]|$)|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.0\.0\.0|\[::1\]|\[::\])/i;
+    // L12 SSRF 拦截（B 修复强化）：本 handler 对渲染层传来的任意 http(s) URL 发起主进程
+    // fetch（有 isTrustedIpcSender + 保存对话框两道门槛，仍构成私网探测面）。旧实现是
+    // 一条字面量正则，等价写法全部漏网：十进制/十六进制/八进制整数 IP（2130706433、
+    // 0x7f.0.0.1、0177.0.0.1）、简写（127.1）、结尾点（127.0.0.1.）、IPv4-mapped IPv6
+    // （[::ffff:127.0.0.1]）、CGNAT 100.64/10、组播/保留段。现改为先把 host 归一化成
+    // 4 段点分十进制再判定，并在**每一次** http(s) 请求前执行（含重定向的每一跳，见 fetch 循环）。
+    // 域名解析到内网的 advanced 绕过（DNS rebinding）不在本门槛目标内（纵深另议）。
+    const SAVE_IMAGE_IPV4_PART_RE = /^(0[xX][0-9a-fA-F]+|[0-9]+)$/;
+    /** 单段数字（十进制 / 0x 十六进制 / 0 前缀八进制）→ 数值；非法返回 NaN。 */
+    const saveImageIpPart = (s) => {
+        if (!SAVE_IMAGE_IPV4_PART_RE.test(s)) return NaN;
+        if (/^0[xX]/.test(s)) return parseInt(s.slice(2), 16);
+        if (/^0[0-7]+$/.test(s)) return parseInt(s, 8);
+        return parseInt(s, 10);
+    };
+    /** IPv4 各种写法 → 4 段点分十进制（127.1 → 127.0.0.1；2130706433 → 127.0.0.1）；
+     *  非数字点分段（域名）或越界返回 ''（不在此门槛判定）。 */
+    const saveImageNormalizeIpv4 = (str) => {
+        const parts = String(str).split('.');
+        if (!parts.length || parts.length > 4) return '';
+        const nums = parts.map(saveImageIpPart);
+        if (nums.some((x) => !Number.isFinite(x) || x < 0)) return '';
+        const head = nums.slice(0, -1);
+        const tail = nums[nums.length - 1];
+        if (head.some((x) => x > 255)) return '';
+        const tailBytes = 4 - head.length; // 末段覆盖剩余字节数（127.1 的 1 即后 24 位）
+        if (tail > Math.pow(256, tailBytes) - 1) return '';
+        const bytes = head.concat(Array.from({ length: tailBytes },
+            (_, i) => (tail >>> (8 * (tailBytes - 1 - i))) & 255));
+        return bytes.join('.');
+    };
+    /** 私网/环回/链路本地/保留地址判定（入参已经归一化为 4 段点分十进制）。 */
+    const saveImageIsPrivateIpv4 = (ip4) => {
+        const n = String(ip4).split('.').map(Number);
+        if (n.length !== 4 || n.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return false;
+        const [a, b] = n;
+        return a === 0                            // 0.0.0.0/8 未指派（含 0.0.0.0 本机别名）
+            || a === 10                           // 10/8 私有
+            || a === 127                          // 127/8 环回
+            || (a === 100 && b >= 64 && b <= 127) // 100.64/10 CGNAT
+            || (a === 169 && b === 254)           // 169.254/16 链路本地（含云元数据 169.254.169.254）
+            || (a === 172 && b >= 16 && b <= 31)  // 172.16/12 私有
+            || (a === 192 && b === 0)             // 192.0.0/24 保留 + 192.0.2/24 文档
+            || (a === 192 && b === 168)           // 192.168/16 私有
+            || (a === 198 && (b === 18 || b === 19)) // 198.18/15 基准测试
+            || a >= 224;                          // 224/4 组播 + 240/4 保留（含广播地址）
+    };
+    /** hostname（URL 解析后的形态）→ 是否禁止访问。IPv6 字面量先扁平化：
+     *  IPv4-mapped（::ffff:127.0.0.1 / ::ffff:7f00:1）取内层 IPv4 判定，
+     *  ::1/::、fe80::/10 链路本地、fc00::/7 ULA 直接拒。非字面量域名返回 false
+     *  （域名不在此门槛判定，避免 DNS 解析引入不稳定/误伤正常 CDN）。 */
+    const saveImageHostIsPrivate = (hostname) => {
+        let h = String(hostname || '').trim().toLowerCase();
+        if (!h) return true; // 空 host 视为非法
+        if (h.endsWith('.')) h = h.slice(0, -1); // 结尾点：127.0.0.1. 与 127.0.0.1 等价
+        if (h === 'localhost' || h === 'localhost.localdomain' || h.endsWith('.localhost')) return true;
+        if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1); // IPv6 字面量方括号
+        const v6 = h.replace(/%.*$/, ''); // 去 zone id（fe80::1%eth0）
+        if (v6.includes(':')) {
+            const mapped = v6.match(/^(?:::ffff:|::)((?:\d{1,3}\.){3}\d{1,3}|[0-9a-f]{1,4}:[0-9a-f]{1,4})$/i);
+            if (mapped) {
+                const inner = mapped[1];
+                if (inner.includes('.')) return saveImageIsPrivateIpv4(saveImageNormalizeIpv4(inner));
+                const half = inner.split(':').map((x) => parseInt(x, 16));
+                return saveImageIsPrivateIpv4(
+                    `${(half[0] >>> 8) & 255}.${half[0] & 255}.${(half[1] >>> 8) & 255}.${half[1] & 255}`);
+            }
+            return v6 === '::1' || v6 === '::'
+                || /^fe[89ab][0-9a-f]:/i.test(v6) || /^f[cd][0-9a-f]{2}:/i.test(v6);
+        }
+        const ip4 = saveImageNormalizeIpv4(h);
+        return ip4 ? saveImageIsPrivateIpv4(ip4) : false;
+    };
     ipcMain.handle('yuki:save-image', async (_e, url, suggestedName) => {
         // L13：提前返回前取消/消费响应体，避免悬挂连接累积（各分支 return 前统一走此 helper）
         const dropBody = async (res) => {
             try { await res.body?.cancel(); } catch (e) { /* 已读完/不可取消：忽略 */ }
         };
+        const SAVE_IMAGE_MAX_REDIRECTS = 5;
+        /** data: URL → Buffer（限额解码，防内存放大）。返回 Buffer 或错误 reason 字符串。 */
+        const decodeSaveImageDataUrl = (raw) => {
+            const m = String(raw).match(/^data:([^,]*),([\s\S]*)$/);
+            if (!m) return 'unsupported-url';
+            const meta = m[1] || '';
+            const isB64 = /;base64$/i.test(meta);
+            const ctype = meta.replace(/;base64$/i, '').trim() || 'application/octet-stream';
+            // 与网络分支同一套类型白名单：SVG 可内嵌 script，落盘后打开即 XSS，拒绝
+            if (!SAVE_IMAGE_CTYPE_RE.test(ctype)) return `bad-content-type:${ctype}`;
+            const payload = m[2];
+            let out = null;
+            if (isB64) {
+                // base64 先按文本长度粗筛（解码后 ≈ 3/4），避免先把超大串解进 Buffer
+                if (payload.length > Math.ceil(SAVE_IMAGE_MAX_BYTES / 3) * 4 + 8) return 'too-large';
+                try { out = Buffer.from(payload, 'base64'); } catch (e) { return 'unsupported-url'; }
+            } else {
+                // 非 base64（URL 编码）形态：解码后体积只会更小，按编码长度粗筛即可
+                if (payload.length > SAVE_IMAGE_MAX_BYTES) return 'too-large';
+                try { out = Buffer.from(decodeURIComponent(payload), 'utf8'); } catch (e) { return 'unsupported-url'; }
+            }
+            if (!out || !out.length) return 'empty-body';
+            return out.length > SAVE_IMAGE_MAX_BYTES ? 'too-large' : out;
+        };
         try {
             const u = String(url || '');
-            if (!/^https?:\/\//i.test(u)) return { ok: false, reason: 'invalid-url' };
-            // L12 SSRF：fetch 前解析 hostname 拦私网/本机地址（含 hostname 内嵌 @/穿越形态，
-            // URL 解析后取 hostname 天然规避 userinfo 欺骗）
-            try {
-                const parsed = new URL(u);
-                if (SAVE_IMAGE_PRIVATE_HOST_RE.test(parsed.hostname)) return { ok: false, reason: 'private-address' };
-            } catch (e) {
-                return { ok: false, reason: 'invalid-url' };
+            // data: 是渲染层页面自带的字节（不是服务端请求，无 SSRF 面，解码体积另限额）；
+            // 其余非 http(s) scheme 一律拒绝，防 file:// 任意读盘。
+            const isData = /^data:/i.test(u);
+            if (!isData && !/^https?:\/\//i.test(u)) return { ok: false, reason: 'unsupported-url' };
+            // L12 SSRF：弹保存对话框前先拦私网/本机地址（明显非法的目标不必先惊动用户选路径）
+            if (!isData) {
+                try {
+                    if (saveImageHostIsPrivate(new URL(u).hostname)) return { ok: false, reason: 'private-address' };
+                } catch (e) {
+                    return { ok: false, reason: 'invalid-url' };
+                }
             }
             let name = String(suggestedName || 'image').trim() || 'image';
             // 纵深防御：渲染层传来的 URL 末段经 decodeURIComponent 后可能仍含
@@ -2280,50 +2498,101 @@ app.whenReady().then(() => {
                 defaultPath: name,
             });
             if (r.canceled || !r.filePath) return { ok: false, reason: 'cancelled' };
-            const res = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'yuki/1.0' } });
-            if (!res.ok) {
-                await dropBody(res);
-                return { ok: false, reason: `http-${res.status}` };
-            }
-            // content-type 白名单校验（仅 res.ok 不够：误传网页 URL 会把 HTML 存成 .jpg）；
-            // M10：空 ctype 同 octet-stream 放行（部分图床不带该头），非空才进白名单判定
-            const ctype = String(res.headers.get('content-type') || '').trim();
-            if (ctype && !SAVE_IMAGE_CTYPE_RE.test(ctype)) {
-                await dropBody(res);
-                return { ok: false, reason: `bad-content-type:${ctype}` };
-            }
-            // 体积上限第一道：headers 有 content-length 时先预判，超限不下载不写盘
-            const declared = parseInt(res.headers.get('content-length'), 10);
-            if (Number.isFinite(declared) && declared > SAVE_IMAGE_MAX_BYTES) {
-                await dropBody(res);
-                return { ok: false, reason: 'too-large' };
-            }
-            // 边读边限流：先 `await res.arrayBuffer()` 把整个响应体读进主进程内存
-            // 再判断超不超，等于放任无限缓冲——content-length 谎报或不带该头的
-            // chunked 响应（多数图床直连即此形态）会绕过第一道检查，把任意大的
-            // body 全部缓冲到主进程（几百 MB 直接拖垮主进程）。超阈值立即取消流。
-            const chunks = [];
-            let got = 0;
-            if (res.body && typeof res.body[Symbol.asyncIterator] === 'function') {
-                for await (const chunk of res.body) {
-                    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-                    got += piece.length;
-                    if (got > SAVE_IMAGE_MAX_BYTES) {
-                        // 超限中止：for-await 内流已锁定，显式 cancel 会 TypeError；
-                        // 直接 return，取消由 for-await 退出（迭代器 return 调 cancel）完成
-                        return { ok: false, reason: 'too-large' };
-                    }
-                    chunks.push(piece);
-                }
+            let buf = null;
+            if (isData) {
+                buf = decodeSaveImageDataUrl(u);
+                if (typeof buf === 'string') return { ok: false, reason: buf };
             } else {
-                chunks.push(Buffer.from(await res.arrayBuffer()));
+                // 取流：redirect:'manual' 手动跟最多 5 跳——'follow' 会让「公网 URL 302 到
+                // http://127.0.0.1/」绕过上面的 host 校验（SSRF via redirect），手动跟跳
+                // 才能每跳都重过一遍判定。Referer 取目标源：部分图床/CDN 有防盗链，
+                // 缺 Referer 直接 403（B 排查方向），补上对正常图床无副作用。
+                let res = null;
+                let cur = u;
+                for (let hop = 0; hop <= SAVE_IMAGE_MAX_REDIRECTS; hop++) {
+                    let parsed;
+                    try { parsed = new URL(cur); } catch (e) { return { ok: false, reason: 'invalid-url' }; }
+                    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, reason: 'unsupported-url' };
+                    if (saveImageHostIsPrivate(parsed.hostname)) return { ok: false, reason: 'private-address' };
+                    try {
+                        res = await fetch(cur, {
+                            redirect: 'manual',
+                            signal: AbortSignal.timeout(30000),
+                            headers: { 'User-Agent': 'yuki/1.0', 'Referer': parsed.origin + '/' },
+                        });
+                    } catch (err) {
+                        // 超时与网络失败分开上报：渲染层提示要能区分「网络不可达」与「太慢」
+                        const msg = String((err && err.message) || err);
+                        const timedOut = (err && err.name === 'TimeoutError') || /tim(e|ed)?\s*out|aborted/i.test(msg);
+                        return { ok: false, reason: timedOut ? 'timeout' : 'network' };
+                    }
+                    const isRedirect = res.status === 301 || res.status === 302 || res.status === 303
+                        || res.status === 307 || res.status === 308;
+                    if (!isRedirect) break;
+                    const loc = res.headers.get('location') || '';
+                    const status = res.status;
+                    await dropBody(res);
+                    res = null;
+                    if (!loc) return { ok: false, reason: `http-${status}` };
+                    try { cur = new URL(loc, cur).toString(); } catch (e) { return { ok: false, reason: 'invalid-url' }; }
+                }
+                if (!res) return { ok: false, reason: 'too-many-redirects' };
+                if (!res.ok) {
+                    await dropBody(res);
+                    return { ok: false, reason: `http-${res.status}` };
+                }
+                // content-type 白名单校验（仅 res.ok 不够：误传网页 URL 会把 HTML 存成 .jpg）；
+                // M10：空 ctype 同 octet-stream 放行（部分图床不带该头），非空才进白名单判定
+                const ctype = String(res.headers.get('content-type') || '').trim();
+                if (ctype && !SAVE_IMAGE_CTYPE_RE.test(ctype)) {
+                    await dropBody(res);
+                    return { ok: false, reason: `bad-content-type:${ctype}` };
+                }
+                // 体积上限第一道：headers 有 content-length 时先预判，超限不下载不写盘
+                const declared = parseInt(res.headers.get('content-length'), 10);
+                if (Number.isFinite(declared) && declared > SAVE_IMAGE_MAX_BYTES) {
+                    await dropBody(res);
+                    return { ok: false, reason: 'too-large' };
+                }
+                // 边读边限流：先 `await res.arrayBuffer()` 把整个响应体读进主进程内存
+                // 再判断超不超，等于放任无限缓冲——content-length 谎报或不带该头的
+                // chunked 响应（多数图床直连即此形态）会绕过第一道检查，把任意大的
+                // body 全部缓冲到主进程（几百 MB 直接拖垮主进程）。超阈值立即取消流。
+                const chunks = [];
+                let got = 0;
+                if (res.body && typeof res.body[Symbol.asyncIterator] === 'function') {
+                    for await (const chunk of res.body) {
+                        const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                        got += piece.length;
+                        if (got > SAVE_IMAGE_MAX_BYTES) {
+                            // 超限中止：for-await 内流已锁定，显式 cancel 会 TypeError；
+                            // 直接 return，取消由 for-await 退出（迭代器 return 调 cancel）完成
+                            return { ok: false, reason: 'too-large' };
+                        }
+                        chunks.push(piece);
+                    }
+                } else {
+                    chunks.push(Buffer.from(await res.arrayBuffer()));
+                }
+                buf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
             }
-            const buf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
-            if (!buf.length) return { ok: false, reason: 'empty-body' };
+            if (!buf || !buf.length) return { ok: false, reason: 'empty-body' };
             if (buf.length > SAVE_IMAGE_MAX_BYTES) return { ok: false, reason: 'too-large' };
             // 异步写盘：原 fs.writeFileSync 在大图/慢盘上会阻塞主进程事件循环
             //（全应用冻结），IPC handler 返回 promise，写盘期间 UI 不卡。
-            await fs.promises.writeFile(r.filePath, buf);
+            // 写失败按 errno 分流：渲染层提示要能区分「没权限」/「磁盘满」/「文件被占用」
+            try {
+                await fs.promises.writeFile(r.filePath, buf);
+            } catch (err) {
+                const code = String((err && err.code) || '');
+                return {
+                    ok: false,
+                    reason: (code === 'EACCES' || code === 'EPERM') ? 'permission-denied'
+                        : code === 'ENOSPC' ? 'no-space'
+                            : code === 'EBUSY' ? 'file-locked'
+                                : 'write-failed',
+                };
+            }
             return { ok: true, path: r.filePath };
         } catch (err) {
             return { ok: false, reason: err.message || 'save-failed' };
@@ -2484,7 +2753,10 @@ app.whenReady().then(() => {
     ipcMain.handle('yuki:settings-reset', () => {
         // settings.reset(keepKeys) 的参数是「要保留的键」列表：用户数据（收藏/历史/进度等）保留，只清偏好。
         // watchProgress 是观看进度数据（非偏好），恢复默认时必须保留。
-        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'watchProgress', 'bangumiToken', 'dandanAppId', 'dandanAppSecret']);
+        settings.reset(['favorites', 'history', 'lastConfigUrl', 'configHistory', 'customLives', 'dlDir', 'cacheDir', 'watchStats', 'recentWatches', 'watchProgress', 'bangumiToken', 'dandanAppId', 'dandanAppSecret',
+        // searchHistory/kazumiAliasMap：本版新增的用户数据（搜索历史、Kazumi 别名表），
+        // 与收藏/历史同级——恢复默认设置只该清偏好，不该清用户自己积累的数据。
+        'searchHistory', 'kazumiAliasMap']);
         // M-8：app.exit(0) 不触发 before-quit，复用退出清理序列停掉 mpv/aria2/推送/后端等子进程
         runQuitCleanup();
         app.relaunch();
@@ -2494,15 +2766,44 @@ app.whenReady().then(() => {
     });
     // 代理设置（2.9）：校验 → 写入环境变量（后端 requests 继承）+ Electron session 代理（渲染层图片/请求），并重启后端使生效
     ipcMain.handle('yuki:set-proxy', async (_e, opts) => {
-        const raw = String((opts && opts.url) || '').trim();
+        // 入参先做「安全可落盘」收敛：非串/控制字符/超长在此拦掉。为什么在这里做而不只靠
+        // 渲染层：IPC 入参是渲染层可控数据，settings.json 与 process.env 都是落点，不能让
+        // 任意长度或含换行（日志注入）的串直接写进去。
+        const rawIn = (opts && typeof opts.url === 'string') ? opts.url : '';
+        const unsafeInput = /[\u0000-\u001f\u007f]/.test(rawIn) || rawIn.length > 512;
+        const raw = rawIn.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 512);
         const enable = !!(opts && opts.enable);
+        // 草稿持久化（persistOnly）：供渲染层「输入即落盘」用——只更新地址记录，
+        // 不注入环境变量、不改 session 代理、不重启后端（每次敲键都重启后端会打断
+        // 播放/下载，而半截地址也不该被应用）。空值=不改动记录（清空输入框不抹既有记录）。
+        if (opts && opts.persistOnly) {
+            // 代理处于启用状态时不接受草稿：届时记录就是「正在生效的地址」，被半截输入
+            // 覆盖后下次启动会按它注入 env（例如端口敲到一半的 127.0.0.1:789），直接打断
+            // 全后端网络。启用态下的地址变更一律走「保存代理」的显式路径。
+            const wrote = !!(raw && settings.get('proxyEnable') !== true);
+            if (wrote) settings.set('proxyUrl', raw);
+            return { ok: true, persisted: wrote };
+        }
+        // scheme 白名单：formatAndValidateProxyUrl 把未知 scheme 当裸主机处理
+        //（'ftp://127.0.0.1:7890' → 主机名 'ftp://127.0.0.1' → 拼出
+        // http://ftp://127.0.0.1:7890 注入 env），故这里先收口：有 scheme 只认
+        // http/https/socks5；无 scheme 只能是 host:port（可带 user:pass@）。
+        // 口径与渲染层 parseProxyUrl 一致（空白/超长由上面的 unsafeInput 拦）。
+        const schemeM = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(raw);
+        const schemeOk = schemeM
+            ? /^(https?|socks5?)$/i.test(schemeM[1])
+            : (!/^[A-Za-z][A-Za-z0-9+.-]*:(?![0-9]+$)/.test(raw) || raw.includes('@'));
         // 参数校验（仿 Kazumi：启用前必须通过格式校验，非法地址直接拒绝，不落盘）
-        const normalized = formatAndValidateProxyUrl(raw);
+        const normalized = (unsafeInput || !schemeOk) ? '' : formatAndValidateProxyUrl(raw);
         if (enable && !normalized) {
             return { ok: false, reason: raw ? '无效的代理地址（示例：127.0.0.1:7890 或 http://127.0.0.1:7890）' : '请填写代理地址' };
         }
         const url = enable ? normalized : '';
-        settings.set('proxyUrl', raw);
+        // 地址记录：只在本次带了非空地址时覆盖——关闭开关不再清空记录（旧行为把 proxyUrl
+        // 写成 ''，用户「关闭后再打开」就看不到上次的网址）。空值=保留既有记录，唯一清空
+        // 途径是「恢复默认设置」。留着未启用/无效的记录是安全的：所有消费者（启动注入、
+        // system-proxy.getManualProxyUrl）都先按 proxyEnable 与格式校验取值。
+        if (raw) settings.set('proxyUrl', raw);
         settings.set('proxyEnable', enable);
         invalidateCache();
         try {
@@ -3939,6 +4240,9 @@ app.whenReady().then(() => {
     bridge.extraEnv.YUKI_MEDIA_PROBE = settings.get('mediaProbe') === false ? '0' : '1';
     bridge.extraEnv.YUKI_AUTO_LINE_FALLBACK = settings.get('autoLineFallback') === false ? '0' : '1';
     bridge.extraEnv.YUKI_LEGACY_PARSER = settings.get('legacyParser') === false ? '0' : '1';
+    // 应用版本注入：WebDAV 同步的版本文件 _meta.json 记录 appVersion，排障时能一眼看出
+    // 「这个云端备份是哪版生成的」（schemaVersion 只标识载荷格式，不含具体版本号）
+    bridge.extraEnv.YUKI_APP_VERSION = app.getVersion();
     // 低配机型自适应：按整机内存 / 核数收紧后端运行时 Worker 上限。冻结产物里每个
     // spawn Worker 就是一个独立的 yuki-backend.exe 子进程（jar 站点还会再派生 JVM），
     // 后端默认总上限 8、其中 jar 3；小内存机器全量拉起会内存暴涨。分档：

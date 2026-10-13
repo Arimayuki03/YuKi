@@ -341,6 +341,62 @@ test('play(): m3u 下标重映射（缺 url 的集被剔除后 startIndex 与 _q
     assert.equal(argValue(fallback.argv, 'playlist-start'), undefined);
 });
 
+// ---------------------------------------------------------------- 清单必须独占目录（autocreate-playlist）
+
+// 用户 mpv.conf 里 `autocreate-playlist=same|filter`（mpv.lite 这类便携配置常见开法）会让
+// mpv 把「清单所在目录」里同扩展名的文件插到播放列表最前面：清单原先直接写临时目录根，
+// 与残留的 *.m3u8（实测用户机上的 seg.m3u8）同目录时，12 集变 13 条、playlist-pos 整体 +1，
+// 集名/进度记账全跟着错。修法是把清单写进独占目录——不改用户配置、不需要版本能力探测。
+test('play(): 原生队列清单独占「会话子目录」，且起播前清空根目录里的历史清单', () => {
+    const { p, ctx } = mkPlayer();
+    const root = path.join(TMP, 'yuki-playlists');
+    // 历史遗留：根目录下的旧会话目录（含旧清单）+ 旧版遗留在临时目录根的清单文件
+    fs.mkdirSync(path.join(root, '111-1'), { recursive: true });
+    fs.writeFileSync(path.join(root, '111-1', 'yuki-playlist.m3u8'), '#EXTM3U\n#EXTINF:-1,旧\nhttp://x/old.m3u8\n', 'utf8');
+    const legacy = path.join(TMP, 'yuki-playlist-1-1.m3u8');
+    fs.writeFileSync(legacy, '#EXTM3U\n#EXTINF:-1,更旧\nhttp://x/older.m3u8\n', 'utf8');
+    const eps = [{ url: 'https://cdn.test/1.m3u8' }, { url: 'https://cdn.test/2.m3u8' }];
+    const { argv } = playAndCapture(p, ctx, eps);
+    const target = argv[argv.length - 1];
+    // 清单 → <临时目录>/yuki-playlists/<pid>-<时间戳>/yuki-playlist.m3u8
+    const sessionDir = path.dirname(target);
+    assert.equal(path.dirname(sessionDir), root, '清单必须落在 yuki-playlists 下的会话子目录（同目录同扩展名文件会被 mpv autocreate 并入列表）');
+    assert.equal(path.basename(target), 'yuki-playlist.m3u8');
+    assert.deepEqual(fs.readdirSync(sessionDir), ['yuki-playlist.m3u8'],
+        '会话目录内只有本份清单：「独占目录」由目录结构保证，不依赖清理成功');
+    assert.deepEqual(fs.readdirSync(root), [path.basename(sessionDir)], '起播前清空根目录：不留历史会话目录');
+    assert.ok(!fs.existsSync(legacy), '旧版遗留在临时目录根的清单同样清掉');
+    // 清单内容仍是原样（2 集）
+    assert.equal((fs.readFileSync(target, 'utf8').match(/^#EXTINF:/gm) || []).length, 2);
+});
+
+test('cleanPlaylists(): 清根目录 + 旧版根文件；每次 clean 后新会话目录仍独占', () => {
+    const ctx = loadMpv();
+    const root = path.join(TMP, 'yuki-playlists');
+    fs.mkdirSync(path.join(root, '222-2'), { recursive: true });
+    fs.writeFileSync(path.join(root, '222-2', 'yuki-playlist.m3u8'), 'x', 'utf8');
+    fs.writeFileSync(path.join(TMP, 'yuki-playlist-9-9.m3u8'), 'x', 'utf8');
+    fs.writeFileSync(path.join(TMP, 'kazumi_stream_7.m3u8'), 'x', 'utf8'); // 不属于清单目录：不得误删
+    ctx.MpvPlayer.cleanPlaylists();
+    assert.deepEqual(fs.readdirSync(root), [], '历史会话目录清空');
+    assert.ok(!fs.existsSync(path.join(TMP, 'yuki-playlist-9-9.m3u8')), '旧版根清单清掉');
+    assert.ok(fs.existsSync(path.join(TMP, 'kazumi_stream_7.m3u8')), '抓流产物不归 cleanPlaylists 管（由 index.js 启动清扫）');
+    fs.rmSync(path.join(TMP, 'kazumi_stream_7.m3u8'), { force: true });
+});
+
+test('play(): 不注入 --autocreate-playlist（保留用户 mpv.conf 的「同目录自动成列表」）', () => {
+    const { p, ctx } = mkPlayer();
+    // 该配置是用户自己的播放习惯（播一集顺带把整目录排队，如 B 站番剧），
+    // YuKi 只在「自己交付整份列表」时不允许列表被目录内容改写（靠独占目录实现），
+    // 绝不通过命令行关掉它。
+    const queue = playAndCapture(p, ctx, [{ url: 'http://x/1.m3u8' }, { url: 'http://x/2.m3u8' }]).argv;
+    assert.ok(!queue.some((a) => a.startsWith('--autocreate-playlist')), '原生队列不得覆盖用户的 autocreate-playlist');
+    // 单集：位置参数就是地址本身（不落清单文件），autocreate 照常生效
+    const single = playAndCapture(p, ctx, [{ url: 'D:\\番剧\\第01集.mp4', title: '第1集' }]).argv;
+    assert.equal(single[single.length - 1], 'D:\\番剧\\第01集.mp4');
+    assert.ok(!single.some((a) => a.startsWith('--autocreate-playlist')));
+});
+
 test('play(): 在线 URL 注入网络预缓冲，本地文件只显式关闭落盘（isNet 由首集判定）', () => {
     const { p, ctx } = mkPlayer();
     const net = playAndCapture(p, ctx, [{ url: 'https://cdn.test/a.m3u8' }]).argv;
@@ -380,6 +436,31 @@ test('play(): header 值内逗号按 mpv 列表语法转义后拼进 --http-head
 });
 
 // ---------------------------------------------------------------- argv 拼装：ytdl/功能资产与失败路径
+
+test('play(): forceHttp11 才注入 --curl-http-version=1.1（默认不注入，避免老构建致命失败）', () => {
+    const { p, ctx } = mkPlayer();
+    // 默认路径：绝不注入。mpv 对不认识的命令行选项是致命错误（"option not found /
+    // Exiting... (Fatal error)"），无 curl 后端的内置 mpv 一注入就整场起播失败。
+    const plain = playAndCapture(p, ctx, [{ url: 'https://cdn.test/a.m3u8' }]);
+    assert.equal(argValue(plain.argv, 'curl-http-version'), undefined);
+    assert.ok(!plain.argv.some((a) => typeof a === 'string' && a.includes('curl-http-version')));
+    // 调用方（index.js 的 h2 兜底重试）确证该二进制接受此选项后显式开启
+    const forced = playAndCapture(p, ctx, [{ url: 'https://cdn.test/a.m3u8' }], { forceHttp11: true });
+    assert.equal(argValue(forced.argv, 'curl-http-version'), '1.1');
+    // 显式 false 与未传等价（调用方按 mpvHttp11Forced() 计算，可能给 null/false）
+    const off = playAndCapture(p, ctx, [{ url: 'https://cdn.test/a.m3u8' }], { forceHttp11: false });
+    assert.equal(argValue(off.argv, 'curl-http-version'), undefined);
+});
+
+test('play(): forceHttp11 对原生队列同样生效（清单地址也走 curl，故障与单集同源）', () => {
+    const { p, ctx } = mkPlayer();
+    const { argv } = playAndCapture(p, ctx, [
+        { url: 'https://cdn.test/e1.m3u8', title: '第1集' },
+        { url: 'https://cdn.test/e2.m3u8', title: '第2集' },
+    ], { forceHttp11: true });
+    assert.equal(argValue(argv, 'curl-http-version'), '1.1');
+    assert.equal(argv[argv.length - 1].endsWith('yuki-playlist.m3u8'), true, '仍是清单文件作为位置参数');
+});
 
 test('play(): spawn 同步抛异常返回 mpv-spawn-failed 并携带 trace 字段，不崩溃', () => {
     const { p, ctx } = mkPlayer();

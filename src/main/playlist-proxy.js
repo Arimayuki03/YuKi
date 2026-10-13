@@ -343,9 +343,15 @@ class PlaylistProxy extends EventEmitter {
             const index = parseInt(seg[2], 10);
             let upstream = '';
             try { upstream = unb64u(seg[3]); } catch (e) { upstream = ''; }
+            // 门控：管道会话，或**本会话已至少转发过一次条目**（sess.pipedOnce）。
+            // 后者为 kazumi 整季队列而加：内置 mpv 会话原本 pipe=false，但条目自带抓流头时
+            // 会改走管道转发（见 _serveResolved），清单被重写成分片走 /seg 的形态——若这里
+            // 仍只认 sess.pipe，重写出的分片会被自己人当"非管道会话"拒掉（404），
+            // 表现就是"清单能取、一分片就断"。标志独立于 sess.pipe，避免影响其它
+            // 依赖 sess.pipe 的语义（如本地抓流产物的 Content-Type 处理）。
             if (!sess || !(index >= 0 && index < sess.eps.length)
-                || !/^https?:\/\//i.test(upstream) || !sess.pipe) {
-                console.log(`[播放列表] /seg 未匹配(${!sess ? '无令牌' : !sess.pipe ? '非管道会话' : '上游地址非法'}): ${rawPath.slice(0, 100)}`);
+                || !/^https?:\/\//i.test(upstream) || (!sess.pipe && !sess.pipedOnce)) {
+                console.log(`[播放列表] /seg 未匹配(${!sess ? '无令牌' : (!sess.pipe && !sess.pipedOnce) ? '非管道会话' : '上游地址非法'}): ${rawPath.slice(0, 100)}`);
                 res.statusCode = 404; res.end();
                 return;
             }
@@ -430,6 +436,13 @@ class PlaylistProxy extends EventEmitter {
             return;
         }
         sess.cache.set(index, resolved.url);
+        // 条目级鉴权头与地址一起留存：kazumi 的抓流头（隐藏窗口拿到的 Referer/Cookie/UA）
+        // 只在这一刻可得，而 302 直连会把它们整包丢掉（见 _serveResolved 管道分流注释）。
+        if (resolved.header && typeof resolved.header === 'object'
+            && Object.keys(resolved.header).length) {
+            if (!sess.entryHeaders) sess.entryHeaders = new Map();
+            sess.entryHeaders.set(index, resolved.header);
+        }
         this._notifyResolved(sess, index, resolved.url);
         await this._serveResolved(sess, index, resolved.url, req, res);
     }
@@ -445,14 +458,32 @@ class PlaylistProxy extends EventEmitter {
     async _serveResolved(sess, index, url, req, res) {
         const isLocal = /^(?:[a-z]:[\\/]|\\\\|file:\/\/)/i.test(url);
         if (!isLocal) {
-            // 管道分流：**会话头非空即 pipe**（kazumi/static/catvod 统一，R22）；
+            // 管道分流：**需要的头非空即 pipe**（kazumi/static/catvod 统一，R22）；
             // forcePipe 会话（PotPlayer 的 m3u8 规范化包装）无头也强制 pipe——
             // 302 直连会让 PotPlayer 裸连 CDN，清单缺 Content-Type 时再次误判
             // MPEG TS（R23 实验矩阵实锤），规范化必须发生在代理回写侧。
-            const keys = Object.keys(sess.headers || {}).map((k) => String(k).toLowerCase());
+            //
+            // 头的来源有两处，旧实现只看前者：建队时已知的会话头（catvod 预热条目的头、
+            // 外部播放器会话头），以及**条目级抓流头**（`sess.entryHeaders`）。kazumi 规则
+            // 面板里 14/16 条规则的 referer/userAgent 是空的，真正让 CDN 放行的是**抓流
+            // 那一刻**从隐藏窗口请求里取到的 Referer/Cookie/UA；建队路径给不出这些头
+            // （kazumi 建队只做 kazumiResolvePage，不抓流），于是 kazumi 整季队列恒走
+            // 302 直连 → 抓流头整包丢失 → 需要防盗链头的 CDN 直接失败（实测用户机上
+            // taobao CDN 条目被拒 HTTP 400）。故：kazumi 会话在「条目自带头」时改走管道
+            // 转发（数据面经本代理，清单重写后的分片请求同样带上这些头），无头条目仍走
+            // 302 快路径。范围只限 kazumi：catvod/static 的既有分流语义（预热头决定 pipe）
+            // 保持不变，避免影响已实测的整季链路。
+            const entryHdr = (sess.entryHeaders && sess.entryHeaders.get(index)) || null;
+            const merged = { ...(sess.headers || {}), ...(entryHdr || {}) };
+            const keys = Object.keys(merged).map((k) => String(k).toLowerCase());
             const needAuth = keys.length > 0;
-            console.log(`[播放列表] 第 ${index + 1} 集应答 ${sess.pipe && (needAuth || sess.forcePipe) ? 'pipe' : '302'} → ${url.slice(0, 80)}`);
-            if (sess.pipe && (needAuth || sess.forcePipe)) {
+            const pipeWanted = (sess.pipe && (needAuth || sess.forcePipe))
+                || (sess.kind === 'kazumi' && !!entryHdr && needAuth);
+            console.log(`[播放列表] 第 ${index + 1} 集应答 ${pipeWanted ? 'pipe' : '302'} → ${url.slice(0, 80)}`);
+            if (pipeWanted) {
+                // 本会话已转发过条目：清单会被重写成 /seg 形态，/seg 端点据此放行
+                // （kazumi 内置 mpv 会话 pipe=false，需这个独立标志，见 /seg 门控注释）
+                sess.pipedOnce = true;
                 // 403/410 重解析判定在 _pipeRemote 内、写响应头之前完成
                 // （headersSent 之后判定恒不可达，见该函数注释）。
                 const st = await this._pipeRemote(sess, index, url, req, res);
@@ -648,14 +679,25 @@ class PlaylistProxy extends EventEmitter {
                 } catch (e) { /* 缓存发送失败回落重取 */ }
             }
             headers = {};
-            // 只注入会话规则头；入站请求头一律不透传，避免把 127.0.0.1 上下文泄漏给源站
-            Object.assign(headers, sess.headers || {});
-            // 跨域剥离 Cookie：会话 Cookie 绑定解析直链所在域（抓流/预热时的登录态），
+            // 只注入会话规则头与**条目级抓流头**；入站请求头一律不透传，避免把 127.0.0.1
+            // 上下文泄漏给源站。条目头后合并（同键以更具体的条目头为准）：kazumi 各集的
+            // 直链可能落在不同 CDN 上，抓流头本就是「这一集」的请求上下文。
+            Object.assign(headers, sess.headers || {},
+                (sess.entryHeaders && sess.entryHeaders.get(index)) || {});
+            // Cookie 域归属：会话 Cookie 绑定解析直链所在域（抓流/预热时的登录态），
             // 转发到其他域是纯泄漏面（Cookie 顺手送给无关 CDN）。清单重写产出的
             // /seg 全部指向已登记域名，正常分片不受影响。
             {
                 let upHost = '';
                 try { upHost = new URL(upstreamUrl).hostname.toLowerCase(); } catch (e) { /* 已过白名单，必合法 */ }
+                // 条目级 Cookie 的归属域就是本条目地址所在域（抓流头随该条目的直链一起
+                // 产生）——先按条目地址绑定，再做跨域剥离判定，否则条目 Cookie 会因为
+                // 会话 _cookieHost（预热条目域）不同而被误剥。
+                const entryHdrForCookie = (sess.entryHeaders && sess.entryHeaders.get(index)) || null;
+                if (entryHdrForCookie && Object.keys(entryHdrForCookie)
+                    .some((k) => String(k).toLowerCase() === 'cookie')) {
+                    if (upHost) sess._cookieHost = upHost;
+                }
                 if (upHost && sess._cookieHost && upHost !== sess._cookieHost) delete headers.Cookie;
             }
             // 无会话头的强制管道会话（PotPlayer m3u8 规范化包装）：Node http 不自动带
@@ -938,7 +980,14 @@ class PlaylistProxy extends EventEmitter {
         if (r.ok) {
             sess.cache.set(index, r.url);
             if (r.header && typeof r.header === 'object' && Object.keys(r.header).length) {
-                sess.headers = { ...(sess.headers || {}), ...r.header };
+                // kazumi：刷新出的头归本条目的条目级头（各集 CDN 可能不同，不能当会话头
+                // 串给其它集；见 _serveResolved 管道分流注释）。其余会话保持既有语义。
+                if (sess.kind === 'kazumi') {
+                    if (!sess.entryHeaders) sess.entryHeaders = new Map();
+                    sess.entryHeaders.set(index, r.header);
+                } else {
+                    sess.headers = { ...(sess.headers || {}), ...r.header };
+                }
             }
         }
         return r;

@@ -1671,6 +1671,10 @@ const Player = {
         }
         const detail = String(result.error || '').replace(/\s+/g, ' ').trim();
         if (detail) note += `：${detail.slice(-240)}`;
+        // 主进程自动修复的结论（HTTP/1.1 兼容重试 / 去掉规则头重试）必须显式透出：
+        // 否则用户只看到"失败"，不知道应用已经试过什么，也就无法判断该换线路、
+        // 换播放器还是重试——这条 hint 正是那次尝试的结果说明。
+        if (result.hint) note += `（${String(result.hint)}）`;
         // 静默退出（无补探测、无日志可提取）：常见于旧版内置/自装 mpv 的行为差异，
         // 给出可操作的下一步而不是干巴巴的「mpv 已退出」
         if (reason === 'mpv-exited-before-playback' && !detail && !result.postProbe) {
@@ -1712,6 +1716,10 @@ const Player = {
         const extra = [];
         if (r && r.anime4k) extra.push(`Anime4K 超分已生效（${r.anime4kModeLabel || '均衡'}）`);
         if (r && r.simulDl) extra.push('已同步加入后台下载');
+        // 自动修复结论（主进程兜底重试成功后回传）：让用户明白"第一次失败后为什么又播上了"，
+        // 也便于把这个结论对应到设置（换播放器 / 换线路）。
+        if (r && r.autoHttp11) extra.push('已自动切换 HTTP/1.1 兼容模式');
+        if (r && r.headerless) extra.push('已自动去掉 Referer/UA（规则头被防盗链拦截）');
         warnToast(extra.length ? `${msg}（${extra.join('，')}）` : msg);
     },
 

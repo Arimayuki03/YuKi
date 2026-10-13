@@ -105,6 +105,85 @@ function buildM3u(episodes, opts = {}) {
     return lines.length > 1 ? lines.join('\n') + '\n' : '';
 }
 
+/**
+ * 播放清单根目录（<临时目录>/yuki-playlists，本应用独占）。
+ *
+ * 原生队列的临时 m3u **必须独占一个目录**，不能像早期那样直接写临时目录根。原因是用户
+ * mpv.conf 里的 `autocreate-playlist=same|filter`（「装载文件时把同目录、同扩展名的文件
+ * 并入播放列表」，mpv.lite 这类便携配置的常见开法——用户看 B 站番剧正是靠它「播一集，
+ * 整目录排队」）：mpv 会把**清单所在目录**里同扩展名的文件插到播放列表**最前面**。
+ * 清单原先直接写 %TEMP% 根，与 %TEMP% 里其他工具/测试残留的 *.m3u8 同目录（实测用户机上
+ * 就有一个 2498 段的 seg.m3u8）→ YuKi 传 12 集清单，mpv 侧变成 13 条、playlist-pos 从 1 起：
+ * file-loaded 取到的集名是「下一集」（OSD/窗口标题显示错集）、渲染层
+ * currentEp=playlist-pos+1 的进度与收藏记账错位、--playlist-start 也按错位后的下标生效
+ * （选第 N 集从别处起播）。实测同一份 mpv（v0.41.0-1050-ge76a35ec9 + 该 portable_config）
+ * 把清单放进独占目录后 playlist-count 精确等于所传集数、playlist-pos 从 0 起。
+ *
+ * 清单写在它下面的**每次会话独立的子目录**里（<pid>-<时间戳>/yuki-playlist.m3u8，见 play()）：
+ * 「目录内只有这一份清单」由目录结构本身保证，不依赖任何清理动作成功——Windows 上删除被
+ * 占用的文件会静默失败（EBUSY/EPERM），若靠「先清目录再写同一个文件名」，一次失败就会让
+ * 旧清单与本次清单同目录，bug 原样复发。
+ *
+ * 不注入 `--autocreate-playlist=no` 代替：那要按版本探测能力（mpv 对不认识的**命令行**
+ * 选项是致命错误 "option not found / Exiting... (Fatal error)"，老版本一注入就整场起播
+ * 失败），而且会一并关掉用户单文件播放时的「整目录排队」——那是他自己要的配置语义；
+ * YuKi 只在「自己交付整份列表」时不允许列表被目录内容改写。
+ */
+function playlistDir() {
+    return path.join(os.tmpdir(), 'yuki-playlists');
+}
+
+/**
+ * 清空清单根目录，并清掉旧版布局遗留在临时目录根的清单文件（启动时 / 每次起播前调用；
+ * 此时无本进程在播会话，旧清单都已无用——mpv 装载清单是一次性读取，进程被杀后不再回读）。
+ */
+function cleanPlaylists() {
+    // 旧版布局：清单直接写临时目录根（保留清扫，升级后不留垃圾）
+    try {
+        for (const f of fs.readdirSync(os.tmpdir())) {
+            if (/^yuki-playlist-\d+-\d+\.m3u8$/.test(f)) {
+                try { fs.rmSync(path.join(os.tmpdir(), f), { force: true }); } catch (e) { /* ignore */ }
+            }
+        }
+    } catch (e) { /* ignore */ }
+    // 现行布局：清空清单根目录（目录内只有本应用写的历史会话清单）
+    try {
+        const root = playlistDir();
+        for (const name of fs.readdirSync(root)) {
+            try { fs.rmSync(path.join(root, name), { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        }
+    } catch (e) { /* 目录不存在/清扫失败不影响起播 */ }
+}
+
+
+// ------------------------------------------------- curl HTTP/2 分帧故障的特征识别
+//
+// 自定义 mpv（如 mpv.lite）若带 libcurl 流后端，http(s) 由 curl 接管，curl 会经 ALPN
+// 协商 HTTP/2；部分 CDN 边缘节点 h2 协商成功却分帧失败，表现为起播即死：
+// `[e][curl] error: Stream error in the HTTP/2 framing layer` + `[e][stream] Failed to
+// open <url>`（v0.3.1 用户实报）。同一地址用 HTTP/1.1 可正常播放——内置 vendor mpv 没有
+// curl 后端（`--list-options` 无任何 --curl-*），走的是 ffmpeg 的 1.1 实现，所以该故障
+// 只在用户指定外部 mpv 后出现。
+//
+// 解药是 `--curl-http-version=1.1`，但**不能无条件注入**：mpv 对不认识的命令行选项是
+// 致命错误（"option not found / Exiting... (Fatal error)"），老构建一注入就整场起播
+// 失败。本模块不猜版本号、也不额外拉起探测进程，而是把两个特征判定做成纯函数交给
+// index.js 的兜底重试：命中 h2 特征 → 带 1.1 重试一次；重试若被 mpv 判为未知选项
+// （isUnknownOptionFailure）则收回并记住该二进制不支持。只有真的接受该选项的构建才会
+// 重试成功，于是"支持与否"由 mpv 自己裁决，无需预探测。
+
+/** 起播失败文本是否为 curl 的 HTTP/2 分帧故障（可被强制 HTTP/1.1 化解）。 */
+function isHttp2StreamFailure(text) {
+    const s = String(text || '');
+    if (/HTTP\/2 framing layer/i.test(s)) return true;
+    return /\[curl\][^\n]*Stream error/i.test(s);
+}
+
+/** 起播失败文本是否为 mpv 拒绝未知选项（用于收回 --curl-http-version 注入）。 */
+function isUnknownOptionFailure(text) {
+    return /option not found|unknown option/i.test(String(text || ''));
+}
+
 function findMpv() {
     const exe = WIN ? 'mpv.exe' : 'mpv';
     const candidates = [];
@@ -356,6 +435,9 @@ class MpvPlayer extends EventEmitter {
         let deferredSeekSec = null;
         let playlistPath = '';
         let startIndex = -1; // 原生队列实际起播的 m3u 下标（-1=非原生队列/未起播）
+        // 交付给 mpv 的列表条目数（单集=1；原生队列=实际写入 m3u 的条数）：file-loaded
+        // 时据 mpv 侧 playlist-count 做列表形状自检（见 _onEvent file-loaded）。
+        let expectedLen = 1;
         // 弹幕行缓冲在每次起播时清空重置（真正的 ASS 写盘延迟到首次追加弹幕时，
         // 见 _writeAss 的按需写入；弹幕轨是否随 IPC 连接装载由 danmakuEnabled 门控）。
         this._danmakuLines = [];
@@ -389,6 +471,11 @@ class MpvPlayer extends EventEmitter {
         if (WIN && !this.externalStyle) args.push('--osd-font=Microsoft YaHei');
         const headerFields = MpvPlayer.headerFieldsValue(opts.header);
         if (headerFields) args.push(`--http-header-fields=${headerFields}`);
+        // curl 后端的 HTTP/1.1 强制（见 isHttp2StreamFailure 注）：仅当调用方（index.js）
+        // 已确证该二进制接受此选项时注入——它不是"默认参数"，而是对已发生的 h2 分帧故障
+        // 的定点修复，且会被记住（settings.mpvForceHttp11 按二进制路径绑定）。当前会话
+        // 之后的每次起播都带上它，故障不再重演。
+        if (opts.forceHttp11 === true) args.push('--curl-http-version=1.1');
         // ytdl_hook 默认整体排除（见 _ytdlArgs 注）：本应用不打包 yt-dlp，放任 mpv 探测
         // 只会在无扩展名直链上白白拖慢起播并刷错误日志。opts.ytdl===true 时保留。
         args.push(...this._ytdlArgs(opts));
@@ -467,15 +554,13 @@ class MpvPlayer extends EventEmitter {
         args.push(...this._screenshotArgs());
         // 原生队列：m3u（#EXTINF 集名进 mpv 原生列表，右键菜单/F8 可见可切）+ 起始集下标
         if (nativeQueue) {
-            // 不保留历史清单：残留的旧 m3u 一旦被当作列表展开，会导致集数虚增与
-            // 匹配错位。写入新清单前先清掉全部同类临时文件（此时旧进程已被 stop）。
-            try {
-                for (const f of fs.readdirSync(os.tmpdir())) {
-                    if (/^yuki-playlist-\d+-\d+\.m3u8$/.test(f)) {
-                        try { fs.rmSync(path.join(os.tmpdir(), f), { force: true }); } catch (e) { /* ignore */ }
-                    }
-                }
-            } catch (e) { /* ignore */ }
+            // 清单写进「本次会话独占」的子目录（见 playlistDir 注）：目录内只有这一份清单，
+            // 同目录同扩展名残留无从产生，mpv 的 autocreate-playlist 便不会往列表里塞东西。
+            // 起播前先清空根目录（含旧版遗留在临时目录根的清单）：不保留、不复用——
+            // 残留清单被当作列表展开同样是集数虚增 + 下标错位。
+            cleanPlaylists();
+            const plDir = path.join(playlistDir(), `${process.pid}-${Date.now()}`);
+            fs.mkdirSync(plDir, { recursive: true });
             // buildM3u 会跳过缺 url 的条目：m3u 里实际写入的集数可能少于 episodes。
             // 记录「原数组下标 → m3u 实际下标」映射，startIndex 与逐集标题（_queueTitles
             // 由 index.js 按原数组注入）都须重映射，否则选中的集数错位、末段越界。
@@ -485,7 +570,8 @@ class MpvPlayer extends EventEmitter {
                 const ep = episodes[i];
                 if (ep && ep.url) m3uIndexOf[i] = m3uCount++;
             }
-            playlistPath = path.join(os.tmpdir(), `yuki-playlist-${process.pid}-${Date.now()}.m3u8`);
+            expectedLen = m3uCount; // 交付 mpv 的条目数（file-loaded 列表形状自检用）
+            playlistPath = path.join(plDir, 'yuki-playlist.m3u8');
             fs.writeFileSync(playlistPath, buildM3u(episodes, { keepRawTitle: opts.keepRawTitle === true }), 'utf8');
             // 起始集下标：非负夹取后映射到 m3u 实际条目；映射不到（该集无 url）
             // 或越界时回退 0，从清单第一项播——绝不传越界的 --playlist-start。
@@ -544,6 +630,8 @@ class MpvPlayer extends EventEmitter {
             title: String(opts.title || ''), // 会话标题（本地文件等无渲染层元信息的播放，登记 OP/ED 用）
             stderr: '',         // 最近一段 mpv 错误输出（避免错误日志无限增长）
             nativeQueue,        // 原生多集队列：ended 逐集携带 nativeQueue/playlistPos 供渲染层逐集记账
+            expectedLen,        // 交付 mpv 的列表条目数（file-loaded 列表形状自检基准）
+            lenChecked: false,  // 本会话是否已做过列表形状自检（每会话只查一次属性）
             pendingSeekSec: deferredSeekSec, // 每次装载逐集应用 seek（原生队列替代全局 --start，见 file-loaded 逐集注释）
             queueIdx: startIndex >= 0 ? startIndex
                 : Math.max(0, Number(opts.startIndex) || 0), // 当前播放的列表下标（file-loaded 时经 IPC 刷新；end-file 记账用）
@@ -948,6 +1036,23 @@ class MpvPlayer extends EventEmitter {
                         this.command('show-text', MpvPlayer.escapeOsdText(full), 1200).catch(() => { });
                     }
                 }).catch(() => { });
+                // 列表形状自检（每会话一次）：mpv 侧 playlist-count 必须等于 YuKi 交付的条目数。
+                // 不等即说明列表被外部因素改写——最典型是用户 mpv.conf 的 autocreate-playlist
+                // 把清单同目录、同扩展名的文件插到列表最前面（实测过一次：%TEMP% 里别的工具
+                // 残留的 seg.m3u8 让 12 集变 13 条、playlist-pos 整体 +1，集名与进度记账全跟着
+                // 错，只能靠肉眼发现）。清单现已移进专用目录（见 playlistDir 注），此情形不该
+                // 再出现——这里留一道告警，别再让它无声地错。
+                if (active.nativeQueue && !active.lenChecked && active.expectedLen > 0) {
+                    active.lenChecked = true;
+                    this.getProperty('playlist-count').then((n) => {
+                        if (this._activeSession !== active) return; // 结果到达时会话可能已切换
+                        if (typeof n === 'number' && n !== active.expectedLen) {
+                            console.warn(`[mpv] 播放列表被改写：mpv playlist-count=${n}，YuKi 交付 ${active.expectedLen} 条`
+                                + '——请检查 mpv.conf 的 autocreate-playlist（同目录同扩展名文件会被并入列表），'
+                                + '集名/进度记账可能错位');
+                        }
+                    }).catch(() => { /* 属性读不到不影响播放 */ });
+                }
                 // 原生队列逐集跳片头/续播：--start 是全局选项会作用到每一集，故经 IPC seek。
                 // 逐集应用（每次装载都重新判定）：opEd 片头位置是「片名+线路」级记录，
                 // 同片名各集片头位置一致复用正是其设计语义——此前只在首集 seek 一次
@@ -1386,5 +1491,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 MpvPlayer.parseMpvVersion = parseMpvVersion;
 MpvPlayer.supportsContextMenu = supportsContextMenu;
 MpvPlayer.buildM3u = buildM3u;
+MpvPlayer.playlistDir = playlistDir;
+MpvPlayer.cleanPlaylists = cleanPlaylists;
+MpvPlayer.isHttp2StreamFailure = isHttp2StreamFailure;
+MpvPlayer.isUnknownOptionFailure = isUnknownOptionFailure;
 
 module.exports = MpvPlayer;
