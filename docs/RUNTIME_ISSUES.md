@@ -479,3 +479,37 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
   - `_QuarkSaveDenied` 语义化拒绝：HTTP 401 或 403 且业务码 ≠41020 判不可自愈硬拒绝，立即上抛跳过剩余重试与个人盘兜底（文件未转存成功时兜底只会多打两轮 v2/play/download 加深风控）；code=41020「转存文件token校验异常」虽以 HTTP 403 包装，但属 JAR vodId 快照令牌过期的**可自愈**错误——按业务码区分而非只看 HTTP 状态，调用方拉实时目录树换新令牌重转存即可成功。代理侧回 502 + 中文提示「今日转存次数已达上限或触发风控」，排查时可直接定位账号额度/风控而非链路故障。
   - `src/main/pan-source.js`（新增）+ `player.js`：网盘类源（站点/线路名或集地址命中 `PAN_SOURCE_RE`，Kazumi 规则引擎豁免防误伤）禁用自动线路回退（失败即收口交用户手动重试）、全局禁用原生播放列表（主进程拒建队 → 渲染层静默回退逐集连播）——网盘解析慢且依赖 Cookie 会话，整季装载只会放大解析次数与风控暴露面。
 - **验证**：`python-backend/tests/test_quark_pan.py` 24/24 OK（覆盖 `_QuarkSaveDenied` 不重试、41020 自愈重转存、快路径分流等）；`tests/js/pan-source-playlist.test.js` 7/7（建队拦截、集地址协定命中、Kazumi 豁免、主/渲两端正则同源、网盘源回退风暴钉死）。真实账号端到端复测待用户验证。
+
+### R29 · 起播即退：curl 的 HTTP/2 分帧故障（内置 mpv 与外部 mpv 同中招）（2026-10-14）
+
+- **发现时间**：2026-10-14（用户报告「catvod 某些线路解析成功但播放不了」，附 `[e][curl] Stream error in the HTTP/2 framing layer` 原文）
+- **证据链**（用户机日志，非推测）：
+  1. `~/.yuki/logs/electron-main.log` 2026-10-13T17:30:58Z：`[mpv] 原生队列起播失败：mpv-exited-before-playback / [ 2.481][e][curl] error: Stream error in the HTTP/2 framing layer（×2） ｜ [ 2.481][e][stream] Failed to open http://127.0.0.1:8869/pl/…/10.m3u`——**失败发生在本地代理条目上**：mpv 请求本地代理拿到 302，curl 跟随跳转去 CDN 时 h2 分帧失败（错误归因在 mpv 打开的那个 URL 上）。
+  2. 同日志更早一条是**打包版内置 mpv**（`resources/vendor/mpv/mpv.exe` v0.41.0-923，`binaries.lock.json` tag 20260814）产生的——即"HTTP/2 故障只影响外部 mpv"不成立；仓库内 `vendor/mpv`（v0.41.0-744，2026-06 下载）反而没有 curl 后端，容易误判（本地复现时注意版本差异）。
+  3. 两个构建的 `--list-options` 均含 7 个 `--curl-*` 选项，其中 `--curl-http-version` 取值 `auto 1.0 1.1 2 2tls 2-prior-knowledge 3 3only`（默认 auto）；实测两者都接受 `--curl-http-version=1.1` 且正常起播。
+- **修复**（`src/main/index.js` + `src/main/mpv-player.js`）：
+  - `isHttp2StreamFailure/isUnknownOptionFailure` 两个纯函数做特征识别；起播失败且 reason=`mpv-exited-before-playback`、报错命中 h2 分帧特征时，用**同一份 episodes/参数**带 `--curl-http-version=1.1` 原地重试一次（起播参数抽成 `launch(extra)` 闭包，杜绝两处漂移）。
+  - 成功后按**二进制路径**持久化 `settings.mpvForceHttp11`，此后该播放器每次起播直接带 1.1（换播放器/重装自动失效，不会把不支持的选项注入新二进制）。
+  - 护栏：**每个二进制每次运行只盲试一次**。实测依据：mpv 对未知命令行选项的致命错误**既不进 `--log-file` 也不进 stderr**（`--no-terminal` 已关掉终端输出，日志在选项解析前已接管），故"靠报错文本回收"只能是尽力而为。
+  - 渲染层提示：成功时 toast 标注「已自动切换 HTTP/1.1 兼容模式」，失败时把 `hint` 拼进失败弹窗——用户能看出应用已经试过什么。
+- **验证**：特征正则对用户原文命中（tests/js/mpv-player.test.js）；argv 注入与原生队列路径单测（mpv-player-internals.test.js）；index.js 源码契约断言（特征门控/重试注入/路径绑定持久化/每二进制一次）；两个真实构建接受该选项（命令行实测）。**故障本身为间歇性**：复测同一 CDN URL 未再复现，故没有 before/after 实测对照。
+
+### R30 · mpv.lite 起播「播放列表导入失败」：autocreate-playlist 把同目录残留并入列表（2026-10-14）
+
+- **发现时间**：2026-10-14（用户报告「catvod 源用新版 mpv.lite 播放器时创建播放列表不能成功导入播放器」）
+- **根因**：`H:\Soft\mpv.lite\portable_config\mpv.conf` 带 `autocreate-playlist=same`（装载文件时把**同目录、同扩展名**的文件并入播放列表，便携配置常见开法——用户看 B 站番剧正是靠它"播一集整目录排队"）。旧实现把清单写在 `%TEMP%` 根，与其它工具/测试残留的 `*.m3u8` 同目录 → mpv 侧把残留插到列表最前：12 集变 13 条、`playlist-pos` 整体 +1，集名/进度记账/`--playlist-start` 全部错位。
+- **修复**（`src/main/mpv-player.js` + `src/main/index.js`）：清单独占"每次会话子目录"（`<tmp>/yuki-playlists/<pid>-<ts>/yuki-playlist.m3u8`，目录内只有这一份清单，由目录结构本身保证，不依赖清理动作成功——Windows 上删除被占用文件会静默失败）；启动与起播前 `cleanPlaylists()` 清扫根目录与旧版遗留；`file-loaded` 时读 `playlist-count` 做列表形状自检，不等即告警。不注入 `--autocreate-playlist=no`：那会关掉用户自己配置的"整目录排队"语义，且旧版 mpv 遇到未知命令行选项会致命退出。
+- **验证**（真实 mpv.lite v0.41.0-1050 实测，脚本驱动应用自身代码）：3 集本地清单 → `playlist-count=3 playlist-pos=0 media-title=第1集`、应用自查零告警、清单所在目录内只有清单一个文件；**对照实验**在同一 mpv 上装载"同目录另有 seg.m3u8"的清单 → `count=4 playlist-pos=1`，复现虚增与错位，证明隔离是必要条件。
+
+### R31 · Kazumi 整季队列丢弃抓流头（+ 重写清单分片被自家 /seg 拒成 404）（2026-10-14）
+
+- **发现时间**：2026-10-14（用户报告「kazumi 大部分源和线路成功解析但不能正常播放，链接复制到直链播放能成功播放」；同机日志另有 taobao CDN 条目 `[e][curl] HTTP error 400`）
+- **根因**（两层，均在整季原生队列路径）：
+  1. **抓流头整包丢失**：用户机上 16 条 Kazumi 规则里 14 条 referer 为空、16 条 userAgent 为空——真正让 CDN 放行的头来自**抓流那一刻**（隐藏窗口真实请求的 Referer/Cookie/UA）。而 kazumi 建队只做 `kazumiResolvePage`（轻量页面解析，不抓流），`sess.headers` 因此为空 → `_serveResolved` 判为"无需鉴权"走 **302 直连**：播放器裸连 CDN，抓流头一个都带不上；`_pipeRemote` 的上游请求也只注入建队时的静态头。单集路径（`_playKazumi`）反而会把抓流头交给播放器——同一份数据两条路径口径不一致。
+  2. **改写清单的分片被自家拒**：一旦条目改走管道转发，清单会被重写成 `/seg/<token>/<i>/<b64u>` 形态；而 `/seg` 端点原本只放行 `sess.pipe` 会话（外部播放器会话）——内置 mpv 会话 `pipe=false`，重写出的分片会被判"非管道会话"返回 404，表现为"清单能取、一分片就断"。
+- **修复**（`src/main/playlist-proxy.js`）：
+  - 条目级抓流头随地址一起留存（`sess.entryHeaders`，写入侧与 `_reresolveEntry` 刷新侧同时维护）；
+  - `_serveResolved` 分流改为"**条目自带头即送管道**（kazumi 会话限定）"，无头条目维持 302 快路径（保住时长体验与零带宽）；`_pipeRemote` 上游请求合并会话头 + 条目头，条目 Cookie 先按**条目所在域**绑定再做跨域剥离（防误剥/防串域）；
+  - `/seg` 门控新增 `sess.pipedOnce`（本会话已转发过条目即放行），独立于 `sess.pipe` 以免影响本地抓流产物的 Content-Type 语义。
+- **验证**：`tests/js/playlist-proxy.test.js` 新增/改写两例——带头 kazumi 条目走管道且上游收到 `Referer`/`Cookie`、清单重写出的 `/seg` 分片取回 200 且同样带头；无头条目仍 302。代理相关三套测试 75/75 通过。
+- **关联**：R22（VLC 播放在线视频的"302 丢头"）是同一类问题的外部播放器形态；本次把内置 mpv 的同类缺口补齐。

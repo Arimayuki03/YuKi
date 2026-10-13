@@ -4,6 +4,39 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-10-14
+
+### Fixed
+
+- **起播即退：curl 的 HTTP/2 分帧故障（内置与外部 mpv 同中招）**：用户实报 `[e][curl] error: Stream error in the HTTP/2 framing layer` + `[e][stream] Failed to open`。证据链（用户机 `electron-main.log`）：失败发生在**本地代理条目**上——mpv 请求 127.0.0.1 代理拿到 302，curl 跟随跳转去 CDN 时 h2 分帧失败；且该条来自**打包版内置 mpv**（v0.41.0-923，`binaries.lock.json` 同 tag），故不是"外部播放器专属"（仓库内 `vendor/mpv` 是更旧的 744、无 curl 后端，容易被误判）。修复：`yuki:play` 兜底——起播失败且报错命中 h2 分帧特征时，用同一份 episodes/参数带 `--curl-http-version=1.1` 原地重试一次，成功后按**二进制路径**持久化 `mpvForceHttp11`（换播放器自动失效）；护栏是每个二进制每次运行只盲试一次（实测 mpv 对未知命令行选项的致命错误既不进 `--log-file` 也不进 stderr，`--no-terminal` 已关掉终端输出，"靠报错文本回收"只能尽力而为）。渲染层把结论透出：成功 toast「已自动切换 HTTP/1.1 兼容模式」、失败弹窗附 `hint`。回归：特征纯函数 3 例 + argv 注入 2 例 + index.js 源码契约断言 1 例；两个真实构建（mpv.lite v0.41.0-1050、打包版 v0.41.0-923）命令行实测接受该选项。故障本身间歇（复测同 URL 未再复现，故无 before/after 对照）。
+- **mpv.lite 起播「播放列表导入失败」：autocreate-playlist 把同目录残留并入列表**：用户便携配置 `portable_config/mpv.conf` 带 `autocreate-playlist=same`（便携 mpv 的常见开法，用户靠它"播一集整目录排队"），而旧实现把清单写在 `%TEMP%` 根，与其它工具残留的 `*.m3u8` 同目录 → mpv 把残留插到列表最前：12 集变 13 条、`playlist-pos` 整体 +1，集名/进度记账/`--playlist-start` 全部错位。修复：清单独占"每次会话子目录"（`<tmp>/yuki-playlists/<pid>-<ts>/yuki-playlist.m3u8`，目录结构本身保证隔离，不依赖清理动作成功——Windows 删被占用文件会静默失败）+ `file-loaded` 读 `playlist-count` 做形状自检告警；不注入 `--autocreate-playlist=no`（会关掉用户自己配置的语义，且旧版 mpv 遇未知命令行选项致命退出）。验证：真实 mpv.lite 上 3 集清单 `count=3/pos=0/标题正确`、目录内只有清单一个文件；对照实验（同目录另放 `seg.m3u8`）复现 `count=4/pos=1`。
+- **Kazumi 整季队列丢弃抓流头（并补 `/seg` 门控缺口）**：用户报「大部分源和线路成功解析但不能正常播放，链接复制到直链播放能成功播放」。根因两层：① 用户机上 16 条规则里 14 条无 referer、16 条无 UA——真正让 CDN 放行的头来自**抓流那一刻**（隐藏窗口真实请求的 Referer/Cookie/UA），而 kazumi 建队只做轻量页面解析（不抓流）→ `sess.headers` 为空 → 走 302 直连，播放器裸连 CDN 一个头都带不上（`_pipeRemote` 上游同样只用建队时的静态头）；② 一旦条目改走管道转发，清单会被重写成 `/seg/…` 形态，而 `/seg` 原本只放行 `sess.pipe` 会话（外部播放器），内置 mpv 会话 `pipe=false` → 重写出的分片被自家判"非管道会话"返回 404（表现为"清单能取、一分片就断"）。修复：条目级抓流头随地址留存（`sess.entryHeaders`，重解析路径同步刷新）、kazumi 会话"条目自带头即送管道"（无头条目维持 302 快路径）、上游请求合并会话头+条目头、条目 Cookie 按条目域绑定后再做跨域剥离、`/seg` 增加独立的 `pipedOnce` 门控。回归：`playlist-proxy` 两例新断言（带头条目 pipe 且上游收到 Referer/Cookie；重写清单的 `/seg` 分片 200 且带头）+ 代理三套 75/75。
+- **图片保存失败（根因：保存的是应用自己的回环封面代理 URL）**：详情 hero 封面经后端 `/kazumi/cover?url=…` 代理渲染（`python-bridge` base 是 127.0.0.1），浮层"保存图片"把它原样交给主进程，被 `private-address` 判定拦下，渲染层又把所有失败笼统显示成"保存图片失败"。修复：渲染层拆回原始远程 URL（`_unwrapCoverProxyUrl`）+ blob→data 转换（限额）；主进程侧私网门槛保持不变，并补 SSRF 加固——`redirect:'manual'` 逐跳重校验 host（堵住"公网 302 到 127.0.0.1"）、整数/十六进制/八进制形态 IP 归一化（`127.1`、`0x7f.1`、CGNAT、IPv4-mapped IPv6、组播/保留段全覆盖）、`data:` 分支限额解码、按 errno 分错误原因（权限/磁盘满/占用/网络/超时/取消），取消对话框仍静默。回归：save-image-fix 11 例 + 相关面 341 例。
+- **吐槽评分：5 分档标签更正为「一般」；取消按钮按「本次是否有未保存改动」二次确认**：`fmtRateLabel` 的 5 分档原为错字「不过不去」，按用户口径改为「一般」（其余 9 档不动）。取消确认用**快照对比**（打开时记录评分/吐槽/标签草稿，关闭时比较）而非"是否触碰过"标记——改回原值不弹、无改动直接关（覆盖"已有评分但没动"），只要本次填过内容或改过数据就弹「取消编辑会丢失本次填写的内容」，确认后走同一 `resolve(false)` 语义；Esc/点遮罩（新增，此前该弹窗无遮罩关闭）/取消按钮三条路径同一判定，且防重入。顺带修掉一个既有数据丢失 bug：改前"先打吐槽再点星"会被重渲清空正文（`_renderDialog` 用 `_ctx.comment` 回写，输入未同步）。回归：bgm-rate 39 例（新增 9）。
+- **Kazumi 手动检索弹窗：拖选标题拖到窗口外即自动关闭**：根因是 `dlg.on('click')` 的 `e.target === 遮罩` 判定——`click` 的 target 是 mousedown/mouseup 目标的**最近公共祖先**，在标题上按下、拖出弹窗在遮罩上松手时公共祖先正是遮罩，被判成"点击外部"。改为记录按下起点（左键且在遮罩上）并要求释放点也在遮罩上；Esc 改为弹窗自身消费（此前不在 dialogStack 里，Esc 会把后面的选源弹窗关掉、留下孤立输入框）。回归：kazumi-alias 22 例。
+- **收藏页多选改状态后封面徽标不立即刷新**：纯 Bangumi 条目批量标记时不走 `recSet`，因而没有 `FavHub.changed` 广播；现补发一次（本地路径由 `recSet` 发、不重复）并就地重绘当前视图徽标，注释与实现口径对齐。回归：records-filter-sort 37 例。
+- **Bangumi 筛选条件：星期文案、评分/排名硬限制、布局**：星期 chips 与已应用条件文案统一为「周一…周日」（取值仍是 1-7，不动持久化与后端参数）；评分硬限制 1–10、排名硬限制 1–10000，含交叉约束（编辑侧优先、另一侧被顶到同值）与空值语义（留空=不限，不再产出 `NaN`）；弹窗整理为排序/标签/季度与日期/评分与排名/星期五分区，内容区独立滚动 + 底部动作条常驻、窄窗不溢出。回归：bangumi-search-filter 15 例。
+- **角色详情浮层不显示 CV**：角色列表卡早就有 CV 行，浮层没有；现按 `actors` 渲染 CV 行（无数据不渲染空行、多 CV 用「/」连接、不溢出）。回归：char-float-cv 5 例。
+- **设置页代理地址丢失（两种场景）**：① 填了网址没点"保存"就关页面/应用 → 从不落盘；② 关闭代理开关 → 渲染层下发空地址、主进程无条件写空串，**把记录清空**。修复：输入即防抖落盘（新增 `persistOnly` 通道，只写记录不动 env/不重启后端——每敲键重启后端会打断播放/下载；启用态下拒绝草稿覆盖"正在生效的地址"）、关闭开关带当前网址下发且主进程只非空覆盖、回填加"用户已编辑"守卫（防异步快照覆盖输入）、scheme 白名单收口（`ftp://127.0.0.1:7890` 这类会被旧逻辑当裸主机拼成非法 env）。回归：proxy-persist 30 例。**取舍说明**：环回/私有地址放行（本机代理客户端如 Clash 监听 127.0.0.1 是主流用法，一刀切拒绝会打断核心功能），socks5 保留（既有且被测试覆盖的能力）。
+- **筛选栏下拉框显示细节补齐**：`.md-select` 的圆角/自绘箭头/主题化早在 2026-08-12 已实现（含包内 asar 验证），本次补齐真实缺陷——超长项改省略号（Chromium UA 把 select 的 overflow 钉成 `clip !important`，故不重复声明 overflow）、`option:disabled`/`optgroup` 配色（暗色下不再落回系统近黑文字）、`.md-select-sm` 圆角 token 化、壁纸模式 hover 不再变实心色块。Windows 原生展开列表无法样式化（平台限制，不做 hack）。
+- **恢复默认设置会清掉搜索历史与别名表**：两者与收藏/历史同级属用户数据，加入重置保留键清单（排序/筛选一类偏好仍按"重置"语义清掉）。
+
+### Added
+
+- **搜索历史**：新增 `search-history.js`（settings 键 `searchHistory`）——聚合 / Kazumi / Bangumi / 首页四处搜索框共用一份，面板按来源分组；点一条即重新检索（跨来源自动切页签）、每条可删、底部可清空（二次确认）、支持键盘上下+回车；去重上移、100 条上限、损坏数据容错、写串行化。**持久化的关键词不再回填输入框**（结果列表仍按页面状态记忆恢复，输入框留空）。
+- **Kazumi 别名检索**：手动检索里输入的关键词一旦检索到可用源即沉淀为该番剧别名（每部 ≤8、去重、长度与字符清洗、上限 LRU），选源弹窗新增「别名 N」管理入口（增删/置顶/设优先）；下次检索若原标题无可用源则按别名依次重试（≤3、命中即停、全源 error 不试），命中源卡标注「别名「x」」。键优先 Bangumi subjectId（`bgm:`），否则归一化片名（`t:`）。回归：kazumi-alias 22 例。
+- **Kazumi 规则管理**：拖拽排序（HTML5 draggable + 行中线算插入间隙 + 指示线，落盘复用既有的**单次** `kazumiReorder`，上移/下移按钮保留并共用同一纯函数）、批量管理（进入模式后勾选 + 操作条：已选 N / 全选 / 反选 / 清空 / 批量更新 / 批量删除 / 退出；批量删除二次确认、逐条串行、完成后刷新；批量模式下卡片上其它按钮与拖拽禁用）、卡片新增**来源域名行**（优先级 `source → homepage → referer → baseURL → searchURL` 取域名；当前后端 `list_all()` 只回 baseURL/searchURL，故实际显示适配站点域名）。回归：kazumi-rule-manage 35 例（顺带修掉一个批量删除计数恒为 0 的真实 bug）。
+- **收藏页与历史页：排序、筛选与卡片快捷操作**：收藏页排序（最近变更 / 番剧名称 / 评分最高 / 开播时间）、历史页排序（时间正序倒序 / 评分 / 播放次数），选择持久化（`favoritesSort`/`historySort`）；收藏页筛选与 Bangumi 搜索同款（标签 / 季度 / 日期区间 / 评分 / 排名 / 星期，缺数据默认按"未知"排除、面板可勾选放行），历史页筛选（单个日期 / 连续区间 / 来源 / 评分档位含"未评分"）；历史卡片右上角 `▶` 直接续播记录里那一集（CatVod 取 detailContent 定位线路+集、Kazumi 走 `kazumiSrc` 自动续播、direct/local/download 走各自链路，失败按原因 toast）、右下角 `⋯` 六态收藏菜单。**新记录现在会把 Bangumi 评分/排名/开播/subjectId 随记录落盘**（纯读匹配缓存，写路径零网络），评分筛选不必每次回源。回归：records-filter-sort 37 例。
+- **时间表封面分类徽标**：集数徽标与收藏徽标之间新增题材徽标——从 Bangumi 标签里取"计数最高且命中类型白名单"的一个（TV/日本/2026年10月/漫画改 这类元信息标签被刻意排除），白名单 34 分类 / 90 别名（含喜剧→搞笑等归一），无命中不显示徽标；数据复用既有的批量详情通道（≤60/批），失败静默。回归：timeline-tag-badge 17 例。
+- **Bangumi 同步「最新修改时间优先」**：此前上传路径硬编码本地优先、页面下拉值 `"0"/"1"` 与后端 `'local'/'remote'` 不匹配（**优先级设置整体是死开关**）。现新增 `newest` 优先级并在后端真正实现冲突裁决（比较本地记录 `ts` 与远端 `updated_at`，较新者胜；一方或双方时间缺失时回落既有规则并标注 `resolvedBy` 供排障）、下拉改语义值并兼容迁移旧值、`uploadFavoritesToBangumi` 不再硬编码并透传 `lastSyncAt`（新键 `bangumiLastSyncAt`）、`kazumiBangumiSync` 端点做参数白名单与格式校验、出口 URL 加安全验收（scheme + 私网/环回拒绝并给出可诊断原因）。回归：新增 `test_kazumi_sync_priority.py` 22 例并接入 `run_all.py`，kazumi-bgm-upload 14 例。
+- **WebDAV 同步内容升级到当前数据模型**：备份载荷加版本标识，旧版（无版本）备份仍可直接恢复；恢复语义——缺失的键保留本机现状、不认识的键忽略并报告、类型不符的键跳过且不影响其它键（单键失败不拖垮其余）；同步范围补齐本版新增的用户数据与偏好（搜索历史、Kazumi 别名表、收藏/历史排序与筛选偏好），`bangumiLastSyncAt` 按"机器相关"排除。不改双向合并/版本对抗（仍按 `docs/WEBDAV_SYNC_MERGE_DESIGN.md` 暂缓）。
+- **图片查看器支持鼠标拖动平移**：与既有缩放/旋转共用 CSS transform 单一出口（`translate` 在最前），pointer 事件 + 指针捕获 + 4px 阈值（与"点击关闭"区分）、拖动时禁用选中/原生拖拽、`grab/grabbing` 光标；复位同时清平移。
+
+### Tests
+
+- JS 单测 2585/2585 通过（新增 12 个测试文件：search-history、records-filter-sort、kazumi-alias、kazumi-rule-manage、timeline-tag-badge、bangumi-search-filter、proxy-persist、save-image-fix、cover-float-pan、char-float-cv 等）；Python `run_all.py` 全 stage 通过（新增 `kazumi-sync-priority` 阶段）；ESLint / Ruff 零 error。
+- 真机实测：mpv.lite v0.41.0-1050 播放清单导入 `count=3/pos=0` + 对照实验复现虚增；两个真实 mpv 构建接受 `--curl-http-version=1.1`。
+
 ## [0.3.1] - 2026-10-12
 
 ### Fixed

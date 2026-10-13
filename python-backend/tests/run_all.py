@@ -28,6 +28,9 @@ STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
+    # Bangumi 双向同步「最新修改时间优先」：冲突裁决（本地 ts vs 远端 updated_at）/
+    # 缺时间回落 / 优先级取值归一（含旧值 0|1 迁移）/ lastSyncAt 校验 / 出口 URL 验收
+    ('kazumi-sync-priority', [PY, os.path.join(HERE, 'test_kazumi_sync_priority.py')]),
     # Bangumi 评分/吐槽（rate/comment 单条透传）+ 验证码自动识别（animeko 思路，可选降级）
     ('kazumi-bgm-rating', [PY, os.path.join(HERE, 'test_kazumi_bgm_rating.py')]),
     # 封面话数徽章批量详情链路（bangumi_info_batch 并发/截断/单条缓存回写）

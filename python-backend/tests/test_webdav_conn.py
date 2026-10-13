@@ -122,13 +122,15 @@ class WebdavConnTests(unittest.TestCase):
 
     def test_sync_uses_custom_dir(self):
         # sync 与 restore 共用同一拼接规则：自定义目录 + 文件名拼出上传地址。
-        # 注意 sync 的 MKCOL 走 requests.request、上传走 requests.put，两者都要打桩
+        # 注意 sync 的 MKCOL 走 requests.request、上传走 requests.put，两者都要打桩；
+        # 末尾多一次 _meta.json（版本标识）PUT，见 test_sync_writes_version_meta_last
         def fake(method, url, **kwargs):
             self.calls.append((method, url))
             return _Rsp(201) if method == 'PUT' else _Rsp(200)
 
         def fake_put(url, **kwargs):
             self.calls.append(('PUT', url))
+            self.kwargs_log.append(kwargs)
             return _Rsp(201)
 
         requests.request = fake
@@ -136,9 +138,115 @@ class WebdavConnTests(unittest.TestCase):
         ok = pm.PluginManager.webdav_sync(None, self.URL, '', '', {'favorites': []}, remote_dir='p1')
         self.assertTrue(ok)
         self.assertEqual(
-            [('MKCOL', f'{self.URL}/p1'), ('PUT', f'{self.URL}/p1/favorites.json')],
+            [('MKCOL', f'{self.URL}/p1'), ('PUT', f'{self.URL}/p1/favorites.json'),
+             ('PUT', f'{self.URL}/p1/_meta.json')],
             self.calls,
         )
+
+    def test_sync_writes_version_meta_last(self):
+        """版本标识：数据文件先写、_meta.json 最后写，且内容声明 schemaVersion。"""
+        import json
+
+        def fake_put(url, **kwargs):
+            self.calls.append(('PUT', url))
+            self.kwargs_log.append(kwargs)
+            return _Rsp(201)
+
+        requests.request = lambda method, url, **kw: _Rsp(200)
+        requests.put = fake_put
+        ok = pm.PluginManager.webdav_sync(None, self.URL, '', '',
+                                          {'favorites': [], 'settings': {'a': 1}})
+        self.assertTrue(ok)
+        self.assertEqual([u.rsplit('/', 1)[1] for _, u in self.calls],
+                         ['favorites.json', 'settings.json', '_meta.json'])
+        meta = json.loads(self.kwargs_log[-1]['data'].decode('utf-8'))
+        self.assertEqual(meta['schemaVersion'], pm.WEBDAV_PAYLOAD_VERSION)
+        self.assertEqual(meta['files'], ['favorites', 'settings'], 'files 为升序清单')
+        self.assertIn('createdAt', meta)
+        self.assertNotIn('_meta', meta['files'])
+
+    def test_sync_meta_carries_app_version_from_env(self):
+        """appVersion 来自主进程注入的 YUKI_APP_VERSION（未注入时空串，不影响同步）。"""
+        import json
+        import os
+
+        def fake_put(url, **kwargs):
+            self.calls.append(('PUT', url))
+            self.kwargs_log.append(kwargs)
+            return _Rsp(201)
+
+        requests.request = lambda method, url, **kw: _Rsp(200)
+        requests.put = fake_put
+        old = os.environ.get('YUKI_APP_VERSION')
+        try:
+            os.environ['YUKI_APP_VERSION'] = '9.9.9-test'
+            pm.PluginManager.webdav_sync(None, self.URL, '', '', {'favorites': []})
+            meta = json.loads(self.kwargs_log[-1]['data'].decode('utf-8'))
+            self.assertEqual(meta['appVersion'], '9.9.9-test')
+        finally:
+            if old is None:
+                os.environ.pop('YUKI_APP_VERSION', None)
+            else:
+                os.environ['YUKI_APP_VERSION'] = old
+
+    def test_sync_skips_reserved_meta_key_in_payload(self):
+        """payload 里出现保留键 _meta 时不得覆盖后端生成的版本文件内容。"""
+        def fake_put(url, **kwargs):
+            self.calls.append(('PUT', url))
+            self.kwargs_log.append(kwargs)
+            return _Rsp(201)
+
+        requests.request = lambda method, url, **kw: _Rsp(200)
+        requests.put = fake_put
+        pm.PluginManager.webdav_sync(None, self.URL, '', '', {'_meta': {'schemaVersion': 999}})
+        self.assertEqual([u for _, u in self.calls], [f'{self.URL}/YuKiSync/_meta.json'])
+
+    def test_sync_rejects_illegal_scheme_without_request(self):
+        def fake_put(url, **kwargs):  # pragma: no cover - 不应被调用
+            self.calls.append(('PUT', url))
+            return _Rsp(201)
+
+        requests.request = lambda method, url, **kw: _Rsp(200)
+        requests.put = fake_put
+        self.assertFalse(pm.PluginManager.webdav_sync(None, 'file:///tmp/x', '', '', {'favorites': []}))
+        self.assertFalse(pm.PluginManager.webdav_sync(None, 'nas.local/dav', '', '', {'favorites': []}))
+        self.assertEqual(self.calls, [])
+
+    def test_sync_allows_loopback_and_private_hosts(self):
+        """自建 NAS/内网地址必须放行（本场景主流用法），不因私网被拦。"""
+        def fake_put(url, **kwargs):
+            self.calls.append(('PUT', url))
+            return _Rsp(201)
+
+        requests.request = lambda method, url, **kw: _Rsp(200)
+        requests.put = fake_put
+        for url in ('http://127.0.0.1:5005/dav', 'http://192.168.1.9:5005/dav'):
+            self.calls.clear()
+            self.assertTrue(pm.PluginManager.webdav_sync(None, url, '', '', {'favorites': []}), url)
+            self.assertTrue(any(u.startswith(url) for _, u in self.calls), url)
+
+    def test_test_reports_hint_for_private_host(self):
+        """测试连接成功时附地址提示（内网/明文 http），失败判定不受影响。"""
+        self._install([_Rsp(207)])
+        r = pm.PluginManager.webdav_test(None, 'http://192.168.1.9:5005/dav', '', '')
+        self.assertTrue(r['ok'])
+        self.assertIn('内网', r['note'])
+        self._install([_Rsp(207)])
+        r2 = pm.PluginManager.webdav_test(None, 'https://dav.jianguoyun.com/dav', '', '')
+        self.assertEqual(r2['note'], '', '公网 https 无提示')
+
+    def test_test_rejects_illegal_scheme_with_chinese_reason(self):
+        r = pm.PluginManager.webdav_test(None, 'file:///tmp/x', '', '')
+        self.assertFalse(r['ok'])
+        self.assertIn('http/https', r['error'])
+        self.assertIn('不被支持', r['error'])
+        self.assertEqual(self.calls, [])
+
+    def test_validate_webdav_url_public_helper(self):
+        self.assertTrue(any('内网' in h for h in pm.PluginManager.validate_webdav_url(None, 'http://10.1.2.3/dav')))
+        self.assertEqual(pm.PluginManager.validate_webdav_url(None, 'https://x.example/dav'), [])
+        with self.assertRaises(ValueError):
+            pm.PluginManager.validate_webdav_url(None, 'gopher://x/1')
 
 
 if __name__ == '__main__':

@@ -75,7 +75,7 @@ src/
     ├── index.html          单页应用壳
     ├── css/ui.css          全局样式
     ├── assets/             渲染层静态资源
-    └── js/ (21 文件)       渲染层模块（均导出为 YUKI.*）
+    └── js/ (22 文件)       渲染层模块（均导出为 YUKI.*）
         ├── app.js          路由与视图调度
         ├── home.js         首页/分类/聚合搜索
         ├── detail.js       详情与播放入口（含「开始播放」一键直达、选集讨论页签、bgm.tv 跳转）
@@ -83,6 +83,7 @@ src/
         ├── bgm-rate.js     Bangumi 评分/吐槽/打标签对话框
         ├── kazumi.js       Kazumi 规则管理与商店
         ├── bangumi-search.js  Bangumi 搜索页签
+        ├── search-history.js  搜索历史（四处搜索框共用，settings 键 searchHistory）
         ├── panels.js       设置面板
         ├── popular.js      推荐页
         ├── about.js / ui-state.js  关于页 / UI 状态
