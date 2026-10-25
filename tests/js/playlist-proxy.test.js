@@ -911,3 +911,74 @@ test('B4b：MAX_SESSIONS 淘汰按最近访问——刚访问过的活跃会话�
     await proxy.close();
 });
 
+// ---------------------------------------------------------------- R32：清单内相对地址
+//
+// 实测现场（用户日志）：catvod 源整季建队成功、m3u 已装载，但 mpv 起来后立刻打出
+//   「[播放列表] 未匹配路径(活令牌): /pl/<token>/enc.key」并在 30s 后 mpv-start-timeout。
+//   根因：清单经 302 交给播放器后，ffmpeg/mpv 解析清单里的相对地址（AES 密钥 enc.key、
+//   相对分片、master→子清单）时，基准仍是**最初请求的本地代理 URL**，302 目标不会替换
+//   它。旧实现把这类回请当「未匹配路径」，回一个空清单 (#EXTM3U + #EXT-X-ENDLIST)，
+//   分片/密钥直接断供——清单能取、一播就卡死。
+//   修复：记下本集 302 的上游地址，命中活令牌的相对地址按它解析成绝对地址再 302
+//   （同源门控，令牌不得变成任意外链跳板）。
+
+test('R32：清单相对地址（enc.key/分片）按本集 302 的上游地址解析并 302 回去', async () => {
+    const { proxy, base, reg } = await make(
+        OK_BACKEND,
+        async () => ({ json: async () => ({ url: 'http://cdn.test/2026/clip/index.m3u8?sign=abc', parse: 0 }) }),
+    );
+    // 先请求条目：302 到上游清单（同时记录解析基准）
+    const r0 = await req(`${base}/pl/${reg.token}/0`);
+    assert.equal(r0.status, 302);
+    assert.equal(r0.location, 'http://cdn.test/2026/clip/index.m3u8?sign=abc');
+
+    // 播放器按清单里的相对地址回请本地代理：AES 密钥
+    const r1 = await req(`${base}/pl/${reg.token}/enc.key`);
+    assert.equal(r1.status, 302, '不再回空清单');
+    assert.equal(r1.location, 'http://cdn.test/2026/clip/enc.key?sign=abc', '相对解析到同目录，并继承签名 query');
+
+    // 相对分片同理
+    const r2 = await req(`${base}/pl/${reg.token}/seg-1.ts`);
+    assert.equal(r2.status, 302);
+    assert.equal(r2.location, 'http://cdn.test/2026/clip/seg-1.ts?sign=abc');
+    await proxy.close();
+});
+
+test('R32：master → 子清单 → 分片的多级相对链（子清单目录为基准）', async () => {
+    const { proxy, base, reg } = await make(
+        OK_BACKEND,
+        async () => ({ json: async () => ({ url: 'http://cdn.test/v/master.m3u8', parse: 0 }) }),
+    );
+    await req(`${base}/pl/${reg.token}/0`);
+    // master 里的相对子清单：2000k/hls/index.m3u8
+    const r1 = await req(`${base}/pl/${reg.token}/2000k/hls/index.m3u8`);
+    assert.equal(r1.status, 302);
+    assert.equal(r1.location, 'http://cdn.test/v/2000k/hls/index.m3u8');
+    // 子清单里的相对分片：以子清单自身地址为基准
+    const r2 = await req(`${base}/pl/${reg.token}/2000k/hls/seg2.ts`);
+    assert.equal(r2.status, 302);
+    assert.equal(r2.location, 'http://cdn.test/v/2000k/hls/seg2.ts');
+    await proxy.close();
+});
+
+test('R32：相对地址仍受门控——无基准回空清单；越界集下标不当相对地址；跨源不解析', async () => {
+    const { proxy, base, reg } = await make(
+        OK_BACKEND,
+        async () => ({ json: async () => ({ url: 'http://cdn.test/a/index.m3u8', parse: 0 }) }),
+    );
+    // 没有任何一集被 302 过 → 没有基准：保持既有兜底（活令牌回最小合法空清单）
+    const r0 = await reqFull(`${base}/pl/${reg.token}/enc.key`);
+    assert.equal(r0.status, 200);
+    assert.match(r0.body, /#EXTM3U/, '无基准时仍回空清单，不猜地址');
+
+    await req(`${base}/pl/${reg.token}/0`); // 建立基准
+    // 越界集下标（/pl/<token>/99）：按「空清单兜底」处理，不当相对地址解析
+    const r1 = await reqFull(`${base}/pl/${reg.token}/99`);
+    assert.equal(r1.status, 200);
+    assert.match(r1.body, /#EXT-X-ENDLIST/);
+    // 绝对外链（跨源）不得被解析：代理不是开放重定向
+    const r2 = await reqFull(`${base}/pl/${reg.token}/http://evil.test/x.ts`);
+    assert.equal(r2.status, 200, '跨源请求落回空清单兜底');
+    assert.match(r2.body, /#EXTM3U/);
+    await proxy.close();
+});

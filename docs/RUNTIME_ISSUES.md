@@ -513,3 +513,23 @@ R4/R5 本轮验证的是隐藏解析窗口及其失败路径；真实可播放�
   - `/seg` 门控新增 `sess.pipedOnce`（本会话已转发过条目即放行），独立于 `sess.pipe` 以免影响本地抓流产物的 Content-Type 语义。
 - **验证**：`tests/js/playlist-proxy.test.js` 新增/改写两例——带头 kazumi 条目走管道且上游收到 `Referer`/`Cookie`、清单重写出的 `/seg` 分片取回 200 且同样带头；无头条目仍 302。代理相关三套测试 75/75 通过。
 - **关联**：R22（VLC 播放在线视频的"302 丢头"）是同一类问题的外部播放器形态；本次把内置 mpv 的同类缺口补齐。
+
+### R32 · catvod 整季队列「m3u 已装载但一播就超时」：清单内相对地址被解析回本地代理、旧实现回空清单（2026-10-24）
+
+- **发现时间**：2026-10-24（用户再次反馈「catvod 源用新版 mpv.lite 播放器时创建播放列表不能成功导入播放器」；R30 的目录隔离修复已上线，症状仍在）
+- **现场证据**（用户机 `~/.yuki/logs/electron-main.log`，R30 修复后仍复现）：
+  ```
+  [播放列表] 构建：ok=true entries=4 kind=catvod
+  [mpv] 原生队列起播：entries=4 start=0 m3u 已装载，等待首集就绪…
+  [播放列表] 第 1 集应答 302 → https://play.xluuss.com/play/e1w9ALjb/index.m3u8
+  [播放列表] 未匹配路径(活令牌): /pl/mvmkuwzw-mt2fa3zo/enc.key
+  [mpv] 原生队列起播失败：mpv-start-timeout
+  ```
+  即「清单装载成功、第一集清单也取到了」，卡在清单内的**相对地址**上。
+- **根因**：m3u 里的条目地址是本地代理 `/pl/<token>/<i>`，代理把它 302 到 CDN 清单；而 ffmpeg/mpv 解析清单内相对 URI（AES 密钥 `enc.key`、相对分片 `seg-1.ts`、master→子清单）时，基准仍是**最初请求的本地代理 URL**，302 目标不会替换它。于是这些请求回到代理的 `/pl/<token>/…` 路径，落进旧实现的「未匹配路径」兜底——该兜底为兼容 VLC 垃圾路径会回一份**空清单**（`#EXTM3U` + `#EXT-X-ENDLIST`，见 R24）。HLS 拿不到密钥/分片 → 无限缓冲 → `mpv-start-timeout`。日志里那一行 `/pl/<token>/enc.key` 就是它。
+- **修复**（`src/main/playlist-proxy.js`）：
+  - 条目 302 时记录「本集上游地址」（`_noteEntryBase`），换集即重置；
+  - 命中活令牌的非集下标路径按「上一次 302 的上游地址」解析成绝对地址再 302（`_resolveRelative`），并记录子目录映射（`_rememberRelDir`）以支持 master → 子清单 → 分片的多级相对链；
+  - 门控：只解析与基准**同源**的地址（令牌不得变成开放重定向）；纯数字（越界集下标）不当相对地址；相对地址不带签名时继承基准 query（与 `_rewriteManifest` 同口径）；解析不出来仍回既有空清单兜底。
+- **验证**：`tests/js/playlist-proxy.test.js` 新增三例（`enc.key`/分片的解析与 302、master→子清单→分片多级链、无基准/越界下标/跨源一律不解析），代理三套测试 28/28 + 60/60 通过；真实 mpv.lite v0.41.0-1050 上以脚本装载 3 集清单仍为 `playlist-count=3 / playlist-pos=0`（R30 隔离语义不回退）。
+- **关联**：R24（空清单兜底）、R30（同目录残留并入列表）、R31（管道模式分片门控）——三者都在同一条整季队列链路上，本次补齐「302 直连模式下的相对地址」这最后一块。

@@ -328,6 +328,86 @@ class PlaylistProxy extends EventEmitter {
         return sess.upstreamHosts.has(host);
     }
 
+    /**
+     * 记录「本集 302 去了哪儿」：播放器随后按清单里的**相对 URI**回请本地代理时，
+     * 用它作为解析基准（见 _resolveRelative）。
+     */
+    _noteEntryBase(sess, index, url) {
+        if (!sess) return;
+        sess.currentIndex = index;
+        sess.relBase = String(url || '');
+        // 换集即换基准：上一集的子目录映射可能来自另一个 CDN 目录，留着会解析错路径
+        if (sess.relDirs) sess.relDirs.clear();
+    }
+
+    /** 记录「这个相对路径被 302 到了哪个上游文件」：子清单（master→media）会再引出
+     *  一层相对地址（分片），必须以子清单自身地址为基准继续解析。 */
+    _rememberRelDir(sess, rest, target) {
+        if (!sess || !target) return;
+        const rel = String(rest || '');
+        const k = rel.lastIndexOf('/');
+        const dir = k >= 0 ? rel.slice(0, k) : '';
+        if (!dir) return;
+        if (!sess.relDirs) sess.relDirs = new Map();
+        if (sess.relDirs.has(dir)) sess.relDirs.delete(dir);
+        sess.relDirs.set(dir, String(target));
+        // 有界：一条清单最多几十个子目录，64 条足够，超出按插入序淘汰最旧
+        while (sess.relDirs.size > 64) {
+            const first = sess.relDirs.keys().next().value;
+            sess.relDirs.delete(first);
+        }
+    }
+
+    /**
+     * 相对 URI → 上游绝对地址（同源门控）。解析不出来返回 ''（调用方走既有兜底）。
+     *
+     * 场景（R32，实测用户日志「未匹配路径(活令牌): /pl/<token>/enc.key」）：
+     * 清单本身经 302 交给播放器后，ffmpeg/mpv 解析清单内相对地址时的基准仍是
+     * **最初请求的 URL**（本地代理地址），302 的目标不会替换它 —— 于是
+     * 'enc.key'、'seg1.ts'、'2000k/hls/mixed.m3u8' 全部变成
+     * /pl/<token>/… 回请到本代理。旧实现把它们当「未匹配路径」回一个空清单
+     * （#EXTM3U+#EXT-X-ENDLIST），分片/密钥直接断供：清单取得到、一播就卡死，
+     * 最终以 mpv-start-timeout 收场（用户报的「创建播放列表不能成功导入播放器」）。
+     */
+    _resolveRelative(sess, rest) {
+        const rel = String(rest || '').trim();
+        if (!sess || !rel) return '';
+        let base = String(sess.relBase || '');
+        let remainder = rel;
+        // 已解析过的子目录优先（最长前缀）：master → 子清单 → 分片 的多级相对链
+        const dirs = sess.relDirs;
+        if (dirs && dirs.size) {
+            let best = '';
+            dirs.forEach((_u, key) => {
+                if (!key) return;
+                if ((rel === key || rel.startsWith(key + '/')) && key.length > best.length) best = key;
+            });
+            if (best) {
+                const u = dirs.get(best);
+                if (u) {
+                    base = String(u);
+                    // 去掉分隔斜杠后再交 URL 拼接：留着会把相对地址变成"根路径绝对地址"
+                    // （'2000k/hls/seg2.ts' 会被解析成 https://cdn/seg2.ts，丢掉目录层级）
+                    remainder = rel.slice(best.length).replace(/^\/+/, '');
+                    if (!remainder) return '';
+                }
+            }
+        }
+        if (!/^https?:\/\//i.test(base)) return '';
+        let abs = null;
+        let baseUrl = null;
+        try {
+            baseUrl = new URL(base);
+            abs = new URL(remainder, baseUrl);
+        } catch (e) { return ''; }
+        if (!/^https?:$/.test(abs.protocol)) return '';
+        // 只允许与基准同源：令牌不得变成「跳任意外链」的开放重定向
+        if (abs.host !== baseUrl.host) return '';
+        // 相对地址不带签名时继承基准的 query（HLS 签名 CDN 约定，与 _rewriteManifest 同口径）
+        if (!abs.search && baseUrl.search) abs.search = baseUrl.search;
+        return abs.toString();
+    }
+
     /** 登记会话内已知上游域名（清单重写产出的 /seg 端点全部指向这些域）。 */
     _allowUpstreamHost(sess, urlStr) {
         if (!sess.upstreamHosts) sess.upstreamHosts = new Set();
@@ -385,6 +465,23 @@ class PlaylistProxy extends EventEmitter {
             if (!live) {
                 const loose = /^\/pl\/([A-Za-z0-9_-]{8,64})\//.exec(rawPath);
                 live = loose ? this.sessions.get(loose[1]) || null : null;
+            }
+            // R32：清单内的相对地址（分片/子清单/AES 密钥）会被播放器解析回本代理的
+            // 同目录路径。命中活令牌时按「上一次 302 的上游地址」解析成绝对地址再 302
+            // 回去；解析不出来（或非同源）才落到下面的空清单兜底。
+            const relHit = /^\/pl\/([A-Za-z0-9_-]{8,64})\/(.+)$/.exec(rawPath);
+            // 纯数字（可带扩展名）的是「越界的集下标」，不是清单里的相对地址——不解析
+            const isIndexPath = relHit ? /^\d{1,4}(?:\.[a-z0-9]{1,5})?$/i.test(relHit[2]) : false;
+            if (live && relHit && !isIndexPath) {
+                const target = this._resolveRelative(live, relHit[2]);
+                if (target) {
+                    this._touch(live);
+                    this._rememberRelDir(live, relHit[2], target);
+                    res.writeHead(302, { Location: target });
+                    res.end();
+                    console.log(`[播放列表] 相对地址 302: ${relHit[2].slice(0, 60)} → ${target.slice(0, 80)}`);
+                    return;
+                }
             }
             if (live) {
                 res.writeHead(200, {
@@ -490,6 +587,9 @@ class PlaylistProxy extends EventEmitter {
                 console.log(`[播放列表] 第 ${index + 1} 集 pipe 完成 st=${st}`);
                 return;
             }
+            // 记下本集的上游地址：播放器随后按清单内相对 URI 回请时以它为基准解析
+            // （见 _resolveRelative；这是 302 直连模式下清单可用、分片不可用的根因修复）
+            this._noteEntryBase(sess, index, url);
             res.writeHead(302, { Location: url });
             res.end();
             return;
