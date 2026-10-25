@@ -1,9 +1,9 @@
 {
-  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 锁定 BtbN/FFmpeg-Builds 的月度快照 tag（autobuild-2026-08-31-13-27，BtbN 逐月末固化、内容不可变，避免锁 latest 时同 tag 资产随上游重构建而失配）+ 版本化资产；sha256 已与该 release 官方 checksums.sha256 核对一致。升级=改 version/url 后同步 sha256。",
+  "_comment": "binaries.lock.json — 第三方二进制完整性清单。mpv/aria2 锁定 release tag（更新=改此文件后重验；注意 shinchiro 的每日构建只保留约两个月，tag 被上游清理后下载 404 会让构建卡在「下载第三方二进制」——遇 404 时把 mpv.tag/asset/sha256 换到现存最新 tag，sha256 取该 release 资产的 digest 字段）；anime4k/misans 逐文件哈希（源已版本化）。ffmpeg 锁定 BtbN/FFmpeg-Builds 的月度快照 tag（autobuild-2026-08-31-13-27，BtbN 逐月末固化、内容不可变，避免锁 latest 时同 tag 资产随上游重构建而失配）+ 版本化资产；sha256 已与该 release 官方 checksums.sha256 核对一致。升级=改 version/url 后同步 sha256。",
   "mpv": {
-    "tag": "20260814",
-    "asset": "mpv-x86_64-20260814-git-7b8915bc1d.7z",
-    "sha256": "1bf3b029da2c98e605e00e85f21ee3142f22a1dcc4ceb5c827b5c51e36e390f9"
+    "tag": "20261021",
+    "asset": "mpv-x86_64-20261021-git-e471496c56.7z",
+    "sha256": "4a355f3e89c83fabc730d33fb4e759dfec747806ed2287b61a90d1681b83e8d3"
   },
   "aria2": {
     "tag": "release-1.37.0",

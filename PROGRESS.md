@@ -188,6 +188,13 @@ PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
 
+2026-10-25 发布 v0.5.0（含发布流水线排障）：
+
+- 版本与文档：package.json / lock / README / CHANGELOG / docs/KAZUMI.md 全部对到 0.5.0；README 的「功能特性」按用户要求改为**只写主要能力**，不再把修复历史当功能点罗列。
+- **推送被 GitHub 拒（email privacy restrictions）**：仓库回绝了带真实邮箱的提交。已把本次未推送的 17 个提交改写到 GitHub noreply 身份（`109644779+Arimayuki03@users.noreply.github.com`，内容/时间/信息不变，仅 author/committer 邮箱），并把仓库级 `user.email` 固定为该 noreply 地址，后续提交不会再撞同一堵墙。
+- **发布构建第一次失败**：Release 工作流在「下载全部第三方二进制」报 404——锁定的 mpv 20260814 已被上游 shinchiro 清掉。修法：换到现存最新 tag 20261021（mpv `v0.41.0-1227`），sha256 取该 release 资产的 `digest` 并本地下载复验一致；lock 的注释补上"上游只保留约两个月、遇 404 的换法"，避免下次踩同样坑。
+- 兼容性核验（新 mpv）：应用传入的全部选项逐个 `--list-options` 命中；`--http-user-agent` 只用于 VLC（mpv 走 `--http-header-fields`，无需该开关）；curl 后端在位；真机解码 h264+aac 测试片 3 帧正常。
+
 2026-10-25 时间筛选器：图标缺失 + 文字不居中（**像素级定位到根因**，第三次才是真修好）：
 
 前两次之所以没修好，是因为没有看到像素。这次改用 CDP `Page.captureScreenshot` 截图 + 自写 PNG 解码逐行数像素，得到确凿事实：

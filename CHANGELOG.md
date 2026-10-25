@@ -32,6 +32,7 @@
 
 ### Changed
 
+- **内置 mpv 升级**：`v0.41.0-923`（20260814 构建）→ **`v0.41.0-1227-ge471496c5`**（20261021 构建，FFmpeg N-127893 / libplacebo v7.377）。升级理由：上游 shinchiro 每日构建只保留约两个月，旧 tag 已被清理（下载 404），构建卡在「下载第三方二进制」一步。验证：新构建可解析应用传入的全部 mpv 选项（`--cache`/`--demuxer-*`/`--network-timeout`/`--focus-on`/`--save-position-on-quit` + `--watch-later-directory`/`--script-opt`/`--osd-font`/`--curl-http-version`/`--http-header-fields` 等）、curl 后端在位（R29 的 HTTP/2 兜底继续可用）、真机解码 h264+aac 测试片正常；`binaries.lock.json` 的 sha256 与 GitHub release 资产的 `digest` 逐字节一致。
 - **WebDAV 载荷排除表**：上传侧补齐 `proxyUrl`/`proxyTestUrl`/`proxyEnable`（可能内嵌账号密码与私网地址）与 `mpvForceHttp11`（按播放器二进制绑定的机器态），与恢复侧拒绝表口径对齐；`translateLLMBase`/`captchaLLMBase` 仅用于跨设备诊断，保留上传、恢复仍拒绝。
 - **回归口径**：JS 单测 **2679/2679** 通过（新增 custom-select / custom-date / ui-filter-controls / overlay-back-stack / kazumi-search-error-code 五个测试文件）；Python `run_all.py` 全 stage 通过（新增 `kazumi-search-errors`）；`check-js` 56 文件 0 错；ESLint 0 error；Ruff 全过。真实渲染验收改用 CDP 截图（`HARNESS_CDP`），隐藏窗口也能出图并做像素测量。
 
