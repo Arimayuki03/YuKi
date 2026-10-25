@@ -1767,11 +1767,16 @@ function shouldRefillProxyInput(current, persisted, dirty) {
     return String(persisted == null ? '' : persisted) !== '';
 }
 
-/** 代理表单展开判定（纯函数）：启用时必展开；未启用但已有地址记录时也展开——
- *  否则「关闭后保留的网址」被折叠在开关后面，用户重开应用仍然看不到上次的记录
- *（这正是本次修复要消灭的现象）。空记录时才随开关收起，保持既有观感。 */
-function proxyFieldsVisible(enable, url) {
-    return enable === true || sanitizeProxyDraft(url) !== '';
+/**
+ * 代理表单展开判定（纯函数）：**只看开关**。
+ *
+ * 历史教训（两版互相推翻的裁决，以本版为准）：曾为了让「关闭后保留的网址」仍可见，
+ * 把判定写成「开关开 或 地址非空」——结果是关掉开关后表单原地不动，用户完全看不到
+ * 「代理已关闭」这件事（开关变灰、地址还在，与真在走代理的界面一模一样）。
+ * 现在：关 = 收起表单；地址记录本身不清（重新打开开关立刻回填），想看旧地址就再拨开。
+ */
+function proxyFieldsVisible(enable) {
+    return enable === true;
 }
 
 /** 防抖落盘器（纯逻辑，计时器可注入以便单测）：
@@ -1969,7 +1974,7 @@ function initSettingsPanel() {
         // 代理开关严格按持久化值回填（proxyEnable === true 才开），避免旧版本/脏数据下误显示为开
         $('#set_proxy_enable').prop('checked', s.proxyEnable === true);
         // 表单展开：启用时必展开；未启用但有地址记录时也展开（否则记录被折叠在开关后面看不见）
-        $('#proxy_fields').toggle(proxyFieldsVisible(s.proxyEnable === true, s.proxyUrl));
+        $('#proxy_fields').toggle(proxyFieldsVisible(s.proxyEnable === true));
         // 系统：代理连通性测试：回填上次测试 URL（同样受编辑守卫）
         if (shouldRefillProxyInput($('#set_proxy_test_url').val(), s.proxyTestUrl, _proxyTestUrlDirty)) {
             $('#set_proxy_test_url').val(s.proxyTestUrl || '');
@@ -2563,8 +2568,8 @@ function initSettingsPanel() {
     // 关闭只禁用、不清空记录：带上当前网址让主进程更新记录（空值=不改动，见 handler），
     // 此前写死 url:'' 会把用户上次填的网址一并抹掉——正是「关闭后再打开就没了」。
     $('#set_proxy_enable').on('change', async function () {
-        // 展开条件带上地址记录：关闭开关时若已有记录，表单保持可见（记录还在，不该被折叠藏起来）
-        $('#proxy_fields').toggle(proxyFieldsVisible(this.checked, $('#set_proxy_url').val()));
+        // 关 = 立即收起表单（地址记录保留在设置里，重新打开开关会回填）
+        $('#proxy_fields').toggle(proxyFieldsVisible(this.checked));
         if (this.checked) return;
         proxyDraft.cancel();   // 紧接着的 setProxy 已带最新值，待写草稿不再单独落盘
         try {

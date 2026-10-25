@@ -1777,18 +1777,46 @@ function unregisterEsc(handler) {
     if (i >= 0) escHandlers.splice(i, 1);
 }
 
-/** 全局 Esc 派发：先关对话框，再关封面放大浮层，最后自顶向下询问视图处理器。 */
-function dispatchEsc() {
+/** 关闭浮层（走 detail.js 的退场动画出口；detail.js 缺席/异常时退回裸摘 .show）。
+ *  返回 true 表示确实关掉了一层。 */
+function _closeFloatLayer(el) {
+    if (!el) return false;
+    try {
+        if (typeof Detail !== 'undefined' && Detail && typeof Detail._hideDetailFloat === 'function') {
+            Detail._hideDetailFloat(el);
+            return true;
+        }
+    } catch (e) { /* 退场动画失败：退回下面的裸关闭 */ }
+    try { el.classList.remove('show'); } catch (e) { return false; }
+    return true;
+}
+
+/**
+ * 关闭「最上层浮层」：对话框栈顶 → 封面放大浮层 → 人物详情浮层。
+ * 返回 true = 消费掉了本次「返回」意图（调用方不应再继续做视图后退）。
+ *
+ * 单独抽出来是因为「返回」有两个入口：键盘 Esc（dispatchEsc）与鼠标侧键后退
+ * （app.js mouseNav）。此前只有 Esc 知道浮层的存在——用户开着图片查看器按鼠标
+ * 后退键，直接把底下的详情页退掉了，图片浮层还留在屏幕上（观感像"退了两层"）。
+ * 现在两个入口共用同一套判定：浮层没关完之前，视图栈不动。
+ */
+function closeTopOverlay() {
     if (dialogStack.length) {
         closeDialog(dialogStack[dialogStack.length - 1]);
-        return;
+        return true;
     }
     // 详情页封面放大浮层不属于对话框系统，单独关闭
     const cf = document.getElementById('cover-float');
-    if (cf && cf.classList.contains('show')) { cf.classList.remove('show'); return; }
+    if (cf && cf.classList.contains('show')) return _closeFloatLayer(cf);
     // 人物详情浮层同样单独关闭
     const chf = document.getElementById('char-float');
-    if (chf && chf.classList.contains('show')) { chf.classList.remove('show'); return; }
+    if (chf && chf.classList.contains('show')) return _closeFloatLayer(chf);
+    return false;
+}
+
+/** 全局 Esc 派发：先关浮层（对话框/封面放大/人物详情），最后自顶向下询问视图处理器。 */
+function dispatchEsc() {
+    if (closeTopOverlay()) return;
     for (let i = escHandlers.length - 1; i >= 0; i--) {
         try { if (escHandlers[i]() === true) return; } catch (e) { /* ignore */ }
     }

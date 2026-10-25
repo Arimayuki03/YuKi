@@ -287,6 +287,10 @@ test('锚点：img 禁用原生拖拽、样式板块含 grab/grabbing 与 touch-
     assert.match(src, /setPointerCapture/, '使用 setPointerCapture');
     const css = read('src/renderer/css/ui.css');
     assert.match(css, /\.cover-float-stage \{[^}]*cursor:grab;/, 'stage 握持光标');
-    assert.match(css, /#cover-float img\.dragging \{ cursor:grabbing; transition:none; \}/, '拖动中 grabbing 光标且摘掉 transform 过渡（1:1 跟手）');
+    // 拖动中必须摘掉 transform 过渡，且选择器权重不得低于 #cover-float img.loaded
+    // （后者也声明 transition）：单写 .dragging 会被 .loaded 盖掉 → 每帧 transform 都被
+    // 150ms 过渡追尾，实测就是「拖动卡顿、图跟不上指针」
+    assert.match(css, /#cover-float img\.dragging,\s*#cover-float img\.loaded\.dragging \{ cursor:grabbing; transition:none;/,
+        '拖动中 grabbing 光标且摘掉 transform 过渡（1:1 跟手，权重压过 .loaded）');
     assert.match(css, /\.cover-float-stage \{[^}]*touch-action:none;/, 'stage touch-action:none（触摸拖动不被浏览器手势抢走）');
 });

@@ -1149,6 +1149,45 @@ const Detail = {
         } catch (e) { warnToast('保存图片失败'); }
     },
 
+    /**
+     * 复制图片地址（工具栏「⧉ 复制地址」）。三条路径依次降级，任何一条走通都必给
+     * toast 反馈——用户报的「复制地址没有提示」有两层原因：① 剪贴板 API 在非安全上下文
+     * /被策略拦截时会直接 reject，旧实现 reject 分支的文案同样走 warnToast，但
+     * ② toast 层(#warnToast z-index)当时压在图片浮层(1300)底下，用户根本看不到。
+     * ②已由 ui.css 提到 1350 修掉；这里补齐 ①的降级链，并统一出口。
+     */
+    async _copyImageUrl(src) {
+        const text = String((src === null || src === undefined) ? '' : src);
+        if (!text) { warnToast('没有可复制的图片地址'); return false; }
+        try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(text);
+                warnToast('已复制图片地址');
+                return true;
+            }
+        } catch (e) { /* 落到 execCommand 兜底 */ }
+        // 兜底：临时 textarea + 原生复制（file:// / 剪贴板权限被拒时仍可用）
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', 'readonly');
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            const before = document.activeElement;
+            ta.select();
+            try { ta.setSelectionRange(0, text.length); } catch (e2) { /* 部分环境不支持 */ }
+            const ok = document.execCommand && document.execCommand('copy');
+            document.body.removeChild(ta);
+            if (before && typeof before.focus === 'function') { try { before.focus(); } catch (e3) { /* ignore */ } }
+            if (ok) { warnToast('已复制图片地址'); return true; }
+        } catch (e) { /* 兜底也失败：下面统一提示 */ }
+        warnToast('复制失败：当前环境不允许访问剪贴板');
+        return false;
+    },
+
     /** 封面放大浮层工具栏重置：缩放回 1、旋转归 0、平移到原点（打开新图/点复位时调用）。 */
     _resetCoverFloatTransform() {
         const wrap = document.getElementById('cover-float');
@@ -1173,7 +1212,9 @@ const Detail = {
     _applyCoverFloatTransform() {
         const wrap = document.getElementById('cover-float');
         if (!wrap) return;
-        const img = wrap.querySelector('img');
+        // 节点引用缓存：拖动期每次 pointermove 都会走到这里，逐帧 querySelector 属于
+        // 白白的布局查询开销（浮层 img 只在创建时 write 一次，引用恒定）
+        const img = wrap._cfImg || (wrap._cfImg = wrap.querySelector('img'));
         if (!img) return;
         const tx = this._coverPanX || 0;
         const ty = this._coverPanY || 0;
@@ -1223,12 +1264,7 @@ const Detail = {
                 const img = wrap.querySelector('img');
                 if (act === 'close') { this._hideDetailFloat(wrap); return; }
                 if (act === 'save') { this._saveImageAs(img.src); return; }
-                if (act === 'copy') {
-                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(img.src).then(() => warnToast('已复制图片地址'), () => warnToast('复制失败'));
-                    } else warnToast('复制失败');
-                    return;
-                }
+                if (act === 'copy') { return this._copyImageUrl(img.src); }
                 if (act === 'reset') { this._resetCoverFloatTransform(); return; }
                 if (act === 'rot-left') { this._coverRotate = (this._coverRotate || 0) - 90; this._applyCoverFloatTransform(); return; }
                 if (act === 'rot-right') { this._coverRotate = (this._coverRotate || 0) + 90; this._applyCoverFloatTransform(); return; }
@@ -1276,6 +1312,10 @@ const Detail = {
                 }
                 this._coverPanX = drag.tx + dx;
                 this._coverPanY = drag.ty + dy;
+                // 同步写 transform 即 1:1 跟手：真正导致「拖动卡顿」的是 .dragging 没能
+                // 摘掉 transform 过渡（见 ui.css 的复合选择器修复），不是这里的写频率。
+                // 不额外套 rAF 合帧——Chromium 已把同一帧内的 pointermove 合并派发，
+                // 再引入一帧延迟只会让拖动起手变钝。
                 this._applyCoverFloatTransform();
             });
             const endCoverDrag = (ev) => {
@@ -1295,6 +1335,7 @@ const Detail = {
             });
         }
         const img = wrap.querySelector('img');
+        wrap._cfImg = img; // 与 _applyCoverFloatTransform 的缓存同源
         img.removeAttribute('style');
         this._resetCoverFloatTransform(); // 每次打开清上一张的缩放/旋转遗留
         // 换图防串影：img 节点常驻复用，直接换 src 时上一张已解码的图会一直亮到
@@ -3105,7 +3146,30 @@ const Detail = {
             const infoStr = Detail._buildCharInfoStr(info);
             // CV（配音）行（C 需求）：与列表卡同源同口径（_charCvText：actors 优先、
             // actor 字符串兜底、多 CV 用「 / 」连接）；无数据时不渲染该行，不留空行。
-            const cvText = Detail._charCvText(info);
+            //
+            // 取数优先级（修复「角色详情页看不到 CV」）：角色详情接口 /v0/characters/{id}
+            // 只返回资料/简介，**不含 actors**（CV 挂在作品侧 /v0/subjects/{id}/characters
+            // 的每个角色条目上，实测 2026-10 官方 API 仍如此）。旧实现只读 info，CV 行因此
+            // 恒为空。现改为：① 角色详情自带 actors（镜像/未来接口变化）→ ② 本次详情页已
+            // 加载的角色列表（按 character id 命中，零额外请求）→ ③ 无缓存列表时回源一次
+            // 作品角色列表（后端 30 分钟缓存，通常零网络）。
+            let cvText = Detail._charCvText(info);
+            if (!cvText) {
+                const cid = String(characterId || '');
+                const hit = (this._characters || []).find((c) => c && String(c.id || '') === cid);
+                cvText = Detail._charCvText(hit);
+            }
+            if (!cvText) {
+                const cid = String(characterId || '');
+                try {
+                    const list = Array.isArray(this._characters) && this._characters.length
+                        ? this._characters
+                        : (this._bgmId && typeof Kazumi !== 'undefined' && Kazumi.bangumiCharacters
+                            ? await Kazumi.bangumiCharacters(this._bgmId).catch(() => []) : []);
+                    const hit2 = (list || []).find((c) => c && String(c.id || '') === cid);
+                    cvText = Detail._charCvText(hit2);
+                } catch (e) { /* 回源失败：CV 行不渲染，不影响浮层其余内容 */ }
+            }
             const metaBits = [
                 info.blood_type ? '血型 ' + info.blood_type : '',
                 info.height ? '身高 ' + info.height + 'cm' : '',

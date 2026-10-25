@@ -254,6 +254,7 @@ function makeEl(tag) {
 function loadTranslateRuntime() {
     const state = { settings: {} };
     const docL = {};
+    const winL = {};
     const html = makeEl('html');
     const documentStub = {
         addEventListener(type, fn) { (docL[type] = docL[type] || []).push(fn); },
@@ -269,13 +270,14 @@ function loadTranslateRuntime() {
     const context = {
         console, Math, Date, JSON, String, Array, Object, Number, Map, Promise,
         setTimeout, clearTimeout, AbortController,
+        Node: function Node() { }, // 沙箱补 DOM 基类：scroll 处理器用 e.target instanceof Node
         requestAnimationFrame: () => 1,
         navigator: {},
         apiUrl: (p) => `http://localhost${p}`,
         document: documentStub,
         innerWidth: 1000,
         innerHeight: 800,
-        addEventListener() {}, // window 事件（scroll 等）不触发
+        addEventListener(type, fn) { (winL[type] = winL[type] || []).push(fn); }, // window 事件（scroll 等）
         yuki: { settingsGet: () => Promise.resolve(state.settings) },
         fetch: (...args) => { fetchCalls.push(args); return fetchImpl(...args); },
     };
@@ -293,6 +295,10 @@ function loadTranslateRuntime() {
         fireMouseup: (target) => Promise.all((docL.mouseup || []).map((fn) => fn({
             target, clientX: 0, clientY: 0,
         }))),
+        /** 派发 document / window 上的某类事件（新链路：pointerdown/pointerup/selectionchange/keyup/scroll）。 */
+        fireDoc(type, evt) { return Promise.all((docL[type] || []).map((fn) => fn(evt || { target: plainEl() }))); },
+        fireWin(type, evt) { return Promise.all((winL[type] || []).map((fn) => fn(evt || { target: plainEl() }))); },
+        has(type) { return !!((docL[type] || []).length || (winL[type] || []).length); },
         flush: flushTasks,
     };
 }
@@ -397,4 +403,57 @@ test('mouseup 闸门：rect 无效的 mouseup 不烧去重窗口；窗口内重�
     await rt.fireMouseup(plainEl());
     await rt.flush();
     assert.equal(rt.fetchCalls.length, 1);
+});
+
+// ---------------------------------------------------------------- 长拖选 / 选区兜底
+//
+// 用户报「选中文字时间过长时气泡不弹出」：真实环境里长拖选常伴随容器自动滚动、
+// 甚至把指针拖出窗口再松手（mouseup 收不到），旧实现只认 document 的 mouseup，
+// 这两种情况都会静默丢弃。现补三条：
+//   ① selectionchange 空闲兜底（选区停止变化 320ms 即视为"选完了"）；
+//   ② 指针仍按着时不抢跑（拖选中不提前弹）；
+//   ③ 弹出后 400ms 内忽略页面滚动（自动滚动的残留 scroll 不再把刚出现的气泡关掉）。
+
+test('长拖选：收不到 mouseup 时由选区空闲兜底弹出（松手落在窗口外/被重渲染打断）', async () => {
+    const rt = loadTranslateRuntime();
+    rt.state.settings = { translateEnable: true, translateTrigger: 'auto', translateTarget: 'zh-CN' };
+    rt.setSelection(makeSelection('拖选了很长一段时间', RECT_B));
+    assert.equal(rt.has('selectionchange'), true, 'selectionchange 监听已挂');
+    // 全程没有 mouseup（模拟松手落在窗口外）
+    await rt.fireDoc('selectionchange');
+    await new Promise((r) => setTimeout(r, 380)); // 越过 320ms 空闲阈值
+    await rt.flush();
+    assert.equal(rt.fetchCalls.length, 1, '兜底链路真的发起了翻译');
+    const ui = uiEls(rt.html);
+    assert.equal(ui.length, 1, '气泡已创建');
+    assert.equal(bodyOf(ui[0]).textContent, '默认译文');
+});
+
+test('拖选进行中（指针仍按着）：selectionchange 不抢跑，松手后才弹', async () => {
+    const rt = loadTranslateRuntime();
+    rt.state.settings = { translateEnable: true, translateTrigger: 'auto', translateTarget: 'zh-CN' };
+    rt.setSelection(makeSelection('正在拖动选中', RECT_A));
+    await rt.fireDoc('pointerdown');
+    await rt.fireDoc('selectionchange');
+    await new Promise((r) => setTimeout(r, 380));
+    await rt.flush();
+    assert.equal(rt.fetchCalls.length, 0, '按住期间不触发');
+    // 松手：pointerup 复位 + mouseup 正常触发
+    await rt.fireDoc('pointerup');
+    await rt.fireMouseup(plainEl());
+    await rt.flush();
+    assert.equal(rt.fetchCalls.length, 1, '松手后正常弹出');
+});
+
+test('弹出后短窗口内的滚动不关闭气泡（自动滚动残留不再误杀）', async () => {
+    const rt = loadTranslateRuntime();
+    rt.state.settings = { translateEnable: true, translateTrigger: 'auto', translateTarget: 'zh-CN' };
+    rt.setSelection(makeSelection('划词后自动滚动', RECT_A));
+    await rt.fireMouseup(plainEl());
+    await rt.flush();
+    assert.equal(uiEls(rt.html).length, 1);
+    // 刚弹出就来的 scroll（宽限窗口内）
+    await rt.fireWin('scroll', { target: plainEl() });
+    await new Promise((r) => setTimeout(r, 40)); // 越过 rAF 回调
+    assert.equal(uiEls(rt.html).length, 1, '宽限窗口内的滚动不关气泡');
 });

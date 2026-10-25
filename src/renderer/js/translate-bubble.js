@@ -362,18 +362,27 @@
 
     // ------------------------------------------------------------ 事件挂载
 
+    /** selectionchange 兜底的空闲阈值：选区停止变化这么久才认作"选完了"。
+     *  取 320ms：小于人手连续微调选区的间隔（拖选过程中每帧都在变），
+     *  又大于一次松手后的感知延迟。 */
+    const SELECT_IDLE_MS = 320;
+    /** 气泡刚开出来的一小段窗口内忽略页面滚动：长时间拖选常伴随容器自动滚动，
+     *  残留的 scroll 事件会在气泡刚出现的瞬间把它关掉（用户看到的"没弹出"）。 */
+    const OPEN_SCROLL_GRACE_MS = 400;
+
     function init() {
         const deduper = createDeduper();
-        let mouseupGen = 0; // await 期间用户可能已关闭/重开气泡：世代号防旧响应串档
+        let mouseupGen = 0;   // await 期间用户可能已关闭/重开气泡：世代号防旧响应串档
+        let openedAt = 0;     // 最近一次弹出气泡/触发钮的时刻（滚动宽限用）
+        let pointerDown = false; // 指针是否仍按着（拖选中/长按选择时不要抢跑）
+        let idleTimer = 0;
 
-        document.addEventListener('mouseup', async (e) => {
-            if (isInsideOurUI(e.target)) return;
-            const sel = window.getSelection();
+        /** 统一入口：判定 → 读设置 → 去重 → 开气泡/触发钮。mouseup 与空闲兜底共用。 */
+        async function tryOpen(sel, rect, opts) {
+            const o = opts || {};
             const text = pickSelectionText(sel, sel && sel.anchorNode && sel.anchorNode.parentElement,
                 sel && sel.focusNode && sel.focusNode.parentElement);
-            if (!text) { close(); return; }
-
-            const rect = sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+            if (!text) { if (o.fromMouseup) close(); return; }
             if (!rect || (rect.width === 0 && rect.height === 0)) return;
 
             // 刷新设置快照（划词是低频手势，一次读取可接受；失败沿用快照）
@@ -385,18 +394,64 @@
             // await 期间发生了新的划词（世代号前进）：本次丢弃，由新划词接管
             if (gen !== mouseupGen) return;
             // 缺键（undefined）同视为关：设置页显式开启（=== true）后划词才生效
-            if (settingsCache.translateEnable !== true) { close(); return; }
+            if (settingsCache.translateEnable !== true) { if (o.fromMouseup) close(); return; }
 
-            // 连划去重登记放在全部闸门之后：开关未开/rect 无效的 mouseup
-            // 不占用 3 秒去重窗口；窗口内重复 mouseup 同文本仍只触发一次
+            // 连划去重登记放在全部闸门之后：开关未开/rect 无效的划词
+            // 不占用 3 秒去重窗口；窗口内重复划同文本仍只触发一次。
+            // （mouseup 与 selectionchange 兜底会先后到达，去重正是这里的第二条防线）
             if (deduper.seen(text)) return;
 
             close(); // 连续划词：回收上一气泡/触发钮
+            openedAt = Date.now();
             if (settingsCache.translateTrigger === 'auto') {
                 openBubble(rect, text);
             } else {
                 bubbleEl = buildTriggerBtn(rect, text);
             }
+        }
+
+        document.addEventListener('mouseup', (e) => {
+            if (isInsideOurUI(e.target)) return;
+            pointerDown = false;
+            const sel = window.getSelection();
+            const rect = sel && sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+            tryOpen(sel, rect, { fromMouseup: true });
+        });
+
+        // 长拖选/松手落在窗口外/选区被重渲染打断时，mouseup 可能压根收不到或收不齐：
+        // 用「选区停止变化」兜底触发一次。拖选过程中 pointerDown 为真，不会抢跑；
+        // mouseup 正常到达时去重窗口会吞掉这次兜底，不会重复弹。
+        document.addEventListener('selectionchange', () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                idleTimer = 0;
+                if (pointerDown) return;             // 还在按住拖动：交给 mouseup
+                const sel = window.getSelection();
+                if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+                if (String(sel.toString() || '').trim().length < 2) return;
+                const rect = sel.getRangeAt(0).getBoundingClientRect();
+                tryOpen(sel, rect, { fromMouseup: false });
+            }, SELECT_IDLE_MS);
+        });
+        if (root.document && typeof root.document.addEventListener === 'function') {
+            // 指针状态：capture 阶段拿，避免被业务代码 stopPropagation 吃掉
+            root.document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+            root.document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+            root.document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+        }
+        // 键盘选区（Shift+方向键/全选）同样适用：按住键时不会误触发，停下即可
+        root.document.addEventListener('keyup', (e) => {
+            if (!e || (e.key !== 'Shift' && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight'
+                && e.key !== 'ArrowUp' && e.key !== 'ArrowDown' && e.key !== 'a' && e.key !== 'A')) return;
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                idleTimer = 0;
+                const s2 = window.getSelection();
+                if (!s2 || s2.isCollapsed || !s2.rangeCount) return;
+                tryOpen(s2, s2.getRangeAt(0).getBoundingClientRect(), { fromMouseup: false });
+            }, SELECT_IDLE_MS);
         });
 
         document.addEventListener('mousedown', (e) => {
@@ -409,6 +464,8 @@
         window.addEventListener('scroll', (e) => {
             // 捕获阶段会收到子元素滚动：气泡正文内滚动阅读不关，仅页面滚动关
             if (bubbleEl && e.target instanceof Node && bubbleEl.contains(e.target)) return;
+            // 宽限窗口：长拖选常伴随容器自动滚动，残留 scroll 会在气泡刚出现时把它关掉
+            if (openedAt && Date.now() - openedAt < OPEN_SCROLL_GRACE_MS) return;
             if (scrollRaf) return;
             scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; close(); });
         }, true);

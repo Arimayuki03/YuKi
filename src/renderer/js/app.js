@@ -5,7 +5,7 @@
  * 启动：等待后端就绪 → 初始化各视图 → 默认显示首页。
  * 全局 Esc 派发给 common.js dispatchEsc（先关对话框，再视图处理器）。
  */
-/* global $, waitBackend, warnToast, dispatchEsc, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, UIState, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular, SettingsSnapshot */
+/* global $, waitBackend, warnToast, dispatchEsc, closeTopOverlay, showLoading, hideLoading, doAction, applySkin, applyMisansFont, toFileUrl, setBackendInfo, UIState, Home, Search, BangumiSearch, Detail, Player, Downloads, Live, Favorites, HistoryView, My, initAuxPanels, ensureLocalPanel, Kazumi, Timeline, Popular, SettingsSnapshot, SearchHistory */
 
 const App = {
     currentView: 'home',
@@ -89,6 +89,12 @@ const App = {
             if (curEl) this._scrollPos[this.currentView] = curEl.scrollTop;
         }
         this.currentView = name;
+        // 搜索历史面板是挂 body 的 fixed 浮层，不会随视图隐藏：切视图/切页签时若不收起，
+        // 用户离开搜索页后它会一直悬在新页面上（程序化 showView 没有 mousedown，
+        // 面板的「点外部收起」兜不住）。这里在视图换代时统一收一次。
+        if (typeof SearchHistory !== 'undefined' && SearchHistory.hide) {
+            try { SearchHistory.hide(); } catch (e) { /* 收面板失败不影响切视图 */ }
+        }
         $('.main-nav-item').removeClass('active');
         $(`.main-nav-item[data-view="${name}"]`).addClass('active');
         $('.view').removeClass('active');
@@ -155,8 +161,12 @@ const App = {
     },
 
     /** 鼠标侧键：后退弹栈回上一视图；前进从重做栈取。栈底不弹（停留在首页）。
-     *  双通道触发（主进程 app-command IPC + 渲染层 mousedown button 3/4），400ms 去重防双跳。 */
+     *  双通道触发（主进程 app-command IPC + 渲染层 mousedown button 3/4），400ms 去重防双跳。
+     *  浮层优先：对话框/图片查看器/人物浮层打开时，「后退」先关浮层（与 Esc 同口径，
+     *  见 common.js closeTopOverlay）。此前侧键直接弹视图栈，图片浮层还盖在新页面上，
+     *  用户要再按一次才退出查看——观感像「返回没生效」。 */
     mouseNav(dir) {
+        if (dir === 'back' && typeof closeTopOverlay === 'function' && closeTopOverlay()) return;
         const now = Date.now();
         if (now - (this._navLast || 0) < 400) return;
         this._navLast = now;

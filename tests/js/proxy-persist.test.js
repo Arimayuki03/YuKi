@@ -316,14 +316,17 @@ test('shouldRefillProxyInput：用户已编辑或框非空时不回填', () => {
     assert.equal(f(null, 'http://x:1', false), true, 'null 视作空');
 });
 
-test('proxyFieldsVisible：启用必展开；未启用但有地址记录也展开（记录不再被折叠藏起来）', () => {
+test('proxyFieldsVisible：只看开关——关掉开关必须收起表单（否则用户看不出代理已关闭）', () => {
     const h = loadPanels({ settings: {} });
     const f = h.ctx.__fieldsVisible;
-    assert.equal(f(true, ''), true, '启用时必展开');
-    assert.equal(f(false, '127.0.0.1:7890'), true, '未启用但有记录 => 展开（用户要能看到上次的网址）');
-    assert.equal(f(false, ''), false, '无记录 => 随开关收起');
-    assert.equal(f(false, '   '), false, '空白不算记录');
-    assert.equal(f(false, ' 127.0.0.1:1 '), true);
+    assert.equal(f(true), true, '启用 => 展开');
+    assert.equal(f(false), false, '未启用 => 收起（地址记录保留在设置里，重开开关回填）');
+    assert.equal(f(undefined), false, '脏值按关闭处理');
+    assert.equal(f('true'), false, '非严格 true 一律不展开（防旧版本脏数据误显示为开）');
+    // 历史上「未启用但地址非空也展开」的写法已被推翻（两版裁决，以本版为准）：
+    // 判定函数只剩开关一个入参，地址不再参与——回归锁：签名里不该再出现第二个形参。
+    const src = fs.readFileSync(path.join(ROOT, 'src/renderer/js/panels.js'), 'utf8');
+    assert.match(src, /function proxyFieldsVisible\(enable\) \{/, '判定函数只接受开关一个入参');
 });
 
 test('makeDraftSaver：防抖合并只落末值，flush 立即落盘，cancel 丢弃', () => {
@@ -412,7 +415,9 @@ test('关闭代理开关：带上当前网址，不再写死空串把记录抹�
     assert.equal(h.setProxyCalls[0].enable, false);
     assert.equal(h.setProxyCalls[0].url, '127.0.0.1:7890', '必须带上当前网址（空串=清空记录）');
     const fields = h.recOf('#proxy_fields');
-    assert.deepEqual(fields.toggleArgs.slice(-1), [true], '关闭时表单不收起（记录还要看得见）');
+    // 用户裁决（本版）：关开关 = 立即收起表单。开关变灰 + 表单还在 = 与「真的在走代理」
+    // 的界面长得一模一样，用户根本看不出关闭生效了。地址仍保留在设置里，拨回开关即回填。
+    assert.deepEqual(fields.toggleArgs.slice(-1), [false], '关闭时表单收起');
     assert.match(h.toasts[h.toasts.length - 1] || '', /代理已关闭/);
 });
 
@@ -437,10 +442,10 @@ test('空框时回填持久化地址（关闭应用再打开的可见性）', as
     const h = loadPanels({ settings: { proxyUrl: 'http://127.0.0.1:7897', proxyEnable: false } });
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(h.fillError(), '', '回填链不得有异常（异常会被 .catch 吞掉，表现为「值没回填」）');
-    assert.equal(h.getVal('#set_proxy_url'), 'http://127.0.0.1:7897', '重启后应看到上次的网址');
-    // 关闭态但有记录：表单必须展开，否则记录被折叠在开关后面，用户仍然「看不到上次的记录」
+    assert.equal(h.getVal('#set_proxy_url'), 'http://127.0.0.1:7897', '输入框仍回填上次的网址（拨开开关即可见）');
+    // 关闭态：表单收起（用户裁决）。记录本身不丢——就在输入框里，拨回开关立刻可见。
     const fields = h.recOf('#proxy_fields');
-    assert.deepEqual(fields.toggleArgs.slice(-1), [true], '未启用但有记录 => 表单展开');
+    assert.deepEqual(fields.toggleArgs.slice(-1), [false], '未启用 => 表单收起');
     // 回填后提示行应解释「环回地址已放行」（放行但告知的取舍）
     const hint = h.recOf('#set_proxy_hint');
     assert.ok(hint, '#set_proxy_hint 应被写入');

@@ -321,11 +321,11 @@ const seed = async (ctx, pairs) => {
     for (const [w, s] of pairs) await ctx.__H.record(w, s);
 };
 
-test('attach + 聚焦：面板列出来源分组、词与删除/清空入口（HTML 已转义）', async () => {
+test('attach + 主动点击：面板列出来源分组、词与删除/清空入口（HTML 已转义）', async () => {
     const ctx = loadVm();
     await seed(ctx, [['甲', 'aggregate'], ['乙', 'kazumi'], ['<img src=x onerror=1>', 'home']]);
     assert.equal(ctx.__H.attach('#search-keyword', 'aggregate'), true);
-    ctx.__$.fire('#search-keyword', 'focus', {});
+    ctx.__$.fire('#search-keyword', 'pointerdown', {});
     await flush();
     assert.equal(ctx.__H.isOpen(), true, '聚焦即弹出');
     const html = ctx.__state.html.get('#search-his-panel') || '';
@@ -339,12 +339,39 @@ test('attach + 聚焦：面板列出来源分组、词与删除/清空入口（H
     assert.match(html, /&lt;img src=x/);
 });
 
+test('展开时机：程序化 focus 不弹面板（切页签/切视图不得自动展开历史）', async () => {
+    const ctx = loadVm();
+    await seed(ctx, [['甲', 'aggregate']]);
+    ctx.__H.attach('#search-keyword', 'aggregate');
+    // 宿主切视图会 focus()（Search.focus / 页签切换）——用户诉求：打开页面不该自带历史面板
+    ctx.__$.fire('#search-keyword', 'focus', {});
+    await flush();
+    assert.equal(ctx.__H.isOpen(), false, 'focus 不再触发展开');
+    // 主动点一下才展开
+    ctx.__$.fire('#search-keyword', 'pointerdown', {});
+    await flush();
+    assert.equal(ctx.__H.isOpen(), true, 'pointerdown 才展开');
+    ctx.__H.hide();
+    // 直接打字也展开（键盘用户不必先点一次）
+    ctx.__H.hide();
+    ctx.__$.val('#search-keyword', '甲');
+    ctx.__$.fire('#search-keyword', 'input', {});
+    await flush();
+    assert.equal(ctx.__H.isOpen(), true, '有输入即展开');
+    ctx.__H.hide();
+    // 空值 input 事件（删空/程序化写空串）不展开，避免面板自己冒出来
+    ctx.__$.val('#search-keyword', '');
+    ctx.__$.fire('#search-keyword', 'input', {});
+    await flush();
+    assert.equal(ctx.__H.isOpen(), false, '空值 input 不展开');
+});
+
 test('attach 幂等；同一输入框重复挂载不重复绑定', async () => {
     const ctx = loadVm();
     await seed(ctx, [['甲', 'home']]);
     ctx.__H.attach('#home-search', 'home');
     ctx.__H.attach('#home-search', 'home');
-    ctx.__$.fire('#home-search', 'focus', {});
+    ctx.__$.fire('#home-search', 'pointerdown', {});
     await flush();
     // 双绑会让每次 focus 都排队两次渲染，这里以「仍然只打开一次、内容正确」为契约
     assert.equal(ctx.__H.isOpen(), true);
@@ -354,7 +381,7 @@ test('attach 幂等；同一输入框重复挂载不重复绑定', async () => {
 test('无历史时聚焦不弹空面板', async () => {
     const ctx = loadVm();
     ctx.__H.attach('#search-keyword', 'aggregate');
-    ctx.__$.fire('#search-keyword', 'focus', {});
+    ctx.__$.fire('#search-keyword', 'pointerdown', {});
     await flush();
     assert.equal(ctx.__H.isOpen(), false);
 });
@@ -367,7 +394,7 @@ test('点条目直接搜同来源；点删除只删该条', async () => {
     ctx.Search = { _stab: 'aggregate', agg: { run: () => { ran = ctx.__state.vals.get('#search-keyword'); } } };
     ctx.App = { currentView: 'search', showView() {} };
     ctx.__H.attach('#search-keyword', 'aggregate');
-    ctx.__$.fire('#search-keyword', 'focus', {});
+    ctx.__$.fire('#search-keyword', 'pointerdown', {});
     await flush(); // 面板懒建 + 首次渲染（删除按钮的委托 handler 在此时才绑上）
     ctx.__H.dispatch('aggregate', '乙');
     assert.equal(ran, '乙', '点击即以该词发起检索');
@@ -383,7 +410,7 @@ test('清空历史：确认后才清，取消则原样保留', async () => {
     const okCtx = loadVm();
     await seed(okCtx, [['甲', 'home'], ['乙', 'home']]);
     okCtx.__H.attach('#home-search', 'home');
-    okCtx.__$.fire('#home-search', 'focus', {});
+    okCtx.__$.fire('#home-search', 'pointerdown', {});
     await flush();
     okCtx.__$.fireDelegated('#search-his-panel', '.search-his-clear', 'click', {});
     await flush(); await flush(); await flush();
@@ -394,7 +421,7 @@ test('清空历史：确认后才清，取消则原样保留', async () => {
     const noCtx = loadVm({ confirm: false });
     await seed(noCtx, [['甲', 'home']]);
     noCtx.__H.attach('#home-search', 'home');
-    noCtx.__$.fire('#home-search', 'focus', {});
+    noCtx.__$.fire('#home-search', 'pointerdown', {});
     await flush();
     noCtx.__$.fireDelegated('#search-his-panel', '.search-his-clear', 'click', {});
     await flush(); await flush(); await flush();
@@ -415,7 +442,7 @@ test('键盘：上下选 + 回车执行高亮项（并拦下宿主回车）', as
     ctx.__H.attach('#search-keyword', 'aggregate');
     let host = 0;
     ctx.__$.addHandler('#search-keyword', 'keydown', () => { host += 1; });
-    ctx.__$.fire('#search-keyword', 'focus', {});
+    ctx.__$.fire('#search-keyword', 'pointerdown', {});
     await flush();
     const keydown = (key) => {
         const ev = { key, preventDefault() {}, stopImmediatePropagation() { ev.stopped = true; } };
@@ -569,7 +596,7 @@ test('bangumi-search.js：聚焦弹出历史面板（接线生效）', async () 
     const ctx = loadVm({ hosts: ['bangumi-search.js'] });
     await seed(ctx, [['旧番', 'bangumi']]);
     ctx.__BangumiSearch.init();
-    ctx.__$.fire('#bgm-search-keyword', 'focus', {});
+    ctx.__$.fire('#bgm-search-keyword', 'pointerdown', {});
     await flush();
     assert.equal(ctx.__H.isOpen(), true);
     assert.match(ctx.__state.html.get('#search-his-panel'), /data-source="bangumi" data-word="旧番"/);

@@ -80,6 +80,14 @@ function loadDetail(extra) {
     return { Detail: vm.runInContext('Detail', context), context };
 }
 
+/** 取浮层面板最后一次写入的 HTML：context.document.body 上按 id 取 char-float，
+ *  其 firstChild 的 innerHTML 就是 _openCharacterDetail 写入的资料面板。 */
+function lastPanelHtml(context) {
+    const el = context.document.body._byId['char-float'];
+    const chunks = el && el.firstChild && el.firstChild._htmls;
+    return (chunks && chunks[chunks.length - 1]) || '';
+}
+
 /** 打开角色详情浮层，返回面板 HTML（真实 _openCharacterDetail 产出）。 */
 async function openChar(info, extra) {
     const { Detail, context } = loadDetail(Object.assign({
@@ -170,4 +178,72 @@ test('锚点：ui.css 有 .char-float-cv 规则且与 .char-float-meta 同层级
     // 数据源复用锚点：详情浮层与列表卡读同一提取函数
     const src = read('src/renderer/js/detail.js');
     assert.match(src, /Detail\._charCvText\(info\)/, '浮层复用 _charCvText（同一数据源）');
+});
+
+// ---------------------------------------------------------------- 浮层 CV 的取数来源（修复「角色详情页看不到 CV」）
+//
+// 现场事实（2026-10 实测官方 API）：角色详情 /v0/characters/{id} 的响应里**没有
+// actors**（CV 挂在作品侧 /v0/subjects/{id}/characters 的每个角色条目上）。所以浮层
+// 只读 info 时 CV 行恒为空。修复后按 ① info 自带 → ② 详情页已加载的角色列表
+// （按 character id 命中，零额外请求）→ ③ 回源一次作品角色列表 依次取值。
+
+test('浮层 CV 回退①：角色详情无 actors 时，取作品角色列表里同 id 的 CV（零额外请求）', async () => {
+    const { Detail } = loadDetail();
+    let fetched = 0;
+    Detail._characters = [
+        { id: 999, name: '别人', actors: [{ name: '不相干' }] },
+        { id: 123, name: '椎名まふゆ', actors: [{ name: '花澤香菜' }] },
+    ];
+    Detail._bgmId = '4242';
+    const KazumiStub = {
+        bangumiCharacter: async () => Object.assign({}, BASE_INFO), // 无 actors
+        bangumiCharacterComments: async () => [],
+        bangumiCharacters: async () => { fetched += 1; return []; },
+    };
+    // 用同一份 context 覆盖 Kazumi 后再开浮层
+    const ctxDetail = loadDetail({ Kazumi: KazumiStub });
+    ctxDetail.Detail._characters = Detail._characters;
+    ctxDetail.Detail._bgmId = '4242';
+    ctxDetail.Detail._showDetailFloat = () => {};
+    await ctxDetail.Detail._openCharacterDetail('123');
+    const html = lastPanelHtml(ctxDetail.context);
+    assert.match(html, /CV：花澤香菜/, '从作品角色列表补到 CV');
+    assert.equal(fetched, 0, '列表已在内存：不再回源');
+});
+
+test('浮层 CV 回退②：本地没有角色列表时回源作品角色列表（后端 30min 缓存）', async () => {
+    let fetchedArgs = null;
+    const { Detail, context } = loadDetail({
+        Kazumi: {
+            bangumiCharacter: async () => Object.assign({}, BASE_INFO),
+            bangumiCharacterComments: async () => [],
+            bangumiCharacters: async (sid) => { fetchedArgs = sid; return [{ id: 123, actors: [{ name: '早見沙織' }] }]; },
+        },
+    });
+    Detail._characters = [];
+    Detail._bgmId = '4242';
+    Detail._showDetailFloat = () => {};
+    await Detail._openCharacterDetail('123');
+    const html = lastPanelHtml(context);
+    assert.equal(fetchedArgs, '4242', '按作品 id 回源');
+    assert.match(html, /CV：早見沙織/, '回源拿到的 CV 要真的渲染出来');
+});
+
+test('浮层 CV 优先级：info 自带 actors 时以它为准（不回源、不被列表覆盖）', async () => {
+    let fetched = 0;
+    const { Detail, context } = loadDetail({
+        Kazumi: {
+            bangumiCharacter: async () => Object.assign({}, BASE_INFO, { actors: [{ name: '详情里的CV' }] }),
+            bangumiCharacterComments: async () => [],
+            bangumiCharacters: async () => { fetched += 1; return [{ id: 123, actors: [{ name: '列表里的CV' }] }]; },
+        },
+    });
+    Detail._characters = [{ id: 123, actors: [{ name: '列表里的CV' }] }];
+    Detail._bgmId = '4242';
+    Detail._showDetailFloat = () => {};
+    await Detail._openCharacterDetail('123');
+    const html = lastPanelHtml(context);
+    assert.equal(fetched, 0);
+    assert.match(html, /CV：详情里的CV/, 'info 自带优先');
+    assert.ok(!html.includes('列表里的CV'), '不被列表数据覆盖');
 });

@@ -444,8 +444,13 @@
         _boundMap[sel] = entry;
         _bindDoc();
         $input.on('keydown', (e) => _onKey(e, entry));
-        $input.on('focus', () => _open(entry));
-        $input.on('input', () => _open(entry)); // 有输入也弹（需求：聚焦或有输入）
+        // 展开时机（用户裁决）：**主动点击搜索框**才展开，不再监听 focus。
+        // 宿主的切页签/切视图会程序化 focus 输入框（Search.focus、BangumiSearch 页签
+        // 切换），focus 即展开的表现就是「一打开搜索页，历史面板自己弹出来盖住页面」。
+        // pointerdown 而不是 click：click 要等松开，按住输入框准备打字时面板就该在。
+        $input.on('pointerdown', () => _open(entry));
+        // 有输入也弹（键盘直接打字时同样算主动使用；空值回删到空时不再弹）
+        $input.on('input', () => { if (String($input.val() || '') !== '') _open(entry); });
         return true;
     }
 
