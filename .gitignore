@@ -38,6 +38,7 @@ TVBox/
 .codegraph/
 .playwright-mcp/
 .mimosa/
+.local/
 ha-orchestrator.config*.json
 dsh-ha-orchestrator.*
 analysis-tmp/
