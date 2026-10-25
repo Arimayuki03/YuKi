@@ -4,6 +4,37 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-10-25
+
+### Added
+
+- **筛选栏下拉自绘弹层**（`src/renderer/js/custom-select.js` + `.yuki-sel-*`）：原生 `<select>` 的展开列表由 Chromium 绘制、CSS 无任何钩子（平台限制，非本应用可控）。做法是保留原生 select 作为"值容器"——`.val()`、`change` 绑定、动态重建 `options` 全部照旧——只在指针按下时 `preventDefault` 并按其 `option` 现画弹层：`--radius-lg` 面板 / `--radius-control` 条目、主题色底与悬停高亮、当前项勾选标记、`optgroup` 分组标题、长列表 `max-height:340px` 内部滚动、层级 1340（高于对话框与封面浮层）、页面缩放反算、键盘 ↑↓/Home/End/Enter/Esc、滚轮与点外部收起、`multiple`/`size>1`/`disabled` 仍走原生。选中时写回 `selectedIndex` 并派发 `input`+`change`（顺序与原生一致）。回归：custom-select 6 例 + 真实渲染量测（81 项季度列表可滚动、选中写回并驱动筛选 chip）。
+- **日期筛选自绘月历**（`src/renderer/js/custom-date.js` + `.yuki-date-*`）：原生日期面板同样不可样式化。最终结构是三次失败的结论——① 只靠 `preventDefault` 拦不住原生面板；② 给整个 input 设 `color:transparent` 会把用 `currentColor` 画的日历按钮一起弄没；③ 绝对定位标签叠在原生输入上，会与 Chromium 在 `appearance:none` 下**画在顶部**的日期文字错位（用户报的"文字不居中"真因）。故把 input 原有的类整体搬到 wrap（wrap 成为盒子，宽高/圆角/边框/主题色/悬停焦点与普通输入框一致），文字与**自绘日历图标**走 wrap 的 flex 正常流，原生 input 退化为 `position:absolute; inset:0; opacity:0; pointer-events:none` 的隐形值容器（值、`change`、`min/max` 语义不变）。日期框同时改为**只读选择器**（`readOnly` + `inputmode=none`，取消键入能力），字段内显示 `YYYY-MM-DD` 或「选择日期」占位。月历能力：四向月份导航、周一起表头、6×7 月视图（今天描边 / 选中实心 / 月外弱化 / `min/max` 外删除线禁用）、今天·清除·关闭、`Esc`/`PageUp`/`PageDown`、标签随直接赋值/选日/清除同步。回归：custom-date 17 例 + 像素级验收（CDP 截图 + 自写 PNG 逐行扫描：文字墨迹中心与字段中心差 0.34px、图标 0.34px）。
+- **检索失败明确状态码**：后端新增 `_classify_search_error()`——HTTP 码优先（`response.status_code`，或从异常文本抠 4xx/5xx），其余按类型归 `TIMEOUT / NETWORK / PARSE / ERROR`；SSE 与 `kazumiSearch` 单源重查两条通道都带 `errCode`/`raw`（"上次检索该源失败未缓存"的合成 payload 带 `NOT_CACHED`）。前端 `_inferErrCode`/`_errCodeLabel`/`_errCodeHint` 负责兜底推断与展示：徽标写「检索失败 · HTTP 403」，源卡正文给错误色胶囊 + 一句可操作建议（防盗链或风控 / 规则失效 / 被限流…）+ 折叠在 `title` 里的原始错误。回归：新增 `test_search_error_classify.py` 8 例（已接入 `run_all.py` 的 `kazumi-search-errors` stage）+ `kazumi-search-error-code.test.js` 4 例。
+- **历史页筛选面板化**：工具栏只留「搜索 / 排序 / 筛选 / 多选 / 清空」，具体维度（来源 / 单日 / 区间 / 评分档位）收进面板，点「应用」才生效并以条件 chips 回显（单个删除 / 全部重置）；日期选择栏加长到 200px。历史页退出播放器后通过新增的 `RecHub` 广播即时刷新列表。
+- **卡片六态收藏菜单补齐到全部记录**：Kazumi 源记录没有源内 id（`vodId` 恒空），此前既不渲染 `⋯` 也无法定位记录。新增 `recFavIdentity()`——有 `vodId` 用 `vodId`，Kazumi 用 `name:<片名>` 合成稳定键（同规则不同番剧不会塌成一条收藏），卡片渲染、菜单读状态、写收藏三处共用；`_itemsByUid` 与 `_itemOf` 追加 `site|name` 兜底键，彻底找不到时给出提示而不再静默。另给缺 `uid` 的远端 Bangumi 条目派生 `bgm-<subjectId>`。
+- **历史卡续播带回记录身份**：`Player.play` 第 9 参 `runtimeOpts` 显式携带 `vodId/pic/siteName` 进 `_curMeta`，从历史页续播不再被"当前详情页残留"串台（此前退出后新写入的历史卡会带错封面/错 id）。
+
+### Fixed
+
+- **播放源相对地址跳转归一（R32）**：HLS 清单相对 302 到 `enc.key` 时播放器侧拼出裸文件名导致分片与解密 404。`playlist-proxy` 增加条目基址记忆与同源相对解析（查询串继承、跨源拒绝、数字下标守卫）。回归：playlist-proxy 3 例，故障链记录到 `docs/RUNTIME_ISSUES.md` R32。
+- **Bangumi 搜索按星期筛选无效**：v0 接口**忽略** `filter.air_weekday`，改为取回后按 `air_date` 计算星期做后置过滤（最多翻 8 轮）；同时修掉接口把 `limit` 静默截到 20 的问题（改为分页聚合），并在镜像地址不可达时按连接类异常回退官方 API——用户 `kazumi/mirror.json` 里的内网地址不再让搜索直接空结果。回归：test_kazumi 新增 7 例。
+- **LLM 翻译目标语言不符**：此前把 `zh` 之类代码直接塞进提示词，模型常按英文作答；改为按语言全名下发并补充明确规则。回归：2 例。
+- **划词翻译：长距离拖选后气泡不弹**：`mouseup` 时选区尚未结算导致判定失败。新增选区内空闲兜底（`SELECT_IDLE_MS=320` 的 `selectionchange`）、指针按下/抬起跟踪、以及"刚打开就滚动"的宽限（`OPEN_SCROLL_GRACE_MS=400`），统一 `tryOpen(sel, rect, {fromMouseup})` 入口。回归：translate-bubble 长拖选/滚动宽限用例。
+- **图片地址复制无反馈**：封面浮层「复制图片地址」改走 `_copyImageUrl`（Clipboard API → textarea+`execCommand` 兜底 → 无论成败都弹 toast）；人物浮层 CV 增加两级回退（本地缓存 → `bangumiCharacters`）。
+- **搜索历史面板取焦点即弹出**：改为只在「点击搜索框」或「已有输入后继续输入」时展开。
+- **代理字段在开关为字符串 `'false'` 时仍显示**：判定收紧为严格布尔真。
+- **卡片 `▶`/`⋯` 点击后不再自动隐藏**：浮现条件里的 `.vod-card:focus-within` 会让鼠标点击留下的焦点把两枚按钮永久点亮；改为只用 `:focus-visible`（键盘可达性保留），菜单展开期间仍由 `.menu-open` 常显。同时把 `▶`/`⋯` 的过渡与动效对齐 `✕`/`✎`（同一套 `transform/box-shadow/opacity` 过渡、悬停 1.15、按压 0.94）。
+- **收藏与历史工具条排布**：排序下拉紧挨搜索框，收藏页「多选」紧跟「同步 Bangumi」，历史页「多选、清空」紧跟「筛选」，多选态「删除勾选」排最后；筛选项不再撑破格子（面板内控件 `min-width:0` 收缩）。
+- **收藏状态徽标的悬浮提示**：删除「Bangumi 收藏状态（在详情页修改）」文案，徽标只表达状态本身。
+- **时间筛选器视觉**：日期块圆角 14px、等宽数字与主题化悬停/聚焦；修复「图标看不见」（`appearance:none` 下 Chromium 不渲染原生 indicator → 自绘 18px 日历图标）与「文字不居中」（原生日期文字在 `appearance:none` 下被画在顶部 → 文字改走 wrap 的正常流居中）。
+- **Kazumi 手动检索弹窗拖动误关**：关闭判定要求"按下与释放都在遮罩且位移 ≤4px、无选中内容"。
+
+### Changed
+
+- **WebDAV 载荷排除表**：上传侧补齐 `proxyUrl`/`proxyTestUrl`/`proxyEnable`（可能内嵌账号密码与私网地址）与 `mpvForceHttp11`（按播放器二进制绑定的机器态），与恢复侧拒绝表口径对齐；`translateLLMBase`/`captchaLLMBase` 仅用于跨设备诊断，保留上传、恢复仍拒绝。
+- **回归口径**：JS 单测 **2679/2679** 通过（新增 custom-select / custom-date / ui-filter-controls / overlay-back-stack / kazumi-search-error-code 五个测试文件）；Python `run_all.py` 全 stage 通过（新增 `kazumi-search-errors`）；`check-js` 56 文件 0 错；ESLint 0 error；Ruff 全过。真实渲染验收改用 CDP 截图（`HARNESS_CDP`），隐藏窗口也能出图并做像素测量。
+
 ## [0.4.0] - 2026-10-14
 
 ### Fixed
