@@ -41,13 +41,13 @@ from config import ConfigManager  # noqa: E402
 
 # 共享 CI runner（GitHub Actions）进程调度抖动大：50 worker 聚合搜索的墙钟断言
 # 在慢机上会超限（曾观测 2.7s vs 2.0s 预算；run 35141371068 观测 3.2s vs 3.0s——
-# 第二轮搜索要等上一批 10 个无限循环 worker 的杀除与清理协调完成）。CI 环境放宽
-# 2s 余量，本地开发保持原有严格度；功能断言（结果集、pid 回收）不受影响。
+# 第二轮搜索要等上一批 10 个无限循环 worker 的杀除与清理协调完成）。
 # 本地后台高负载（如并行测试套件）也会放大 spawn 抖动：实测裸机连续跑 14 用例
 # 出现 L3_RUNTIME_TIMEOUT 覆盖预期错误码、1.61s vs 1.5s 墙钟超限、启动屏障
-# deadline exceeded（HEAD 基线同样复现，与修复无关）。默认加 2s 余量，CI 已有
-# 同款处理；deadline_ms 与行为断言本身不变。
-_BUDGET_ASSERT_SLACK = 2.0 if os.environ.get('CI') else 0.0
+# deadline exceeded（HEAD 基线同样复现，与修复无关）。故本地与 CI 统一加 2s
+# 余量（此前代码只在 CI 生效，本地长时间运行/并行时仍会假红）；deadline_ms 与
+# 行为断言本身不变。
+_BUDGET_ASSERT_SLACK = 2.0
 # `_call` 默认 deadline：含 Worker 冷启动（spawn + booted 屏障 + attach Job）。
 # 裸机负载下冷启动可超 1s，启动屏障先把整个 deadline 烧完，预期错误码
 # （CRASHED/CALL_FAILED/CREDENTIALS）被 L3_RUNTIME_TIMEOUT 覆盖。放宽到 5s

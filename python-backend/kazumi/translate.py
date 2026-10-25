@@ -204,8 +204,32 @@ def google_translate(text, to_lang, from_lang='auto'):
     return translated
 
 
-_LLM_PROMPT = ('You are a translator. Translate the user text into {target}. '
-               'Output ONLY the translation, no explanations, no quotes.')
+# LLM 的目标语言要用「语言名」而不是 BCP-47 码：此前直接把 `zh-CN`/`ja`/`zh-TW`
+# 这类码塞进提示词，模型对码的解释很不稳定——实测同一个模型对 `zh-CN` 偶尔译成
+# 英文、对 `zh-TW` 常给简体（它把 zh 当普通话，忽略地区），用户看到的就是
+# 「开了 LLM 翻译后目标语言不对」。免费通道（微软/谷歌）认码，故只在 LLM 侧映射。
+_LLM_TARGET_NAMES = {
+    'zh-CN': 'Simplified Chinese (简体中文)',
+    'zh-TW': 'Traditional Chinese (繁體中文, Taiwan/Hong Kong usage)',
+    'en': 'English',
+    'ja': 'Japanese (日本語)',
+}
+
+
+def llm_target_name(to_lang):
+    """目标语言码 → 提示词里用的语言名（未知码原样返回，交给模型自行理解）。"""
+    code = normalize_lang(to_lang, microsoft=False)
+    for key, name in _LLM_TARGET_NAMES.items():
+        if key.lower() == str(code).lower():
+            return name
+    raw = str(to_lang or '').strip()
+    return raw or _LLM_TARGET_NAMES['zh-CN']
+
+
+_LLM_PROMPT = ('You are a professional translator. Translate the user text into {target}. '
+               'Rules: output ONLY the translation (no explanations, no quotes, no preamble); '
+               'preserve line breaks and the original formatting; keep names, numbers and '
+               'URLs unchanged; if the text is already in {target}, output it unchanged.')
 
 # 验证码识别提示词：只许 4 位数字、拒绝猜测编造——站点 verify_check 会在
 # 提交时判卷，宁缺毋滥（返回空/非 4 位数字按识别失败处理，交由下一级兜底）。
@@ -389,7 +413,7 @@ def llm_translate(text, to_lang, llm_cfg):
     body = {
         'model': model,
         'messages': [
-            {'role': 'system', 'content': _LLM_PROMPT.format(target=to_lang)},
+            {'role': 'system', 'content': _LLM_PROMPT.format(target=llm_target_name(to_lang))},
             {'role': 'user', 'content': text},
         ],
         'temperature': 0.2,

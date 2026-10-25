@@ -363,3 +363,14 @@ test('日期控件回填时联动原生 min/max（起止先后约束可见）', 
     assert.equal(stub.getAttr('#bgm-date-start', 'max'), undefined);
     assert.equal(stub.getAttr('#bgm-date-end', 'min'), undefined);
 });
+
+test('筛选弹窗排名标签：最好名次/最差名次（排名 1 为最好，避免“最低/最高”歧义）', () => {
+    const html = fs.readFileSync(path.join(__dirname, '../../src/renderer/index.html'), 'utf8');
+    const start = html.indexOf('id="bgm-rank-range-row"');
+    const end = html.indexOf('id="bgm-rank-vals"');
+    assert.ok(start >= 0 && end > start, '排名区间行必须存在');
+    const block = html.slice(start, end);
+    assert.ok(block.includes('最好名次'), '排名下限的标签应为「最好名次」');
+    assert.ok(block.includes('最差名次'), '排名上限的标签应为「最差名次」');
+    assert.ok(!block.includes('最低') && !block.includes('最高'), '排名行不应再出现易歧义的「最低/最高」');
+});

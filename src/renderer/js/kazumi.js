@@ -1241,20 +1241,31 @@ const Kazumi = {
         } catch (e) { warnToast('测试连接失败，请检查网络或 Token'); }
     },
 
-    /** 删除某条 Bangumi 收藏；返回是否成功（详情弹窗据此刷新状态）。 */
-    async removeBangumiCollection(subjectId, name) {
-        if (!await confirmDialog(`从 Bangumi 收藏中删除「${name}」？`, { okText: '删除' })) return false;
+    /**
+     * 直接删除 Bangumi 收藏（无二次确认）：供收藏卡六态菜单「取消收藏」用——
+     * 菜单点选本身就是确认动作，再弹一个确认框会变成两次确认。
+     * 失败原因在此 toast（调用方只看返回值）。成功时作废本地收藏缓存。
+     */
+    async delBangumiCollection(subjectId) {
         const token = await this._getBangumiToken();
+        if (!token) { warnToast('请先在设置 → Kazumi 规则 → Bangumi 同步中保存 Token'); return false; }
         try {
             const rsp = await doAction('kazumiBangumiCollectionDel', { token, id: subjectId }, '/kazumi/action');
             if (rsp && rsp.code === 200) {
-                warnToast('已删除收藏');
                 this._bgmColCacheDel(String(subjectId)); // 删除成功同步作废本地缓存
                 return true;
             }
-            warnToast('删除失败：' + ((rsp && rsp.msg) || '未知错误'));
+            warnToast('取消收藏失败：' + ((rsp && rsp.msg) || '未知错误'));
             return false;
-        } catch (e) { warnToast('删除失败'); return false; }
+        } catch (e) { warnToast('取消收藏失败'); return false; }
+    },
+
+    /** 删除某条 Bangumi 收藏（带二次确认，详情弹窗用）；返回是否成功。 */
+    async removeBangumiCollection(subjectId, name) {
+        if (!await confirmDialog(`从 Bangumi 收藏中删除「${name}」？`, { okText: '删除' })) return false;
+        const ok = await this.delBangumiCollection(subjectId);
+        if (ok) warnToast('已删除收藏');
+        return ok;
     },
 
     /** 批量上传期间抑制 setBangumiCollection 的单条 toast（成功/失败均静默，由批量函数汇总提示）。 */
@@ -2421,6 +2432,53 @@ const Kazumi = {
     },
 
     // ---------------------------------------------------------------- 详情页 Kazumi 源弹窗
+    // ---------------------------------------------------------------- 检索失败状态码
+    // 用户要求「播放源检索失败原因要有明确状态码提示」：后端已把异常归一成 errCode
+    // （HTTP 403 / TIMEOUT / NETWORK / PARSE …），这里负责展示；老备份/缓存重放没有
+    // errCode 时按 msg 文本兜底分类，保证任何来源都能给出可读码。
+    _ERR_CODE_LABELS: {
+        TIMEOUT: '超时',
+        NETWORK: '网络',
+        PARSE: '解析失败',
+        ERROR: '未知错误',
+        NOT_CACHED: '未缓存',
+    },
+
+    /** 从原始 msg 里兜底推断状态码（HTTP 4xx/5xx、超时、网络、解析）。 */
+    _inferErrCode(msg) {
+        const s = String(msg || '');
+        if (!s) return '';
+        const m = s.match(/\b([45]\d\d)\b/);
+        if (m) return 'HTTP ' + m[1];
+        if (/timeout|timed out|超时/i.test(s)) return 'TIMEOUT';
+        if (/connection|resolve|refused|unreachable|ssl|proxy/i.test(s)) return 'NETWORK';
+        if (/json|decode|attribute|keyerror|indexerror|not found in|empty/i.test(s)) return 'PARSE';
+        return '';
+    },
+
+    /** 错误码 → 中文短标签（HTTP 码原样显示）。 */
+    _errCodeLabel(code) {
+        const c = String(code || '');
+        if (!c) return '';
+        if (/^HTTP\b/.test(c)) return c;
+        return this._ERR_CODE_LABELS[c] || c;
+    },
+
+    /** 错误码 → 可操作的建议（卡片里给一句人话，别让用户只看到一串异常）。 */
+    _errCodeHint(code) {
+        const c = String(code || '');
+        if (/^HTTP 40[13]$/.test(c)) return '源站拒绝访问：可能是防盗链或风控，试试别的源或稍后重试';
+        if (c === 'HTTP 404') return '源站地址失效，规则可能需要更新';
+        if (c === 'HTTP 429') return '被源站限流，稍等片刻再试';
+        if (/^HTTP 5/.test(c)) return '源站暂时故障，稍后重试或换源';
+        if (c === 'TIMEOUT') return '源站响应超时，稍后重试或换源';
+        if (c === 'NETWORK') return '连不上源站（网络/代理/被墙），检查网络后重试';
+        if (c === 'PARSE') return '页面结构变了，规则可能已失效';
+        if (c === 'NOT_CACHED') return '上次检索该源失败未缓存，点「重试」重新查询';
+        return '';
+    },
+
+    // ---------------------------------------------------------------- 详情页 Kazumi 源弹窗
 
     /**
      * 打开 Kazumi 源弹窗（detail.js / search.js 调用）。
@@ -2736,13 +2794,22 @@ const Kazumi = {
      * 故意不碰 DOM（除状态重置）：别名轮的整页重绘由 _maybeTryAlias 负责，
      * 标题轮的首屏由 openSourceDialog 负责。
      */
-    _startDlgSearch(st, token, word, attempt) {
+    _startDlgSearch(st, token, word, attempt, opts) {
         this._closeDlgStream();
         st.keyword = word;
         st.attempt = attempt || 0;
         st.aliasPhase = st.attempt > 0;
+        // 合并轮（opts.merge）：已有结果的源保留结果、原地等新结果追加（见 _applySourceResult
+        // 的 keep 分支），只把「没搜到」的源重新置为检索中。这样别名检索是「补空缺」，
+        // 不会把原标题轮已经搜到的结果整页清空重来。
+        const mergeMode = !!(opts && opts.merge);
+        st.mergeRound = mergeMode;
         Object.keys(st.plugins).forEach((n) => {
             const p = st.plugins[n];
+            if (mergeMode && p.status === 'success' && (p.results || []).length) {
+                p.searching = true;
+                return;
+            }
             p.searching = false;
             p.status = 'pending';
             p.results = [];
@@ -2793,6 +2860,28 @@ const Kazumi = {
     },
 
     /**
+     * 别名「补空缺」判定：标题轮已经搜到东西，但**仍有源一无所获**时，用已存别名再打
+     * 一轮并合并结果（用户诉求：别名记下来之后，下次检索就该自动生效，而不是只有标题
+     * 全空才轮到它）。
+     *
+     * 补充轮刻意排除两类状态：
+     * - pending：那一轮还没跑完，别提前判；
+     * - 全 error：整层网络/后端故障，换词不可能好，多打一轮只是把失败请求翻倍。
+     * captcha 也不补：要人工过验证，换个词照样要验证（由卡片上的「进行验证」处理）。
+     */
+    _aliasAugmentWanted(st) {
+        const names = Object.keys(st.plugins || {});
+        if (!names.length) return false;
+        const sts = names.map((n) => st.plugins[n].status);
+        if (sts.some((s) => s === 'pending')) return false;
+        if (sts.every((s) => s === 'error')) return false;
+        // noresult（换了词可能就有）与 error（**上次检索该源失败、没有缓存**，重开弹窗
+        // 那次查询又失败）都值得换个别名再打一轮：错误多半是"这个词在源站上 0 命中被
+        // 判成失败/超时"，而别名正是为此准备的。全 error 除外（整层网络故障换词无益）。
+        return sts.some((s) => s === 'noresult' || s === 'error');
+    },
+
+    /**
      * 一轮检索结束后的去向：还有可用别名就换词再试，否则收尾。
      * 顺序试而非并行——命中即停，最坏 3 轮；并行会把「第一个别名就命中」也变成
      * 3 倍请求，源站与后端共享搜索池都吃不消（且结果合并反而更难解释）。
@@ -2804,15 +2893,21 @@ const Kazumi = {
         if (token !== this._dlgToken || this._dlgState !== st) return;
         if (hit > 0) this._aliasNoteHit(st, st.keyword); // 命中计数（只对别名轮有意义）
         const next = (st.aliasChain || [])[st.aliasTry || 0];
-        if (!next || hit > 0 || !this._aliasFallbackWanted(st)) {
+        // 继续换词的两个条件互斥地覆盖两种诉求：
+        // ① 标题轮零可用源 → 别名兜底（_aliasFallbackWanted）；
+        // ② 已有结果但仍有源一无所获 → 别名补空缺、结果合并（_aliasAugmentWanted）。
+        const wantMore = !!next && (hit > 0 ? this._aliasAugmentWanted(st) : this._aliasFallbackWanted(st));
+        if (!wantMore) {
             st.aliasPhase = false;
+            st.mergeRound = false;
             this._aliasFlush(st); // 本轮命中的别名计数一次性落盘
             this._updateSheetHeader();
             return;
         }
         st.aliasTry = (st.aliasTry || 0) + 1;
-        this._aliasFlush(st); // 上一轮若有命中先计数落盘（一次检索最多写一次 settings）
-        this._startDlgSearch(st, token, next, st.aliasTry);
+        // 不在中途落盘：命中词累积在 st.aliasHitWords，收工时 _aliasFlush 一次性写入
+        // （一次检索最多写一次 settings——中继轮不写，也避免 dialog 未收工就留下半截计数）
+        this._startDlgSearch(st, token, next, st.aliasTry, { merge: hit > 0 });
         this._renderSourceSheet(); // 整页重绘：所有卡回到「检索中」+ 头部标出别名词
     },
 
@@ -2950,7 +3045,14 @@ const Kazumi = {
         if (payload.captcha) {
             if (!keep) { p.status = 'captcha'; p.captchaUrl = payload.captchaUrl || ''; p.results = []; }
         } else if (payload.error) {
-            if (!keep) { p.status = 'error'; p.msg = payload.msg || ''; p.results = []; }
+            if (!keep) {
+                p.status = 'error';
+                p.msg = payload.msg || '';
+                // 状态码：后端 errCode → 文本兜底推断（旧备份/缓存重放也能显示）
+                p.errCode = payload.errCode || this._inferErrCode(payload.msg);
+                p.errRaw = payload.raw || '';
+                p.results = [];
+            }
         } else if (payload.status === 'noresult' || !(payload.list || []).length) {
             if (!keep) { p.status = 'noresult'; p.results = []; }
         } else {
@@ -2989,11 +3091,17 @@ const Kazumi = {
             const r = ((rsp && rsp.results) || []).find((x) => x.pluginName === pluginName) || null;
             if (!r) { p.status = 'noresult'; p.results = []; }
             else if (r.captcha) { p.status = 'captcha'; p.captchaUrl = r.captchaUrl || ''; p.results = []; }
-            else if (r.error) { p.status = 'error'; p.msg = r.msg || ''; p.results = []; }
+            else if (r.error) {
+                p.status = 'error';
+                p.msg = r.msg || '';
+                p.errCode = r.errCode || this._inferErrCode(r.msg);
+                p.errRaw = r.raw || '';
+                p.results = [];
+            }
             else { p.status = (r.data && r.data.length) ? 'success' : 'noresult'; p.results = r.data || []; }
         } catch (e) {
             if (token !== this._dlgToken) return { ok: false, status: 'stale' };
-            p.status = 'error'; p.msg = '查询失败'; p.results = [];
+            p.status = 'error'; p.msg = '查询失败'; p.errCode = 'NETWORK'; p.results = [];
         }
         p.hitWord = (p.status === 'success' && isAlias) ? this._aliasNorm(keyword) : '';
         p.searching = false;
@@ -3062,12 +3170,14 @@ const Kazumi = {
 
     /** 状态 → 徽标。 */
     _statusBadge(p) {
+        // 失败态带上明确状态码（用户要求）：徽标直接写「检索失败 · HTTP 403」
+        const errLabel = p.errCode ? this._errCodeLabel(p.errCode) : '';
         const map = {
             pending: { text: '检索中', cls: 'kazumi-status-pending' },
             success: { text: `${p.results.length} 条`, cls: 'kazumi-status-ok' },
             noresult: { text: '无结果', cls: 'kazumi-status-muted' },
             captcha: { text: '需验证', cls: 'kazumi-status-captcha' },
-            error: { text: '检索失败', cls: 'kazumi-status-error' },
+            error: { text: errLabel ? `检索失败 · ${errLabel}` : '检索失败', cls: 'kazumi-status-error' },
         };
         const m = map[p.status] || map.pending;
         return `<span class="kazumi-status ${m.cls}">${m.text}</span>`;
@@ -3110,8 +3220,16 @@ const Kazumi = {
                 const hint = p.status === 'captcha' ? '该源需要验证码验证'
                     : p.status === 'error' ? '该源检索失败'
                     : '该源未找到结果';
+                // 失败态：状态码 chip + 一句可操作的建议 + 原始错误（折叠在 title 里）
+                const codeLabel = p.status === 'error' ? this._errCodeLabel(p.errCode) : '';
+                const codeHint = p.status === 'error' ? this._errCodeHint(p.errCode) : '';
+                const detail = codeHint || p.msg || '';
                 body = `<div class="kazumi-src-body">
-                    <div class="tip-line">${escHtml(hint)}${p.msg ? '：' + escHtml(p.msg) : ''}</div>
+                    <div class="kazumi-err-line">
+                        ${codeLabel ? `<span class="kazumi-err-code" title="该源检索失败的状态码">${escHtml(codeLabel)}</span>` : ''}
+                        <span class="kazumi-err-text">${escHtml(hint)}${detail ? '：' + escHtml(detail) : ''}</span>
+                    </div>
+                    ${p.errRaw ? `<div class="tip-line pad0 kazumi-err-raw" title="${escHtml(p.errRaw)}">原始错误：${escHtml(p.errRaw)}</div>` : ''}
                     <div class="kazumi-src-actions">${this._sourceActionsHtml(name, p)}</div>
                 </div>`;
             }
@@ -3283,27 +3401,39 @@ const Kazumi = {
     /**
      * 手动检索：弹关键词输入框，重查该源；搜出可用源的关键词会沉淀成别名。
      *
-     * 关窗判定（交互修复）：只有「按下与释放都落在遮罩本身」才算点击外部关闭。
-     * 旧实现只看 click 的 e.target——click 事件的 target 是 mousedown 与 mouseup 的
-     * 最近公共祖先：在弹窗里的标题/输入框上按下、把选中文本拖到弹窗外的遮罩上松手时，
-     * 公共祖先正好是遮罩（弹窗是遮罩的子节点），于是"拖选结束"被误判成"点了外部"
-     * 直接关窗（用户报告：选中标题拖到窗口外，手动检索弹窗自动关闭）。
-     * 现在改为记录按下起点：只有起点和终点都在遮罩上的完整点击才关窗；从弹窗内部
-     * 起始的拖选无论在哪里松手都不关（拖选输入框文本、快速双击同理不受影响）。
+     * 别名入口（用户诉求「点击手动检索时应该出现别名选项」）：弹窗内直接列出该番剧
+     * 已沉淀的别名，点一下即按该别名检索；没有别名时给一句说明（搜成功后自动记录）。
+     *
+     * 关窗判定（交互修复 v2）：只有「按下→释放→无位移→无选区」四件套全满足的
+     * 遮罩点击才关窗。历史问题：① 旧实现只看 click 的 e.target，而 click 的 target
+     * 是 mousedown/mouseup 的最近公共祖先——在标题/输入框上按下、把选中文本拖到
+     * 遮罩上松手时公共祖先正是遮罩，被误判成「点外部」而关窗；② 只补「起点也在
+     * 遮罩」仍不够：用户在遮罩上按下、横向拖选标题文字（起点确实在遮罩）再松手，
+     * 依旧会关。故再加位移阈值（>4px 视为拖选/拖动）与「存在非折叠选区」两道闸，
+     * 保证「选中标题拖到窗口外」这类操作绝不会关掉弹窗。
      * 另补 Esc = 关闭本弹窗（capture 阶段消费：否则 app.js 的全局 Esc 会派发给
      * dispatchEsc 把下面的选源弹窗一起关掉，留下一个孤立的输入框）。
      */
     _showKeywordDialog(pluginName, token, title) {
-        const kw = this._dlgState ? this._dlgState.keyword : '';
+        const st0 = this._dlgState;
+        const kw = st0 ? st0.keyword : '';
+        // 已存别名（该番剧）：按当前会话状态渲染成快捷入口
+        const aliases = (st0 && Array.isArray(st0.aliases)) ? st0.aliases : [];
+        const aliasChips = aliases.length
+            ? aliases.map((a) => `<button type="button" class="kazumi-alias-quick-chip" data-alias="${escHtml(a.alias)}" title="按别名「${escHtml(a.alias)}」检索该源">${escHtml(a.alias)}</button>`).join('')
+            : '<span class="tip-line pad0">暂无已存别名——这次检索成功后会自动记成别名，下次可用。</span>';
         const dlg = $('<div class="md-dialog-overlay" style="display:flex">'
             + '<div class="md-dialog">'
             + `<div class="md-dialog-title">${escHtml(title || '手动检索')} · ${escHtml(pluginName)}</div>`
-            + '<div class="md-dialog-body"><div class="md-field"><input id="kazumi-kw-input" class="md-input" type="text" value="' + escHtml(kw) + '" placeholder="输入关键词，回车确认" /></div></div>'
+            + '<div class="md-dialog-body">'
+            + '<div class="md-field"><input id="kazumi-kw-input" class="md-input" type="text" value="' + escHtml(kw) + '" placeholder="输入关键词，回车确认" /></div>'
+            + `<div class="kazumi-alias-quick"><span class="kazumi-alias-quick-label">别名</span>${aliasChips}</div>`
+            + '</div>'
             + '<div class="md-dialog-actions">'
             + '<button class="md-dialog-btn" id="kazumi-kw-cancel">取消</button>'
             + '<button class="md-dialog-btn md-dialog-btn-primary" id="kazumi-kw-ok">确认</button>'
             + '</div></div></div>').appendTo(document.body);
-        let downOnScrim = false; // 按下起点是否落在遮罩本身（见方法注释）
+        let down = null; // { x, y, scrim }（按下起点，见方法注释的关窗四件套）
         let onEsc = null;
         const close = () => {
             if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function' && onEsc) {
@@ -3328,15 +3458,33 @@ const Kazumi = {
                 done.then((r) => { if (r && r.ok) this._aliasRecord(st, v, pluginName); }).catch(() => { });
             }
         };
-        dlg.on('mousedown', (e) => { downOnScrim = (e.button === 0 && e.target === dlg[0]); });
+        // 关窗四件套（见方法注释）：按下在遮罩 → 释放在遮罩 → 位移 ≤4px → 无文本选区。
+        // 任一不满足都视为「拖选/拖动」，绝不关窗。
+        const DRAG_SLOP_PX = 4;
+        dlg.on('mousedown', (e) => {
+            down = { x: Number(e.clientX) || 0, y: Number(e.clientY) || 0, scrim: (e.button === 0 && e.target === dlg[0]) };
+        });
         dlg.on('mouseup', (e) => {
-            if (e.button !== 0) return;
-            const wasOnScrim = downOnScrim && e.target === dlg[0];
-            downOnScrim = false; // 任何一次释放都复位：残留状态会让下一次点击误判
-            if (wasOnScrim) close();
+            const d = down;
+            down = null; // 任何一次释放都复位：残留状态会让下一次点击误判
+            if (!d || !d.scrim || e.button !== 0 || e.target !== dlg[0]) return;
+            if (Math.abs((Number(e.clientX) || 0) - d.x) > DRAG_SLOP_PX
+                || Math.abs((Number(e.clientY) || 0) - d.y) > DRAG_SLOP_PX) return; // 拖动/拖选后松手
+            try {
+                const sel = (typeof window !== 'undefined' && window.getSelection) ? window.getSelection() : null;
+                if (sel && !sel.isCollapsed && String(sel).trim()) return; // 正在选中文字：不关
+            } catch (err) { /* 选区 API 不可用：按无选区处理 */ }
+            close();
         });
         dlg.find('#kazumi-kw-cancel').on('click', close);
         dlg.find('#kazumi-kw-ok').on('click', submit);
+        // 别名快捷入口：点一下即按该别名检索（先回填输入框，用户能看到实际用的词）
+        dlg.find('.kazumi-alias-quick-chip').on('click', (e) => {
+            const v = String($(e.currentTarget).attr('data-alias') || '').trim();
+            if (!v) return;
+            dlg.find('#kazumi-kw-input').val(v);
+            submit();
+        });
         dlg.find('#kazumi-kw-input').on('keydown', (e) => { if (e.key === 'Enter') submit(); }).trigger('focus').select();
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
             document.addEventListener('keydown', onEsc, true);
@@ -4044,9 +4192,24 @@ const WEBDAV_SETTINGS_EXCLUDE = new Set([
     // 时刻。跨设备恢复它会让另一台机器的增量判定错位（明明没同步过却以为已对齐，
     // 于是跳过本该上传的改动），属机器相关键：上传与恢复双向排除。
     'bangumiLastSyncAt',
+    // URL/连接目标类：恢复侧（WEBDAV_RESTORE_DENIED）已一律拒绝，上传侧同样不应
+    // 把这些键送进云端快照——
+    // - proxyUrl 可能内嵌 user:pass（settings.js 的 SENSITIVE_KEYS 也不含它，明文）；
+    // - lastConfigUrl/configHistory/probeSourceUrl 可能是带私有 token 的订阅地址；
+    // - bangumiMirrorRoot 是连接目标域名；
+    // - proxyEnable 与 proxyUrl 成对，单独上传一个开关既无恢复价值，又会让抓包者
+    //   推断本机代理行为。
+    // 这些键既恢复不了、也没有跨设备复用价值，上传只会扩大泄露面。
+    'proxyUrl', 'proxyTestUrl', 'proxyEnable',
+    'lastConfigUrl', 'configHistory', 'probeSourceUrl', 'bangumiMirrorRoot',
     // 本机绝对路径（cacheDir/dlDir/wallpaper 同口径）：换台机器必然无意义，
     // 播放器路径尤其会把另一端的起播指向不存在的可执行文件。
     'mpvPath', 'externalPlayerPath',
+    // mpvForceHttp11：按「播放器二进制路径」绑定的 HTTP/1.1 兜底标记（R29）。
+    // 换台机器路径必然不同，带上它等于让另一端的起播多背一个无用开关；且恢复侧
+    // 本来就不认它（见 WEBDAV_RESTORE_DENIED）——上传只会让每次恢复多报一条
+    // 「N 项本机不识别已忽略」的假告警。
+    'mpvForceHttp11',
     // 首启状态与日志清理水位：只对本机这一次安装有意义
     'onboarded', 'logLastCleanupAt',
     'cacheDir', 'dlDir', 'wallpaper', 'settingsCat',
@@ -4247,6 +4410,8 @@ const WEBDAV_RESTORE_DENIED = new Set([
     // 本机绝对路径 / 本机状态
     'cacheDir', 'dlDir', 'wallpaper', 'settingsCat', 'webDavRestoreBackup',
     'mpvPath', 'externalPlayerPath', 'onboarded', 'logLastCleanupAt', 'bangumiLastSyncAt',
+    // 按播放器二进制路径绑定的 HTTP/1.1 兜底标记（R29）：本机专用，且已在上传侧排除
+    'mpvForceHttp11',
     // WebDAV 自身配置（本机怎么连远端，见上传侧排除表同组注释）。
     // 与本表/排除表的重叠是有意的：这些键不会被自己的快照携带（上传侧已排除），
     // 列在这里是为了让「外来/被篡改快照」携带它们时同样静默拒绝，

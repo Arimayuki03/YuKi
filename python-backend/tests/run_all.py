@@ -28,6 +28,8 @@ STAGES = [
     ('smoke', [PY, os.path.join(HERE, 'smoke.py')]),
     ('phase3', [PY, os.path.join(HERE, 'test_phase3.py')]),
     ('kazumi', [PY, os.path.join(HERE, 'test_kazumi.py')]),
+    # 单源检索失败分类（server._classify_search_error）：HTTP 码 / 超时 / 网络 / 解析 → 明确状态码
+    ('kazumi-search-errors', [PY, os.path.join(HERE, 'test_search_error_classify.py')]),
     # Bangumi 双向同步「最新修改时间优先」：冲突裁决（本地 ts vs 远端 updated_at）/
     # 缺时间回落 / 优先级取值归一（含旧值 0|1 迁移）/ lastSyncAt 校验 / 出口 URL 验收
     ('kazumi-sync-priority', [PY, os.path.join(HERE, 'test_kazumi_sync_priority.py')]),

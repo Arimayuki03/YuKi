@@ -1562,5 +1562,199 @@ class TestBangumiTrends(unittest.TestCase):
         self.assertEqual(out, {'items': [], 'total': 0})
 
 
+class TestTranslateLlmTarget(unittest.TestCase):
+    """LLM 翻译的目标语言：提示词里必须写「语言名」而不是 BCP-47 码。
+
+    用户报「开启 LLM 翻译后翻译目标语言不正确」：旧实现把 zh-CN / ja / zh-TW 这类
+    码直接塞进提示词，模型对码的解释不稳定（实测 zh-TW 常给简体、zh-CN 偶发译成
+    英文）。免费通道（微软/谷歌）认码，故只在 LLM 侧映射成语言名。
+    """
+
+    def test_target_name_mapping(self):
+        from kazumi.translate import llm_target_name
+        self.assertIn('Simplified Chinese', llm_target_name('zh-CN'))
+        self.assertIn('Traditional Chinese', llm_target_name('zh-TW'))
+        self.assertEqual('English', llm_target_name('en'))
+        self.assertIn('Japanese', llm_target_name('ja'))
+        # 大小写/下划线变体都要归一
+        self.assertIn('Simplified Chinese', llm_target_name('zh_cn'))
+        # 未知码原样透传（交给模型自行理解，好过瞎猜成简体）
+        self.assertEqual('fr-CA', llm_target_name('fr-CA'))
+
+    def test_translate_prompt_uses_language_name(self):
+        from unittest import mock
+        import json
+        from kazumi import translate as tr
+
+        captured = {}
+
+        class FakeRsp:
+            status_code = 200
+            text = json.dumps({'choices': [{'message': {'content': '译文'}}]})
+
+        def fake_post(url, **kw):
+            captured['body'] = kw.get('json')
+            return FakeRsp()
+
+        cfg = {'base': 'https://llm.example/v1', 'key': 'k', 'model': 'm'}
+        with mock.patch('http_client.post', side_effect=fake_post):
+            out = tr.llm_translate('こんにちは', 'zh-TW', cfg)
+        self.assertEqual(out, '译文')
+        system = captured['body']['messages'][0]['content']
+        self.assertIn('Traditional Chinese', system, '提示词里是语言名')
+        self.assertNotIn('into zh-TW', system, '不再直接把语言码塞进提示词')
+
+
+class TestBangumiSearchFiltered(unittest.TestCase):
+    """带筛选的 Bangumi 搜索（mock http_client.post，不触网）。
+
+    重点锁两处实测缺陷：
+    1. 官方 /v0/search/subjects **忽略** filter.air_weekday（2026-10 实测：带 [2] 与
+       不带返回的 total 恒为 1000，结果周一到周日混杂）——星期维度必须本机后置过滤，
+       且请求体里不该再发这个字段（发了只会让人误以为服务端在筛）。
+    2. 接口对 limit>20 静默截断成 20（limit=50/100 都只回 20 条）——「每页 24/50 条」
+       必须由本机按 20 条翻页凑齐，否则翻页 offset 按 50 步进会整段跳过。
+    """
+
+    def setUp(self):
+        self.mgr = PluginManager()
+        self.mgr._plugins = []
+
+    @staticmethod
+    def _rsp(payload):
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return payload
+
+        return FakeRsp()
+
+    def _items(self, dates, start_id=1):
+        return [{'id': start_id + i, 'name': 'S%d' % (start_id + i), 'date': d, 'air_date': d}
+                for i, d in enumerate(dates)]
+
+    def test_weekday_is_filtered_locally_and_not_sent_upstream(self):
+        from unittest import mock
+        # 2026-10-06 是周二；10-07 周三；10-08 周四
+        page = self._items(['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-13'])
+        with mock.patch('http_client.post', return_value=self._rsp({'data': page, 'total': 4})) as m:
+            out = self.mgr.bangumi_search_filtered(weekdays=[2], limit=10)
+        body = m.call_args[1]['json']
+        self.assertNotIn('air_weekday', body['filter'], '上游忽略该字段，不该再发（避免"看起来在筛"）')
+        self.assertEqual([i['id'] for i in out['items']], [1, 4], '只留周二的两条')
+        self.assertEqual(out['total'], 4, 'total 仍取接口原值（跨页上界语义）')
+
+    def test_weekday_scans_forward_until_page_filled(self):
+        from unittest import mock
+        # 每页 20 条、全是周三，只有最后一页含周二 → 必须继续向后扫描才能凑够
+        calls = []
+
+        def fake_post(url, **kw):
+            off = int(kw['params']['offset'])
+            calls.append(off)
+            if off < 60:
+                dates = ['2026-10-07'] * 20          # 周三
+            else:
+                dates = ['2026-10-06'] * 20          # 周二
+            # id 从 1 起步且跨页唯一（id=0 会被归一化判成"缺 id"丢条）
+            ids = self._items(dates, start_id=off * 10 + 100)
+            return self._rsp({'data': ids, 'total': 200})
+
+        with mock.patch('http_client.post', side_effect=fake_post):
+            out = self.mgr.bangumi_search_filtered(weekdays=[2], limit=5)
+        self.assertEqual(len(out['items']), 5)
+        self.assertTrue(all(i['date'] == '2026-10-06' for i in out['items']))
+        self.assertGreaterEqual(len(calls), 2, '一页扫不够要继续往后翻')
+        self.assertEqual(calls[:2], [0, 20], '按实际返回条数（20）推进游标，而不是请求的 limit')
+
+    def test_page_size_beyond_server_cap_is_filled_by_paging(self):
+        from unittest import mock
+        calls = []
+
+        def fake_post(url, **kw):
+            off = int(kw['params']['offset'])
+            calls.append((int(kw['params']['limit']), off))
+            # 实测：上游把 limit>20 截断成 20
+            ids = self._items(['2026-10-06'] * 20, start_id=off * 10 + 100)
+            return self._rsp({'data': ids, 'total': 400})
+
+        with mock.patch('http_client.post', side_effect=fake_post):
+            out = self.mgr.bangumi_search_filtered(limit=24, offset=0)
+        self.assertEqual(len(out['items']), 24, '每页 24 条要真的给满 24 条')
+        self.assertEqual(len({i['id'] for i in out['items']}), 24, '翻页不得重复')
+        self.assertEqual([c[1] for c in calls], [0, 20], '两页凑满：20 + 4')
+
+
+    def test_mirror_connection_failure_falls_back_to_official_api(self):
+        # 现场：用户机 mirror.json 的 root 被设成内网地址 192.168.1.5，所有
+        # api.192.168.1.5 请求 DNS 直接失败 → 以前所有 Bangumi 搜索静默返回空，
+        # 用户看到的就是「搜索/筛选没结果」。连接类失败必须回退官方域名。
+        from unittest import mock
+        import requests
+
+        class FakeRsp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {'data': self_data, 'total': 1}
+
+        self_data = [{'id': 42, 'name': 'S42', 'date': '2026-10-06'}]
+        calls = []
+
+        def fake_post(url, **kw):
+            calls.append(url)
+            if 'api.192.168.1.5' in url:
+                raise requests.exceptions.ConnectionError('NameResolutionError')
+            return FakeRsp()
+
+        self.mgr.enable_bangumi_proxy = True
+        self.mgr.mirror_root = '192.168.1.5'
+        with mock.patch('http_client.post', side_effect=fake_post):
+            out = self.mgr.bangumi_search_filtered(limit=5)
+        self.assertEqual(len(out['items']), 1, '回退官方域名后应有结果')
+        self.assertTrue(any('api.192.168.1.5' in u for u in calls), '先打镜像')
+        self.assertTrue(any('api.bgm.tv' in u for u in calls), '镜像连接失败后回退官方')
+
+    def test_mirror_http_error_does_not_fall_back(self):
+        # HTTP 状态错误是服务端明确答复（如 404/403），换域名无益也不该重试
+        from unittest import mock
+        calls = []
+
+        class BadRsp:
+            def raise_for_status(self):
+                raise RuntimeError('500 server error')
+
+            def json(self):
+                return {}
+
+        def fake_post(url, **kw):
+            calls.append(url)
+            return BadRsp()
+
+        self.mgr.enable_bangumi_proxy = True
+        self.mgr.mirror_root = 'bangumi.vip'
+        with mock.patch('http_client.post', side_effect=fake_post):
+            out = self.mgr.bangumi_search_filtered(limit=5)
+        self.assertEqual(out['items'], [])
+        self.assertEqual(len(calls), 1, 'HTTP 错误不触发域名回退')
+
+    def test_search_failure_folds_to_empty(self):
+        from unittest import mock
+        with mock.patch('http_client.post', side_effect=Exception('net down')):
+            out = self.mgr.bangumi_search_filtered(limit=10)
+        self.assertEqual(out, {'items': [], 'total': 0, 'raw_count': 0})
+
+    def test_weekday_of_date(self):
+        self.assertEqual(PluginManager._weekday_of_date('2026-10-05'), 1)   # 周一
+        self.assertEqual(PluginManager._weekday_of_date('2026-10-11'), 7)   # 周日
+        self.assertEqual(PluginManager._weekday_of_date('2026-10-05T00:00:00'), 1)
+        self.assertEqual(PluginManager._weekday_of_date(''), 0)
+        self.assertEqual(PluginManager._weekday_of_date('2026-02-30'), 0, '非法日期返回 0 而不是抛错')
+
+
 if __name__ == '__main__':
     unittest.main()
+

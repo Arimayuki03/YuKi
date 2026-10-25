@@ -194,11 +194,21 @@ test('本版新增键：进同步范围与允许表；机器相关键进排除�
         assert.ok(exclude.includes(k), `${k} 应在排除表内（本机怎么连远端，机器绑定）`);
         assert.ok(!allowed.includes(k), `${k} 不应在允许表内`);
     });
-    // 敏感 URL 类键：不恢复（防云端快照改写本机连接目标）
+    // 敏感 URL/连接目标类：上传与恢复双向排除——恢复侧拒绝它们是防云端快照改写
+    // 本机连接目标；上传侧也排除是防本机私有地址/凭据被写进云端（proxyUrl 可能
+    // 内嵌 user:pass，配置源 URL 可能带私有 token）。
     ['lastConfigUrl', 'configHistory', 'probeSourceUrl', 'proxyUrl', 'proxyTestUrl',
-        'bangumiMirrorRoot', 'translateLLMBase', 'captchaLLMBase'].forEach((k) => {
+        'bangumiMirrorRoot', 'proxyEnable'].forEach((k) => {
+        assert.ok(exclude.includes(k), `${k} 应在排除表内（不上传）`);
         assert.ok(denied.includes(k), `${k} 应在拒绝表内`);
         assert.ok(!allowed.includes(k), `${k} 不应在允许表内`);
+    });
+    // LLM Base（服务地址）是唯一刻意保留上传的 URL 类键：仅用于跨设备诊断，
+    // 恢复侧仍拒绝（见 kazumi.js 排除表注释）。
+    ['translateLLMBase', 'captchaLLMBase'].forEach((k) => {
+        assert.ok(denied.includes(k), `${k} 应在拒绝表内`);
+        assert.ok(!allowed.includes(k), `${k} 不应在允许表内`);
+        assert.ok(!exclude.includes(k), `${k} 应保留上传（诊断用途）`);
     });
 });
 
@@ -242,6 +252,13 @@ test('载荷组装：子开关裁剪 + 设置快照带新键、剔除机器态/�
             webDavRemoteDir: '/x', webDavAutoEnable: true, webDavEnableStats: true,
             mpvPath: 'C:/mpv.exe', cacheDir: 'C:/cache', settingsCat: 'play',
             webDavRestoreBackup: { ts: 1 },
+            // URL/连接目标类：上传会泄露私有地址/凭据，且恢复侧本就拒绝
+            proxyUrl: 'http://user:pass@127.0.0.1:7890', proxyTestUrl: 'https://example.com/generate_204',
+            proxyEnable: true, lastConfigUrl: 'https://priv.example/config.json?token=abc',
+            configHistory: ['https://priv.example/config.json?token=abc'],
+            probeSourceUrl: 'https://priv.example/config.json', bangumiMirrorRoot: 'bangumi.vip',
+            // LLM Base 是刻意保留上传的诊断字段（恢复侧仍拒绝）
+            translateLLMBase: 'https://llm.example/v1',
         },
     });
     kazumi._rules = [{ name: 'r1' }];
@@ -256,9 +273,13 @@ test('载荷组装：子开关裁剪 + 设置快照带新键、剔除机器态/�
     assert.deepEqual(data.settings.kazumiAliasMap, { 't:芙莉莲': [{ alias: '葬送', ts: 1 }] });
     assert.equal(data.settings.favoritesSort, 'score');
     assert.deepEqual(data.settings.historyFilter, { from: '2026-01-01' });
+    // LLM Base 保留上传（诊断），但不能因此把凭据带出去
+    assert.equal(data.settings.translateLLMBase, 'https://llm.example/v1');
     ['bangumiLastSyncAt', 'bangumiToken', 'dandanAppSecret', 'translateLLMKey',
         'webDavUrl', 'webDavPassword', 'webDavRemoteDir', 'webDavAutoEnable', 'webDavEnableStats',
-        'mpvPath', 'cacheDir', 'settingsCat', 'webDavRestoreBackup'].forEach((k) => {
+        'mpvPath', 'cacheDir', 'settingsCat', 'webDavRestoreBackup',
+        'proxyUrl', 'proxyTestUrl', 'proxyEnable', 'lastConfigUrl',
+        'configHistory', 'probeSourceUrl', 'bangumiMirrorRoot'].forEach((k) => {
         assert.equal(k in data.settings, false, `${k} 不应出现在设置快照里`);
     });
     // 版本标识由后端生成：渲染层不参与，也不得占用保留键

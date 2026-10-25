@@ -324,7 +324,7 @@ function prepareSheet(kazumi, aliases, settings) {
     return kazumi;
 }
 
-test('别名检索：标题轮有可用源时不再试别名（零额外请求）', async () => {
+test('别名检索：标题轮已有结果但仍有源无结果 → 用别名补一轮并合并（别名下次自动生效）', async () => {
     const h = loadKazumi({ settings: { kazumiAliasMap: { 't:葬送的芙莉莲': [{ alias: '芙莉莲', ts: 1, hits: 0 }] } } });
     prepareSheet(h.kazumi);
     await h.kazumi.openSourceDialog('葬送的芙莉莲', 'kazumi', '');
@@ -334,12 +334,41 @@ test('别名检索：标题轮有可用源时不再试别名（零额外请求�
         { name: 'B', list: [], status: 'noresult' }]);
     h.instances[0].done();
     await tick();
-    assert.equal(h.instances.length, 1, '有结果就不换词');
-    assert.equal(h.kazumi._dlgState.plugins.A.status, 'success');
-    assert.equal(h.kazumi._dlgState.plugins.A.hitWord, '', '标题轮结果不带别名标记');
+    // 用户诉求：记下来的别名下次检索就该生效，而不是只有标题全空才轮到它。
+    // 判据是「仍有源一无所获」——此时补一轮别名并把结果**合并**（不清空已有结果）。
+    assert.equal(h.instances.length, 2, '仍有源没搜到 → 别名补一轮');
+    assert.equal(wordOf(h.instances[1].url), '芙莉莲');
+    const st = h.kazumi._dlgState;
+    assert.equal(st.mergeRound, true, '补空缺轮是合并轮');
+    assert.equal(st.plugins.A.status, 'success', '已有结果的源保留结果');
+    assert.equal(st.plugins.A.hitWord, '', '标题轮结果不带别名标记');
+
+    h.instances[1].emit([
+        { name: 'A', list: [{ src: 'u1', name: 'n1' }, { src: 'u2', name: 'n2' }], status: 'success' },
+        { name: 'B', list: [{ src: 'u3', name: 'n3' }], status: 'success' },
+    ]);
+    h.instances[1].done();
+    await tick();
+    assert.equal(h.instances.length, 2, '没有更多别名 → 收工');
+    assert.equal(st.plugins.A.results.length, 2, '同源两轮结果按 源+标题 去重合并');
+    assert.equal(st.plugins.B.status, 'success', '补上的源生效');
+    assert.equal(st.aliasPhase, false, '收工后退出别名轮标记');
 });
 
-test('别名检索：标题轮无可用源 → 顺序试别名，命中即停并标注命中词', async () => {
+test('别名检索：全部源都有结果时零额外请求（不多打别名轮）', async () => {
+    const h = loadKazumi({ settings: { kazumiAliasMap: { 't:葬送的芙莉莲': [{ alias: '芙莉莲', ts: 1 }] } } });
+    prepareSheet(h.kazumi);
+    await h.kazumi.openSourceDialog('葬送的芙莉莲', 'kazumi', '');
+    h.instances[0].emit([{ name: 'A', list: [{ src: 'u1', name: 'n1' }], status: 'success' },
+        { name: 'B', list: [{ src: 'u2', name: 'n2' }], status: 'success' }]);
+    h.instances[0].done();
+    await tick();
+    assert.equal(h.instances.length, 1, '全源都有结果 → 不换词');
+    assert.equal(h.kazumi._dlgState.aliasPhase, false);
+    assert.equal(h.kazumi._dlgState.mergeRound, false);
+});
+
+test('别名检索：标题轮无可用源 → 顺序试别名，命中后继续补空缺并标注命中词', async () => {
     const h = loadKazumi({
         settings: { kazumiAliasMap: { 't:葬送的芙莉莲': [{ alias: '芙莉莲', ts: 9, hits: 2 }, { alias: '葬送', ts: 1, hits: 0 }] } },
     });
@@ -360,9 +389,16 @@ test('别名检索：标题轮无可用源 → 顺序试别名，命中即停并
         { name: 'B', list: [], status: 'noresult' }]);
     h.instances[1].done();
     await tick();
-    assert.equal(h.instances.length, 2, '命中即停：不再试下一个别名');
+    // 别名轮命中 A，但 B 仍一无所获 → 继续用下一个别名补空缺（别名链用尽才收工）
+    assert.equal(h.instances.length, 3, '仍有源无结果 → 继续试下一个别名');
+    assert.equal(wordOf(h.instances[2].url), '葬送');
     assert.equal(st.plugins.A.status, 'success');
     assert.equal(st.plugins.A.hitWord, '芙莉莲', '卡片标出别名命中词');
+    h.instances[2].emit([{ name: 'A', list: [], status: 'noresult' }, { name: 'B', list: [], status: 'noresult' }]);
+    h.instances[2].done();
+    await tick();
+    assert.equal(h.instances.length, 3, '别名用尽 → 收工');
+    assert.equal(st.plugins.A.status, 'success', '合并轮不会因新词无果而丢掉旧结果');
     assert.equal(st.aliasPhase, false);
     // 命中计数落盘（一次检索只写一次 settings）
     const w = h.writes.filter((x) => x.key === 'kazumiAliasMap');
@@ -708,4 +744,75 @@ test('任务A：源码级回归锁——关窗只看 mousedown/mouseup 双端，
         '旧的 click.target 单端判定必须已被移除');
     assert.ok(/dlg\.on\('mousedown'/.test(SRC) && /dlg\.on\('mouseup'/.test(SRC),
         '应改为 mousedown/mouseup 双端判定');
+});
+
+test('任务A：遮罩上按下后拖动再松手不关窗（位移阈值），同一位置点击才关', () => {
+    const h = loadKazumiForDialog();
+    h.kazumi._queryPlugin = async () => ({ ok: false });
+    h.kazumi._showKeywordDialog('A', 1, '手动检索');
+    const dlg = h.$.created[0];
+    const overlayEl = dlg[0];
+    // 在遮罩上按下 → 横向拖选标题文字 → 在遮罩上松手：位移超阈值，不关
+    fire(dlg, 'mousedown', { button: 0, target: overlayEl, clientX: 20, clientY: 20 });
+    fire(dlg, 'mouseup', { button: 0, target: overlayEl, clientX: 260, clientY: 60 });
+    assert.notEqual(dlg.removed, true, '拖动后松手不得关窗');
+    // 同一位置（抖动 ≤4px）的完整点击 → 关
+    h.kazumi._showKeywordDialog('A', 1, '手动检索');
+    const dlg2 = h.$.created[1];
+    fire(dlg2, 'mousedown', { button: 0, target: dlg2[0], clientX: 40, clientY: 40 });
+    fire(dlg2, 'mouseup', { button: 0, target: dlg2[0], clientX: 42, clientY: 41 });
+    assert.equal(dlg2.removed, true, '遮罩空白处的正常点击照旧关闭');
+});
+
+test('任务A：存在非折叠文本选区时不关窗（正在选标题/输入框内容）', () => {
+    const h = loadKazumiForDialog();
+    h.kazumi._queryPlugin = async () => ({ ok: false });
+    const sel = { isCollapsed: false, toString: () => '选中的标题文字' };
+    h.ctx.window.getSelection = () => sel;
+    h.kazumi._showKeywordDialog('A', 1, '手动检索');
+    const dlg = h.$.created[0];
+    fire(dlg, 'mousedown', { button: 0, target: dlg[0], clientX: 10, clientY: 10 });
+    fire(dlg, 'mouseup', { button: 0, target: dlg[0], clientX: 10, clientY: 10 });
+    assert.notEqual(dlg.removed, true, '有选区时连"点遮罩"也不关');
+    // 选区清空后再点 → 关
+    sel.isCollapsed = true;
+    fire(dlg, 'mousedown', { button: 0, target: dlg[0], clientX: 10, clientY: 10 });
+    fire(dlg, 'mouseup', { button: 0, target: dlg[0], clientX: 10, clientY: 10 });
+    assert.equal(dlg.removed, true);
+});
+
+test('手动检索弹窗内的别名入口：渲染已存别名，点一下即按该别名检索', async () => {
+    const h = loadKazumiForDialog({ settings: { kazumiAliasMap: { 't:葬送的芙莉莲': [{ alias: '芙莉莲', ts: 1 }, { alias: '葬送', ts: 2 }] } } });
+    const kazumi = h.kazumi;
+    const st = { title: '葬送的芙莉莲', aliasKey: 't:葬送的芙莉莲', keyword: '葬送的芙莉莲' };
+    st.aliasMap = {}; st.aliasChain = []; st.aliases = [];
+    kazumi._dlgState = st;
+    kazumi._renderSourceCard = () => { };
+    kazumi._updateSheetHeader = () => { };
+    // 别名表从设置里读（与真实 openSourceDialog 的预热同源）
+    st.aliases = kazumi._aliasSanitizeList([{ alias: '芙莉莲', ts: 1 }, { alias: '葬送', ts: 2 }]);
+    kazumi._showKeywordDialog('A', 1, '手动检索');
+    const dlg = h.$.created[0];
+    const markup = String(dlg.html$ || '');
+    assert.match(markup, /class="kazumi-alias-quick-chip" data-alias="芙莉莲"/, '弹窗里出现已存别名');
+    assert.match(markup, /data-alias="葬送"/);
+
+    const calls = [];
+    kazumi._queryPlugin = async (kw, plugin, token) => { calls.push({ kw, plugin, token }); return { ok: true, status: 'success' }; };
+    const chipNode = dlg.find('.kazumi-alias-quick-chip');
+    const chipEl = { attr: (k) => (k === 'data-alias' ? '芙莉莲' : undefined) };
+    fire(chipNode, 'click', { currentTarget: chipEl });
+    await tick();
+    assert.equal(calls.length, 1, '点别名即发起单源检索');
+    assert.equal(calls[0].kw, '芙莉莲', '检索词就是被点的别名');
+    assert.equal(dlg.removed, true, '发起检索后关闭弹窗');
+});
+
+test('手动检索弹窗：没有已存别名时给出说明文案（不留空白区域）', () => {
+    const h = loadKazumiForDialog();
+    h.kazumi._queryPlugin = async () => ({ ok: false });
+    h.kazumi._showKeywordDialog('A', 1, '手动检索');
+    const markup = String(h.$.created[0].html$ || '');
+    assert.match(markup, /暂无已存别名/, '无别名时提示"搜成功后会自动记成别名"');
+    assert.ok(!/kazumi-alias-quick-chip/.test(markup), '无别名时不渲染空 chip');
 });

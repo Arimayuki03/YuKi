@@ -437,6 +437,56 @@ def _form_int(form, name, default):
         raise _FormValueError(f'{name} must be an integer') from None
 
 
+# 单源检索失败 → (错误码, 面向用户的短说明)。用户要求「检索失败原因要有明确状态码
+# 提示」：此前只把 str(e)[:80] 原样塞进卡片（"403 Client Error: Forbidden for url: …"），
+# 看不出到底是 HTTP 状态码、超时还是解析失败。归一成三类：
+#   - HTTP <code>：上游明确回了状态码（requests.HTTPError 带 response，或文本里能抠出
+#     4xx/5xx）——最常见 403（防盗链/风控）、404（地址失效）、429（限流）；
+#   - TIMEOUT / NETWORK / PARSE：超时、连不通、页面结构解析失败；
+#   - ERROR：其余未归类（保留原文尾部便于排查）。
+_HTTP_STATUS_TEXT = {
+    401: '需要登录或凭据失效',
+    403: '源站拒绝访问（防盗链或风控）',
+    404: '源站地址不存在（规则可能已失效）',
+    429: '请求过于频繁被限流',
+    500: '源站内部错误',
+    503: '源站暂时不可用',
+}
+
+def _classify_search_error(exc):
+    """把单源检索异常归一成 (错误码, 面向用户的短说明)。
+
+    码优先取上游 HTTP 状态码（requests 的 HTTPError 带 response；拿不到再从文本里
+    抠 4xx/5xx），其次按异常类型分成 TIMEOUT / NETWORK / PARSE，最后兜底 ERROR。
+    前端直接把码渲染成小胶囊（「HTTP 403」「超时」），并配一句可操作的建议。
+    """
+    text = str(exc) or ''
+    status = None
+    rsp = getattr(exc, 'response', None)
+    if rsp is not None:
+        try:
+            status = int(getattr(rsp, 'status_code', 0) or 0) or None
+        except (TypeError, ValueError):
+            status = None
+    if status is None and text:
+        m = re.search(r'\b([45]\d\d)\b', text)
+        if m:
+            status = int(m.group(1))
+    if status:
+        hint = (_HTTP_STATUS_TEXT.get(status)
+                or _HTTP_STATUS_TEXT.get(status // 100 * 100)
+                or '源站返回错误')
+        return 'HTTP %d' % status, hint
+    names = {c.__name__ for c in type(exc).__mro__}
+    if names & {'Timeout', 'ReadTimeout', 'ConnectTimeout', 'TimeoutError', 'TimeoutException'}:
+        return 'TIMEOUT', '源站响应超时'
+    if names & {'ConnectionError', 'SSLError', 'ProxyError', 'NewConnectionError'}:
+        return 'NETWORK', '网络连接失败（源站不可达或被拦截）'
+    if names & {'JSONDecodeError', 'ValueError', 'AttributeError', 'KeyError', 'IndexError',
+                'IndexSizeError', 'TypeError'}:
+        return 'PARSE', '源站返回内容无法解析（规则可能已失效）'
+    return 'ERROR', (text[:80] or type(exc).__name__)
+
 def cancel_config_task(reason='cancelled'):
     global _config_cancel_event
     with _config_lock:
@@ -1950,6 +2000,7 @@ def create_app():
             yield 'event: done\ndata: {}\n\n'
         return StreamingResponse(gen(), media_type='text/event-stream')
 
+
     @fastapi_app.get('/search/kazumi-stream')
     def kazumi_search_stream(word: str = Query(''), tag: str = Query(''),
                              year: str = Query(''), sort: str = Query(''),
@@ -2002,6 +2053,7 @@ def create_app():
                             'source': 'kazumi:' + miss, 'name': miss, 'list': [],
                             'status': 'error', 'error': True, 'captcha': False,
                             'captchaUrl': '',
+                            'errCode': 'NOT_CACHED',
                             'msg': '上次检索该源失败未缓存，点「重试」重新查询',
                         }, ensure_ascii=False)
                     yield 'event: done\ndata: {}\n\n'
@@ -2021,7 +2073,9 @@ def create_app():
                     return {'pluginName': plugin.name, 'data': data, 'status': 'success' if data else 'noresult'}
                 except Exception as e:
                     logger.warning('[kazumi] kazumi-search-stream failed: %s: %s', plugin.name, e)
-                    return {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
+                    code, msg = _classify_search_error(e)
+                    return {'pluginName': plugin.name, 'error': True,
+                            'errCode': code, 'msg': msg, 'raw': str(e)[:200]}
 
             def _payload_of(r):
                 return json.dumps({
@@ -2032,6 +2086,9 @@ def create_app():
                     'captchaUrl': r.get('captchaUrl', ''),
                     'ocrAvailable': r.get('ocrAvailable') or False,
                     'msg': r.get('msg', ''),
+                    # 明确状态码（用户要求）：前端卡片直接显示 HTTP 403 / TIMEOUT / NETWORK …
+                    'errCode': r.get('errCode', ''),
+                    'raw': r.get('raw', ''),
                 }, ensure_ascii=False)
 
             # 手动管理线程池（M-20）：as_completed 超时/异常也要发 done 事件。
@@ -3049,7 +3106,9 @@ def dispatch_kazumi_action(form):
                             logger.info('[kazumi] search ok: %s (%d items)', plugin.name, len(data))
                     except Exception as e:
                         logger.warning('[kazumi] search failed: %s: %s', plugin.name, e)
-                        results[idx] = {'pluginName': plugin.name, 'error': True, 'msg': str(e)[:80]}
+                        code, msg = _classify_search_error(e)
+                        results[idx] = {'pluginName': plugin.name, 'error': True,
+                                        'errCode': code, 'msg': msg, 'raw': str(e)[:200]}
                 # R 组：改用模块级共享池（全局 16 线程上限），不再每请求建池。
                 # 逐个 submit 后等全部完成（等价原 pool.map 的同步阻塞语义），
                 # 共享池本身不销毁。异常已在 _search_one 内消化，futures 不会抛。

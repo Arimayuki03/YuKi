@@ -22,6 +22,28 @@ from .utils import NoResultException, CaptchaRequiredException, BgmFieldError
 
 logger = logging.getLogger('yuki.kazumi.manager')
 
+# 连接类异常类名（requests/urllib3 的 DNS、拒绝连接、超时、代理、TLS 失败都算）：
+# 用类名集合而不是 import requests，避免与 http_client 的依赖方向耦合，也兼容
+# 未来换 HTTP 实现。判定沿 __cause__/__context__ 链最多走 6 层（requests 会把
+# urllib3 的底层异常包两层）。
+_CONN_ERROR_NAMES = {
+    'ConnectionError', 'ConnectTimeout', 'ReadTimeout', 'Timeout', 'SSLError',
+    'ProxyError', 'InvalidURL', 'MissingSchema', 'NameResolutionError',
+    'NewConnectionError', 'MaxRetryError', 'gaierror',
+}
+
+
+def _is_connection_error(exc):
+    """异常链里是否含连接类失败（判定用，不做重试决策之外的事）。"""
+    cur = exc
+    for _ in range(6):
+        if cur is None:
+            break
+        if type(cur).__name__ in _CONN_ERROR_NAMES:
+            return True
+        cur = getattr(cur, '__cause__', None) or getattr(cur, '__context__', None)
+    return False
+
 # 代理：应用内「代理设置」由主进程注入 HTTP(S)_PROXY 环境变量，
 # http_client.system_proxies 环境变量优先读取（C1 收编后不再依赖 requests trust_env）。
 
@@ -841,12 +863,21 @@ class PluginManager:
         复刻 Kazumi 搜索工作台的全部筛选维度：关键词、标签（AND 语义）、
         排序（heat/rank/score/match）、播出日期区间、排名区间、评分区间、放送星期。
         POST api.bgm.tv/v0/search/subjects，结果经日历归一化补 name_cn/air_date，
-        按 id 去重后返回 {items, total}。镜像开启时经 _base_api() 走全域名反代。"""
+        按 id 去重后返回 {items, total}。镜像开启时经 _base_api() 走全域名反代。
+
+        ⚠ 放送星期（air_weekday）必须由本机后置过滤：
+        官方 v0 搜索接口**忽略** filter.air_weekday（2026-10 实测：带 [2] 与不带
+        返回的 total 恒为 1000，且结果里周一到周日混杂），Kazumi 原版直接把该字段
+        塞进请求体，于是"星期筛选"在两端都是空操作。这里改为：请求体不再发该字段
+        （省得让人误以为服务端在筛），改由 air_date 反算 isoweekday 后本地过滤；
+        为补足过滤掉的行，命中不足一页时向后顺延扫描（_WEEKDAY_SCAN_ROUNDS 轮封顶）。
+        total 仍取接口原值（跨页可继续往后翻），属"上界"语义。"""
         tags = list(tags or [])
         try:
             weekdays = sorted({int(w) for w in (weekdays or []) if str(w).strip()})
         except (TypeError, ValueError):
             weekdays = []   # L-25：非数字入参不再 500
+        weekdays = [w for w in weekdays if 1 <= w <= 7]   # 1=周一 … 7=周日（isoweekday）
         # rank：显式区间优先；sort=rank 时用 Kazumi 的 >0 下限，否则 >=0
         rank_filter = self._build_number_filter(rank_min, rank_max)
         if not rank_filter:
@@ -862,38 +893,131 @@ class PluginManager:
         score_filter = self._build_number_filter(score_min, score_max)
         if score_filter:
             filter_body['rating'] = score_filter
-        if weekdays:
-            filter_body['air_weekday'] = weekdays
         body = {
             'keyword': keyword or '',
             'sort': sort or 'heat',
             'filter': filter_body,
         }
+        page_size = max(1, min(int(limit), 50))
         try:
-            rsp = http_client.post(
-                f'{self._base_api()}/v0/search/subjects',
-                params={'limit': min(int(limit), 50), 'offset': max(int(offset), 0)},
-                json=body,
-                headers={'User-Agent': BANGUMI_UA},
-                timeout=(5, 10),
-                verify=True,
-            )
-            rsp.raise_for_status()
-            data = rsp.json()
-            raw = data.get('data', []) if isinstance(data, dict) else data
-            items = []
-            seen = set()
-            if isinstance(raw, list):
-                for entry in raw:
-                    item = self._normalize_calendar_item(entry)
-                    if item and item.get('id') and item['id'] not in seen:
-                        seen.add(item['id'])
-                        items.append(item)
-            total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
-            return {'items': items, 'total': total, 'raw_count': len(raw) if isinstance(raw, list) else 0}
+            items, total, raw_len = [], 0, 0
+            if not weekdays:
+                items, total, raw_len = self._search_subjects_paged(body, page_size, max(int(offset), 0))
+            else:
+                cursor = max(int(offset), 0)
+                seen = set()
+                for _ in range(self._WEEKDAY_SCAN_ROUNDS):
+                    page, page_total, _raw = self._search_subjects_paged(body, self._SUBJECTS_PAGE_CAP, cursor)
+                    total = page_total
+                    raw_len += len(page)
+                    for it in page:
+                        if it['id'] in seen:
+                            continue
+                        if self._weekday_of_date(it.get('air_date') or it.get('date')) in weekdays:
+                            seen.add(it['id'])
+                            items.append(it)
+                            if len(items) >= page_size:
+                                break
+                    if len(items) >= page_size or len(page) < self._SUBJECTS_PAGE_CAP:
+                        break   # 够一页了，或已到结果末尾
+                    cursor += len(page)   # 按实际返回条数推进（服务端会压到 20/页）
+            return {'items': items, 'total': total, 'raw_count': raw_len}
         except Exception as e:
             logger.warning('[kazumi] bangumi search filtered failed: %s', e)
             return {'items': [], 'total': 0, 'raw_count': 0}
+
+    # /v0/search/subjects 单次最多返回 20 条（实测 limit=50/100 都只回 20），
+    # 且 offset 按条数计——所以要满一页（设置里可到 50/页）必须自己按 20 条翻。
+    _SUBJECTS_PAGE_CAP = 20
+
+    # 星期筛选的向后扫描轮数上限：每轮 20 条，8 轮 = 160 条样本（按 1/7 命中率
+    # 约能凑出 20+ 条，够默认页；再多就是拿用户的等待时间换极冷门条件）。
+    _WEEKDAY_SCAN_ROUNDS = 8
+
+    @staticmethod
+    def _weekday_of_date(value):
+        """YYYY-MM-DD → 1=周一 … 7=周日；解析失败返回 0（调用方按不命中处理）。"""
+        m = re.search(r'(\d{4})-(\d{2})-(\d{2})', str(value or ''))
+        if not m:
+            return 0
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoweekday()
+        except ValueError:
+            return 0
+
+    def _search_subjects_paged(self, body, want, offset):
+        """按服务端 20 条/页的硬上限翻页，凑够 want 条（或结果到底）。
+
+        为什么不能直接把 want 当 limit 发出去：接口对 limit>20 静默截断成 20
+        （实测 limit=50/100 都只回 20 条）。而前端「搜索每页条数」可设到 50，
+        以前一次请求就要 50 条，实际只拿到 20 条 —— 表现为"设了 50 条/页却只有
+        20 张卡"，且翻页 offset 按 50 步进会跳过中间 30 条。这里按 20 条逐页取齐。
+        返回 (items, total, raw_count)。"""
+        want = max(1, min(int(want), 50))
+        cursor = max(int(offset), 0)
+        out_items = []
+        seen = set()
+        total = 0
+        raw_count = 0
+        while len(out_items) < want:
+            page, page_total, raw = self._search_subjects_page(
+                body, self._SUBJECTS_PAGE_CAP, cursor)
+            total = page_total
+            raw_count += raw
+            if not page:
+                break
+            for it in page:
+                if it['id'] in seen:
+                    continue
+                seen.add(it['id'])
+                out_items.append(it)
+            cursor += len(page)
+            if len(page) < self._SUBJECTS_PAGE_CAP:
+                break   # 已到结果末尾
+        return out_items[:want], total, raw_count
+
+    def _search_subjects_page(self, body, limit, offset):
+        """打一页 /v0/search/subjects，返回 (items, total, raw_count)。
+
+        镜像降级：开了 Bangumi 镜像但镜像根域名解析不了/连不上（用户把镜像填成内网
+        地址、或镜像站已下线）时，回退官方 api.bgm.tv 再试一次。此前这种配置下**所有**
+        Bangumi 搜索都静默返回空列表——用户看到的现象是「搜索/筛选没结果」而不是
+        「镜像不可用」，极难自查（现场：用户机 mirror.json 的 root 被设成
+        192.168.1.5，所有 api.192.168.1.5 请求 DNS 直接失败）。
+        只对连接类失败回退：HTTP 4xx/5xx 是服务端明确答复，换域名无益也不该重试。
+        """
+        try:
+            return self._search_subjects_page_once(self._base_api(), body, limit, offset)
+        except Exception as e:
+            if not self.enable_bangumi_proxy or not _is_connection_error(e):
+                raise
+            logger.warning('[kazumi] 镜像 %s 连接失败，回退官方 api.bgm.tv 重试：%s',
+                           self._mirror_api(), e)
+            return self._search_subjects_page_once(BANGUMI_API, body, limit, offset)
+
+    def _search_subjects_page_once(self, base, body, limit, offset):
+        """打一页 /v0/search/subjects（指定基址），返回 (items, total, raw_count)。"""
+        rsp = http_client.post(
+            f'{base}/v0/search/subjects',
+            params={'limit': min(int(limit), 50), 'offset': max(int(offset), 0)},
+            json=body,
+            headers={'User-Agent': BANGUMI_UA},
+            timeout=(5, 10),
+            verify=True,
+        )
+        rsp.raise_for_status()
+        data = rsp.json()
+        raw = data.get('data', []) if isinstance(data, dict) else data
+        items = []
+        seen = set()
+        if isinstance(raw, list):
+            for entry in raw:
+                item = self._normalize_calendar_item(entry)
+                if item and item.get('id') and item['id'] not in seen:
+                    seen.add(item['id'])
+                    items.append(item)
+        total = data.get('total', len(items)) if isinstance(data, dict) else len(items)
+        return items, total, len(raw) if isinstance(raw, list) else 0
 
     def bangumi_info(self, subject_id):
         """Bangumi 番剧详情（api.bgm.tv）。"""
