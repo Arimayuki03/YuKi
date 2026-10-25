@@ -17,7 +17,7 @@
 | 下载 | aria2c + ffmpeg |
 | 主要平台 | Windows |
 | 数据目录 | `~/.yuki/` 与 Electron `userData` |
-| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；2026-09-30~10-08 v0.3.0 功能批次（详情页快照体系 A 系列、全局屏蔽词、设置快照层、缓存池/singleflight/guardedLoad、后端预热与聚合搜索缓存一致性、Bangumi 鉴权归因修正、验证码训练工具健壮化）与全仓代码审查修复批次（OCR 83 条发现 → 77 条落地，deepseek-v4.1-flash 交叉验证 + 主流程仲裁）完成；2026-09-26 Kazumi 对齐批次（评分对话框打标签 / 详情页选集讨论板块 / bgm.tv 跳转按钮，未定版）完成；2026-09-28 未暂存区全量代码审查修复批次完成（OCR delegate + 13 审查子代理，47 文件全覆盖：4 critical/high + 12 medium + 一批 low 修复，明细见 docs/CODE_REVIEW_2026-09-28.md）；2026-10-10~12 **v0.3.1 修复批次**：WebDAV 关代理后还原失败两层修复（http_client NO_PROXY='*' 拦 WinINET 回退 + set-proxy 启用分支删残留）与设置页代理开关关闭立即生效（用户实测回归），timeline 时间敏感单测假红修复；2026-10-14 **v0.4.0 功能批次（25 项，15 路并行作业 + 宿主收口）**：播放链路三类实证修复（curl HTTP/2 分帧 → HTTP/1.1 兜底重试并按播放器路径持久化；mpv.lite `autocreate-playlist=same` 下清单独占会话目录 + `playlist-count` 形状自检；Kazumi 整季队列条目级抓流头接入管道转发 + `/seg` pipedOnce 门控），界面与交互修复一批（图片保存根因=保存了自己的回环封面代理 URL + SSRF 逐跳加固、图片查看器拖动、评分 5 分档「一般」与取消快照确认、手动检索弹窗拖出即关、收藏批量标记后徽标刷新、Bangumi 筛选硬限制与布局、角色浮层 CV、代理地址输入即落盘且关开关不清空、`.md-select` 细节补齐），功能新增一批（搜索历史、Kazumi 别名检索与规则拖拽/批量管理/来源域名、收藏与历史排序筛选与卡片快捷按钮、时间表分类徽标、Bangumi 同步「最新修改时间优先」真正落地、WebDAV 载荷版本标识与旧备份兼容、恢复默认保留搜索历史与别名表）；文档同步 GUIDE/FILE_STRUCTURE/RUNTIME_ISSUES（R29–R31）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
+| 项目状态 | 第一阶段安全/稳定性修复、2A/2B、UI/观看统计及 TVBox/FongMi G0.1-G0.3、S1.1-S1.4、C2.1-C2.5 已验收；2026-08-23/24 打包版用户问题批次修复与原生播放列表/边下边播去重/mpv 中文菜单/Anime4K 快捷键已完成；2026-08-26 UI 视觉系统升级（DESIGN.md 契约）、壁纸自定义调整、夸克转存失败修复与网盘源播放策略收敛已完成；2026-09-14 RM-1/RM-2/RM-4/RM-5（下载番剧文件夹、应用内更新、解析持久缓存、Bangumi 观看进度自动上报）代码完成；2026-09-18/20 两轮全项目代码审查修复（17 项缺陷 + 三报告交叉 P1×5/P2×19/P3×24）完成；v0.2.5 已发布（2026-09-22）；2026-09-22/24 完成审查收口批次（17 条 High）、功能增强批次（广告过滤/跳片头片尾/Bangumi 评分/省略 type 仓兼容/IPC 加固）与大规模测试补齐（JS 单元 540→1717、Python 测试文件 55→73 个 / 74 阶段）；**v0.2.6 定版发布**（2026-09-24）；2026-09-30~10-08 v0.3.0 功能批次（详情页快照体系 A 系列、全局屏蔽词、设置快照层、缓存池/singleflight/guardedLoad、后端预热与聚合搜索缓存一致性、Bangumi 鉴权归因修正、验证码训练工具健壮化）与全仓代码审查修复批次（OCR 83 条发现 → 77 条落地，deepseek-v4.1-flash 交叉验证 + 主流程仲裁）完成；2026-09-26 Kazumi 对齐批次（评分对话框打标签 / 详情页选集讨论板块 / bgm.tv 跳转按钮，未定版）完成；2026-09-28 未暂存区全量代码审查修复批次完成（OCR delegate + 13 审查子代理，47 文件全覆盖：4 critical/high + 12 medium + 一批 low 修复，明细见 docs/CODE_REVIEW_2026-09-28.md）；2026-10-10~12 **v0.3.1 修复批次**：WebDAV 关代理后还原失败两层修复（http_client NO_PROXY='*' 拦 WinINET 回退 + set-proxy 启用分支删残留）与设置页代理开关关闭立即生效（用户实测回归），timeline 时间敏感单测假红修复；2026-10-14 **v0.4.0 功能批次（25 项，15 路并行作业 + 宿主收口）**：播放链路三类实证修复（curl HTTP/2 分帧 → HTTP/1.1 兜底重试并按播放器路径持久化；mpv.lite `autocreate-playlist=same` 下清单独占会话目录 + `playlist-count` 形状自检；Kazumi 整季队列条目级抓流头接入管道转发 + `/seg` pipedOnce 门控），界面与交互修复一批（图片保存根因=保存了自己的回环封面代理 URL + SSRF 逐跳加固、图片查看器拖动、评分 5 分档「一般」与取消快照确认、手动检索弹窗拖出即关、收藏批量标记后徽标刷新、Bangumi 筛选硬限制与布局、角色浮层 CV、代理地址输入即落盘且关开关不清空、`.md-select` 细节补齐），功能新增一批（搜索历史、Kazumi 别名检索与规则拖拽/批量管理/来源域名、收藏与历史排序筛选与卡片快捷按钮、时间表分类徽标、Bangumi 同步「最新修改时间优先」真正落地、WebDAV 载荷版本标识与旧备份兼容、恢复默认保留搜索历史与别名表）；文档同步 GUIDE/FILE_STRUCTURE/RUNTIME_ISSUES（R29–R31）；**2026-10-25 用户 17 项问题清单批次已完成**（筛选栏圆角与时间筛选器、图片查看器拖动/复制提示/侧键返回、catvod 整季队列相对地址 R32、Bangumi 星期筛选与分页补齐、搜索历史展开时机、角色详情 CV、Kazumi 手动检索别名入口、收藏页布局与卡片动作悬停、历史筛选排序与续播记账、代理表单收起、WebDAV 键补齐）；N3（PC 原生运行时新引擎）与真实公共仓/发布环境验收仍未开始（drpy 引擎已实现后移除，见 §4） |
 
 源应用是 Android TV/CatVod 架构应用；当前桌面实现保留 CatVod Spider 契约，同时独立接入 Kazumi 规则系统。Kazumi Flutter 原版仅作为行为与功能参考。
 
@@ -187,6 +187,114 @@ npm run build:win
 PowerShell 命令不要使用 Bash 的 `&&`；需要连续执行时使用 `;`。
 
 ## 7. 最近验证结果
+
+2026-10-25 时间筛选器：图标缺失 + 文字不居中（**像素级定位到根因**，第三次才是真修好）：
+
+前两次之所以没修好，是因为没有看到像素。这次改用 CDP `Page.captureScreenshot` 截图 + 自写 PNG 解码逐行数像素，得到确凿事实：
+
+1. **图标缺失的根因**：`.md-input` 上带 `-webkit-appearance:none; appearance:none`（设计系统统一样式）。Chromium 在这种日期输入框上**根本不渲染** `::-webkit-calendar-picker-indicator`（像素截图里字段右侧空无一物），所以之前"恢复原生图标"的改法不可能生效。→ 改为**自绘图标**（18px 线性日历，`currentColor` + `--md-on-surface-variant`，悬停变主题色），并显式 `display:none` 掉原生 indicator（不同版本表现不一，避免出现两个）。
+2. **文字不居中的根因**：`appearance:none` 下 Chromium 把日期文字画在输入框的**顶部**（而不是垂直居中），我们绝对定位的标签再"居中"也只是叠在它上面 → 用户看到的是原生那行顶部文字。→ 彻底放弃"在原生输入上叠标签"的方案：**把 input 原有的类整体搬到 wrap 上**（`.md-input/.rec-input/.rec-date` → wrap 成为真正的盒子，宽高/圆角/边框/底色/悬停焦点与原样式完全一致），文字与图标改走 wrap 的 `display:flex; align-items:center` 正常流；原生 input 退化为 `position:absolute; inset:0; opacity:0; pointer-events:none` 的隐形值容器（值/change/min-max 语义不变）。
+
+**像素级验收**（1440 宽真实渲染，PNG 逐行扫描）：
+- 字段 36px 高、文字墨迹中心 = 字段中心 **−0.34px**、图标墨迹中心 **+0.34px**（≈0，视觉完全居中）；
+- DOM 量测：label 中心偏移 **−0.01px**、icon 中心偏移 **0**、图标 18px、右侧留白 14.7px；
+- 功能链路：点开日历选 `2026-10-15` → 值/标签同步、应用筛选出 chip「日期: 2026-10-15×」、重置 → 值空 + 标签回「选择日期」+ `data-empty=1`；
+- Bangumi 筛选弹窗内：wrap 继承 `.md-input`（264×37.6、圆角 14）、文字/图标偏移均为 0、起止日期 `min` 联动仍生效。
+
+**验证**：JS 单测 **2679/2679**；`check-js` 56 文件 0 错；ESLint 0 error。截图存档 `build/ui-verify/final-measure.png`（隐藏窗口用 CDP 截图，`build/ui-harness` 已支持 `HARNESS_CDP`）。
+
+2026-10-25 时间筛选器再修两处（图标消失 + 文字不居中）：
+
+- **图标不见了**：上一版为隐藏日期文字给整个 input 设了 `color: transparent` + `-webkit-text-fill-color: transparent`；而原生日历按钮 `::-webkit-calendar-picker-indicator` 是**用 currentColor 绘制**的，于是被一起弄透明。修法：input 自身不再设透明色（只保留 `caret-color:transparent`），改为把原生 `::-webkit-datetime-edit` 整体 **`display:none`** —— 分段文字与分段高亮都不再绘制，日历按钮照常显示。实测 `getComputedStyle(input).color` 恢复为不透明（亮/暗两种主题、历史面板与 Bangumi 弹窗三处一致）。
+- **日期选择栏内文字不居中**：标签原来是 `left:12px; top:50%; transform:translateY(-50%)`，亚像素换算 + 与原生分段文字上下叠字让观感偏。改为**铺满整格的 flex 居中**（`inset:0; display:flex; align-items:center; padding:0 38px 0 12px; line-height:1`），左内边距与原生输入一致（12px）；配合上一条的 `display:none`，字段里只剩我们这一层文字，不会被原生文字叠出"没居中"的错觉。实测文字包围盒中心与字段中心差 **0.17px**（字形高度差，视觉即居中）。
+
+- **验证**：JS 单测 **2679/2679**（断言更新：input 自身不得设透明色、`::-webkit-datetime-edit` 必须 `display:none`、标签必须 `inset:0 + flex 居中 + 12px 左内边距`）；ESLint 0 error；`check-js` 56 文件 0 错。
+- **真实渲染验收**：亮/暗主题、历史筛选面板与 Bangumi 筛选弹窗四处字段均为「高度 36（弹窗内 45）/ 文字左偏 12px / 中心差 0.17px / input color 不透明」；点击字段右侧图标位置做 `elementFromPoint` 命中的是透明触发层（点图标＝开自绘日历）。
+
+2026-10-25 时间筛选器两处回归修正（图标 + 点击后字段里冒出日期块）：
+
+- **图标变了**：上一版把原生 `::-webkit-calendar-picker-indicator` 隐藏、改画自绘 SVG 圆钮 → 用户不认这个图标。**已回退**：删掉自绘 SVG 与隐藏规则，日历按钮恢复原生外观（仍由既有 `::-webkit-calendar-picker-indicator` 主题化规则上色/悬停放大）。
+- **点击后栏内显示「日期块状」**：根因是打开日历时调用 `input.focus()`——Chromium 会给日期分段（`::-webkit-datetime-edit-*-field`）画高亮背景块。两处修正：
+  1. 打开面板时**不聚焦原生 input**，焦点交给面板自身（`tabIndex=-1` + `preventScroll`）；键盘操作仍走全局监听（Esc/PageUp/PageDown），选完/清除再把焦点还给字段；
+  2. CSS 把分段高亮彻底压掉：`::-webkit-datetime-edit` 及其 `fields-wrapper/text/month-field/day-field/year-field/hour…` 全部 `background:transparent !important` + `color/fill transparent`，并去掉字段聚焦时的 `outline`。
+
+- **验证**：JS 单测 **2679/2679**（相应断言更新：不再有自绘图标、原生按钮保持可见、分段高亮背景必须被压掉、聚焦不画 outline）；`check-js` 56 文件 0 错；ESLint 0 error。
+- **真实渲染验收**：`hasCustomIcon=false`（自绘图标已移除）、标签 `2026-10-08` 正常、点击后 `document.activeElement` 是面板而非 input（`inputFocusRing=none`）、选日写回 `2026-10-15` 且焦点回到字段。
+
+2026-10-25 时间筛选器「取消输入功能」（承接上一条：日期框只当选择器，不再可输入）：
+
+- 原生日期框被设为 **readOnly**（`aria-readonly="true"`、`inputmode="none"`）——键盘/分段编辑/加减号调值全部失效，只剩"点一下开日历"。值容器语义不变（`.val()`/change/min-max 照旧）。
+- 显示层自绘：原生日期文本与日历图标 `transparent` 隐藏，改为 `.yuki-date-label`（空值占 `选择日期` 弱化色、有值显示 ISO `2026-10-08`）与右侧主题色圆钮日历图标；`data-empty` 驱动占位态配色。
+- 值同步：给 input 的 `value` 存取器打补丁（`input.value = x` / jQuery `.val(x)` 直接赋值也会刷标签），并在 `change`/`input` 上兜底——「重置筛选」这类不派发事件的写值不会再留下过期文案。
+- 顺带修掉一个隐患：`_matchDateInput` 原本把 readOnly 一律排除，装饰后 `readOnly=true` 会让键盘（Enter/Space）打不开日历；改为「我们自己装饰过的只读」仍然接管，用户/页面自己写的 readonly 才跳过。
+
+- **验证**：JS 单测 **2679/2679**（本批新增 3 例：只读 + 占位/值标签 + 图标、标签随「直接赋值/选日/清除」三路同步、展示层样式契约）；`check-js` 56 文件 0 错；ESLint 0 error。
+- **真实渲染验收**：`readOnly=true`、`-webkit-text-fill-color: rgba(0,0,0,0)`（原生文本不可见）、标签「选择日期」用 `on-surface-variant`、自绘日历图标在位；直接写值 → 标签变 `2026-10-08` 且 `data-empty=0`；键盘输入不改值；点开日历选 `2026-10-15` → 值与标签同步；「清除」→ 值空 + 标签回占位 + `data-empty=1`。
+
+2026-10-25 用户第五批 2 项问题清单（Kazumi 卡收藏入口 + 原生日历仍在弹出）：
+
+- **历史页 Kazumi 源卡没有六态按钮**：根因是收藏身份判定要求 `site + vodId`，而 Kazumi 记录**没有源内 id**（player 侧对 `kazumi:` 源刻意不继承 `Detail.vodId`，见 T4 隔离）→ vodId 恒空 → 按钮不渲染。若直接把空 id 当收藏键，同规则下所有番剧会塌成同一条收藏。修复：新增 `recFavIdentity(v)`——有 vodId 用 vodId，Kazumi 源用 `name:<片名>` 合成稳定键；卡片渲染、打开菜单读状态、写入收藏三处共用同一函数；`_itemsByUid` 与 `_itemOf` 增加「site|name」兜底键（Kazumi 卡 `data-id` 为空也能回查到记录）。实测两张同规则不同番剧的 Kazumi 卡各自写入 `kazumi:xxx|name:规则番甲` / `…乙`，互不覆盖，重开菜单高亮「在看」。
+- **时间筛选器展开后仍显示默认日历**：只靠 pointerdown/mousedown 的 `preventDefault` 并不能可靠阻止 Chromium 打开原生日期面板（实测用户机上两个日历叠在一起）。改为**让原生 input 收不到指针事件**：`custom-date` 启动即把所有 `input[type=date]` 包进 `<span class="yuki-date-wrap">` 并盖一层透明触发按钮（`.yuki-date-trigger`），input 设 `pointer-events:none` → 原生面板永远没有机会弹出；输入框仍可用 Tab 聚焦、键盘输入，`.val()`/change/min-max 语义完全不变。动态注入的日期输入由 `MutationObserver`（rAF 去抖）补装饰；`data-native-date` 可显式退出。
+
+- **验证**：JS 单测 **2676/2676**（本批新增 4 例：装饰层包裹与幂等、点透明触发层打开日历、wrap 内 input 指针事件关闭的样式契约、Kazumi 收藏键与两级回查）；`check-js` 56 文件 0 错；ESLint 0 error。
+- **真实渲染验收**（Electron 驱动真实 `index.html`）：Kazumi 历史卡出现 ⋯、菜单 6 项、选「在看」后本地收藏键为 `name:规则番甲`（同规则另一部不受影响）、重开菜单高亮正确；日期输入 `className=yuki-date-wrap` 且 `pointer-events:none`、透明触发层点击打开自绘日历（284×301、42 格、层级 1340）、选日写回 `2026-10-08`；Bangumi 筛选弹窗内的日期输入同样被装饰，`max=2026-10-10` 时 10-20 为 disabled（min/max 联动未回退）。
+
+2026-10-25 用户第四批 5 项问题清单（时间筛选器展开态 + 工具条排布 + 徽标提示）：
+
+- **时间筛选器展开状态美化**：原生 `<input type="date">` 的日历面板由 Chromium 绘制、CSS 无钩子，新增 **`js/custom-date.js` 自绘日历弹层**（与 `custom-select` 同一套设计：input 仍是值容器，指针按下 `preventDefault` 后按 `value` 现算 42 格月视图）。
+  面板：`--radius-lg` 圆角 + 主题色底 + `popIn` 入场 + 层级 1340；头部「« ‹ 2026 年 10 月 › »」四向导航；周一起的星期表头；日期格 30px、悬停浅底+微放大、**今天**描边、**选中**主题色实心、**月外**弱化、**min/max 之外**删除线禁用；底部「今天 / 清除 / 关闭」；`Esc`/`PageUp`/`PageDown` 键盘支持；选日写回 `value` 并派发 `input`+`change`（同值不派发，与原生一致）；`清除` 走空值 + change（页面据此重筛）。
+- **我的收藏：多选紧挨「同步 Bangumi」**：DOM 顺序改为 搜索 → 排序 → 筛选 → 同步 Bangumi → **多选** → 批量操作；去掉上一版把多选推到最右的 `order:90 + margin-left:auto`。实测多选左边缘距同步按钮右边缘 10px（工具条 gap）。
+- **收藏状态徽标提示删除**：`records.recCard` 与 `timeline._attachFavBadges` 的徽标不再挂 `title`（原先「Bangumi 收藏状态（在详情页修改）」的悬浮提示已按用户要求移除）；顺带修掉 timeline 侧为了转义而引入的 `escHtml` 依赖（该沙箱没有该全局）。
+- **历史页：多选/清空紧挨筛选按钮**：去掉把多选推到右边的规则，顺序即 搜索 → 排序 → **筛选 → 多选 → 清空**（多选态再出现的「删除勾选」排在清空之后）；实测筛选→多选间距同为 10px。
+
+- **验证**：JS 单测 **2672/2672**（本批新增 11 例自绘日历：ISO 解析/月偏移跨年/月长含闰年/42 格月视图周一对齐/min-max 越界/命中范围/按下 preventDefault + 42 格渲染/选日回写与同值不派发/禁用日不生效/导航·今天·清除·关闭/Esc·滚动关闭/样式接线锚点；工具条排布与徽标提示改为源码锚点断言）；`check-js` 56 文件 0 错；ESLint 0 error；Ruff 全过。
+- **真实渲染验收**（Electron 驱动真实 `index.html`）：日期弹层 `display:block`、圆角 14px、层级 1340、42 格、`Esc` 关闭；收藏工具条多选紧贴同步（10px）；历史工具条 筛选→多选 10px、清空紧随其后；收藏状态徽标 `title` 为 `null`。
+
+2026-10-25 用户第三批 8 项问题清单（承接同日两批；本批以「交互细节 + 状态提示」为主）：
+
+- **时间筛选器美化**：日期块做成"可点的时间胶囊"——等宽数字 + 500 字重 + 12px 左内边距、悬停取主题色边框与浅底、日历按钮做成浅主题色圆钮（悬停放大 1.08）、暗色反色；日期宽度 **158 → 200px**（用户要求"长度加大"，yyyy-mm-dd 不再被裁）。
+- **检索失败状态码**：后端新增模块级 `_classify_search_error(exc)`（HTTP 码优先，取自 `response.status_code` 或从文本抠 4xx/5xx；其余归 TIMEOUT / NETWORK / PARSE / ERROR），SSE 与 `kazumiSearch` 单源重查两条通道都带 `errCode`/`raw`（"上次检索失败未缓存"的合成 payload 带 `NOT_CACHED`）；前端 `_inferErrCode/_errCodeLabel/_errCodeHint` 负责兜底推断与展示——徽标写「检索失败 · HTTP 403」，卡片正文给错误色胶囊 + 一句可操作建议（防盗链/风控、规则失效、限流…）+ 折叠在 title 里的原始错误。
+- **收藏工具条顺序**：搜索 → **排序（紧挨搜索框右侧）** → 筛选 → 同步 Bangumi → 批量操作 → **多选（最右）**；历史页工具条：搜索 → 排序 → 筛选 → **多选 → 清空 → 删除勾选（最右）**，多选/清空靠右由 `margin-left:auto` + `order` 承担，两页共用 `recSortFilterHtml` 注入到搜索框右侧。
+- **点完六态按钮后不隐藏（根因）**：浮现条件里的 `.vod-card:focus-within` —— 鼠标点击会把焦点留在按钮上，于是「▶ 与 ⋯」永久常显、移开鼠标也不消失。改为只用 `:focus-visible`（键盘可达性保留），菜单展开期间仍由 `.menu-open` 常显。
+- **收藏卡六态菜单打不开（根因）**：远端 Bangumi 收藏条目（my.js 映射）**没有 uid**，卡片按钮按 uid 回查记录必失配 → 静默 return。修复：`mergeExtraRecords` 给缺失 uid 的条目派生稳定 `bgm-<subjectId>`；`_itemsByUid` 追加 `site|vodId` 兜底键；新增 `_itemOf(uid, $btn)` 两级回查，彻底找不到时给「记录已刷新」提示（不再静默）。
+- **四枚卡片按钮悬停动效统一**：`▶/⋯` 的过渡列表补齐 `transform/box-shadow/color`（与 `✕/✎` 完全一致），悬停同样 `scale(1.15)` + `--shadow-sm`、按压 `scale(0.94)`，颜色按角色（▶/⋯/✎ 主题色，✕ 危险色）。
+
+- **验证**：JS 单测 **2661/2661**（本批新增 8 例：检索失败码推断/标签/建议/卡片渲染、`:focus-within` 回归锁、四按钮动效一致性、`mergeExtraRecords` 补 uid、`_itemOf` 两级回查）；Python `run_all.py` **ALL PASS**（新增 stage `kazumi-search-errors` 8 例）；`check-js` 55 文件 0 错；ESLint 0 error；Ruff 全过。
+- **真实渲染验收**（Electron 驱动真实 `index.html`）：收藏工具条 12 个控件顺序如上且 `多选` 是最后一个可见控件；历史工具条 6 个控件顺序如上；日期输入 200×36 / 圆角 14px；Bangumi 收藏卡 ⋯ 能打开 6 项菜单；关掉菜单后 `▶`/`⋯` 的 opacity 回到 0（层叠实测，绕开隐藏窗口过渡冻结）。
+
+2026-10-25 用户第二批 10 项问题清单（承接同日 17 项批次；本批为"上一批没做透/看错"的返工与新增）：
+
+- **筛选栏圆角与时间筛选器（返工）**：上一批把控件圆角从 10px 调到 12px——**在 36px 高的控件上肉眼几乎无差别，用户判定"没实现"**。本批校准到 **14px**（一眼能看出圆），并补齐"可点"的视觉暗示：筛选栏下拉/输入悬停取主题色边框、下拉箭头悬停换成主题色箭头（新增 `--md-select-chevron-accent` 明暗两套）、聚焦不退回直角；日期筛选器继续沿用主题化日历按钮 + 数字等宽 + 158px 宽，并随历史筛选面板化（见下）一起重排。
+  **展开后的列表已改为自绘弹层**（新文件 `js/custom-select.js` + `.yuki-sel-panel` 样式）：原生 `<select>` 只保留"值容器 + 收起态外观"，指针按下时 `preventDefault`（原生弹层不再出现）+ 按 `option` 现读现画一个圆角列表（`--radius-lg` 面板 + `--radius-control` 条目、主题色底、当前项 ✓、键盘 ↑↓/Enter/Esc、滚轮/点外部收起、大列表滚动、`optgroup` 分组标题、页面缩放反算、层级 1340）。选中时写回 `selectedIndex` 并派发 `input`+`change`（与原生 `<select>` 同序），因此页面里既有的 `.val()`/change 绑定/动态重建选项全部零改动。
+- **翻译气泡：长拖选不弹出**：旧实现只认 document 的 mouseup——长拖选常伴随容器自动滚动、指针拖出窗口再松手（mouseup 收不到），这两种情况被静默丢弃。现补三条链路：① `selectionchange` 空闲兜底（选区停止变化 320ms 即视为选完）；② 指针仍按着（pointerdown..pointerup）时不抢跑；③ 气泡弹出后 400ms 内忽略页面滚动（自动滚动的残留 scroll 不再把刚出现的气泡关掉）。键盘选区（Shift+方向键/Ctrl+A）同样走兜底。
+- **LLM 翻译目标语言不正确**：提示词此前直接塞语言码（`zh-CN`/`zh-TW`/`ja`），模型对码的解释不稳定（实测 `zh-TW` 常给简体、`zh-CN` 偶发译成英文）。新增 `llm_target_name()` 映射为语言名（Simplified Chinese / Traditional Chinese / English / Japanese），并在提示词里明确"只输出译文、保留换行与格式、名字数字 URL 不变、已是目标语言则原样返回"。免费通道（微软/谷歌）认码，行为不变。
+- **Kazumi 别名检索（失败源也要重试）**：`_aliasAugmentWanted` 此前只认 `noresult`——"上次检索该源失败未缓存"的源（状态 `error`）被排除在外，重开弹窗后仍不会用别名重试。现 `noresult` 与 `error` 都算"值得换词再试"（全 error 除外：整层网络故障换词无益）。
+- **收藏筛选面板下拉超出格子**：`.md-select` 基线 `min-width:200px` 在窄面板里会横向撑破——面板内 select/input 统一 `min-width:0; max-width:100%`，select 改 `flex:0 1 200px; min-width:120px`（窄屏 `flex:1 1 160px`）。
+- **Bangumi 收藏卡也有六态菜单**：`recCard` 对 `site='bangumi'` 且带数字 subject id 的卡同款渲染右下角 ⋯（按钮带 `data-bgm-id`）；落盘走账号接口（`setBangumiCollection` / 新增的 `delBangumiCollection`，无二次确认——菜单点选即确认），成功后同步本地镜像条目并广播；**顺序刻意"先账号后本地"**，账号失败则本地不动，避免"本地显示已收藏、账号里没有"的假象。
+- **卡片 ✕/✎ 悬停无反馈**：补 `transform: scale(1.15)` + 主题色底（✕ 危险色 / ✎ 主题色）+ 阴影 + `:active` 回弹 + `:focus-visible` 常显，过渡含 transform。
+- **六态菜单滚轮自动隐藏**：菜单是 fixed 定位的锚点浮层，只监听 window scroll 不够（滚动发生在 `.view` 等内部容器时 scroll 不冒泡）。改为捕获阶段 `wheel` + `scroll` 委托，菜单自身内部滚动除外。
+- **历史页筛选重设计（仿收藏页）**：工具栏只留「排序 + 筛选按钮 + 已生效条件 chips」，来源/日期(单日或区间)/评分档位收进筛选面板，**草稿态 + 应用/重置**（与收藏页同一套交互）；chips 点 × 立即删该维度重筛，来源 chip 显示来源名而非 site key。
+- **历史页播完不刷新**：播放结束 `_writeWatch → recordPlay` 写的是 settings.history，但 `recSet` 只对 favorites 广播 → 历史页不动。新增轻量通道 `RecHub`（不复用 FavHub，避免播放一次惊动详情页/时间表/我的/搜索徽标全体重绘），历史视图订阅后"本页可见且不在多选态"时就地重绘。
+
+- **验证**：JS 单测 **2653/2653**（本批新增 17 例：历史面板结构/草稿应用/chip 删除、RecHub 广播与不打扰、Bangumi 卡菜单渲染与落盘、长拖选兜底/不抢跑/滚动宽限、面板内控件可收缩、✕/✎ 悬停规则、自绘下拉 6 例）；Python `run_all.py` ALL PASS（新增 `TestTranslateLlmTarget` 2 例）；`check-js` 0 错；ESLint 0 error；Ruff 全过。
+- **真实渲染验收**（Electron 驱动真实 `index.html` + 固定数据）：历史工具条只剩 [排序][筛选][chips] 且面板 display:flex、面板内控件 14px 圆角且无横向溢出、应用后 chips 出现"评分: 未评分×"、Bangumi 卡渲染 `data-bgm-id` 的 ⋯ 按钮、✕ 过渡含 transform、滚轮把菜单关掉（block → none）、收藏排序下拉圆角 14px；**自绘下拉**：点按下即 `dispatchEvent` 返回 false（原生弹层被抑制）、面板 14px 圆角/层级 1340、81 个季度项 max-height 340 可滚动、选中写回 `value=2026Q2` 并让筛选 chip 出现「季度: 2026Q2×」、点面板外/滚轮收起、设置页与历史/收藏工具栏的下拉同一套行为。
+
+2026-10-25 用户 17 项问题清单批次（宿主逐项实现 + 真实渲染/真机证据验证）：
+
+- **筛选栏与时间筛选器**：新增控件圆角令牌 `--radius-control:12px`，`.md-select/.md-input` 与筛选栏 `.rec-select/.rec-input/.home-search/.search-bar` 全量改用（此前 `.rec-select` 等后置同名规则把圆角覆盖回 10px，实测 12px→10px）；原生 date/time 输入主题化（日历按钮 hover 底色 + `html.dark` 反色、数字等宽、空值占位弱化、`.rec-date` 150→158px）；区间输入去掉步进箭头。
+- **图片查看器**：拖动卡顿根因 = `.dragging` 的 `transition:none` 被后置的同权重 `#cover-float img.loaded` 盖掉（每帧 transform 都被 150ms 过渡追尾），改为复合选择器 `#cover-float img.loaded.dragging` 并缓存 img 节点；「复制地址没有提示」两层根因：`#warnToast` z-index 200 压在图片浮层 1300 下方（实测取计算样式）+ 剪贴板 API 失败无降级 → toast 提至 1350、复制走 `_copyImageUrl`（Clipboard API → execCommand 兜底 → 必有 toast）；查看图片时鼠标侧键返回改为「先关浮层」：common.js 抽出 `closeTopOverlay`（对话框 → 图片浮层 → 人物浮层）与 Esc 共用，浮层没关完视图栈不动。
+- **catvod 整季队列（R32）**：用户机日志实证「m3u 已装载 → 第 1 集 302 → `未匹配路径(活令牌): /pl/<token>/enc.key` → mpv-start-timeout」。根因是清单内相对 URI 被 ffmpeg/mpv 以**最初请求的本地代理地址**为基准解析（302 目标不替换基准），旧实现按「未匹配路径」回空清单。修复：记录本集 302 上游地址 + 子目录映射，同源解析相对地址再 302（`_resolveRelative/_rememberRelDir/_noteEntryBase`）。
+- **Bangumi 搜索筛选**：官方 v0 搜索**忽略** `filter.air_weekday`（2026-10 实测：带 [2] 与不带 total 恒 1000、结果周一到周日混杂）→ 星期改为本机按 `air_date` 反算 isoweekday 后置过滤 + 逐页向后扫描补足；同批发现接口对 `limit>20` 静默截断成 20（实测 limit=50/100 都只回 20）→ 后端按 20 条翻页凑满一页（每页 24/50 条真给满、offset 不再跳段）。另补**镜像降级**：用户机 `kazumi/mirror.json` 的 root 被设成内网地址 `192.168.1.5`，所有 `api.192.168.1.5` 请求 DNS 直接失败 → 此前所有 Bangumi 搜索静默返回空（表现即「搜索/筛选没结果」）；现连接类失败（DNS/拒绝连接/超时/代理/TLS）自动回退官方 `api.bgm.tv` 重试一次（HTTP 4xx/5xx 不回退）。
+- **搜索历史展开时机**：`focus` 不再弹面板（切页签/切视图的程序化 focus 是「一打开页面就弹」的根因），改为 pointerdown 或真实输入；切视图统一收起面板。
+- **角色详情 CV**：`/v0/characters/{id}` 响应无 `actors`（CV 挂在作品角色列表条目上，实测官方 API），浮层 CV 行改为 info → 详情页已加载角色列表 → 回源一次作品角色列表 三级取值。
+- **Kazumi 手动检索弹窗（两项）**：关窗加「位移 ≤4px + 无文本选区」两道闸（拖选标题永不关窗）；弹窗内新增「别名」快捷 chips（点一下即按该别名检索），无别名时给说明；别名检索从「标题零结果才兜底」升级为「已存别名下次检索自动补一轮并合并结果」（合并轮不清空已得结果、最多 3 个别名、全源 error 不打）。
+- **收藏页布局与卡片动作**：来源/状态两排 tabs 合并成一行（标签 + 分隔线）；排序下拉 + 筛选按钮并入搜索工具条（少一排横条）；评分/排名区间输入 88→118px；收藏卡补右下角「⋯ 收藏」六态菜单（与历史卡一致；无 site+vodId 身份的 Kazumi 卡不渲染）；续播 ▶ 与收藏 ⋯ 默认隐藏，卡片悬停/聚焦/菜单展开时浮现（触摸设备常显），菜单展开期间按钮挂 `.menu-open`。
+- **时间表分类徽标**：真实渲染验收（固定日历数据）确认卡片 DOM 顺序为 `集数徽标 → 分类徽标（单个主要分类，如「奇幻」）→ 收藏状态徽标`，与用户要求的位置一致。
+- **历史页筛选/排序与续播记账**：逐键验证时间正倒序、评分高低、播放次数三种排序 + 日期区间/来源/评分档位三维叠加；修掉「任一筛选都触发 Bangumi 元数据回填、接口不可达时整页卡 30s」（只在实际需要元数据的维度回源，首帧最多等 1.2s，超时先出结果、元数据到达再补渲）；历史卡 ▶ 把记录自身 vodId/封面/来源名经 `Player.play` 第 9 参带下去（此前 `_curMeta.vodId` 只能取当前详情页 → 落盘记录无封面/串台）。
+- **代理开关**：`proxyFieldsVisible` 只看开关——关 = 立即收起表单（地址记录保留在设置里，拨开即回填）。
+- **WebDAV 同步内容**：上传/恢复双向补齐 `mpvForceHttp11`（按播放器二进制路径绑定、本机专用），三张表交集仍为空。
+- **验证**：JS 单测 **2636/2636**（新增 29 例：图片拖拽/复制/侧键返回、R32 相对地址 3 例、Bangumi 星期与分页 5 例、记录身份透传 4 例、收藏布局/悬停/toast 层级 6 例、手动检索别名 4 例、CV 回退 3 例、搜索历史展开时机 1 例等）；Python `run_all.py` ALL PASS（新增 `TestBangumiSearchFiltered` 5 例）；`check-js` 54 文件 0 错；ESLint 0 error；Ruff 全过。
+- **真实渲染验收**（Electron 驱动真实 `index.html` + 固定数据；不启动后端）：收藏工具条合并为一行、卡片动作悬停态 `opacity:0/visibility:hidden`、菜单 6 项与 `.menu-open`、评分/排名输入 118px、控件圆角 12px、日期输入 158px、代理表单开关联动、toast 1350 > 浮层 1300、拖动期 `transition:none` 且 transform 跟手、侧键关浮层不动视图栈、搜索历史打开页面不自动展开。
 
 2026-10-14 v0.4.0 批次（15 路子代理并行实现 + 宿主关键路径与集成收口）：
 
