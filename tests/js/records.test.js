@@ -622,7 +622,7 @@ test('render：收藏网格整格重写后调用 playCardsEnter（「我的」�
     await view.render();
     // 整格确实写入 3 张 .vod-card（错峰入场的前提是有卡片，而非走了空态分支）
     const gridHtml = htmls.join('');
-    assert.equal((gridHtml.match(/class="vod-card"/g) || []).length, 3, '网格写入 3 张卡');
+    assert.equal((gridHtml.match(/class="vod-card[\s"]/g) || []).length, 3, '网格写入 3 张卡（修饰类 has-play/has-fav 不影响计数）');
     assert.equal(calls.length, 1, 'render 恰好触发一次错峰入场');
     assert.ok(calls[0], 'playCardsEnter 以网格容器为入参');
 });

@@ -30,6 +30,8 @@
     <link rel="stylesheet" href="css/ui.css">
     <script src="js/jquery.min.js" defer></script>
     <script src="js/common.js" defer></script>
+    <script src="js/custom-select.js" defer></script><!-- 筛选栏下拉自绘弹层（原生 select 只留收起态外观） -->
+    <script src="js/custom-date.js" defer></script><!-- 日期筛选自绘日历（原生日期弹层不可样式化） -->
     <script src="js/cache.js" defer></script>
     <script src="js/detail-snap.js" defer></script><!-- A-01 详情页列表快照写入侧（第二阶段 detail.js 接线由后续代理做） -->
     <script src="js/ui-state.js" defer></script>
@@ -241,15 +243,16 @@
                     <button id="view-favorites-tagseen" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记看过</button>
                     <button id="view-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                 </div>
-                <div class="rec-bar">
+                <div class="rec-bar rec-bar-tabs">
+                    <span class="rec-filter-label" title="按收藏来源分类">来源</span>
                     <div id="view-favorites-srcs" class="rec-tags" title="按收藏来源分类">
                         <span class="class-tab active" data-src="">全部</span>
                         <span class="class-tab" data-src="catvod">CatVod</span>
                         <span class="class-tab" data-src="bangumi">Bangumi</span>
                     </div>
-                </div>
-                <div class="rec-bar">
-                    <div id="view-favorites-tags" class="rec-tags">
+                    <span class="rec-bar-divider" aria-hidden="true"></span>
+                    <span class="rec-filter-label" title="按收藏状态筛选">状态</span>
+                    <div id="view-favorites-tags" class="rec-tags" title="按收藏状态筛选">
                         <span class="class-tab active" data-tag="">全部</span>
                         <span class="class-tab" data-tag="want">想看</span>
                         <span class="class-tab" data-tag="seen">看过</span>
@@ -263,9 +266,10 @@
             <section id="view-history" class="view">
                 <div class="view-toolbar">
                     <input id="view-history-search" class="md-input rec-search" type="text" placeholder="搜索历史（片名/备注/源）…">
-                    <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
+                    <!-- 排序下拉 + 筛选按钮由 records.js 注入到搜索框右侧（recSortFilterHtml） -->
                     <button id="view-history-multidel" class="md-btn md-btn-sm">多选</button>
                     <button id="view-history-clear" class="md-btn md-btn-sm md-btn-danger-tonal" title="清空历史">清空</button>
+                    <button id="view-history-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                 </div>
                 <div id="view-history-grid" class="vod-grid"></div>
                 <div id="view-history-pager" class="pager"></div>
@@ -335,7 +339,9 @@
                     <div class="tool-card">
                         <div class="view-toolbar">
                             <input id="my-favorites-search" class="md-input rec-search" type="text" placeholder="搜索收藏（片名/备注/源）…">
+                            <!-- 排序下拉 + 筛选按钮由 records.js 注入到搜索框右侧（recSortFilterHtml） -->
                             <button id="my-favorites-bgm-sync" class="md-btn md-btn-sm md-btn-tonal" title="拉取/合并 Bangumi 账号收藏">同步 Bangumi</button>
+                            <button id="my-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                             <label id="my-favorites-checkall-wrap" class="md-check-wrap" style="display:none"><input id="my-favorites-checkall" type="checkbox"> 全选</label>
                             <button id="my-favorites-delchecked" class="md-btn md-btn-sm md-btn-danger-tonal" style="display:none">删除勾选</button>
                             <button id="my-favorites-tagwant" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记想看</button>
@@ -343,17 +349,17 @@
                             <button id="my-favorites-tagwatching" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记在看</button>
                             <button id="my-favorites-taghold" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记搁置</button>
                             <button id="my-favorites-tagdropped" class="md-btn md-btn-sm md-btn-tonal" style="display:none">标记抛弃</button>
-                            <button id="my-favorites-multidel" class="md-btn md-btn-sm">多选</button>
                         </div>
-                        <div class="rec-bar">
+                        <div class="rec-bar rec-bar-tabs">
+                            <span class="rec-filter-label" title="按收藏来源分类">来源</span>
                             <div id="my-favorites-srcs" class="rec-tags" title="按收藏来源分类">
                                 <span class="class-tab active" data-src="">全部</span>
                                 <span class="class-tab" data-src="catvod">CatVod</span>
                                 <span class="class-tab" data-src="bangumi">Bangumi</span>
                             </div>
-                        </div>
-                        <div class="rec-bar">
-                            <div id="my-favorites-tags" class="rec-tags">
+                            <span class="rec-bar-divider" aria-hidden="true"></span>
+                            <span class="rec-filter-label" title="按收藏状态筛选">状态</span>
+                            <div id="my-favorites-tags" class="rec-tags" title="按收藏状态筛选">
                                 <span class="class-tab active" data-tag="">全部</span>
                                 <span class="class-tab" data-tag="want">想看</span>
                                 <span class="class-tab" data-tag="seen">看过</span>
@@ -1603,11 +1609,11 @@
                     </div>
                     <label class="bgm-filter-switch"><input type="checkbox" id="bgm-rank-toggle"> 启用排名范围<span class="bgm-filter-note-inline">1-10000，留空表示不限</span></label>
                     <div id="bgm-rank-range-row" class="bgm-filter-range" style="display:none;">
-                        <span class="bgm-range-label">最低</span>
-                        <input id="bgm-rank-min" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" />
+                        <span class="bgm-range-label">最好名次</span>
+                        <input id="bgm-rank-min" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" title="排名下限：数值越小名次越好" />
                         <span class="bgm-range-sep">至</span>
-                        <span class="bgm-range-label">最高</span>
-                        <input id="bgm-rank-max" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" />
+                        <span class="bgm-range-label">最差名次</span>
+                        <input id="bgm-rank-max" class="md-input bgm-num-input" type="number" min="1" max="10000" step="1" inputmode="numeric" placeholder="1-10000" title="排名上限：数值越大名次越靠后" />
                         <span class="tip-line pad0 bgm-range-hint" id="bgm-rank-vals"></span>
                     </div>
                 </div>

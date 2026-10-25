@@ -57,11 +57,17 @@
     --md-scrim:                    rgba(10,10,12,0.40);
     --md-shadow:                   rgba(15,15,20,0.14);
     --md-select-chevron:            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2370707A' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    /* 悬停/聚焦态的主题色箭头（与默认同形状，只换描边色；默认主题色 #059669） */
+    --md-select-chevron-accent:     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23059669' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
     /* ── 圆角阶梯 ── */
     --radius-sm:                   8px;
     --radius-md:                   10px;
     --radius-lg:                   14px;
+    /* 表单控件（下拉/输入）统一圆角：筛选栏下拉「做成圆角」的统一口径。
+       14px 在 36/40px 高的控件上是"一眼看得出圆"的量级（10→12 的差异几乎不可见，
+       用户反馈"看起来没实现"就是这次校准的依据） */
+    --radius-control:              14px;
     --radius-xl:                   18px;
     --radius-pill:                 999px;
 
@@ -128,6 +134,7 @@ html.dark {
     --md-scrim:                    rgba(0,0,0,0.55);
     --md-shadow:                   rgba(0,0,0,0.55);
     --md-select-chevron:            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239B9EA7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    --md-select-chevron-accent:     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2334D399' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
     /* 深色阴影需更高 alpha 才可感知 */
     --shadow-xs:                   0 1px 2px rgba(0,0,0,0.35);
@@ -255,7 +262,7 @@ html.dark { color-scheme: dark; }
     height: 56px;
     padding: 0 14px;
     border: 1px solid var(--md-outline-variant);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     background: var(--md-surface-container-high);
     color: var(--md-on-surface);
     font-size: 16px;
@@ -640,7 +647,11 @@ html.dark { color-scheme: dark; }
     display: none;
     position: fixed;
     inset: 0;
-    z-index: 200;
+    /* 1350：必须高于 #cover-float(1300) 与 #char-float(1200)——图片查看器/人物浮层
+       打开时的 toast（「已复制图片地址」「已保存图片」）此前被浮层盖住，表现成
+       「点了复制地址没有任何提示」；同时低于窗口标题栏层(1999/2000) 与吸顶栏，
+       不遮挡窗口控制按钮。 */
+    z-index: 1350;
     pointer-events: none;
 }
 
@@ -1240,11 +1251,19 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
 /* 视图工具条 / 选择器：flex 横排可换行，gap 统一 10px；
    工具条内 select/input/btn 高度对齐 40px，避免 44/36/40 参差。 */
 .view-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:16px; }
+/* 收藏/历史工具条排布（用户裁决 v2）：
+   两页都按 DOM 顺序左对齐排列——搜索 → 排序 → 筛选 → 多选/清空（紧挨着，不再推右）。
+   收藏页：同步 Bangumi 后紧跟「多选」；历史页：筛选后紧跟「多选、清空」。 */
+.view-toolbar .rec-search { flex:1 1 260px; min-width:180px; max-width:420px; }
+.view-toolbar #my-favorites-sort, .view-toolbar #view-favorites-sort,
+.view-toolbar #view-history-sort { flex:0 0 auto; }
+.view-toolbar #my-favorites-filter-btn, .view-toolbar #view-favorites-filter-btn,
+.view-toolbar #view-history-filter-btn { flex:0 0 auto; }
 .view-toolbar .md-select { height:40px; min-width:180px; flex:0 1 auto; }
 .view-toolbar .md-input { height:40px; }
 .md-select {
-    height:44px; padding:0 40px 0 12px; min-width:200px;
-    border:1px solid var(--md-outline-variant); border-radius:var(--radius-md);
+    height:44px; padding:0 40px 0 14px; min-width:200px;
+    border:1px solid var(--md-outline-variant); border-radius:var(--radius-control);
     background-color:var(--md-surface-container-high); background-image:var(--md-select-chevron);
     background-repeat:no-repeat; background-position:right 12px center; background-size:18px 18px;
     color:var(--md-on-surface); font-size:14px; line-height:20px; font-family:inherit; font-weight:500;
@@ -1266,7 +1285,7 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
    不指定则暗色下退回系统近黑文字叠深色底（不可读） */
 .md-select option:disabled { color:var(--md-on-surface-variant); }
 .md-select optgroup { color:var(--md-on-surface-variant); font-weight:600; }
-.md-select-sm { height:34px; min-width:0; padding-right:32px; border-radius:var(--radius-md); background-position:right 10px center; background-size:15px 15px; font-size:13px; }
+.md-select-sm { height:34px; min-width:0; padding-right:32px; border-radius:var(--radius-control); background-position:right 10px center; background-size:15px 15px; font-size:13px; }
 /* 隐藏下拉展开列表的滚动条（Chromium 绘制的 select popup 生效处）：时间表「本周」等长列表下拉 */
 .md-select { scrollbar-width:none; }
 .md-select::-webkit-scrollbar { width:0; height:0; display:none; }
@@ -1275,7 +1294,7 @@ html:not(.glass-on) #view-settings .settings-grid.set-enter > .tool-card { anima
 /* 分类 tabs：小间距统一 6px */
 .class-tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
 /* 首页当前源搜索框：位于工具栏源选择器右侧、刷新左侧；高度与工具栏控件对齐 40px */
-.home-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:var(--radius-md); }
+.home-search { flex:1 1 auto; max-width:300px; height:40px; font-size:13px; border-radius:var(--radius-control); }
 .class-tab {
     padding:6px 14px; border-radius:var(--radius-pill); font-size:13px; cursor:pointer;
     border:1px solid transparent;
@@ -1379,7 +1398,7 @@ html:not(.glass-on) .vod-grid.cards-enter > .vod-card { animation:vodCardIn var(
 
 /* 搜索（圆角输入框） */
 .search-bar { display:flex; gap:12px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
-.search-bar .md-input { flex:1; min-width:200px; height:44px; border-radius:var(--radius-md); }
+.search-bar .md-input { flex:1; min-width:200px; height:44px; border-radius:var(--radius-control); }
 
 /* 搜索历史面板（search-history.js）：搜索框正下方浮层，按来源分组 + 单击即搜 + 单条删除/清空。
    为什么用 fixed：面板挂在 body 下、坐标由 JS 按输入框 rect 推（search-history.js _place），
@@ -2185,6 +2204,19 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 /* 源卡展开区 */
 .kazumi-src-body { padding:4px 14px 12px; border-top:1px solid var(--md-outline-variant); }
 .kazumi-src-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+/* 检索失败状态码（用户要求"明确状态码提示"）：错误色小胶囊 + 一句建议 + 原始错误弱化 */
+.kazumi-err-line { display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap; }
+.kazumi-err-code {
+    flex:none; padding:1px 8px; border-radius:var(--radius-pill);
+    font-size:11px; font-weight:700; line-height:18px; letter-spacing:.2px;
+    color:var(--md-on-error-container); background:var(--md-error-container);
+    border:1px solid color-mix(in srgb, var(--md-error) 35%, transparent);
+}
+.kazumi-err-text { flex:1 1 auto; min-width:0; font-size:12.5px; color:var(--md-on-surface-variant); }
+.kazumi-err-raw {
+    margin-top:6px; font-size:11px; color:var(--md-on-surface-variant);
+    opacity:.75; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
 /* 别名检索（T86）：头部入口 + 别名轮提示 + 管理面板。
    头部按钮用 margin-left:auto 靠右，不改动既有「标题 + 进度」靠左的排版 */
 .kazumi-sheet-head .kazumi-alias-toggle { flex:none; margin-left:auto; }
@@ -2224,6 +2256,27 @@ html:not(.glass-on) #detail-body.detail-page-anim #detail-tab-content { animatio
 /* 面板渲染在 #kazumi-dialog-body 内，.md-dialog-body .md-input 的 8px 顶距会把
    输入框压得比「添加」按钮低半格，这里按行内对齐口径抹掉 */
 .kazumi-alias-add .kazumi-alias-input { flex:1; min-width:0; margin-top:0; }
+/* 手动检索弹窗内的别名快捷入口（用户诉求：点手动检索就该看到别名）：
+   与「添加别名」面板同一套胶囊观感，但整行可点、点了直接检索 */
+.kazumi-alias-quick {
+    display:flex; flex-wrap:wrap; align-items:center; gap:6px;
+    margin-top:10px; padding-top:10px; border-top:1px dashed var(--md-outline-variant);
+}
+.kazumi-alias-quick-label {
+    flex:none; font-size:11px; font-weight:700; letter-spacing:.3px;
+    color:var(--md-on-surface-variant);
+}
+.kazumi-alias-quick-chip {
+    flex:none; max-width:220px; padding:3px 10px; cursor:pointer;
+    border-radius:var(--radius-pill); font-size:12px; font-family:inherit;
+    border:1px solid var(--md-outline-variant); background:var(--md-surface-container-high);
+    color:var(--md-on-surface); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    transition:background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.kazumi-alias-quick-chip:hover {
+    background:var(--accent-hover-bg); border-color:var(--accent-border); color:var(--md-primary);
+}
+.kazumi-alias-quick .tip-line.pad0 { margin:0; font-size:11px; }
 /* 选集视图返回栏 */
 .kazumi-road-toolbar { display:flex; align-items:center; gap:12px; padding:2px 0 10px;
     border-bottom:1px solid var(--md-outline-variant); margin-bottom:12px; }
@@ -2673,7 +2726,7 @@ html.glass-on .bgm-rate-tags-block {
 .downloads-wrap { max-width:980px; margin:0 auto; }
 .dl-input-bar { display:flex; gap:10px; align-items:center; margin-bottom:14px; }
 /* 输入栏与直链播放输入框同款（48px 高、24px 圆角） */
-.dl-input-bar .md-input { flex:1; height:44px; border-radius:var(--radius-md); }
+.dl-input-bar .md-input { flex:1; height:44px; border-radius:var(--radius-control); }
 .dl-input-bar .md-btn { flex-shrink:0; white-space:nowrap; }
 
 .dl-toolbar {
@@ -2751,15 +2804,32 @@ html.glass-on .bgm-rate-tags-block {
     position:absolute; top:6px; right:6px; z-index:2;
     width:24px; height:24px; padding:0; border:none; border-radius:50%;
     background:rgba(0,0,0,.55); color:#fff; font-size:12px; line-height:24px;
-    cursor:pointer; opacity:0; transition:opacity var(--dur-fast) var(--ease);
+    cursor:pointer; opacity:0;
+    /* 悬停反馈（用户报「鼠标移上去没有任何变化」）：位移+放大+变色三条一起给，
+       只改 transform/background/color，不触发布局 */
+    transition:opacity var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+               color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease),
+               box-shadow var(--dur-fast) var(--ease);
 }
 .rec-edit {
     position:absolute; top:6px; right:36px; z-index:2;
     width:24px; height:24px; padding:0; border:none; border-radius:50%;
     background:rgba(0,0,0,.55); color:#fff; font-size:12px; line-height:24px;
-    cursor:pointer; opacity:0; transition:opacity var(--dur-fast) var(--ease);
+    cursor:pointer; opacity:0;
+    /* 与 .rec-del 同一套过渡：悬停时放大 + 换主题色底，给出"可点"的反馈 */
+    transition:opacity var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+               color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease),
+               box-shadow var(--dur-fast) var(--ease);
 }
 .vod-card:hover .rec-del, .vod-card:hover .rec-edit { opacity:1; }
+/* 悬停态：放大一点点 + 主题色底（✕ 用危险色，✎ 用主题色），提示"这里是按钮" */
+.rec-del:hover, .rec-edit:hover { transform:scale(1.15); box-shadow:var(--shadow-sm); }
+.rec-del:hover { background:var(--md-error); color:var(--md-on-error); }
+.rec-edit:hover { background:var(--md-primary); color:var(--md-on-primary); }
+.rec-del:active, .rec-edit:active { transform:scale(0.94); }
+.rec-del:focus-visible, .rec-edit:focus-visible {
+    opacity:1; outline:2px solid var(--accent-border); outline-offset:2px;
+}
 
 /* ===== 收藏/历史多选删除：选择模式下卡片左上角出现勾选框，点击卡片即切换勾选 ===== */
 .rec-check {
@@ -2793,15 +2863,238 @@ html.glass-on .bgm-rate-tags-block {
    （#view-favorites / #view-history / #my-panel-favorites），静态标记覆盖不到
    「我的→我的收藏」这个 app.js 路由实际落点。控件规格对齐既有 .view-toolbar（36px 高）。 */
 .rec-filter-bar { gap:8px; }
+/* 收藏页 tabs 行（来源 + 状态同一行，用户裁决的按钮布局重设计）：两段之间用细竖线
+   分隔，标签名在左、胶囊在右；窄窗口时整段换行而不是把胶囊挤成两行 */
+.rec-bar-tabs { gap:8px 10px; }
+.rec-bar-tabs .rec-filter-label { min-width:0; margin-right:-2px; }
+.rec-bar-divider {
+    flex:0 0 auto; width:1px; height:16px; margin:0 2px;
+    background:var(--md-outline-variant);
+}
+@media (max-width: 720px) {
+    .rec-bar-tabs .rec-bar-divider { display:none; }
+}
+/* chips 独立成行时与网格的间距（原先裹在 .rec-filter-bar 里靠回收边距） */
+.rec-chips-bar { margin:0 0 12px; }
+/* 筛选栏内的下拉/输入统一走「控件圆角」令牌（比卡片小一档），与 .md-select
+   默认圆角同源，避免同一排里出现两种弧度 */
+.rec-filter-bar .md-select, .rec-filter-bar .md-input { border-radius:var(--radius-control); }
+/* ===== 自绘下拉弹层（js/custom-select.js）=====
+   原生 <select> 的展开列表由系统绘制、CSS 无钩子；这里自己画：圆角 + 主题色 +
+   与其它浮层同款阴影/入场动画。层级 1340：高于对话框(100)/封面浮层(1300)，
+   低于 toast(1350) 与窗口标题栏(1999)。 */
+.yuki-sel-panel {
+    position:fixed; z-index:1340; display:none;
+    min-width:120px; max-width:min(420px, 92vw);
+    padding:6px; border-radius:var(--radius-lg);
+    background:var(--md-surface-container-high);
+    border:1px solid var(--md-outline-variant);
+    box-shadow:var(--shadow-lg);
+    overflow-y:auto; overscroll-behavior:contain;
+}
+.yuki-sel-panel.show { display:block; animation:popIn var(--dur-fast) var(--ease); }
+.yuki-sel-item {
+    display:flex; align-items:center; gap:8px;
+    padding:8px 10px; border-radius:var(--radius-control);
+    font-size:13px; line-height:18px; color:var(--md-on-surface);
+    cursor:pointer; user-select:none;
+}
+.yuki-sel-item.is-active { background:var(--accent-hover-bg); }
+.yuki-sel-item.is-checked { color:var(--md-primary); font-weight:600; }
+.yuki-sel-item.is-disabled { opacity:.45; cursor:not-allowed; }
+.yuki-sel-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.yuki-sel-check { flex:none; width:14px; text-align:center; font-size:12px; opacity:0; }
+.yuki-sel-item.is-checked .yuki-sel-check { opacity:1; }
+.yuki-sel-group {
+    padding:6px 10px 4px; font-size:11px; font-weight:600;
+    color:var(--md-on-surface-variant); letter-spacing:.3px;
+}
+.yuki-sel-empty { padding:10px; font-size:12px; color:var(--md-on-surface-variant); }
+/* ===== 自绘日历弹层（js/custom-date.js）=====
+   与下拉弹层同一套语言：圆角面板 + 主题色选中 + 同层阴影，层级同为 1340。 */
+/* 日期输入装饰层：外面套 wrap，盖一层透明触发按钮。
+   关键点：原生 input 设 pointer-events:none —— 它再也收不到指针事件，Chromium
+   不会弹出默认日历（只靠 preventDefault 不可靠，实测仍会弹出，两个日历叠一起）。
+   输入框仍可用 Tab 聚焦、键盘输入，值容器语义完全不变。 */
+/* ===== 日期字段：wrap 即「可见的输入框」 =====
+   做过的三次尝试（都失败，留档防倒退）：
+   ① 只靠 pointerdown/mousedown 的 preventDefault 拦原生日历 → 实测拦不住；
+   ② 给整个原生 input 设 color:transparent 藏文字 → 日历按钮（用 currentColor 画）一起消失；
+   ③ 绝对定位的标签叠在原生输入上 → 原生输入在 appearance:none 下把文字画在**顶部**，
+      标签再居中也是两段文字错位（用户看到的"文字不居中"）。
+   现在的做法：把 input 原有的类（.md-input/.rec-input/.rec-date…）整体搬到 wrap 上，
+   wrap 成为真正的盒子（尺寸/圆角/边框/底色/悬停焦点全部继承原样式），
+   文字与图标走 wrap 的 flex 正常流（align-items:center），原生 input 退化成
+   绝对定位的隐形值容器（opacity:0 + pointer-events:none）。 */
+.yuki-date-wrap { position:relative; display:flex; align-items:center; gap:8px; cursor:pointer; }
+.yuki-date-wrap > .yuki-date-input {
+    position:absolute; inset:0; width:100%; height:100%; margin:0;
+    opacity:0; pointer-events:none;   /* 隐形值容器：原生面板与分段文字都不会出现 */
+}
+.yuki-date-wrap > .yuki-date-input::-webkit-datetime-edit { display:none; }
+.yuki-date-wrap > .yuki-date-input::-webkit-calendar-picker-indicator { display:none; }
+/* 悬停/焦点反馈由 wrap 承担（原生 input 已不可见且不接指针） */
+.yuki-date-wrap:hover { border-color:var(--accent-border); background:var(--accent-hover-bg); }
+.yuki-date-wrap:focus-within { border-color:var(--md-primary); box-shadow:0 0 0 3px var(--accent-ring); }
+.yuki-date-label {
+    /* 正常流文本：垂直居中由 wrap 的 align-items:center 保证 */
+    flex:1 1 auto; min-width:0;
+    font-size:13px; font-weight:500; line-height:1.2; letter-spacing:.3px;
+    font-variant-numeric:tabular-nums; color:var(--md-on-surface);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    pointer-events:none;
+}
+.yuki-date-wrap[data-empty="1"] > .yuki-date-label { color:var(--md-on-surface-variant); font-weight:400; }
+/* 自绘日历图标（.md-input 的 appearance:none 下 Chromium 根本不渲染原生 indicator） */
+.yuki-date-icon {
+    flex:none; display:inline-flex; align-items:center; justify-content:center;
+    width:18px; height:18px; margin-left:auto;
+    color:var(--md-on-surface-variant);
+    pointer-events:none;
+    transition:color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.yuki-date-wrap:hover > .yuki-date-icon { color:var(--md-primary); transform:scale(1.06); }
+.yuki-date-wrap[data-empty="1"] > .yuki-date-icon { color:var(--md-outline); }
+.yuki-date-wrap > .yuki-date-trigger {
+    position:absolute; inset:0; width:100%; height:100%; padding:0; margin:0;
+    border:none; background:transparent; cursor:pointer; z-index:1;
+    color:transparent; font-size:0; line-height:0;
+}
+.yuki-date-wrap > .yuki-date-trigger:focus-visible { outline:none; }
+
+.yuki-date-panel {
+    position:fixed; z-index:1340; display:none;
+    width:296px; padding:10px;
+    border-radius:var(--radius-lg);
+    background:var(--md-surface-container-high);
+    border:1px solid var(--md-outline-variant);
+    box-shadow:var(--shadow-lg);
+    overflow:auto; overscroll-behavior:contain;
+}
+.yuki-date-panel.show { display:block; animation:popIn var(--dur-fast) var(--ease); }
+.yuki-date-head { display:flex; align-items:center; gap:2px; margin-bottom:6px; }
+.yuki-date-title {
+    flex:1 1 auto; text-align:center; font-size:13.5px; font-weight:700;
+    color:var(--md-on-surface); letter-spacing:.3px;
+}
+.yuki-date-nav {
+    flex:none; width:26px; height:26px; padding:0; border:none; border-radius:50%;
+    background:transparent; color:var(--md-on-surface-variant); cursor:pointer;
+    font-size:14px; line-height:1;
+    transition:background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.yuki-date-nav:hover { background:var(--accent-hover-bg); color:var(--md-primary); transform:scale(1.08); }
+.yuki-date-week { display:grid; grid-template-columns:repeat(7, 1fr); margin-bottom:4px; }
+.yuki-date-week span {
+    text-align:center; font-size:11px; font-weight:600;
+    color:var(--md-on-surface-variant); line-height:22px;
+}
+.yuki-date-grid { display:flex; flex-direction:column; gap:2px; }
+.yuki-date-row { display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; }
+.yuki-date-cell {
+    height:30px; padding:0; border:none; border-radius:var(--radius-sm);
+    background:transparent; color:var(--md-on-surface);
+    font-size:12.5px; line-height:1; cursor:pointer; font-variant-numeric:tabular-nums;
+    transition:background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.yuki-date-cell:hover:not(.is-disabled) { background:var(--accent-hover-bg); transform:scale(1.06); }
+.yuki-date-cell.is-out { color:var(--md-on-surface-variant); opacity:.55; }
+.yuki-date-cell.is-today { box-shadow:inset 0 0 0 1px var(--accent-border); font-weight:700; }
+.yuki-date-cell.is-selected,
+.yuki-date-cell.is-selected:hover { background:var(--md-primary); color:var(--md-on-primary); font-weight:700; }
+.yuki-date-cell.is-disabled { opacity:.32; cursor:not-allowed; text-decoration:line-through; }
+.yuki-date-foot {
+    display:flex; align-items:center; gap:6px; justify-content:flex-end;
+    margin-top:8px; padding-top:8px; border-top:1px solid var(--md-outline-variant);
+}
+.yuki-date-btn {
+    height:28px; padding:0 12px; border:none; border-radius:var(--radius-control);
+    background:transparent; color:var(--md-on-surface); font-size:12px; cursor:pointer;
+    transition:background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.yuki-date-btn:hover { background:var(--accent-hover-bg); }
+.yuki-date-btn-primary { background:var(--accent-soft); color:var(--md-primary); font-weight:600; }
+.yuki-date-btn-primary:hover { background:var(--accent-hover-bg); }
+@media (prefers-reduced-motion: reduce) { .yuki-date-panel.show { animation:none; } }
+@media (prefers-reduced-motion: reduce) { .yuki-sel-panel.show { animation:none; } }
+
+/* 筛选栏控件：悬停时边框取主题色并轻微抬升（"可点"的视觉暗示），聚焦再加环 */
+.rec-filter-bar .md-select:hover:not(:disabled), .rec-filter-bar .md-input:hover:not(:disabled):not(:focus) {
+    border-color:var(--accent-border);
+}
+.rec-filter-bar .md-select:focus, .rec-filter-bar .md-input:focus {
+    border-radius:var(--radius-control); /* 聚焦态不退回直角（UA 有时会重置） */
+}
+/* 下拉箭头：悬停/聚焦时换成主题色箭头，明确"这里可以点开" */
+body:not(.has-wallpaper) .rec-filter-bar .md-select:hover:not(:disabled) {
+    background-image:var(--md-select-chevron-accent);
+}
 /* 工具条按钮与同排控件等高：重置按钮用的是 `.md-btn-sm`（自带 32px），混在 36px 的
    下拉/输入之间会矮一截（无头渲染几何断言实测 32 vs 36，同一基线上看着没对齐）。 */
 .rec-filter-bar .md-btn { height: 36px; }
-.rec-select { height:36px; min-width:118px; max-width:190px; flex:0 0 auto; font-size:13px; border-radius:var(--radius-md); }
-.rec-input { height:36px; font-size:13px; border-radius:var(--radius-md); min-width:0; }
+.rec-select { height:36px; min-width:118px; max-width:190px; flex:0 0 auto; font-size:13px; border-radius:var(--radius-control); }
+.rec-input { height:36px; font-size:13px; border-radius:var(--radius-control); min-width:0; }
 .rec-input-wide { flex:1 1 240px; max-width:420px; }
 /* 日期/数字输入：原生控件默认尺寸与 .md-input 不一致，统一压到 36px 与工具条基线对齐 */
-.rec-date { width:150px; flex:0 0 auto; }
-.rec-num { width:88px; flex:0 0 auto; }
+.rec-date { width:200px; flex:0 0 auto; } /* 日期选择栏加长（用户要求：yyyy-mm-dd 留足呼吸） */
+/* 评分/排名区间输入：原 88px 对「0.0-10.0」「1-10000」都显局促（数值被裁、
+   箭头贴边），加长到 118px */
+.rec-num { width:118px; flex:0 0 auto; }
+/* 日期/时间筛选器（原生 date/time 控件）统一外观：
+   - 数字等宽，日期位不抖
+   - 日历按钮主题化（暗色反色）+ hover 底色反馈 + 更大可点区
+   - 空值时 yyyy/mm/dd 占位用弱化色（Chromium 对空 date 判 :invalid） */
+/* 时间筛选器美化（用户要求）：
+   - 日期块做成"可点的时间胶囊"：稍高内边距 + 等宽数字 + 主题色日历按钮
+   - 空值占位（Chromium 的 年/月/日）弱化成提示色，填好后恢复正常文字色
+   - 悬停/聚焦有明确反馈（边框取主题色 + 外环），与下拉控件同一套语言 */
+input[type="date"].md-input, input[type="datetime-local"].md-input,
+input[type="time"].md-input, input[type="month"].md-input {
+    font-variant-numeric:tabular-nums;
+    letter-spacing:.3px;
+    cursor:pointer;
+    padding:0 6px 0 12px;
+    font-weight:500;
+}
+input[type="date"].md-input:hover:not(:disabled), input[type="time"].md-input:hover:not(:disabled),
+input[type="datetime-local"].md-input:hover:not(:disabled) {
+    border-color:var(--accent-border);
+    background:var(--accent-hover-bg);
+}
+input[type="date"].md-input::-webkit-datetime-edit,
+input[type="datetime-local"].md-input::-webkit-datetime-edit,
+input[type="time"].md-input::-webkit-datetime-edit { padding:0 2px; color:var(--md-on-surface); }
+input[type="date"].md-input::-webkit-datetime-edit-fields-wrapper { padding:0; }
+input[type="date"].md-input::-webkit-datetime-edit-text,
+input[type="time"].md-input::-webkit-datetime-edit-text { color:var(--md-on-surface-variant); padding:0 1px; }
+input[type="date"].md-input:not(:valid)::-webkit-datetime-edit { color:var(--md-on-surface-variant); }
+input[type="date"].md-input::-webkit-calendar-picker-indicator,
+input[type="datetime-local"].md-input::-webkit-calendar-picker-indicator,
+input[type="time"].md-input::-webkit-calendar-picker-indicator,
+input[type="month"].md-input::-webkit-calendar-picker-indicator {
+    width:22px; height:22px; flex:none;
+    opacity:.85; cursor:pointer; border-radius:50%;
+    padding:3px; margin-left:2px;
+    /* 日历按钮做成浅主题色圆钮：一眼看出"这里点开选日期" */
+    background-color:var(--accent-soft);
+    transition:opacity var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+               transform var(--dur-fast) var(--ease);
+}
+input[type="date"].md-input::-webkit-calendar-picker-indicator:hover,
+input[type="datetime-local"].md-input::-webkit-calendar-picker-indicator:hover,
+input[type="time"].md-input::-webkit-calendar-picker-indicator:hover,
+input[type="month"].md-input::-webkit-calendar-picker-indicator:hover {
+    opacity:1; background-color:var(--accent-hover-bg); transform:scale(1.08);
+}
+html.dark input[type="date"].md-input::-webkit-calendar-picker-indicator,
+html.dark input[type="datetime-local"].md-input::-webkit-calendar-picker-indicator,
+html.dark input[type="time"].md-input::-webkit-calendar-picker-indicator,
+html.dark input[type="month"].md-input::-webkit-calendar-picker-indicator { filter:invert(1) brightness(1.35); }
+/* 数字区间输入：去掉原生步进箭头（36px 高度里两个小箭头既难点又挤占数值宽度，
+   区间语义已由「下限 - 上限」两个框表达） */
+input[type="number"].rec-num::-webkit-inner-spin-button,
+input[type="number"].rec-num::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+input[type="number"].rec-num { -moz-appearance:textfield; appearance:textfield; }
 .rec-filter-sep { flex:0 0 auto; font-size:12px; color:var(--md-on-surface-variant); }
 .rec-filter-panel {
     margin:0 0 12px; padding:12px 14px; border-radius:var(--radius-lg);
@@ -2819,6 +3112,19 @@ html.glass-on .bgm-rate-tags-block {
 .rec-filter-inline input { width:16px; height:16px; accent-color:var(--md-primary); cursor:pointer; }
 .rec-filter-actions { justify-content:flex-end; gap:8px; }
 .rec-filter-actions .rec-filter-inline { margin-right:auto; }
+/* 面板内的说明文字（历史面板"日期与区间叠加时以单日为准"等） */
+.rec-filter-note { margin-right:auto; font-size:11.5px; color:var(--md-on-surface-variant); }
+/* 面板内控件不得撑破容器：select 默认 min-width:200px（.md-select 基线），
+   在窄面板里会横向溢出「格子」——统一收到 .rec-select 口径并允许收缩 */
+.rec-filter-panel .md-select, .rec-filter-panel .md-input {
+    min-width:0; max-width:100%;
+}
+.rec-filter-panel .rec-select { flex:0 1 200px; min-width:120px; }
+.rec-filter-panel .rec-date { flex:0 0 auto; }
+.rec-filter-panel .rec-input-wide { flex:1 1 240px; }
+@media (max-width: 720px) {
+    .rec-filter-panel .rec-select { flex:1 1 160px; }
+}
 
 /* 已生效条件 chip：点 × 删单个维度（观感对齐 Bangumi 搜索的 .bgm-chip） */
 .rec-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
@@ -2839,12 +3145,42 @@ html.glass-on .bgm-rate-tags-block {
     position:absolute; z-index:2; width:24px; height:24px; padding:0; border:none; border-radius:50%;
     background:rgba(0,0,0,.55); color:#fff; cursor:pointer;
     display:flex; align-items:center; justify-content:center;
-    transition:background var(--dur-fast) var(--ease);
+    /* 默认隐藏（用户要求）：两枚按钮都只在鼠标移入卡片时浮现，避免封面/信息区
+       常驻一排半透明黑钮。opacity + visibility 过渡（不改 display，无重排）；
+       隐藏态同时置 visibility:hidden，透明按钮才不会继续拦截卡片的点击。
+       过渡列表与 ✕/✎ 完全一致（用户要求四枚按钮的悬停动效统一） */
+    opacity:0; visibility:hidden;
+    transition:opacity var(--dur-fast) var(--ease), visibility var(--dur-fast) var(--ease),
+               background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+               transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 .rec-play-btn svg, .rec-fav-btn svg { width:14px; height:14px; fill:#fff; display:block; }
 .rec-play-btn:hover, .rec-fav-btn:hover { background:var(--md-primary); }
 .rec-play-btn:hover svg, .rec-fav-btn:hover svg { fill:var(--md-on-primary); }
-/* 续播常驻显示（历史页主操作入口，悬停才出现等于把功能藏起来）；收藏钮同样常驻 */
+/* 悬停动效与 ✕/✎ 对齐：同样放大 1.15 + 阴影，按压回弹 */
+.rec-play-btn:hover, .rec-fav-btn:hover { transform:scale(1.15); box-shadow:var(--shadow-sm); }
+.rec-play-btn:active, .rec-fav-btn:active { transform:scale(0.94); }
+.rec-play-btn:focus-visible, .rec-fav-btn:focus-visible {
+    opacity:1; visibility:visible; pointer-events:auto;
+    outline:2px solid var(--accent-border); outline-offset:2px;
+}
+/* 浮现条件：鼠标在卡片内 / 卡片内键盘焦点 / 按钮自身聚焦 / 续播进行中 /
+   收藏菜单展开中（菜单挂在 body 上，鼠标移进菜单时卡片已不 hover，按钮必须
+   留亮，否则锚点消失、菜单像是浮在空处）。
+   @media (hover:none)（触摸屏）没有 hover 可用，退回常显。 */
+.vod-card:hover .rec-play-btn, .vod-card:hover .rec-fav-btn,
+.rec-play-btn:focus-visible, .rec-fav-btn:focus-visible,
+.rec-play-btn.loading, .rec-fav-btn.menu-open {
+    opacity:1; visibility:visible; pointer-events:auto;
+}
+/* 注意：这里刻意**不用** .vod-card:focus-within —— 鼠标点击按钮会把焦点留在按钮上，
+   :focus-within 于是让「▶ 与 ⋯」永久常显，用户移开鼠标后按钮不消失（实测报告）。
+   键盘可达性由按钮自身的 :focus-visible 兜住：键盘聚焦才显示，鼠标点击不留痕。 */
+@media (hover: none) {
+    .rec-play-btn, .rec-fav-btn { opacity:1; visibility:visible; pointer-events:auto; }
+}
+/* 位置：续播在右上角、收藏在右下角。显示策略见上方 .vod-card:hover 一组
+   （用户裁决：两枚按钮默认隐藏、悬停浮现） */
 .rec-play-btn { top:6px; right:66px; }
 /* 不要为「有播放记录的卡」额外位移删除/编辑按钮：三枚按钮的默认档位（删除 6 /
    编辑 36 / 续播 66，间隔 30px）已经构成注释里写的视觉顺序「▶ ✎ ✕」，无需再挪。
@@ -3029,8 +3365,12 @@ html.dark .my-stats-coll-box[data-tag="hold"]    { --cat-color:#FFB74D; }
     touch-action:none;
 }
 /* 拖动进行中（detail.js pointermove 过阈值后挂 .dragging，pointerup/cancel 摘除）：
-   摘掉 transform 过渡——过渡会让图追不上指针（橡皮筋拖尾），拖动期必须 1:1 跟手 */
-#cover-float img.dragging { cursor:grabbing; transition:none; }
+   摘掉 transform 过渡——过渡会让图追不上指针（橡皮筋拖尾），拖动期必须 1:1 跟手。
+   ⚠ 必须写成与 .loaded 同权重的复合选择器：下面 #cover-float img.loaded 也声明了
+   transition（含 transform），同为 (1,1,1) 且书写在后，会盖掉单写 .dragging 的
+   transition:none —— 每帧 transform 都被 150ms 过渡追尾，实测表现即「拖动卡顿」 */
+#cover-float img.dragging,
+#cover-float img.loaded.dragging { cursor:grabbing; transition:none; will-change:transform; }
 #cover-float img {
     width:min(520px, 90vw); max-height:92vh; border-radius:var(--radius-lg);
     object-fit:contain;
@@ -3345,7 +3685,7 @@ html.dark[data-color="cyan"] {
 body.frameless #view-direct { padding-top:48px !important; }
 .direct-card { max-width:980px; margin:0 auto; }
 /* 直链播放输入框：大小与下载页面输入框一致（48px 高、24px 圆角） */
-.direct-card .md-input { height:44px; border-radius:var(--radius-md); }
+.direct-card .md-input { height:44px; border-radius:var(--radius-control); }
 
 /* ===== 侧栏收缩（只显示图标） ===== */
 .nav-collapse-btn {
@@ -3531,8 +3871,8 @@ html.no-anim *, html.no-anim *::before, html.no-anim *::after {
        13px 下 4 字需 ~64px，不放宽会把表内最长的「魔法少女」截断） */
     .timeline-tag-badge { font-size:13px; max-width:78px; }
     /* 通用控件 */
-    .md-input { height:64px; font-size:19px; border-radius:var(--radius-md); }
-    .search-bar .md-input { border-radius:var(--radius-md); }
+    .md-input { height:64px; font-size:19px; border-radius:var(--radius-control); }
+    .search-bar .md-input { border-radius:var(--radius-control); }
     .md-btn { height:48px; font-size:16px; border-radius:var(--radius-md); }
     .md-btn-sm { height:40px; font-size:15px; border-radius:var(--radius-sm); }
     .md-btn-icon { width:48px; height:48px; min-width:48px; max-width:48px; flex:0 0 48px; border-radius:var(--radius-md); }

@@ -731,3 +731,55 @@ test('缓存未加载（null）：settingsGet 失败时按默认降级（skip �
     assert.equal(player._opEdSaveEnabled, true, '回读失败按默认开');
     assert.ok(context.__toasts.includes('跳过片头片尾功能已关闭'));
 });
+
+// ---------------------------------------------------------------- 记录身份（历史卡续播）
+//
+// 用户报：历史卡点 ▶ 播完后，新写入的历史卡没有封面、点开还是别的片子。根因是
+// Player.play 的 _curMeta.vodId 只能从「当前详情页」Detail.vodId 取——在历史页起播时
+// 详情页要么没开（空）、要么还停在上次那部（串台），退出时 recordPlay 落盘的
+// pic/vodId 全跟着错。修复：历史卡续播经第 9 参 runtimeOpts 显式带记录身份。
+
+test('play() 记录身份：runtimeOpts 的 vodId/pic/siteName 进 _curMeta，不被当前详情页串台', async () => {
+    const settings = {};
+    const backing = new Map();
+    const { player, context } = loadPlayerWithIpc(settings, backing);
+    // 详情页还停在上次看的另一部：不传 runtimeOpts 时会被误用
+    context.Detail = {
+        site: 'other-site', vodId: 'other-vod',
+        _lastVod: { vod_pic: 'https://wrong.example/cover.jpg' },
+        _siteName: () => '别的源',
+    };
+    player.getVipFlags = async () => [];
+    const r = await player.play('siteA', '线路A', 'ep1', '片甲', '第1集', null, 0, '', {
+        vodId: 'v1', pic: 'https://right.example/cover.jpg', siteName: '源甲',
+    });
+    assert.equal(r.ok, true);
+    assert.equal(player._curMeta.vodId, 'v1', '用记录身份，不是详情页残留的 other-vod');
+    assert.equal(player._curMeta.pic, 'https://right.example/cover.jpg');
+    assert.equal(player._curMeta.siteName, '源甲');
+});
+
+test('play() 记录身份：未传 runtimeOpts 时回落当前详情页（详情页起播语义不变）', async () => {
+    const settings = {};
+    const backing = new Map();
+    const { player, context } = loadPlayerWithIpc(settings, backing);
+    context.Detail = { site: 'siteA', vodId: 'from-detail', _lastVod: null, _siteName: () => '源A' };
+    player.getVipFlags = async () => [];
+    const r = await player.play('siteA', '线路A', 'ep1', '片乙', '第1集', null, 0, '');
+    assert.equal(r.ok, true);
+    assert.equal(player._curMeta.vodId, 'from-detail');
+    assert.equal(player._curMeta.pic, '', '没给封面就不编（由 _writeWatch 按详情页兜底）');
+});
+
+test('play() 记录身份：Kazumi 源即使详情页残留 CatVod id 也不串（既有隔离语义不回退）', async () => {
+    const settings = {};
+    const backing = new Map();
+    const { player, context } = loadPlayerWithIpc(settings, backing);
+    context.Detail = { site: 'siteA', vodId: 'catvod-id', _lastVod: null };
+    player.getVipFlags = async () => [];
+    context.Kazumi = { bangumiMatchCached: null };
+    // 规则引擎链路需要完整后端桩，这里只关心元信息装配（它在 Kazumi 分支之前完成）
+    await player.play('kazumi:规则', '线路A', 'ep1', '番丙', '第1集', null, 0, 'https://src.page/1');
+    assert.equal(player._curMeta.vodId, '', 'Kazumi 源不得继承详情页的 CatVod vodId');
+    assert.equal(player._curMeta.kazumiSrc, 'https://src.page/1');
+});

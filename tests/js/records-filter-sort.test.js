@@ -220,9 +220,9 @@ globalThis.__TOOLS = {
     parseRecTagQuery, recSeasonRange, normFavFilter, favFilterActive, matchFavFilter,
     scoreInTier, normHistoryFilter, historyFilterActive, matchHistoryFilter, collectHistorySites,
     recBgmId, recMetaOf, recMetaIdsOf, recPrefetchBgmMeta, recScore, recRank, recAirDate, recWeekday,
-    favMenuItems, buildFavMenuHtml, recToolbarHtml, parseRecSources, locateRecEpisode,
+    favMenuItems, buildFavMenuHtml, recToolbarHtml, recFavControlsHtml, recSortFilterHtml, parseRecSources, locateRecEpisode,
     openRecFavMenu, applyRecFavMenu, closeRecFavMenu,
-    playDirectRecord, resumePlayRecord, playDirectFailToast: directPlayFailToast,
+    playDirectRecord, resumePlayRecord, playIdentityOf, playDirectFailToast: directPlayFailToast, mergeExtraRecords, recFavIdentity,
 };`,
         context, { filename: 'records.js' });
     context.__TOOLS.toasts = toasts;
@@ -593,22 +593,33 @@ test('buildFavMenuHtml：六态 + 取消收藏，当前状态高亮且 aria-chec
     eq(t.favMenuItems().map((x) => x.tag), ['want', 'watching', 'seen', 'hold', 'dropped', '']);
 });
 
-test('recToolbarHtml：收藏/历史控件齐备、无内联事件属性（CSP）、带 title/aria 标签', () => {
+test('收藏/历史控件 HTML：排序+筛选（recSortFilterHtml）与面板分离、无内联事件（CSP）', () => {
     const t = tools();
-    const fav = t.recToolbarHtml('view-favorites', false);
-    assert.ok(fav.includes('id="view-favorites-sort"') && fav.includes('id="view-favorites-filter-apply"'));
-    assert.ok(fav.includes('id="view-favorites-f-unknown"'), '含未知/未评分开关');
-    assert.ok(fav.includes('data-weekday="7"'));
+    // 两页同一套结构：排序下拉 + 筛选按钮（recSortFilterHtml）插在搜索框右侧；
+    // chips + 筛选面板贴网格。三段都不得含内联事件（CSP script-src-attr 禁）。
+    const favInline = t.recFavControlsHtml('view-favorites');
+    const favPanel = t.recToolbarHtml('view-favorites', false);
+    assert.ok(favInline.includes('id="view-favorites-sort"'), '排序下拉在控件条里');
+    assert.ok(favInline.includes('id="view-favorites-filter-btn"'), '筛选按钮在控件条里');
+    assert.ok(favInline.includes('aria-label="筛选"') && favInline.includes('aria-expanded="false"'));
+    assert.ok(favPanel.includes('id="view-favorites-filter-apply"'), '筛选面板含应用按钮');
+    assert.ok(favPanel.includes('id="view-favorites-f-unknown"'), '含未知/未评分开关');
+    assert.ok(favPanel.includes('data-weekday="7"'));
+    // 历史页：排序/筛选同样在控件条里（插到搜索框右侧），面板里只有筛选维度
+    const hisInline = t.recSortFilterHtml('view-history', true);
+    assert.ok(hisInline.includes('id="view-history-sort"'), '历史排序下拉在控件条里');
+    assert.ok(hisInline.includes('id="view-history-filter-btn"'), '历史筛选按钮在控件条里');
+    assert.ok(hisInline.includes('value="time-asc"') && hisInline.includes('value="count-desc"'));
     const his = t.recToolbarHtml('view-history', true);
-    for (const id of ['-sort', '-sites', '-date', '-from', '-to', '-score', '-filter-reset']) {
-        assert.ok(his.includes(`id="view-history${id}"`), `历史工具条应含 view-history${id}`);
+    assert.ok(!his.includes('id="view-history-sort"'), '排序不再重复出现在面板块里');
+    for (const id of ['-sites', '-date', '-from', '-to', '-score', '-filter-reset', '-filter-apply']) {
+        assert.ok(his.includes(`id="view-history${id}"`), `历史筛选面板应含 view-history${id}`);
     }
-    assert.ok(his.includes('value="none"') && his.includes('value="time-asc"'));
-    for (const html of [fav, his]) {
+    assert.ok(his.includes('value="none"'), '评分档位选项在面板里');
+    for (const html of [favInline, favPanel, hisInline, his]) {
         assert.ok(!/on(click|change|input)=/i.test(html), '不得出现内联事件属性（CSP script-src-attr）');
         assert.ok(html.includes('title='), '控件应带 title（可读性）');
     }
-    assert.ok(fav.includes('aria-label="筛选"') && fav.includes('aria-expanded="false"'));
 });
 
 test('parseRecSources / locateRecEpisode：详情响应解析与集数定位', () => {
@@ -760,7 +771,7 @@ test('收藏筛选：settings.favoritesFilter 载入 → 谓词生效与空态�
     assert.ok(htmls.join('').includes('没有匹配的记录'));
 });
 
-test('历史筛选与排序：settings 载入 + 即时筛选（控件 change）+ 非法区间纠正回写', async () => {
+test('历史筛选与排序：settings 载入 + 面板草稿/应用 + 非法区间纠正回写', async () => {
     const d1 = localTs(2026, 1, 31);
     const d2 = localTs(2026, 2, 2);
     const settings = {
@@ -780,17 +791,23 @@ test('历史筛选与排序：settings 载入 + 即时筛选（控件 change）+
         '颠倒的区间自动交换端点后落状态');
     assert.ok(htmls.join('').includes('规则片'));
     assert.ok(!htmls.join('').includes('源乙片'), '来源筛选生效');
-    // 控件改评分档位：即时筛选（未评分档只留无评分记录）
+    // 筛选面板是草稿态（与收藏页同一套交互）：改控件本身不生效，点「应用」才落状态并重筛
     ctx.__TOOLS.values['#view-history-score'] = 'none';
     ctx.__TOOLS.values['#view-history-sites'] = '';
     ctx.__TOOLS.values['#view-history-date'] = '';
     ctx.__TOOLS.values['#view-history-from'] = '';
     ctx.__TOOLS.values['#view-history-to'] = '';
     htmls.length = 0;
-    ctx.__TOOLS.fire('#view-history-score', 'change', {});
+    // 面板控件不再逐个绑定 change（草稿态）：值只被「应用」读取
+    assert.ok(!settings.historyFilter.score, '草稿不改持久化状态');
+    assert.equal(htmls.length, 0, '草稿不触发重绘');
+    ctx.__TOOLS.fire('#view-history-filter-apply', 'click', {});
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(settings.historyFilter.score, 'none');
     assert.ok(htmls.join('').includes('规则片') && htmls.join('').includes('源乙片'), '两条都未评分 → 都在「未评分」档');
+    // 已生效条件 chips：来源/区间/评分各一个；点 × 直接删该维度并重筛
+    const chips = String(ctx.__TOOLS.values['#view-history-chips|html'] || '');
+    assert.match(chips, /评分: 未评分/, '评分档位进了 chip 行');
     // 重置：状态与持久化都回到默认
     ctx.__TOOLS.fire('#view-history-filter-reset', 'click', {});
     await new Promise((r) => setTimeout(r, 0));
@@ -802,8 +819,18 @@ test('历史筛选与排序：settings 载入 + 即时筛选（控件 change）+
     const viewCard = ctx.__recCard({ uid: 'v1', site: 'site-a', vodId: 'v1', name: '浏览卡', kind: 'view' }, true, false, {});
     assert.ok(!viewCard.includes('rec-play-btn'), '浏览卡不出续播按钮（无集数可续）');
     assert.ok(viewCard.includes('rec-fav-btn'));
+    // 收藏页卡片：不出续播 ▶（收藏是状态不是播放记录），但**要**出右下角「⋯ 收藏」——
+    // 与历史卡同款（用户裁决）：六态一次点选，不再靠标签徽章循环点击。
     const favCard = ctx.__recCard({ uid: 'f1', site: 'a', vodId: '1', name: '收藏卡', tag: 'want' }, true, true, {});
-    assert.ok(!favCard.includes('rec-play-btn') && !favCard.includes('rec-fav-btn'), '收藏页卡片不出这两个按钮');
+    assert.ok(!favCard.includes('rec-play-btn'), '收藏页卡片不出续播按钮');
+    assert.ok(favCard.includes('rec-fav-btn'), '收藏页卡片带右下角收藏菜单按钮');
+    // Kazumi 源 vodId 恒空：现在**要**渲染六态按钮（用片名合成收藏键 name:<片名>，
+    // 见 recFavIdentity），否则历史页的 Kazumi 卡没有收藏入口（用户反馈）
+    const kzCard = ctx.__recCard({ uid: 'k1', site: 'kazumi:r', vodId: '', name: '规则片', tag: 'want' }, true, true, {});
+    assert.ok(kzCard.includes('rec-fav-btn'), 'Kazumi 卡也有六态收藏按钮');
+    // 连 site 都没有的脏记录才不渲染（写不出可用身份）
+    const noSite = ctx.__recCard({ uid: 'x1', site: '', vodId: '', name: '脏数据' }, true, true, {});
+    assert.ok(!noSite.includes('rec-fav-btn'), '无 site 的脏记录不渲染收藏钮');
 });
 
 // ---------------------------------------------------------------- 任务 1：批量标记广播
@@ -998,4 +1025,272 @@ test('卡片右上角三枚动作按钮坐标档位互不重叠（CSS 契约：6
     // 实际触发续播（无头渲染 elementFromPoint 实测复现，历史/收藏的播放卡全中招）。
     assert.doesNotMatch(css, /\.vod-card\.has-play\s+\.rec-(?:del|edit)\s*\{/,
         '不得为 has-play 卡位移 del/edit：默认 6/36/66 已是目标视觉顺序「▶ ✎ ✕」');
+});
+
+// ---------------------------------------------------------------- 历史排序覆盖（逐键验证）
+
+test('历史排序五种键全覆盖：时间正/倒序、评分高/低、播放次数', async () => {
+    const t0 = localTs(2026, 3, 1);
+    const t1 = localTs(2026, 3, 5);
+    const t2 = localTs(2026, 3, 9);
+    const history = [
+        { uid: 'a', site: 's1', siteName: '源1', vodId: '1', name: '甲', kind: 'play', ts: t2, lastPlayTs: t2, playCount: 5, bgmScore: 7.5 },
+        { uid: 'b', site: 's1', siteName: '源1', vodId: '2', name: '乙', kind: 'play', ts: t1, lastPlayTs: t1, playCount: 1, bgmScore: 9.1 },
+        { uid: 'c', site: 's1', siteName: '源1', vodId: '3', name: '丙', kind: 'play', ts: t0, lastPlayTs: t0, playCount: 3 },
+    ];
+    const expect = {
+        'time-desc': ['甲', '乙', '丙'],
+        'time-asc': ['丙', '乙', '甲'],
+        'score-desc': ['乙', '甲', '丙'],   // 未评分的丙排最后
+        'score-asc': ['甲', '乙', '丙'],    // 未评分同样排最后（两向都在末尾）
+        'count-desc': ['甲', '丙', '乙'],
+    };
+    for (const [sort, names] of Object.entries(expect)) {
+        const htmls = [];
+        const settings = { historySort: sort, historyFilter: {}, history };
+        const ctx = loadRecords(settings, { onGridHtml: (x) => htmls.push(x) });
+        const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+        await view.enter();
+        const seen = htmls.join('').match(/data-name="([^"]*)"/g) || [];
+        assert.deepEqual(seen.map((s) => s.slice(11, -1)), names, `排序键 ${sort} 的结果顺序`);
+    }
+});
+
+test('历史筛选三维叠加：日期区间 + 来源 + 评分档位相互 AND', async () => {
+    const d = (y, m, day) => localTs(y, m, day);
+    const history = [
+        { uid: 'a', site: 's1', siteName: '源1', name: '命中', kind: 'play', ts: d(2026, 4, 10), lastPlayTs: d(2026, 4, 10), bgmScore: 8.5 },
+        { uid: 'b', site: 's1', siteName: '源1', name: '低分', kind: 'play', ts: d(2026, 4, 10), lastPlayTs: d(2026, 4, 10), bgmScore: 5.0 },
+        { uid: 'c', site: 's2', siteName: '源2', name: '别源', kind: 'play', ts: d(2026, 4, 10), lastPlayTs: d(2026, 4, 10), bgmScore: 8.6 },
+        { uid: 'd', site: 's1', siteName: '源1', name: '过期', kind: 'play', ts: d(2026, 2, 1), lastPlayTs: d(2026, 2, 1), bgmScore: 8.8 },
+    ];
+    const htmls = [];
+    const settings = {
+        historySort: 'time-desc',
+        historyFilter: { from: '2026-04-01', to: '2026-04-30', site: 's1', score: '8-9' },
+        history,
+    };
+    const ctx = loadRecords(settings, { onGridHtml: (x) => htmls.push(x) });
+    const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+    await view.enter();
+    const names = (htmls.join('').match(/data-name="([^"]*)"/g) || []).map((s) => s.slice(11, -1));
+    assert.deepEqual(names, ['命中'], '只留同源、同期、且评分落在 8~9 档的那条');
+});
+
+test('续播身份透传：历史卡 ▶ 起播时把记录自身的 vodId/封面/来源名交给 Player', async () => {
+    const plays = [];
+    const settings = {
+        history: [],
+        lastSourceMap: { 'site-a|v1': 1 },
+        watchProgress: { 'site-a|v1': { currentEp: 1, totalEps: 12 } },
+    };
+    const ctx = loadRecords(settings, {
+        player: {
+            play: async (...args) => { plays.push(args); },
+        },
+        doAction: async () => ({
+            list: [{
+                vod_id: 'v1',
+                vod_play_from: '线路甲$$$线路乙',
+                vod_play_url: '第1集$http://a/1.m3u8#第2集$http://a/2.m3u8$$$第1集$http://b/1.m3u8',
+            }],
+        }),
+    });
+    const rec = {
+        uid: 'h1', site: 'site-a', siteName: '源甲', vodId: 'v1', name: '片甲',
+        pic: 'https://img.example/cover.jpg', kind: 'play', lastEpisode: '第2集',
+    };
+    const r = await ctx.__TOOLS.resumePlayRecord(rec);
+    assert.equal(r.ok, true);
+    assert.equal(plays.length, 1);
+    const [site, flag, url, title, epName, , epIdx, kazumiSrc, opts] = plays[0]; // 第 6 参（episodes）本用例不关心
+    assert.equal(site, 'site-a');
+    assert.equal(flag, '线路乙', '按 lastSourceMap 记忆的线路起播');
+    assert.equal(url, 'http://b/1.m3u8');
+    assert.equal(title, '片甲');
+    assert.equal(epName, '第1集');
+    assert.equal(epIdx, 0);
+    assert.equal(kazumiSrc, '');
+    // 关键：记录身份跟着下去 → _curMeta 拿到 vodId/封面，退出时落盘的历史与最近观看
+    // 才有封面、且点开新记录会进到正确的片子（此前只能从 Detail.vodId 猜）
+    eq(opts, { vodId: 'v1', pic: 'https://img.example/cover.jpg', siteName: '源甲' }); // 跨 realm：按 JSON 比较
+});
+
+test('playIdentityOf：只搬运身份字段，缺字段退化为空串（绝不把 undefined 塞进元信息）', () => {
+    const ctx = loadRecords({}, {});
+    const f = ctx.__TOOLS.playIdentityOf;
+    eq(f(null), {});
+    eq(f({ vodId: 'v1', pic: 'p', siteName: 's' }), { vodId: 'v1', pic: 'p', siteName: 's' });
+    eq(f({ vodId: 12 }), { vodId: '12', pic: '', siteName: '' });
+});
+
+// ---------------------------------------------------------------- 历史筛选面板（仿收藏页重设计）
+
+test('历史筛选：排序/筛选在搜索工具条里，面板只放筛选维度（chips + 面板贴网格）', () => {
+    const t = tools();
+    const controls = t.recSortFilterHtml('view-history', true);
+    assert.match(controls, /id="view-history-sort"/, '排序下拉在控件条里（紧挨搜索框）');
+    assert.match(controls, /id="view-history-filter-btn"[^>]*aria-expanded="false"/, '筛选按钮带 aria-expanded');
+    const block = t.recToolbarHtml('view-history', true);
+    assert.match(block, /id="view-history-chips"/, 'chips 行');
+    assert.match(block, /id="view-history-filter-panel"[^>]*style="display:none"/, '筛选面板默认收起');
+    assert.match(block, /id="view-history-filter-apply"/, '应用按钮');
+    for (const id of ['-sites', '-date', '-from', '-to', '-score']) {
+        assert.ok(block.indexOf(`id="view-history${id}"`) > block.indexOf('view-history-filter-panel'),
+            `${id} 收在筛选面板里`);
+    }
+});
+
+test('历史筛选 chip：日期/区间/来源/评分各一条，点 × 立即删该维度并重筛', async () => {
+    const d = localTs(2026, 5, 6);
+    const settings = {
+        historySort: 'time-desc',
+        historyFilter: { from: '2026-05-01', to: '2026-05-31', site: 'site-a', score: 'gte9' },
+        history: [{ uid: 'h1', site: 'site-a', siteName: '源甲', vodId: 'v1', name: '甲片', kind: 'play', ts: d, lastPlayTs: d, bgmScore: 9.4 }],
+    };
+    const htmls = [];
+    const ctx = loadRecords(settings, { onGridHtml: (x) => htmls.push(x) });
+    const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+    await view.enter();
+    const chips = String(ctx.__TOOLS.values['#view-history-chips|html'] || '');
+    assert.match(chips, /区间: 2026-05-01 ~ 2026-05-31/);
+    assert.match(chips, /来源: 源甲/, 'chip 用来源展示名而不是 site key');
+    assert.match(chips, /评分: 9 分以上/);
+    // 点 ×（评分维度）→ 立即重筛且状态落盘
+    ctx.__TOOLS.fire('#view-history-chips', 'click', {
+        stopPropagation() {},
+        currentTarget: { data: (k) => (k === 'kind' ? 'score' : '') },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(settings.historyFilter.score, '', '删维度后持久化同步');
+    const after = String(ctx.__TOOLS.values['#view-history-chips|html'] || '');
+    assert.ok(!/评分:/.test(after), '该 chip 消失');
+    assert.match(after, /来源: 源甲/, '其它维度不受影响');
+});
+
+test('历史变更广播：播放结束写入新记录后，历史页立刻重绘（不再等到下次进页）', async () => {
+    const settings = { history: [], historySort: 'time-desc', historyFilter: {} };
+    const htmls = [];
+    const ctx = loadRecords(settings, { onGridHtml: (x) => htmls.push(x) });
+    ctx.App = { currentView: 'history' }; // 播放结束回到历史页的场景
+    const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+    await view.enter();
+    htmls.length = 0;
+    // player.js 退出时调的就是 Records.recordPlay
+    await ctx.__Records.recordPlay({ site: 'site-a', vodId: 'v9', name: '新播的片', episode: '第1集', seconds: 600 });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(htmls.join('').includes('新播的片'), '记录写入后历史页自动刷新（RecHub 广播）');
+    assert.equal(settings.history.length, 1);
+});
+
+test('历史变更广播：不在历史页时不打扰（避免无谓重绘）', async () => {
+    const settings = { history: [], historySort: 'time-desc', historyFilter: {} };
+    const htmls = [];
+    const ctx = loadRecords(settings, { onGridHtml: (x) => htmls.push(x) });
+    ctx.App = { currentView: 'home' };
+    const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+    await view.enter();
+    htmls.length = 0;
+    await ctx.__Records.recordPlay({ site: 'site-a', vodId: 'v9', name: '新播的片' });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(htmls.length, 0, '不在本页时不重绘');
+});
+
+// ---------------------------------------------------------------- Bangumi 卡六态菜单
+
+test('Bangumi 收藏卡也有右下角六态菜单（身份用 subject id，走账号接口）', async () => {
+    const ctx = loadRecords({ favorites: [] });
+    const card = ctx.__recCard({ uid: 'b1', site: 'bangumi', vodId: '12345', bangumiId: '12345', name: '番剧甲', bangumi: true, tag: 'want' }, true, true, {});
+    assert.ok(card.includes('rec-fav-btn'), 'Bangumi 卡有 ⋯ 按钮');
+    assert.match(card, /data-bgm-id="12345"/, '按钮带 subject id');
+    assert.ok(!card.includes('rec-play-btn'), 'Bangumi 卡没有续播按钮');
+    // 无数字 id（脏数据）→ 不渲染，避免写出无主状态
+    const bad = ctx.__recCard({ uid: 'b2', site: 'bangumi', vodId: '', name: '无编号', bangumi: true }, true, true, {});
+    assert.ok(!bad.includes('rec-fav-btn'));
+});
+
+test('Bangumi 六态菜单落盘：先写账号接口，成功后同步本地镜像并广播', async () => {
+    const settings = { favorites: [{ uid: 'b1', site: 'bangumi', vodId: '777', bangumiId: '777', name: '番剧乙', bangumi: true, tag: 'want' }] };
+    const calls = [];
+    const ctx = loadRecords(settings, {
+        kazumi: {
+            _favTagToBangumiType: { want: 1, seen: 2, watching: 3, hold: 4, dropped: 5 },
+            setBangumiCollection: async (id, type, opts) => { calls.push(['set', id, type, !!(opts && opts.quiet)]); return true; },
+            delBangumiCollection: async (id) => { calls.push(['del', id]); return true; },
+        },
+        timeline: { invalidateColCache: () => {}, refreshAfterFavoriteChange: () => {} },
+    });
+    // 打开菜单 → 选「在看」
+    await ctx.__TOOLS.openRecFavMenu(null, ctx.__TOOLS.recMetaOf ? { site: 'bangumi', vodId: '777', name: '番剧乙', bangumi: true } : null);
+    await ctx.__TOOLS.applyRecFavMenu('watching');
+    assert.deepEqual(calls[0], ['set', '777', 3, true], '目标类型 3=在看，且静默（菜单自己给 toast）');
+    assert.equal(settings.favorites[0].tag, 'watching', '本地镜像同步更新');
+    // 再选「取消收藏」→ 删账号收藏
+    await ctx.__TOOLS.openRecFavMenu(null, { site: 'bangumi', vodId: '777', name: '番剧乙', bangumi: true, tag: 'watching' });
+    await ctx.__TOOLS.applyRecFavMenu('');
+    assert.deepEqual(calls[1], ['del', '777'], '取消收藏走删除接口');
+    assert.equal(settings.favorites.length, 0, '本地镜像条目一并移除');
+});
+
+// ---------------------------------------------------------------- 卡片动作的记录回查（六态菜单打不开的根因）
+
+test('mergeExtraRecords：远端 Bangumi 条目补稳定 uid（原来没有 uid → 六态菜单点了没反应）', () => {
+    const ctx = loadRecords({ favorites: [] });
+    const merged = ctx.__TOOLS.mergeExtraRecords([], [
+        { site: 'bangumi', vodId: '4242', name: '番剧甲', bangumi: true, tag: 'want' },
+        { site: 'bangumi', vodId: '4243', name: '番剧乙', bangumi: true, tag: 'seen', uid: 'keep-me' },
+    ]);
+    assert.equal(merged.length, 2);
+    assert.equal(merged[0].uid, 'bgm-4242', '缺 uid 时按 subject id 派生（跨渲染稳定）');
+    assert.equal(merged[1].uid, 'keep-me', '已有 uid 不动');
+    // 幂等：同一份数据再合并一次仍是同一个 uid（不会每次渲染换 key）
+    const again = ctx.__TOOLS.mergeExtraRecords([], [{ site: 'bangumi', vodId: '4242', name: '番剧甲', bangumi: true }]);
+    assert.equal(again[0].uid, 'bgm-4242');
+});
+
+test('_itemOf：uid 命中优先，uid 缺失时按卡片 site|id 兜底（收藏卡 ⋯ 菜单可正常打开）', async () => {
+    const settings = {
+        favorites: [{ uid: 'f1', site: 'siteA', vodId: '11', name: '本地收藏', tag: 'want' }],
+    };
+    const ctx = loadRecords(settings, { onGridHtml: () => {} });
+    const view = ctx.__makeRecordView('my-favorites', 'favorites', '暂无收藏', true, true, 'pageSizeFavorites', '#my-panel-favorites');
+    await view.enter();
+    // uid 命中
+    assert.equal(view._itemOf('f1', null).name, '本地收藏');
+    // uid 缺失（远端条目渲染时 uid 为空的历史形态）：靠卡片 data-site/data-id 兜底
+    const fakeCard = { data: (k) => (k === 'site' ? 'siteA' : (k === 'id' ? '11' : '')), closest() { return fakeCard; } };
+    const $btn = { length: 1, closest: () => fakeCard };
+    assert.equal(view._itemOf('', $btn).name, '本地收藏', '空 uid 时按 site|vodId 找到记录');
+    // 彻底找不到时返回 null（调用方给「记录已刷新」提示，绝不静默）
+    assert.equal(view._itemOf('nope', null), null);
+});
+
+test('Kazumi 历史卡：六态按钮 + 片名合成收藏键（同规则下不同番剧不塌成一条）', async () => {
+    const settings = {
+        favorites: [],
+        history: [
+            { uid: 'k1', site: 'kazumi:r1', siteName: '规则A', vodId: '', name: '规则番甲', kind: 'play', ts: 2, lastPlayTs: 2 },
+            { uid: 'k2', site: 'kazumi:r1', siteName: '规则A', vodId: '', name: '规则番乙', kind: 'play', ts: 1, lastPlayTs: 1 },
+        ],
+    };
+    const ctx = loadRecords(settings, { onGridHtml: () => {} });
+    const view = ctx.__makeRecordView('view-history', 'history', '暂无历史', true, false, 'pageSizeHistory');
+    await view.enter();
+    // 身份：没有 vodId 时用 name:<片名>（否则同 site 的两部番会互相覆盖）
+    const a = ctx.__TOOLS.recFavIdentity({ site: 'kazumi:r1', vodId: '', name: '规则番甲' });
+    const b = ctx.__TOOLS.recFavIdentity({ site: 'kazumi:r1', vodId: '', name: '规则番乙' });
+    assert.equal(a.vodId, 'name:规则番甲');
+    assert.notEqual(a.vodId, b.vodId, '同规则不同番剧的收藏键必须不同');
+    // 普通源仍用 vodId
+    assert.equal(ctx.__TOOLS.recFavIdentity({ site: 'a', vodId: '9', name: 'x' }).vodId, '9');
+    // 卡片按钮渲染 + 回查命中（data-id 为空 → 按片名兜底）
+    const card = ctx.__recCard({ uid: 'k1', site: 'kazumi:r1', vodId: '', name: '规则番甲', tag: 'want' }, true, false, {});
+    assert.ok(card.includes('rec-fav-btn'), 'Kazumi 卡有六态按钮');
+    const fakeCard = {
+        data: (k) => (k === 'site' ? 'kazumi:r1' : k === 'id' ? '' : k === 'name' ? '规则番甲' : ''),
+        closest() { return fakeCard; },
+    };
+    const $btn = { length: 1, closest: () => fakeCard };
+    const found = view._itemOf('', $btn);
+    assert.ok(found && found.name === '规则番甲', '空 uid + 空 id 时按片名回查命中');
 });

@@ -862,6 +862,10 @@ const Player = {
      * @param episodes 当前线路全部集 [{name,url}]（连播队列用）
      * @param epIndex  当前集在 episodes 中的下标
      * @param kazumiSrc Kazumi 番剧源页 URL（仅 kazumi: 源；写入历史记录供历史卡重新选源）
+     * @param runtimeOpts 附加运行时参数：
+     *   - reconnectAttempt 断流重连计数（内部用）
+     *   - vodId / pic / siteName 记录身份（历史卡续播等不经详情页的入口必传，
+     *     写入 _curMeta → 观看统计/最近观看/历史记录都用它，否则封面为空或串台）
      * @returns {ok: boolean, reason?: string} 起播结果
      */
     async play(site, flag, id, title, subtitle, episodes, epIndex, kazumiSrc, runtimeOpts = {}) {
@@ -976,12 +980,23 @@ const Player = {
         }
         // 元信息必须先于原生队列分支装配：队列会话经 _rememberSession 读取 _curMeta
         // （观看统计/最近观看/历史都依赖它），放在分支之后会导致整季会话元信息为空。
-        let vodId = '';
+        // 记录身份：调用方（历史卡续播等**不经详情页**的入口）经 runtimeOpts 显式给出；
+        // 缺省才回落「当前详情页」——后者只在详情页起播时成立，历史页续播时 Detail
+        // 要么空、要么还停在上次那部，取它会写出封面为空/串台的播放记录。
+        let vodId = String((runtimeOpts && runtimeOpts.vodId) || '');
         try {
-            if (!String(site).startsWith('kazumi:') && typeof Detail !== 'undefined' && Detail.vodId) vodId = Detail.vodId;
+            if (!vodId && !String(site).startsWith('kazumi:')
+                && typeof Detail !== 'undefined' && Detail.vodId) vodId = Detail.vodId;
         } catch (e) { /* ignore */ }
+        // 封面/来源名同属「记录身份」，与 vodId 同源同生命周期：_writeWatch 落盘历史与
+        // 最近观看都读 _curMeta 这两个字段。放在这里是为了让下面**两处** _curMeta 装配
+        // （队列分支前的预装配、主链路装配）用同一个值，不会一处有一处没有。
+        const recordPic = String((runtimeOpts && runtimeOpts.pic) || '');
+        const recordSiteName = String((runtimeOpts && runtimeOpts.siteName) || '');
         this._curMeta = { site, title, subtitle: subtitle || '', vodId, kazumiSrc: kazumiSrc || '',
             flag: flag || '',
+            pic: recordPic,
+            siteName: recordSiteName,
             totalEps: (Array.isArray(episodes) ? episodes.length : 0) };
         // 尝试从当前视图取 vodId（详情页连播时记录观看进度）。仅 CatVod 源使用 Detail.vodId：
         // Kazumi 源从弹窗直接起播，Detail.vodId 可能残留上一次 CatVod 详情的 id，须隔离（T4）。
@@ -1148,6 +1163,9 @@ const Player = {
         // flag 同步入 _curMeta：Shift+O/E 片头/片尾登记按「片名+线路」为键（AdSkip）。
         this._curMeta = { site, title, subtitle: subtitle || '', vodId, kazumiSrc: kazumiSrc || '',
             flag: flag || '',
+            // 记录身份里的封面/来源名必须与预装配口径一致（漏了这里等于主链路永远拿到空封面）
+            pic: recordPic,
+            siteName: recordSiteName,
             totalEps: (Array.isArray(episodes) ? episodes.length : 0) };
         // Kazumi 源封面持久化：起播时同步把 Bangumi 封面缓存落进本次播放元信息，
         // 历史/最近观看卡重启后仍能显示封面（Bangumi 缓存本身就是 localStorage 持久化的）。

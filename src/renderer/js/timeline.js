@@ -961,7 +961,7 @@ const Timeline = {
                 oldEpHtml = $staleEps[0].outerHTML;
             }
             $staleEps.remove();
-            $card.append(`<div class="vod-fav-row"><span class="vod-fav-badge vod-fav-${meta[1]}" title="Bangumi 收藏状态（在详情页修改）">${meta[0]}</span></div>`);
+            $card.append(`<div class="vod-fav-row"><span class="vod-fav-badge vod-fav-${meta[1]}">${meta[0]}</span></div>`);
             // 话数徽章/源徽章吸回行首（优先复用刚保住的既有徽章；收藏数据晚于首屏
             // 时徽章直挂封面，同位重叠问题也在此一并吸附归行）
             if (oldEpHtml || kzHtml) {

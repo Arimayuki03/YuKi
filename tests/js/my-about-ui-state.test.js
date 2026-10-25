@@ -1185,7 +1185,8 @@ describe('my', () => {
         /** 渲染后把 grid HTML 解析回卡片对象（按 uid/id 保留勾选态）。 */
         function syncCards() {
             const html = jq.html('#my-favorites-grid');
-            const chunks = html.split('<div class="vod-card"').slice(1);
+            // 卡片可能带附加修饰类（has-play / has-fav）：按「类名开头」切分而不是整串匹配
+            const chunks = html.split(/<div class="vod-card(?:\s[^"]*)?"/).slice(1);
             const old = new Map(cards.map((c) => [`${c.bgm ? 'b' : 'l'}:${c.uid || c.id}`, c.checked]));
             cards.length = 0;
             for (const chunk of chunks) {
@@ -1205,7 +1206,7 @@ describe('my', () => {
 
     /** 从 grid HTML 中解析每张卡的关键 data-* 属性。 */
     function parseCards(html) {
-        return [...html.matchAll(/<div class="vod-card"([^>]*)>/g)].map((m) => {
+        return [...html.matchAll(/<div class="vod-card(?:\s[^"]*)?"([^>]*)>/g)].map((m) => {
             const attrs = m[1];
             const pick = (k) => (attrs.match(new RegExp(`${k}="([^"]*)"`)) || [])[1] || '';
             return { uid: pick('data-uid'), site: pick('data-site'), id: pick('data-id') };

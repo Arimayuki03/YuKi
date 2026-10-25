@@ -45,6 +45,13 @@ async function recSet(key, list) {
     if (key === 'favorites' && typeof FavHub !== 'undefined' && FavHub.changed) {
         FavHub.changed({ key });
     }
+    // 历史变更走独立通道：播放结束（player.js _writeWatch → recordPlay）会新写一条记录，
+    // 历史页正开着时必须立刻刷新——用户报「点播放按钮播完退出后，历史页数据没变」。
+    // 不复用 FavHub：那套订阅者（详情页/时间表/我的/搜索徽标）只关心收藏，播放一次
+    // 就全体重绘一遍纯属浪费。
+    if (key === 'history' && typeof RecHub !== 'undefined' && RecHub.changed) {
+        RecHub.changed({ key });
+    }
 }
 
 // ---------------------------------------------------------------- 收藏事件中心
@@ -52,6 +59,24 @@ async function recSet(key, list) {
 // 都经 recSet → FavHub.changed 广播给所有订阅者。消费者订阅后自行重渲染，
 // 不再需要在 detail.js 的各个点击处理程序里手写 My._bgmCache=null / render() / Timeline.refresh。
 // 命名为 FavHub 避免与下方 Favorites 视图对象（makeRecordView 产物）冲突。
+/** 历史变更通道（FavHub 的精简孪生）：只有历史页订阅，播放结束/删除/清空时收到通知后就地重绘。 */
+const RecHub = {
+    _subs: [],
+    onChanged(callback) {
+        if (typeof callback !== 'function') return () => { };
+        this._subs.push(callback);
+        return () => {
+            const i = this._subs.indexOf(callback);
+            if (i >= 0) this._subs.splice(i, 1);
+        };
+    },
+    changed(meta) {
+        this._subs.slice().forEach((cb) => {
+            try { cb(meta || {}); } catch (e) { /* 单个订阅者异常不影响其它 */ }
+        });
+    },
+};
+
 const FavHub = {
     _subs: [],
     /** 订阅收藏变更事件，返回取消订阅函数。callback 同步派发，不 await。 */
@@ -276,6 +301,24 @@ const Records = {
 function normTag(t) { return (t === undefined || t === null) ? 'want' : t; }
 
 /** Bangumi 托管条目判定：远端账号收藏（bangumi 标志）或详情页同步写入的本地镜像（site='bangumi'）。
+/**
+ * 收藏身份（site + vodId）：Kazumi 源的历史/播放记录**没有源内 id**（player 侧对
+ * kazumi: 源刻意不继承 Detail.vodId，见 T4 隔离），vodId 恒为空。若直接拿空 id 当
+ * 收藏键，同一规则下的所有番剧会塌成同一条收藏（site=kazumi:x|vodId=''）——
+ * 所以这类记录用「片名」合成稳定 id（name:<片名>）。其余记录照旧用 vodId。
+ * 卡片的 ⋯ 六态菜单、收藏写入、状态读取三处必须共用本函数，否则读写的键对不上。
+ */
+function recFavIdentity(v) {
+    const site = String((v && v.site) || '');
+    const id = String((v && v.vodId) || '');
+    if (id) return { site, vodId: id };
+    if (site.indexOf('kazumi:') === 0) {
+        return { site, vodId: 'name:' + String((v && v.name) || '').trim() };
+    }
+    return { site, vodId: id };
+}
+
+/** Bangumi 托管条目判定：远端账号收藏（bangumi 标志）或详情页同步写入的本地镜像（site='bangumi'）。
  *  recCard 渲染与收藏来源筛选共用同一口径，避免「筛进 Bangumi 分类的卡片却按本地卡渲染」。 */
 function isBangumiItem(v) {
     return !!v.bangumi || String(v.site || '') === 'bangumi';
@@ -378,6 +421,10 @@ const REC_BGM_META_TTL = 30 * 60 * 1000;
 const REC_BGM_META_FAIL_TTL = 60 * 1000;
 const REC_BGM_META_BATCH = 60;      // 每批 id 上限（对齐 bangumiInfoBatch 单批 ≤60）
 const REC_BGM_META_MAX_IDS = 120;   // 单次渲染回填上限：超出部分本渲染按未知处理，下次渲染补
+// 元数据回填的首帧等待上限：超过就先渲染（缺字段按「未知」处理），回填到达后再补渲一次。
+// 取 1.2s 的理由：正常网络下单批（≤60 个 id）后端并发回源在 1s 量级，命中缓存则 0ms；
+// 而 Bangumi 被墙/后端无响应时 doAction 要 30s 才超时——不能让筛选按钮跟着卡 30s。
+const REC_META_WAIT_MS = 1200;
 const _recBgmMeta = new Map();
 let _recBgmMetaPending = null;      // Map<subjectId, Promise>（在途去重；懒建）
 
@@ -753,6 +800,12 @@ function matchFavFilter(v, filter, meta) {
 // （含匹配不到 Bangumi 的记录）——缺数据不消失，而是归到这个档里可查。
 const REC_SCORE_TIERS = ['', 'gte9', '8-9', '7-8', '6-7', 'lt6', 'none'];
 
+/** 评分档位 → 展示文案（筛选面板下拉与已生效 chip 共用同一套文案，避免两处漂移）。 */
+const REC_SCORE_TIER_LABELS = {
+    gte9: '9 分以上', '8-9': '8 ~ 9 分', '7-8': '7 ~ 8 分',
+    '6-7': '6 ~ 7 分', lt6: '6 分以下', none: '未评分',
+};
+
 /** 评分是否落在档位内：tier 空 = 不限；未知档位不筛（防脏设置把列表筛成空）。 */
 function scoreInTier(score, tier) {
     const t = String(tier || '');
@@ -902,7 +955,8 @@ function recCard(v, editable, withTags, playCountByName) {
     // 本地卡点击循环切换（委托 .rec-tag），Bangumi 卡只读（rec-tag-static，去详情页改）。
     const tagBadge = withTags && tag
         ? (isBgm
-            ? `<span class="rec-tag rec-tag-static" data-site="bangumi" title="Bangumi 收藏状态（在详情页修改）">${tagLabel(tag)}</span>`
+            // 用户裁决：收藏状态徽标不挂悬浮提示（原先「在详情页修改」的文案已删除）
+        ? `<span class="rec-tag rec-tag-static" data-site="bangumi">${tagLabel(tag)}</span>`
             : `<span class="rec-tag ${tag === 'seen' ? 'seen' : ''}" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="点击循环切换：想看→在看→看过→搁置→抛弃→取消">${tagLabel(tag)}</span>`)
         : '';
     const del = isBgm ? '' : `<button class="rec-del" data-uid="${uid}" data-site="${escHtml(v.site)}" data-id="${escHtml(v.vodId)}" title="移除">✕</button>`;
@@ -913,11 +967,17 @@ function recCard(v, editable, withTags, playCountByName) {
     const playBtn = (v.kind === 'play' && !isBgm)
         ? `<button type="button" class="rec-play-btn" data-uid="${uid}" title="继续播放（回到上次线路与集数）" aria-label="继续播放">${REC_PLAY_ICON}</button>`
         : '';
-    // 历史卡右下角「⋯ 收藏」（仅历史页 = withTags 为假时；收藏页用点击循环切换的 .rec-tag 徽章）：
-    // 需要稳定身份（site+vodId）才能收藏——Kazumi 源 vodId 恒空，其收藏入口在选源/详情链路，
-    // 此处不渲染（避免写出一条 site=kazumi:xxx|vodId='' 的孤儿收藏）。
-    const favBtn = (!withTags && !isBgm && String(v.site || '') && String(v.vodId || ''))
-        ? `<button type="button" class="rec-fav-btn" data-uid="${uid}" title="收藏（展开状态菜单）" aria-label="收藏" aria-haspopup="menu">${REC_FAV_ICON}</button>`
+    // 右下角「⋯ 收藏」六态菜单：历史卡、收藏卡、**Bangumi 收藏卡**都渲染（用户裁决：
+    // 卡片动作一致）。收藏页此前只有点击循环切换的 .rec-tag 徽章——想看→在看→看过→
+    // 搁置→抛弃要连点、中途还会误改状态，「取消收藏」只能靠 ✕；改为 ⋯ 菜单一次点选到位。
+    // Bangumi 卡的身份是 subject id（vodId 即 id），状态写入走账号接口（见 applyRecFavMenu）。
+    // Kazumi 源 vodId 恒空 → 不渲染（避免写出一条 site=kazumi:xxx|vodId='' 的孤儿收藏）。
+    const bgmSubjectId = isBgm ? String(v.vodId || v.bangumiId || '') : '';
+    // Kazumi 源没有 vodId（用片名合成收藏键），其它源必须有 vodId 才是稳定身份
+    const favIdentity = recFavIdentity(v);
+    const favBtn = (String(v.site || '') && String(favIdentity.vodId || '')
+        && (!isBgm || /^\d+$/.test(bgmSubjectId)))
+        ? `<button type="button" class="rec-fav-btn${isBgm ? ' rec-fav-btn-bgm' : ''}" data-uid="${uid}"${isBgm ? ` data-bgm-id="${escHtml(bgmSubjectId)}"` : ''} title="${isBgm ? 'Bangumi 收藏状态（展开菜单，选择即同步账号）' : '收藏（展开状态菜单）'}" aria-label="收藏" aria-haspopup="menu">${REC_FAV_ICON}</button>`
         : '';
     // Bangumi 卡「★ 评分」按钮已挪到详情页 hero 操作行（T80）：评分是详情级操作，
     // 挤在收藏卡封面上既遮挡封面又让每张卡背一份按钮。卡片上只保留「我的 N★」
@@ -1159,7 +1219,10 @@ function mergeExtraRecords(list, extra) {
         const id = String(it.vodId);
         if (localIds.has(id) || seen.has(id)) continue;
         seen.add(id);
-        fresh.push(it);
+        // 远端 Bangumi 收藏条目（my.js 映射）**没有 uid**：卡片按钮按 uid 回查记录，
+        // 缺了它六态菜单/续播就会"点了没反应"（用户报「收藏卡六态菜单打不开」）。
+        // 用 subject id 派生稳定 uid（同一部作品每次渲染都一致），不改动源对象。
+        fresh.push(it.uid ? it : Object.assign({}, it, { uid: 'bgm-' + id }));
     }
     return list.concat(fresh);
 }
@@ -1274,10 +1337,30 @@ async function resumeKazumiRecord(v) {
         const idx = locateRecEpisode(episodes, want, 0);
         if (idx < 0) continue;
         if (typeof Player === 'undefined' || typeof Player.play !== 'function') return { ok: false, reason: 'mpv-missing' };
-        await Player.play(site, road.name, episodes[idx].url, String(v.name || ''), episodes[idx].name, episodes, idx, srcUrl);
+        await Player.play(site, road.name, episodes[idx].url, String(v.name || ''), episodes[idx].name, episodes, idx, srcUrl,
+            playIdentityOf(v));
         return { ok: true };
     }
     return { ok: false, reason: 'need-source' };
+}
+
+/**
+ * 续播时交给 Player 的记录身份（vodId / 封面 / 来源名）。
+ *
+ * 修的是「点历史卡 ▶ 播完后新写入的记录没有封面、点开是别的片子」：Player.play 的
+ * 第 9 参（runtimeOpts）此前没人用，_curMeta.vodId 只能从 **当前详情页** Detail.vodId
+ * 取——在历史页点 ▶ 时详情页要么没开（vodId 为空）、要么还停在上次看的另一部
+ * （vodId 串台），_writeWatch 落盘 recordPlay 时 pic/vodId 全跟着错：新卡片没封面，
+ * 而且点开这条"新记录"会进到另一部片子。这里把记录自身的身份显式带下去，与详情页
+ * 起播链路（Detail._playEpisode 走 Detail.vodId）语义对齐。
+ */
+function playIdentityOf(v) {
+    if (!v) return {};
+    return {
+        vodId: String(v.vodId || ''),
+        pic: String(v.pic || ''),
+        siteName: String(v.siteName || ''),
+    };
 }
 
 /** 历史卡「▶ 续播」主入口：按记录身份恢复上次线路与集数直接起播，不经过详情页。
@@ -1314,7 +1397,8 @@ async function resumePlayRecord(v) {
     if (epIdx < 0) epIdx = 0;
     const ep = src.episodes[epIdx];
     if (typeof Player === 'undefined' || typeof Player.play !== 'function') return { ok: false, reason: 'mpv-missing' };
-    await Player.play(site, src.from, ep.url, String(v.name || ''), ep.name, src.episodes, epIdx);
+    await Player.play(site, src.from, ep.url, String(v.name || ''), ep.name, src.episodes, epIdx, '',
+        playIdentityOf(v));
     return { ok: true };
 }
 
@@ -1360,12 +1444,17 @@ function favMenuEl() {
 
 /** 关闭六态菜单（幂等；同时解绑一次性监听）。 */
 function closeRecFavMenu() {
+    // 摘掉展开期常显标记（见 openRecFavMenu 的 .menu-open 说明）
+    try {
+        const btn = document.querySelector('.rec-fav-btn.menu-open');
+        if (btn && btn.classList) btn.classList.remove('menu-open');
+    } catch (e) { /* 无 DOM 环境忽略 */ }
     _favMenuCtx = null;
     _favMenuCloseAt = Date.now();
     if (typeof document === 'undefined') return;
     const el = document.getElementById(REC_FAV_MENU_ID);
     if (el) el.style.display = 'none';
-    $(document).off('click.recfavmenu keydown.recfavmenu');
+    $(document).off('click.recfavmenu keydown.recfavmenu wheel.recfavmenu scroll.recfavmenu');
     $(window).off('scroll.recfavmenu resize.recfavmenu');
 }
 
@@ -1373,11 +1462,19 @@ function closeRecFavMenu() {
  *  当前状态异步读出后回填高亮（getFavTag 走本地 settings，无网络）。 */
 async function openRecFavMenu($btn, item) {
     if (!item || !String(item.site || '')) return;
+    const fav = recFavIdentity(item); // 与卡片渲染、写入共用同一套收藏键
     let cur = '';
-    try { cur = await Records.getFavTag(String(item.site || ''), String(item.vodId || '')); } catch (e) { cur = ''; }
+    try {
+        // Bangumi 条目（site='bangumi' 或带 bangumi 标志）：状态来自账号收藏映射，
+        // 本地 favorites 表里那一条只是镜像（tag 字段由 my.js 同步时写入）
+        cur = String(item.tag || '') || await Records.getFavTag(fav.site, fav.vodId);
+    } catch (e) { cur = ''; }
     const el = favMenuEl();
     const $el = $(el);
     _favMenuCtx = { item, cur: String(cur || '') };
+    // 菜单挂在 body 上：鼠标移进菜单时卡片已不 hover，按钮会随淡出消失、菜单像浮在半空。
+    // 挂 .menu-open（CSS 里是浮现条件之一）让按钮在菜单展开期间保持可见，关闭时摘除。
+    try { if ($btn && $btn.addClass) $btn.addClass('menu-open'); } catch (e) { /* 桩环境无 classList */ }
     $el.html(buildFavMenuHtml(_favMenuCtx.cur)).css('display', 'block');
     // 定位：贴着按钮右缘向上展开（历史卡「⋯」在右下角，菜单向上弹避免被视口裁掉）；
     // 视口左右越界时夹回可视区（菜单宽度受控 156px，夹取足够）。
@@ -1404,9 +1501,52 @@ async function openRecFavMenu($btn, item) {
         $(document).on('click.recfavmenu', (e) => {
             if ($(e.target).closest('#' + REC_FAV_MENU_ID + ', .rec-fav-btn').length) return;
             closeRecFavMenu();
-        }).on('keydown.recfavmenu', (e) => { if (e.key === 'Escape') closeRecFavMenu(); });
+        }).on('keydown.recfavmenu', (e) => { if (e.key === 'Escape') closeRecFavMenu(); })
+            // 滚轮：菜单是 fixed 定位的「锚点浮层」，页面/卡片列表一滚它就脱离按钮了。
+            // 只监听 window scroll 不够——滚动发生在 .view 这类内部容器时 scroll 不冒泡，
+            // 菜单会一直挂在不动的旧坐标上（用户报「滚轮一滚菜单还留着」）。用捕获阶段的
+            // wheel + scroll 兜住所有容器；菜单自身的滚动（列表过长）不算。
+            .on('wheel.recfavmenu scroll.recfavmenu', (e) => {
+                const el = document.getElementById(REC_FAV_MENU_ID);
+                if (el && e.target && el.contains(e.target)) return;
+                closeRecFavMenu();
+            });
         $(window).on('scroll.recfavmenu resize.recfavmenu', () => closeRecFavMenu());
     }, 0);
+}
+
+/** 应用菜单选择：'' = 取消收藏（删除条目），其余 = 六态标签。
+/**
+ * Bangumi 卡片的六态菜单落盘：账号侧先写（权威），成功后同步本地镜像并广播。
+ *
+ * 为什么本地也要写：收藏页的卡片、时间表的收藏过滤集合、详情页收藏按钮都读本地
+ * favorites（Bangumi 条目在本地是「镜像」）。只写账号的话，界面要等下次同步才变。
+ * 顺序刻意「先账号后本地」：账号失败时本地不动，避免出现「本地显示已收藏、账号里没有」
+ * 的假象（这类不一致正是此前 my.js 合并逻辑最头疼的情况）。
+ */
+async function applyBgmFavMenu(item, next) {
+    const id = String((item && (item.vodId || item.bangumiId)) || '');
+    if (!/^\d+$/.test(id)) { warnToast('该条目缺少 Bangumi 编号，无法同步'); return; }
+    if (typeof Kazumi === 'undefined') { warnToast('Kazumi 引擎不可用'); return; }
+    const entry = {
+        site: 'bangumi', siteName: 'Bangumi', vodId: id, name: String(item.name || ''),
+        pic: String(item.pic || ''), bangumiId: id, bangumi: true,
+    };
+    let ok = false;
+    try {
+        ok = next
+            ? await Kazumi.setBangumiCollection(id, (Kazumi._favTagToBangumiType || {})[next] || 1, { quiet: true })
+            : await Kazumi.delBangumiCollection(id);
+    } catch (e) { ok = false; }
+    if (!ok) return; // 具体失败原因由 Kazumi 侧 toast
+    try {
+        if (!next) {
+            if (await Records.isFavorite('bangumi', id)) await Records.toggleFavorite(entry);
+        } else {
+            await Records.setFavTag(entry, next);
+        }
+    } catch (e) { /* 本地镜像写失败不影响账号侧已成功的状态 */ }
+    warnToast(next ? `已标记为${tagLabel(next)}（Bangumi）` : '已取消收藏（Bangumi）');
 }
 
 /** 应用菜单选择：'' = 取消收藏（删除条目），其余 = 六态标签。
@@ -1419,9 +1559,18 @@ async function applyRecFavMenu(tag) {
     const { item, cur } = ctx;
     const next = String(tag || '');
     if (next === cur) return;
+    // Bangumi 条目：状态是账号侧数据，必须走 Bangumi 收藏接口（本地 favorites 只是镜像）。
+    // 六态映射见 Kazumi._favTagToBangumiType（1想看 2看过 3在看 4搁置 5抛弃）；
+    // 「取消收藏」= 删除该 subject 的收藏记录。
+    if (isBangumiItem(item)) {
+        await applyBgmFavMenu(item, next);
+        return;
+    }
+    // 与 recCard / openRecFavMenu 共用同一套收藏键（Kazumi 源用片名合成 id）
+    const favId = recFavIdentity(item);
     const v = {
         site: String(item.site || ''), siteName: String(item.siteName || ''),
-        vodId: String(item.vodId || ''), name: String(item.name || ''),
+        vodId: favId.vodId, name: String(item.name || ''),
         pic: String(item.pic || ''), remarks: String(item.remarks || ''),
         bangumiId: item.bangumiId ? String(item.bangumiId) : '',
     };
@@ -1439,6 +1588,41 @@ async function applyRecFavMenu(tag) {
     } catch (e) { warnToast('收藏操作失败'); }
 }
 
+/**
+ * 历史筛选面板：来源 / 日期（单日或区间）/ 评分档位，草稿态 + 应用。
+ * 结构与收藏页 `rec-filter-panel` 同款（同容器、同标签列、同操作行），两个页面的
+ * 筛选交互与视觉完全一致（用户要求「仿照收藏页重新设计」）。
+ */
+function recHistoryPanelHtml(viewName) {
+    const scoreOpts = [
+        ['', '评分不限'], ['gte9', '9 分以上'], ['8-9', '8 ~ 9 分'],
+        ['7-8', '7 ~ 8 分'], ['6-7', '6 ~ 7 分'], ['lt6', '6 分以下'], ['none', '未评分'],
+    ].map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
+    return `<div id="${viewName}-filter-panel" class="rec-filter-panel" style="display:none">
+        <div class="rec-filter-row">
+            <label class="rec-filter-label" for="${viewName}-sites">来源</label>
+            <select id="${viewName}-sites" class="md-select rec-select" title="按来源筛选"><option value="">全部来源</option></select>
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label" for="${viewName}-date">日期</label>
+            <input id="${viewName}-date" class="md-input rec-input rec-date" type="date" title="只看这一天的记录（按播放/浏览时间）">
+            <span class="rec-filter-sep" title="或按日期区间（含起止两天）">或区间</span>
+            <input id="${viewName}-from" class="md-input rec-input rec-date" type="date" title="起始日期（含当天）">
+            <span class="rec-filter-sep">~</span>
+            <input id="${viewName}-to" class="md-input rec-input rec-date" type="date" title="结束日期（含当天）">
+        </div>
+        <div class="rec-filter-row">
+            <label class="rec-filter-label" for="${viewName}-score">评分</label>
+            <select id="${viewName}-score" class="md-select rec-select" title="按 Bangumi 评分档位筛选">${scoreOpts}</select>
+        </div>
+        <div class="rec-filter-row rec-filter-actions">
+            <span class="tip-line pad0 rec-filter-note">日期与区间叠加时以单日为准；区间含起止两天</span>
+            <button id="${viewName}-filter-reset" class="md-btn md-btn-sm md-btn-tonal">重置</button>
+            <button id="${viewName}-filter-apply" class="md-btn md-btn-sm md-btn-filled">应用</button>
+        </div>
+    </div>`;
+}
+
 /** 视图控制条（排序 + 筛选）HTML：插到网格前。
  *  为什么不写进 index.html：同一视图工厂服务 #view-favorites / #view-history /
  *  #my-panel-favorites 三个容器，而 app.js 把 favorites 路由重定向到「我的→我的收藏」
@@ -1446,44 +1630,16 @@ async function applyRecFavMenu(tag) {
  *  入口的控件、事件与状态完全一致（单一样本，不存在两份标记漂移）。 */
 function recToolbarHtml(viewName, isHistory) {
     if (isHistory) {
-        return `<div class="rec-bar rec-filter-bar">
-            <select id="${viewName}-sort" class="md-select rec-select" title="排序方式">
-                <option value="time-desc">时间倒序</option>
-                <option value="time-asc">时间正序</option>
-                <option value="score-desc">评分高 → 低</option>
-                <option value="score-asc">评分低 → 高</option>
-                <option value="count-desc">播放次数</option>
-            </select>
-            <select id="${viewName}-sites" class="md-select rec-select" title="按来源筛选"><option value="">全部来源</option></select>
-            <input id="${viewName}-date" class="md-input rec-input rec-date" type="date" title="只看这一天的记录（按播放/浏览时间）">
-            <span class="rec-filter-sep" title="日期区间（含起止两天）">~</span>
-            <input id="${viewName}-from" class="md-input rec-input rec-date" type="date" title="起始日期（含当天）">
-            <input id="${viewName}-to" class="md-input rec-input rec-date" type="date" title="结束日期（含当天）">
-            <select id="${viewName}-score" class="md-select rec-select" title="按 Bangumi 评分档位筛选">
-                <option value="">评分不限</option>
-                <option value="gte9">9 分以上</option>
-                <option value="8-9">8 ~ 9 分</option>
-                <option value="7-8">7 ~ 8 分</option>
-                <option value="6-7">6 ~ 7 分</option>
-                <option value="lt6">6 分以下</option>
-                <option value="none">未评分</option>
-            </select>
-            <button id="${viewName}-filter-reset" class="md-btn md-btn-sm md-btn-tonal" title="重置历史排序与筛选">重置筛选</button>
-        </div>`;
+        // 历史页：排序/筛选已并入搜索工具条（recSortFilterHtml），这里只产出
+        // 「已生效条件 chips + 筛选面板」两块，插在网格正上方（与收藏页同构）。
+        return `<div id="${viewName}-chips" class="rec-chips rec-chips-bar" style="display:none"></div>
+        ${recHistoryPanelHtml(viewName)}`;
     }
+    // 收藏页：排序/筛选按钮（recFavControlsHtml）并入搜索框所在的 .view-toolbar，
+    // 这里只产出「已生效条件 chip + 筛选面板」两块，插在网格正上方。
     const wd = [[1, '周一'], [2, '周二'], [3, '周三'], [4, '周四'], [5, '周五'], [6, '周六'], [7, '周日']]
         .map(([n, lb]) => `<span class="class-tab" data-weekday="${n}">${lb}</span>`).join('');
-    return `<div class="rec-bar rec-filter-bar">
-        <select id="${viewName}-sort" class="md-select rec-select" title="排序方式">
-            <option value="recent">最近变更</option>
-            <option value="name">番剧名称</option>
-            <option value="score">评分最高</option>
-            <option value="airdate">开播时间</option>
-            <option value="rank">排名最高</option>
-        </select>
-        <button id="${viewName}-filter-btn" class="md-btn md-btn-sm md-btn-tonal" title="筛选（标签 / 季度 / 开播日期 / 评分 / 排名 / 星期）" aria-label="筛选" aria-expanded="false">筛选</button>
-        <div id="${viewName}-chips" class="rec-chips" style="display:none"></div>
-    </div>
+    return `<div id="${viewName}-chips" class="rec-chips rec-chips-bar" style="display:none"></div>
     <div id="${viewName}-filter-panel" class="rec-filter-panel" style="display:none">
         <div class="rec-filter-row">
             <label class="rec-filter-label" for="${viewName}-f-tag">标签</label>
@@ -1524,6 +1680,28 @@ function recToolbarHtml(viewName, isHistory) {
             <button id="${viewName}-filter-apply" class="md-btn md-btn-sm md-btn-filled">应用</button>
         </div>
     </div>`;
+}
+
+/** 排序下拉 + 筛选按钮（收藏/历史共用）：**紧挨搜索框右侧**插进 .view-toolbar
+ *  （用户要求：排序挨着搜索栏，多选等操作按钮靠右）。
+ *  两页只有排序键与筛选说明文案不同，控件结构与 id 口径完全一致。 */
+function recSortFilterHtml(viewName, isHistory) {
+    const sortOpts = isHistory
+        ? [['time-desc', '时间倒序'], ['time-asc', '时间正序'], ['score-desc', '评分高 → 低'],
+            ['score-asc', '评分低 → 高'], ['count-desc', '播放次数']]
+        : [['recent', '最近变更'], ['name', '番剧名称'], ['score', '评分最高'],
+            ['airdate', '开播时间'], ['rank', '排名最高']];
+    const tip = isHistory
+        ? '筛选（来源 / 日期 / 评分档位）'
+        : '筛选（标签 / 季度 / 开播日期 / 评分 / 排名 / 星期）';
+    return `<select id="${viewName}-sort" class="md-select rec-select" title="排序方式">`
+        + sortOpts.map(([v, label]) => `<option value="${v}">${label}</option>`).join('')
+        + `</select><button id="${viewName}-filter-btn" class="md-btn md-btn-sm md-btn-tonal" title="${tip}" aria-label="筛选" aria-expanded="false">筛选</button>`;
+}
+
+/** 收藏页控件条（历史页同款）：保留旧函数名，供既有调用方与单测使用。 */
+function recFavControlsHtml(viewName) {
+    return recSortFilterHtml(viewName, false);
 }
 
 /** 视图工厂：收藏与历史结构一致，仅存储键与空态文案不同；editable 开启卡片编辑按钮；withTags 开启想看/已看标签（仅收藏）；pageSizeKey 为各自的每页条数设置键（T39）。多选（T40）：收藏支持批量删除/标记想看/标记已看且保留全选；历史仅批量删除且无全选；清空按钮仅历史保留。containerSel 覆盖事件委托根（默认 #${viewName}，供「我的」页内嵌面板复用）。 */
@@ -1723,6 +1901,17 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 $(`#${viewName}-tagdropped`).on('click', () => this.tagChecked('dropped'));
             }
             $(`#${viewName}-delchecked`).on('click', () => this.removeChecked());
+            // 历史变更订阅：播放结束（_writeWatch→recordPlay）新写入的记录要立刻反映到
+            // 正开着的历史页（用户报「播完退出后历史页数据没变」）。仅在本页可见且不在
+            // 多选态时重绘——多选中的整格重写会把勾选状态清掉。
+            if (storeKey === 'history' && typeof RecHub !== 'undefined' && RecHub.onChanged) {
+                this._unsubRec = RecHub.onChanged(() => {
+                    if (!this._inited || this._selectMode) return;
+                    const visible = (typeof App !== 'undefined' && App && App.currentView === 'history');
+                    if (!visible) return;
+                    this.render();
+                });
+            }
             // 搜索框：实时过滤当前列表（片名/备注/源名模糊匹配）；过滤条件变化回第一页。
             // 200ms 防抖：render 全链路含 settingsGet IPC + 网格重建，逐键触发开销大；
             // 停止输入 200ms 后按最新关键字渲染一次即可（定时器句柄挂视图，重复输入自动续期）。
@@ -1783,7 +1972,21 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         _ensureToolbar() {
             const gridSel = `#${viewName}-grid`;
             if ($(gridSel).length && !$(`#${viewName}-sort`).length) {
-                $(gridSel).before(recToolbarHtml(viewName, storeKey === 'history'));
+                const isHist = storeKey === 'history';
+                // 收藏页走包装函数（语义更清楚、也是既有单测的入口），历史页取同构版本
+                const controls = isHist ? recSortFilterHtml(viewName, true) : recFavControlsHtml(viewName);
+                // 排序下拉 + 筛选按钮紧挨搜索框右侧（用户要求）；找不到搜索框时退回
+                // 工具条末尾，再不行就自己起一行——三种落点都保证控件只出现一次。
+                const $bar = $(root).find('.view-toolbar').first();
+                if ($bar.length) {
+                    const $search = $bar.find('input.rec-search').first();
+                    if ($search.length) $search.last().after(controls);
+                    else $bar.append(controls);
+                } else {
+                    $(gridSel).before(`<div class="rec-bar rec-filter-bar">${controls}</div>`);
+                }
+                // chips + 筛选面板贴在网格正上方（只在有生效条件/展开面板时占位）
+                $(gridSel).before(recToolbarHtml(viewName, isHist));
             }
             this._bindToolbar();
         },
@@ -1797,39 +2000,27 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 this._saveSort();
                 this.render();
             });
-            if (isHist) {
-                // 历史筛选是「即时生效」语义（无草稿态）：每个控件对应一个明确维度，
-                // 不存在需要攒起来一起应用的组合输入。归一化后回写控件，非法区间/档位
-                // 被纠正的效果用户当场可见（如把结束日期选到开始日期之前）。
-                $(`#${viewName}-sites, #${viewName}-date, #${viewName}-from, #${viewName}-to, #${viewName}-score`)
-                    .on('change', () => {
-                        this._filter = normHistoryFilter({
-                            site: $(`#${viewName}-sites`).val(),
-                            date: $(`#${viewName}-date`).val(),
-                            from: $(`#${viewName}-from`).val(),
-                            to: $(`#${viewName}-to`).val(),
-                            score: $(`#${viewName}-score`).val(),
-                        });
-                        this._page = 1;
-                        this._saveFilter();
-                        this._syncControls();
-                        this.render();
-                    });
-                $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
-                return;
-            }
+            // 两页共用同一套交互：筛选按钮开面板 → 面板内是草稿 → 应用才生效；
+            // 已生效条件以 chip 呈现，点 × 立即删掉该维度重筛。
             $(`#${viewName}-filter-btn`).on('click', () => this._toggleFilterPanel());
-            // 星期 chip 只切选中态，统一在「应用」时读走（面板是草稿态，应用才生效）
-            $(`#${viewName}-f-weekdays`).on('click', '.class-tab', (e) => {
-                $(e.currentTarget).toggleClass('active');
-            });
             $(`#${viewName}-filter-apply`).on('click', () => this._applyFilterDraft());
-            $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
-            // 已生效条件 chip 的 ×：删单个维度后立即重筛（对齐 Bangumi 搜索的 chip 交互）
+            // 已生效条件 chip 的 ×：删单个维度后立即重筛（委托挂在 chips 容器上——
+            // 容器由 recToolbarHtml 一次性生成，_syncChips 只改 innerHTML，委托不会丢）
             $(`#${viewName}-chips`).on('click', '.rec-chip-del', (e) => {
                 e.stopPropagation();
                 this._removeFilterChip(String($(e.currentTarget).data('kind') || ''));
             });
+            if (isHist) {
+                // 历史面板没有星期 chips（收藏专属），其余绑定与收藏页完全一致
+                $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
+                return;
+            }
+            // 星期 chip 只切选中态，统一在「应用」时读走（面板是草稿态，应用才生效）
+            $(`#${viewName}-f-weekdays`).on('click', '.class-tab', (e) => {
+                $(e.currentTarget).toggleClass('active');
+            });
+            // 应用按钮已在上面统一绑定（两页共用），这里只补收藏专属的星期 chip 与重置
+            $(`#${viewName}-filter-reset`).on('click', () => this._resetAdvanced());
         },
 
         /** 从 settings 载入排序/筛选状态（enter 与首次 render 各读一次）。
@@ -1868,6 +2059,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
                 $(`#${viewName}-from`).val(f.from);
                 $(`#${viewName}-to`).val(f.to);
                 $(`#${viewName}-score`).val(f.score);
+                this._syncChips(); // 历史页也有已生效条件 chip（此前这里提前 return，chip 恒空）
                 return;
             }
             const f = normFavFilter(this._filter);
@@ -1903,11 +2095,27 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         /** 已生效筛选条件 chip（点 × 删单个维度）：一眼看出「列表为什么变了」。
          *  kind 带上标签值（tag:xxx），删除时无需回读 DOM。 */
         _syncChips() {
-            if (storeKey === 'history' || !this._filter) return;
-            const f = normFavFilter(this._filter);
+            if (!this._filter) return;
             const chips = [];
             const mk = (kind, label) => chips.push(
                 `<span class="rec-chip">${escHtml(label)}<span class="rec-chip-del" data-kind="${escHtml(kind)}" title="移除该条件">×</span></span>`);
+            if (storeKey === 'history') {
+                const hf = normHistoryFilter(this._filter);
+                if (hf.date) mk('date', `日期: ${hf.date}`);
+                else if (hf.from || hf.to) mk('range', `区间: ${hf.from || '不限'} ~ ${hf.to || '不限'}`);
+                if (hf.site) {
+                    // 来源 chip 显示来源名而不是 site key（kazumi:规则名 这类 key 对用户没意义）
+                    const hit = (this._siteLabels && this._siteLabels.get(hf.site)) || hf.site;
+                    mk('site', `来源: ${hit}`);
+                }
+                if (hf.score) {
+                    const label = REC_SCORE_TIER_LABELS[hf.score] || hf.score;
+                    mk('score', `评分: ${label}`);
+                }
+                $(`#${viewName}-chips`).html(chips.join('')).toggle(chips.length > 0);
+                return;
+            }
+            const f = normFavFilter(this._filter);
             f.tags.forEach((t) => mk('tag:' + t, `标签: ${t}`));
             if (f.season) mk('season', `季度: ${f.season}`);
             else if (f.dateRange) mk('date', `开播: ${f.dateRange.from || '不限'} ~ ${f.dateRange.to || '不限'}`);
@@ -1921,6 +2129,18 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         /** 删除单个筛选维度（chip ×）：标签按值删，其余维度整维清空。 */
         _removeFilterChip(kind) {
             const f = Object.assign({}, this._filter || {});
+            if (storeKey === 'history') {
+                // 历史维度：单日与区间互斥，删任一都清空整组日期条件
+                if (kind === 'date' || kind === 'range') { f.date = ''; f.from = ''; f.to = ''; }
+                else if (kind === 'site') f.site = '';
+                else if (kind === 'score') f.score = '';
+                this._filter = normHistoryFilter(f);
+                this._page = 1;
+                this._saveFilter();
+                this._syncControls();
+                this.render();
+                return;
+            }
             if (kind.indexOf('tag:') === 0) {
                 const want = kind.slice(4);
                 f.tags = (Array.isArray(f.tags) ? f.tags : []).filter((t) => t !== want);
@@ -1948,6 +2168,23 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
          *  归一化会纠正非法区间（交换颠倒端点）/越界数值，回填控件让纠正结果可见。
          *  季度与日期区间互斥（选季度清日期，反之亦然），与 Bangumi 搜索工作台一致。 */
         _applyFilterDraft() {
+            if (storeKey === 'history') {
+                // 历史面板草稿 → 归一化（交换颠倒端点、剔非法档位）→ 回填 → 重筛。
+                // 单日与区间同时填时以单日为准（两者的语义会互相排除，留着会让人困惑）
+                const day = String($(`#${viewName}-date`).val() || '');
+                this._filter = normHistoryFilter({
+                    date: day,
+                    from: day ? '' : $(`#${viewName}-from`).val(),
+                    to: day ? '' : $(`#${viewName}-to`).val(),
+                    site: $(`#${viewName}-sites`).val(),
+                    score: $(`#${viewName}-score`).val(),
+                });
+                this._page = 1;
+                this._saveFilter();
+                this._syncControls();
+                this.render();
+                return;
+            }
             const season = String($(`#${viewName}-f-season`).val() || '');
             const dateFrom = String($(`#${viewName}-f-date-from`).val() || '');
             const dateTo = String($(`#${viewName}-f-date-to`).val() || '');
@@ -1993,9 +2230,13 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
          *  选中值由 _syncControls 回填（值已消失时回落「全部来源」）。 */
         _syncSiteOptions(list) {
             if (storeKey !== 'history') return;
+            const items = collectHistorySites(list);
+            // site → 展示名：来源 chip 里显示「源名」而不是 kazumi:xxx 这种内部 key。
+            // 必须在 DOM 守卫**之前**建好：chip 渲染不依赖下拉框是否存在（无 DOM 的
+            // 单测/面板隐藏场景同样要能显示来源名）。
+            this._siteLabels = new Map(items.map((it) => [it.value, it.label]));
             const $sel = $(`#${viewName}-sites`);
             if (!$sel.length) return;
-            const items = collectHistorySites(list);
             const html = ['<option value="">全部来源</option>']
                 .concat(items.map((it) => `<option value="${escHtml(it.value)}">${escHtml(it.label)}</option>`)).join('');
             const cur = String((this._filter && this._filter.site) || '');
@@ -2013,7 +2254,7 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
          *  Kazumi 源需要人工介入时打开既有选源弹窗。 */
         async resumePlay(uid, $btn) {
             if (this._resumeBusy) return;
-            const item = (this._itemsByUid && this._itemsByUid.get(String(uid))) || null;
+            const item = this._itemOf(uid, $btn);
             if (!item) { warnToast('记录已失效，请在详情页重新打开'); return; }
             const $b = ($btn && $btn.length) ? $btn : $(`#${viewName}-grid .rec-play-btn[data-uid="${uid}"]`);
             this._resumeBusy = true;
@@ -2037,9 +2278,29 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         },
 
         /** 打开六态收藏菜单（历史卡 ⋯）：按 uid 取记录，当前状态由 getFavTag 读出后高亮。 */
+        /** 卡片动作的记录回查：先按 uid，再按卡片上的 site|vodId 兜底。
+         *  返回 null 表示记录确实不在了（调用方给提示，绝不静默——静默正是
+         *  「点了六态按钮没反应」这个 bug 难查的原因）。 */
+        _itemOf(uid, $btn) {
+            const map = this._itemsByUid;
+            if (!map) return null;
+            const key = String(uid || '');
+            if (key && map.get(key)) return map.get(key);
+            if ($btn && $btn.length && $btn.closest) {
+                const $card = $btn.closest('.vod-card');
+                const site = String($card.data('site') || $card.data('source') || '');
+                const id = String($card.data('id') || '');
+                const name = String($card.data('name') || '');
+                // 有 id 用 id；Kazumi 卡没有 id，用片名合成的收藏键（见 recFavIdentity）
+                const key = id ? ('k:' + site + '|' + id) : (site && name ? ('k:' + site + '|name:' + name) : '');
+                if (key && map.get(key)) return map.get(key);
+            }
+            return null;
+        },
+
         async openFavMenu(uid, $btn) {
-            const item = (this._itemsByUid && this._itemsByUid.get(String(uid))) || null;
-            if (!item) return;
+            const item = this._itemOf(uid, $btn);
+            if (!item) { warnToast('记录已刷新，请重新打开列表再试'); return; }
             await openRecFavMenu($btn, item);
         },
 
@@ -2053,6 +2314,9 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
         },
 
         async render() {
+            // 渲染世代：元数据回填超时后的「补渲」只在世代未变时执行（翻页/改筛选已
+            // 产生新渲染时，旧回填不得再触发一次重绘，否则会闪回旧条件的结果）。
+            const gen = (this._renderGen = (this._renderGen || 0) + 1);
             let list = await recGet(storeKey);
             // Kazumi 源封面回填：历史/收藏记录 pic 为空但 Bangumi 缓存有封面时，
             // 把封面写回记录并持久化（重启后不再空白；补拉成功后也会回写，见 persistRecordCover）
@@ -2091,16 +2355,34 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             // ---- 高级筛选 + 排序（两页共用管线，规则见文件上方「纯函数层」）----
             // 直接调 render（翻页/标签变更/广播重绘）时状态可能尚未载入，这里兜底读一次。
             if (!this._sort) await this._loadViewState();
-            const advancedOn = storeKey === 'history'
-                ? (historyFilterActive(this._filter) || /^score-/.test(this._sort))
+            // 只有「真的要用 Bangumi 字段」的维度才回填元数据：历史页的日期/来源筛选
+            // 与时间排序都不需要它（日期取记录自身 ts、来源取 site 原值）。此前任一筛选
+            // 都会触发一次批量回源——Bangumi 不可达时要等 doAction 的 30s 超时，用户看到
+            // 的就是「筛选点了没反应」。现在无关维度零网络。
+            const needMeta = storeKey === 'history'
+                ? (/^score-/.test(this._sort) || !!normHistoryFilter(this._filter).score)
                 : (favFilterActive(this._filter) || /^(score|rank|airdate)$/.test(this._sort));
-            // 需要 Bangumi 字段时才回填元数据：批量（≤60/批）、有 30 分钟缓存、单渲染有上限，
-            // 命中缓存与片名匹配缓存的条目零网络——翻页/改排序不会重复打接口。
-            if (advancedOn) {
-                await recPrefetchBgmMeta(recMetaIdsOf(list, storeKey !== 'history' && normFavFilter(this._filter).tags.length > 0));
+            if (needMeta) {
+                const ids = recMetaIdsOf(list, storeKey !== 'history' && normFavFilter(this._filter).tags.length > 0);
+                if (ids.length) {
+                    // 回填最多阻塞 1.2s：命中缓存是同步的（多数情况下 ids 为空），真正要回源时
+                    // 先按「未知」出结果，元数据到达后再补一次渲染——绝不把列表卡在网络上。
+                    const task = recPrefetchBgmMeta(ids).catch(() => { });
+                    const settled = await Promise.race([
+                        task.then(() => true),
+                        new Promise((r) => setTimeout(() => r(false), REC_META_WAIT_MS)),
+                    ]);
+                    if (!settled) {
+                        task.then(() => {
+                            if (!this._inited || this._renderGen !== gen) return; // 已被新渲染取代
+                            this.render();
+                        }).catch(() => { });
+                    }
+                }
             }
             if (storeKey === 'history') {
                 this._syncSiteOptions(listForSites || list);
+                this._syncChips(); // 来源下拉建好才知道 site→展示名，chip 需要它才能显示"源名"
                 list = list.filter((v) => matchHistoryFilter(v, this._filter, recMetaOf(v)));
             } else if (favFilterActive(this._filter)) {
                 list = list.filter((v) => matchFavFilter(v, this._filter, recMetaOf(v)));
@@ -2109,7 +2391,14 @@ function makeRecordView(viewName, storeKey, emptyTip, editable, withTags, pageSi
             // 卡片动作（续播 ▶ / 收藏 ⋯）按 uid 回查记录：DOM data-* 只有身份字段，
             // 续播还缺 lastEpisode/kazumiSrc 等，回查表让动作层拿到完整记录（含 pic）。
             this._itemsByUid = new Map();
-            list.forEach((v) => { if (v && v.uid) this._itemsByUid.set(String(v.uid), v); });
+            list.forEach((v) => {
+                if (!v) return;
+                if (v.uid) this._itemsByUid.set(String(v.uid), v);
+                // 兜底键：卡片上的 data-site/data-id 永远在，uid 缺失时也能定位到记录
+                if (v.site && v.vodId) this._itemsByUid.set('k:' + String(v.site) + '|' + String(v.vodId), v);
+                // Kazumi 记录没有 vodId：按片名登记兜底键，卡片按钮才找得到记录
+                else if (v.site && v.name) this._itemsByUid.set('k:' + String(v.site) + '|name:' + String(v.name).trim(), v);
+            });
             const grid = $(`#${viewName}-grid`).empty();
             grid.toggleClass('selecting', this._selectMode);
             if (!list.length) {
